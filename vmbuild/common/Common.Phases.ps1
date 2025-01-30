@@ -18,6 +18,7 @@ function Write-JobProgress {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
                 $latestStatus = $lastProgress | Select-Object -expand StatusDescription;
+                $secondsRemaining = $lastProgress | Select-Object -expand SecondsRemaining;
                 $jobName = $job.Name
                 if ($latestActivity) {
                     $latestActivity = $latestActivity.Replace("$jobName`: ", "").Trim()
@@ -53,16 +54,16 @@ function Write-JobProgress {
                             $roleName = ($jobName -split " ")[1]
                             $jobName2 = "  $($vmName.PadRight($padding1," ")) $($roleName.PadRight($padding2," "))"
                         }
-
-                        # $latestActivity = "$($latestActivity.PadRight($Common.ScreenWidth/2 - 10," "))"
                     }
                     $CurrentActivity = "$jobName2`: $latestActivity"
                     $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus
                     if ($global:JobProgressHistory -notcontains $HistoryLine) {
                         $global:JobProgressHistory += $HistoryLine
+                        if ($secondsRemaining -gt 0) {
+                            $latestStatus += " (Remaining: $($secondsRemaining)s)"
+                        }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
-                        write-host -NoNewline "$hideCursor"
-                        # start-sleep -seconds 1
+                        write-host -NoNewline "$hideCursor"                        
                     }
                 }
                 catch {
@@ -105,7 +106,7 @@ function Start-Phase {
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
-        Write-OrangePoint "[Phase $Phase] Not Applicable. Skipping." -ForegroundColor Yellow -WriteLog
+        Write-OrangePoint "[Phase $Phase] No VMs need this step. Skipping." -ForegroundColor Yellow -WriteLog
         $global:PhaseSkipped = $true
         return $true
     }
@@ -119,6 +120,64 @@ function Start-Phase {
 
     return $true
 }
+
+function Start-NormalJobs {
+    param (
+        [object]$machines,
+        [object]$scriptBlock,
+        [object]$phase
+    )
+
+    [System.Collections.ArrayList]$jobs = @()
+    $job_created_yes = 0
+    $job_created_no = 0
+    $maxVmNameLength = 0
+    $maxRoleNameLength = 0
+
+    if (-not $phase) {
+        $phase = "NormalJob"
+    }
+    foreach ($currentItem in $machines) {
+        $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
+        if ($currentItem.vmName.Length -gt $maxVmNameLength) {
+            $maxVmNameLength = $currentItem.vmName.Length
+        }
+        if ($currentItem.role.Length -gt $maxRoleNameLength) {
+            $maxRoleNameLength = $currentItem.role.Length
+        }
+
+        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        if (-not $job) {
+            Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        if ($Err.Count -ne 0) {
+            Write-Log "[Phase $Phase] Failed to start job for VM $($currentItem.vmName). $Err" -Failure
+            $job_created_no++
+        }
+        else {
+            Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
+            $jobs += $job
+            $job_created_yes++
+        }
+    }
+
+    $additionalData = [PSCustomObject]@{
+        MaxVmNameLength   = $maxVmNameLength
+        MaxRoleNameLength = $maxRoleNameLength + 2
+    }
+
+    # Create return object
+    $return = [PSCustomObject]@{
+        Failed         = $job_created_no
+        Success        = $job_created_yes
+        Jobs           = $jobs
+        Applicable     = $true
+        AdditionalData = $additionalData
+    }
+    return $return
+}
+
 
 function Start-PhaseJobs {
     param (
@@ -136,7 +195,7 @@ function Start-PhaseJobs {
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
     $ConfigurationData = $null
-    if ($Phase -gt 1) {
+    if ($Phase -gt 1 -and $Phase -lt 10) {
         $ConfigurationData = Get-ConfigurationData -Phase $Phase -deployConfig $deployConfig
         if (-not $ConfigurationData) {
             # Nothing applicable for this phase
@@ -174,8 +233,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1
-        if ($Phase -eq 1 -and $currentItem.hidden) {
+        # Don't touch hidden VM's in Phase 1 or 10
+        if ($currentItem.hidden -and $Phase -in @(1, 10)) {
             continue
         }
 
@@ -190,7 +249,7 @@ function Start-PhaseJobs {
 
             if ($Phase -eq 9 -and ($currentItem.role -in ("Primary"))) {
                 $valid = $true
-            }
+            }           
 
             if ($valid -eq $false) {
                 continue
@@ -231,19 +290,32 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        if ($Phase -eq 0 -or $Phase -eq 1) {
-            # Create/Prepare VM
-            $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
-            if (-not $job) {
-                Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
-                $job_created_no++
+        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
+
+            if ($Phase -eq 10) {         
+                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+                    continue
+                }       
+                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
             }
             else {
-                if ($Phase -eq 1) {
-                    # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
-                    #if (-not $Migrate) {
+                # Create/Prepare VM
+                $job = Start-Job -ScriptBlock $global:VM_Create -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
+                else {
+                    if ($Phase -eq 1) {
+                        # Add VM's that started jobs in phase 1 (VM Creation) to global remove list.
+                        #if (-not $Migrate) {
                         $global:vm_remove_list += ($jobName -split " ")[0]
-                    #}
+                        #}
+                    }
                 }
             }
         }
@@ -251,9 +323,22 @@ function Start-PhaseJobs {
             $reservation = $null
             #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node, create Cluster IP reservation
             if ($Phase -eq 5) {
+                #Vm_Config captures this variable
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
                 $reservation = $reservation -replace "-", ""
             }
+            $alreadyCopiedDSC = $false
+            if (-not $global:DSC_Copied) {
+                $global:DSC_Copied = @()
+            }
+            if ($currentitem.VmName -in $global:DSC_Copied) {
+                write-log "[alreadyCopiedDSC] $($currentItem.VmName) was in $($global:DSC_Copied -join ','))" -verbose -logonly
+                $alreadyCopiedDSC = $true
+            }
+            else {
+                $global:DSC_Copied += $currentItem.VmName
+            }
+            Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) alreadyCopiedDSC = $alreadyCopiedDSC"
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
@@ -302,7 +387,7 @@ function Start-PhaseJobs {
 function Wait-Phase {
 
     param(
-        [int]$Phase,
+        [object]$Phase,
         $Jobs,
         $AdditionalData
     )
@@ -340,7 +425,41 @@ function Wait-Phase {
             foreach ($job in $failedJobs) {
                 $FailRetry = $FailRetry + 1
                 if ($FailRetry -gt 30) {
-                    $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    try {
+                        $childJobs = $job | Select-Object -ExpandProperty childjobs
+                        if ($job.Name) {
+                            $jobOutput = $job.Name
+                            $jobOutput += " "
+                        }
+                        else {
+                            $jobOutput = ""
+                        }
+                        $joberror = $childJobs | Select-Object -ExpandProperty Error
+                        if ($joberror -is [string]) {
+                            $jobOutput += $joberror
+                            $jobOutput += " "
+                        }
+                   
+                        if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception) {
+                            if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
+                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message
+                                $jobOutput += " "
+                            }
+                            else {
+                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception
+                                $jobOutput += " "
+                            }
+                        }
+                        if ($childJobs.JobStateInfo.Message) {
+                            $jobOutput += $childJobs.JobStateInfo.Message
+                            $jobOutput += " "
+                        }
+                    }
+                    catch {
+                        Write-Log "Job failed Error Gathering Job Output: : $_" -LogOnly
+                        $jobOutput = "Error Gathering Job Output: " + $jobOutput
+                    }
+                                   
                     $jobJson = $job | convertTo-Json -depth 5 -WarningAction SilentlyContinue
                     Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                     Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
@@ -381,7 +500,7 @@ function Wait-Phase {
                         if ($incrementCount) {
                             $return.Failed++
                         }
-                        if ($phase -gt 2 -and $jobName.Contains("[DC]")) {
+                        if ($phase -ge 2 -and $jobName.Contains("[DC]")) {
                             Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
                                 $jobs | Stop-Job
@@ -408,7 +527,7 @@ function Wait-Phase {
             }
 
             # Sleep
-            Start-Sleep -Milliseconds 200
+            Start-Sleep -Milliseconds 250
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
@@ -446,7 +565,7 @@ function Get-ConfigurationData {
         "7" { $cd = Get-Phase7ConfigurationData -deployConfig $deployConfig }
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
-            if ($cd) {
+            if ($cd -and -not $global:NoSnapshot) {
                 $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $ConfigurationShort
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
@@ -476,7 +595,7 @@ function Get-ConfigurationData {
     if ($cd) {
 
         $global:preparePhasePercent++
-        Start-Sleep -Milliseconds 201
+        Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
 
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
@@ -486,8 +605,8 @@ function Get-ConfigurationData {
 
 
         $global:preparePhasePercent++
-        Start-Sleep -Milliseconds 201
-        Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent
+        Start-Sleep -Milliseconds 251
+        Write-Progress2 "Preparing Phase $Phase" -Status "Starting required VMs (if needed)" -PercentComplete $global:preparePhasePercent -log
 
         if ($critlist) {
             $failures = Invoke-SmartStartVMs -CritList $critlist
@@ -500,8 +619,8 @@ function Get-ConfigurationData {
         if ($dc) {
 
             $global:preparePhasePercent++
-            Start-Sleep -Milliseconds 201
-            Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent
+            Start-Sleep -Milliseconds 251
+            Write-Progress2 "Preparing Phase $Phase" -Status "Testing net connection to 3389 on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
 
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
@@ -517,6 +636,7 @@ function Get-ConfigurationData {
             }
             catch {}
             finally {
+                Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
                 $Global:ProgressPreference = $OriginalProgressPreference
             }
         }
@@ -545,8 +665,8 @@ function Get-Phase2ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -notin "AADClient", "OSDClient", "Linux") {
+        # Filter out machines with an unconnectable OS, except AADClient, which has a special case to skip the DSC
+        if ($vm.role -notin "OSDClient", "Linux") {
             if (-not $vm.Hidden) {
                 $cd
                 #Write-Host "xxxReturning $cd for $($vm.vmName)"

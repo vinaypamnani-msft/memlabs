@@ -1,0 +1,348 @@
+{
+  "vmOptions": {
+    "prefix": "FAB-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "fabrikam.com",
+    "domainNetBiosName": "fabrikam",
+    "adminName": "admin",
+    "network": "10.0.1.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "CAS and Primary",
+    "CMVersion": "2409",
+    "DomainName": "fabrikam.com",
+    "Network": "10.0.1.0",
+    "DefaultClientOS": "Windows 11 22H2",
+    "DefaultServerOS": "Server 2025",
+    "DefaultSqlVersion": "SQL Server 2022",
+    "IncludeClients": true,
+    "IncludeSSMSOnNONSQL": true
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "DC1",
+      "role": "DC",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": false,
+      "InstallCA": true,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "CS1SITE",
+      "role": "CAS",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "CS1",
+      "installSUP": true,
+      "installRP": true,
+      "siteName": "ConfigMgr CAS",
+      "wsusContentDir": "E:\\WSUS",
+      "remoteSQLVM": "CS1SQLAO1"
+    },
+    {
+      "vmName": "CS1SITE-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "siteCode": "CS1",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "FS1"
+    },
+    {
+      "vmName": "CS1SQLAO1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "CS1SQLAO2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER2",
+      "AlwaysOnGroupName": "CS1 Availibility Group",
+      "AlwaysOnListenerName": "ALWAYSON2",
+      "SqlServiceAccount": "SQLCLUSTER2Svc",
+      "SqlAgentAccount": "SQLCLUSTER2Agent",
+      "installRP": false
+    },
+    {
+      "vmName": "CS1SQLAO2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "SQLCLUSTER2Svc",
+      "SqlAgentAccount": "SQLCLUSTER2Agent"
+    },
+    {
+      "vmName": "FS1",
+      "role": "FileServer",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "PS1DPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PS1"
+    },
+    {
+      "vmName": "PS1SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2025",
+      "memory": "10GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "CS1",
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "1433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "250GB"
+      },
+      "siteCode": "PS1",
+      "installSUP": false,
+      "installRP": false,
+      "siteName": "ConfigMgr Primary Site"
+    },
+    {
+      "vmName": "PS2DPMP1",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "PS2",
+      "enablePullDP": false
+    },
+    {
+      "vmName": "PS2SITE",
+      "role": "Primary",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "CS1",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "600GB"
+      },
+      "siteCode": "PS2",
+      "installSUP": false,
+      "installRP": true,
+      "siteName": "ConfigMgr Primary Site",
+      "network": "10.0.2.0",
+      "wsusContentDir": "E:\\WSUS",
+      "remoteSQLVM": "PS2SQLAO1"
+    },
+    {
+      "vmName": "PS2SITE-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "siteCode": "PS2",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "network": "10.0.2.0",
+      "remoteContentLibVM": "FS1"
+    },
+    {
+      "vmName": "PS2SQLAO1",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "10.0.2.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "OtherNode": "PS2SQLAO2",
+      "fileServerVM": "FS1",
+      "ClusterName": "SQLCLUSTER",
+      "AlwaysOnGroupName": "PS2 Availibility Group",
+      "AlwaysOnListenerName": "ALWAYSON",
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent",
+      "installRP": false
+    },
+    {
+      "vmName": "PS2SQLAO2",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "network": "10.0.2.0",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "SqlServiceAccount": "SQLCLUSTERSvc",
+      "SqlAgentAccount": "SQLCLUSTERAgent"
+    },
+    {
+      "vmName": "SS1SITE",
+      "role": "Secondary",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "PS2",
+      "siteCode": "SS1",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "installSUP": true,
+      "siteName": "ConfigMgr Secondary Site",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "network": "10.0.3.0",
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "W10CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 22H2 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user3",
+      "network": "10.0.2.0"
+    },
+    {
+      "vmName": "W10CLIENT2",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 1909 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user4",
+      "network": "10.0.3.0"
+    },
+    {
+      "vmName": "W10WG1",
+      "role": "WorkgroupMember",
+      "operatingSystem": "Windows 10 22H2 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false
+    },
+    {
+      "vmName": "W11CLIENT1",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 22H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user1"
+    },
+    {
+      "vmName": "W11CLIENT2",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 22H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user2"
+    }
+  ],
+  "cmOptions": {
+    "Version": "2403",
+    "Install": true,
+    "PushClientToDomainMembers": true,
+    "PrePopulateObjects": true,
+    "EVALVersion": false,
+    "OfflineSCP": false,
+    "OfflineSUP": false,
+    "UsePKI": true
+  }
+}

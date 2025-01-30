@@ -40,22 +40,11 @@ function Remove-VirtualMachine {
 
         $adapters = $vmTest | Get-VMNetworkAdapter
         foreach ($adapter in $adapters) {
-            if ($adapter.SwitchName -eq "cluster") {
-                try {
-                    Remove-DhcpServerv4Reservation  -ScopeId 10.250.250.0 -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-                    Write-Log "$VmName`: Removing $($adapter.MacAddress) Reservation..." -HostOnly
-                }
-                catch {}
-                #Write-Log "$VmName`: Removing DHCP Reservation on cluster network..." -HostOnly
-            }
-            else {
-                Remove-DhcpServerv4Reservation  -ScopeId $vmFromList.Network -ClientId $adapter.MacAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-
-            }
+            Remove-DHCPReservation -mac $adapter.MacAddress -vmName $currentItem.vmName                        
         }
 
         if ($vmTest.State -ne "Off") {
-            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinu
+            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue
         }
 
         $cachediskFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".disk.json")
@@ -193,6 +182,99 @@ function Remove-InProgress {
     Write-Host
 }
 
+function Remove-ForestTrust {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [string]$DomainName,
+        [Parameter()]
+        [switch] $IfBroken,
+        [Parameter()]
+        [switch] $WhatIf
+        
+    )    
+    $TrustedForests = Get-List -Type ForestTrust | Where-Object { $_.ForestTrust -eq $DomainName -or $_.Domain -eq $DomainName }
+    
+    if ($TrustedForests) {
+        foreach ($TrustedForest in $TrustedForests) {
+                        
+            $DC1 = get-list -type VM -DomainName $TrustedForest.ForestTrust | Where-Object { $_.Role -eq "DC" }
+            $DC2 = get-list -type VM -DomainName $TrustedForest.domain | Where-Object { $_.Role -eq "DC" }
+
+            if ($DC1) {
+                $forestDomain = $TrustedForest.ForestTrust
+                $domainName = $TrustedForest.domain
+                start-vm2 -Name $DC1.vmName
+
+                $scriptBlockTest = {
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName,
+                        [String]$adminName,
+                        [String]$adminName2,
+                        [String]$pw
+                    )
+                    & netdom trust $($forestDomain) /d:$($DomainName) /userD:$adminName /passwordD:$pw /userO:$adminName2 /PasswordO:$pw /verify /twoway
+                }
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlockTest -ArgumentList @($forestDomain, $domainName, $DC1.AdminName, $DC2.AdminName, $($Common.LocalAdmin.GetNetworkCredential().Password)) -SuppressLog  
+
+                write-host -verbose "Netdom results: $($result.ScriptBlockOutput)"
+                if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput -like "*has been successfully verified*") {
+
+                    if ($IfBroken) {
+                        Write-GreenCheck "Trust Verified Successfully"
+                        return
+                    } 
+                    else {
+                        Write-OrangePoint "Trust Verified Successfully. Deleting Anyway"
+                    }
+                }
+                else {
+
+                    Write-RedX "Trust is not working. Removing."
+                    write-log $result.ScriptBlockOutput                
+                }
+
+                Write-Log "Removing Trust on $DC1 for '$otherDomain'" -Activity
+             
+                
+                $scriptBlock1 = {
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName
+                    )
+                    write-host "Running on $env:ComputerName as $env:Username"
+                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
+                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
+                }
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
+                $result = Invoke-VmCommand -VmName $DC1.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($domainName, $forestDomain) -SuppressLog
+                write-log $result.ScriptBlockOutput
+            }
+
+            if ($DC2) {
+                $forestDomain = $TrustedForest.domain
+                $domainName = $TrustedForest.ForestTrust
+                Write-Log "Removing Trust on $DC2 for '$otherDomain'" -Activity
+
+                start-vm2 -Name $DC2.vmName
+                $scriptBlock1 = {
+                    param(
+                        [String]$forestDomain,
+                        [String]$DomainName
+                    )
+                    write-host "Running on $env:ComputerName as $env:Username"
+                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
+                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
+                }
+                $result = Invoke-VmCommand -VmName $DC2.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
+                $result = Invoke-VmCommand -VmName $DC2.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($domainName, $forestDomain) -SuppressLog
+                write-log $result.ScriptBlockOutput
+            }
+
+        }
+    }
+}
+
 function Remove-Domain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
@@ -207,33 +289,34 @@ function Remove-Domain {
 
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
 
-    if ($DC) {
-        if ($DC.ForestTrust) {
-            $forestDomain = $DC.ForestTrust
-            $RemoteDC = Get-List -Type Vm -DomainName $forestDomain | Where-Object { $_.Role -eq "DC" }
-            if ($RemoteDC) {
-                Write-Log "Removing Trust on $forestDomain for '$DomainName'" -Activity
+    Remove-ForestTrust -DomainName $DomainName
+    $DeleteVMs = {
+    
+        try {
+            $global:ScriptBlockName = "Delete Domain"
+            # Dot source common
+            #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    
+            $rootPath = Split-Path $using:PSScriptRoot -Parent
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
 
-                start-vm2 -Name $RemoteDC.VmName
-                $scriptBlock1 = {
-                    param(
-                        [String]$forestDomain,
-                        [String]$DomainName
-                    )
-                    write-host "Running on $env:ComputerName as $env:Username"
-                    write-host "Netdom trust $forestDomain /Domain:$DomainName /Remove /Force"
-                    Netdom trust $forestDomain /Domain:$DomainName /Remove /Force
-                }
-                $result = Invoke-VmCommand -VmName $RemoteDC.vmName -VmDomainName $forestDomain -ScriptBlock $scriptBlock1 -ArgumentList @($forestDomain, $domainName) -SuppressLog
-                write-log $result.ScriptBlockOutput
-            }
+            $currentItem = $using:currentItem
+            $Phase = $using:Phase
+            $vm = $currentItem
+            Remove-VirtualMachine -VmName $vm.VmName
+            Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
+        }
+        catch {
+            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM." -OutputStream -Failure
         }
     }
 
-    if ($vmsToDelete) {
-        foreach ($vm in $vmsToDelete) {
-            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
-        }
+
+    if ($vmsToDelete) {        
+        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove"
+
+        $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
+        
     }
 
 

@@ -67,9 +67,20 @@ if (-not $pushClients) {
 }
 
 # Wait for collection to populate
+
+$ClientNameList = $ClientNames.split(",")
+$AnyClientFound = $false
+foreach ($clientName in $ClientNameList) {
+    $isClient = (Get-CMDevice | Where-Object { $_.Name -eq $clientName -or $_Name -like "$($clientName).*" }).IsClient
+    if ($isClient) {
+        $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
+        $AnyClientFound = $true
+    }    
+}
+
 $CollectionName = "All Systems"
 if ($ClientNames) {
-    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
+    Write-DscStatus "Waiting for $($ClientNameList -join ',') to appear in '$CollectionName'"
 }
 else {
     Write-DscStatus "Skipping Client Push. No Clients to push."
@@ -78,10 +89,40 @@ else {
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }
-$ClientNameList = $ClientNames.split(",")
+
+
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 Start-Sleep -Seconds 5
+if (-not $AnyClientFound) {
+    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+}
+$failCount = 0
+$success = $false
+while (-not $success) {
+   
+    $failCount++
+    if ($failCount -eq 2 -and $AnyClientFound) {
+        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+    }
+    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    Start-Sleep -Seconds 20
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    $success = $PackageSuccess -ge 1
 
+    if ($failCount -ge 20) {
+        $success = $true   
+    }
+    
+}
+Start-Sleep -Seconds 30
+Invoke-CMSystemDiscovery
+Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+foreach ($client in $ClientNameList) {
+    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+}
+
+$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
 
     if ([string]::IsNullOrWhiteSpace($client)) {
@@ -98,16 +139,24 @@ foreach ($client in $ClientNameList) {
     $failCount = 0
     $success = $true
     while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
+        if ($failCount -ge 2) {
             $success = $false
             break
         }
         Invoke-CMSystemDiscovery
         Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+        $seconds = 600
+        while ($seconds -ge 0) {
+            Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
+            Start-Sleep -Seconds 30
+            $seconds -= 30
+            $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+            if ($machinelist -contains $client) {
+                Write-DscStatus "$client is in'$CollectionName'"
+                break
+            }
+        }
         $failCount++
     }
     if ($success) {
@@ -116,27 +165,6 @@ foreach ($client in $ClientNameList) {
         Start-Sleep -Seconds 5
     }
 
-}
-
-while ($failcount -le 30) {
-    $failCount++
-    foreach ($client in $ClientNameList) {
-        $device = Get-CMDevice -Name $client
-        $status = $device.ClientActiveStatus
-        if ($status -eq 1) {
-            continue
-        }
-        Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-
-        $device = Get-CMDevice -Name $client
-        $status = $device.ClientActiveStatus
-
-        if ($status -eq 1) {
-            Write-DscStatus "$client Successfully installed"
-        }
-    }
-    Start-Sleep -Seconds 60
 }
 
 # Update actions file

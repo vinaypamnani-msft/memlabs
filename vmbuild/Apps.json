@@ -1,0 +1,100 @@
+[
+  {
+    "AppName": "MEMLABS-orca",
+    "AppMsi": "Orca.Msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "MS",
+    "SoftwareVersion": "1.0"
+  },
+  {
+    "AppName": "MEMLABS-7zip",
+    "AppMsi": "7zip.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "MS",
+    "SoftwareVersion": "1.0"
+  },
+  {
+    "AppName": "MEMLABS-LibreOffice_24.8.0_Win_x86-64r",
+    "AppMsi": "LibreOffice_24.8.0_Win_x86-64.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "MS",
+    "SoftwareVersion": "24.8.0"
+  },
+  {
+    "AppName": "MEMLABS-googlechromestandaloneenterprise64",
+    "AppMsi": "googlechromestandaloneenterprise64.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Google",
+    "SoftwareVersion": "128.0"
+  },
+  {
+    "AppName": "MEMLABS-Firefox Setup 129.0.2",
+    "AppMsi": "Firefox Setup 129.0.2.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Mozilla",
+    "SoftwareVersion": "129.0.2"
+  },
+  {
+    "AppName": "MEMLABS-Wireshark-4.2.6-x64",
+    "AppMsi": "Wireshark-4.2.6-x64.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Wireshark",
+    "SoftwareVersion": "4.2.6"
+  },
+  {
+    "AppName": "MEMLABS-vlc-3.0.9.2-win64",
+    "AppMsi": "vlc-3.0.9.2-win64.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "VLC",
+    "SoftwareVersion": "3.0.9.2"
+  },
+  {
+    "AppName": "MEMLABS-7zip",
+    "AppMsi": "7zip.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "MS",
+    "SoftwareVersion": "1.0"
+  },
+  {
+    "AppName": "MEMLABS-WinSCP-6.3.4",
+    "AppMsi": "WinSCP-6.3.4.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "WinSCP",
+    "SoftwareVersion": "6.3.4"
+  },
+  {
+    "AppName": "MEMLABS-KeePass-2.57",
+    "AppMsi": "KeePass-2.57.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "KeePass",
+    "SoftwareVersion": "2.57"
+  },
+  {
+    "AppName": "MEMLABS-putty-64bit-0.81-installer",
+    "AppMsi": "putty-64bit-0.81-installer.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Putty",
+    "SoftwareVersion": "0.81"
+  },
+  {
+    "AppName": "MEMLABS-putty-0.81-installer",
+    "AppMsi": "putty-0.81-installer.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Putty",
+    "SoftwareVersion": "0.81"
+  },
+  {
+    "AppName": "MEMLABS-7z2408-x64",
+    "AppMsi": "7z2408-x64.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Igor",
+    "SoftwareVersion": "2408"
+  },
+  {
+    "AppName": "MEMLABS-7z2408",
+    "AppMsi": "7z2408.msi",
+    "Description": "MEMLABS-applications",
+    "Publisher": "Igor",
+    "SoftwareVersion": "2408.0"
+  }
+]

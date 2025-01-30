@@ -74,6 +74,7 @@ Configuration Phase9
         }
 
         SqlScript 'DisableAgentJob' {
+            Id                   = 'DisableAgentJob'
             ServerName           = $thisvm.VmName
             InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
@@ -110,8 +111,8 @@ Configuration Phase9
             WaitForAll WaitSCCM {
                 ResourceName     = '[WaitForEvent]WorkflowComplete'
                 NodeName         = $WaitFor
-                RetryIntervalSec = 60
-                RetryCount       = 300
+                RetryIntervalSec = 15
+                RetryCount       = 1200
                 Dependson        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
@@ -124,6 +125,7 @@ Configuration Phase9
         }
 
         SqlScript 'EnableAgentJob' {
+            Id                   = 'EnableAgentJob'
             ServerName           = $thisvm.VmName
             InstanceName         = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
@@ -249,6 +251,7 @@ Configuration Phase9
 
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
+            URL       = $deployConfig.URLS.ODBC
             Ensure    = "Present"
             DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
@@ -278,6 +281,8 @@ Configuration Phase9
         InstallADK ADKInstall {
             ADKPath      = "C:\temp\adksetup.exe"
             ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE          
             Ensure       = "Present"
             DependsOn    = "[WriteStatus]ADKInstall"
         }
@@ -291,6 +296,7 @@ Configuration Phase9
 
         InstallODBCDriver ODBCDriverInstall {
             ODBCPath  = "C:\temp\msodbcsql.msi"
+            URL       = $deployConfig.URLS.ODBC
             Ensure    = "Present"
             DependsOn = "[WriteStatus]ODBCDriverInstall"
         }
@@ -381,6 +387,8 @@ Configuration Phase9
         InstallADK ADKInstall {
             ADKPath      = "C:\temp\adksetup.exe"
             ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
+            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE         
             Ensure       = "Present"
             DependsOn    = "[WriteStatus]ADKInstall"
         }

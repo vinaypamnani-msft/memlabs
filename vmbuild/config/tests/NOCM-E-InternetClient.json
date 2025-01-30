@@ -1,0 +1,40 @@
+{
+  "vmOptions": {
+    "prefix": "NOC-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "nocm.com",
+    "domainNetBiosName": "nocm",
+    "adminName": "admin2",
+    "network": "10.220.202.0",
+    "timeZone": "Eastern Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "No ConfigMgr",
+    "CMVersion": "2403",
+    "DomainName": "adatum.com",
+    "Network": "10.220.201.0",
+    "DefaultClientOS": "Windows 11 Latest",
+    "DefaultServerOS": "Server 2022",
+    "DefaultSqlVersion": "Sql Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": false,
+    "IncludeSSMSOnNONSQL": false
+  },
+  "VirtualMachines": [
+    {
+      "vmName": "W11INT1",
+      "role": "InternetClient",
+      "operatingSystem": "Windows 10 21H2 (64-bit)",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": true,
+      "dynamicMinRam": "1GB",
+      "additionalDisks": {
+        "E": "400GB"
+      }
+    }
+  ]
+}

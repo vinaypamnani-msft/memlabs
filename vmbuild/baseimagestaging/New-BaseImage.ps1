@@ -52,7 +52,7 @@ if ($Common.FatalError) {
 # Validate/Download bginfo.exe
 $bgInfoPath = "$($Common.StagingInjectPath)\staging\bginfo\bginfo.exe"
 if (-not (Test-Path $bgInfoPath)) {
-    $worked = Get-File -Source "https://live.sysinternals.com/bginfo.exe" -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
+    $worked = Get-File -Source $($Common.AzureFileList.Urls.BgInfo) -Destination $bgInfoPath -DisplayName "Downloading bginfo.exe" -Action "Downloading" -Silent
     if (-not $worked -and -not $IgnoreBginfo.IsPresent) {
         Write-Log "$bgInfoPath not found, and download failed. Use IgnoreBginfo switch if you don't care about this." -Warning
         return

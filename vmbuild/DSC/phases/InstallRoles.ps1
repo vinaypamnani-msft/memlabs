@@ -14,7 +14,8 @@ $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
 $usePKI = $deployConfig.cmOptions.UsePKI
-if (-not $usePKI){
+$offlineSUP = $deployConfig.cmOptions.OfflineSUP
+if (-not $usePKI) {
     $usePKI = $false
 }
 
@@ -112,7 +113,7 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     #Add the SQL Instance, and port
     if ($sqlServer.sqlInstanceName) {
         if ($sqlServer.sqlInstanceName -ne "MSSQLSERVER") {
-        $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
+            $sqlServerName = $sqlServerName + "\" + $sqlServer.sqlInstanceName
         }
     }
     if ($sqlServer.sqlPort) {
@@ -204,86 +205,92 @@ $productsToAdd = @("SQL Server 2005")
 #$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
 $classificationsToAdd = @("Tools")
 if ($configureSUP) {
-    Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
-    $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
-    $attempts = 0
-    $configured = $false
-    do {
-        try {
-            if ($topSite) {
-                $attempts++
-                Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempts"
-                Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
-                $configured = $true
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
-                Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
-            }
-        }
-        catch {
-            # Run sync to refresh categories, wait for sync, then try again?
-            if (-not $syncTimeout) {
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts $_"
-                Sync-CMSoftwareUpdate
-                Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
-            }
-            else {
-                Write-DscStatus "Timed out while waiting for sync to finish. Monitoring again..."
-            }
-            $syncFinished = $syncTimeout = $false
-            $i = 0
-            do {
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
 
-                if (-not $syncState.LastSyncState ) {
-                    Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
-                    Sync-CMSoftwareUpdate
-                    Start-Sleep -Seconds 120
-                }
-                else {
-                    $syncStateString = "Unknown"
-                    switch ($($syncState.LastSyncState)) {
-                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                        "6701" { $syncStateString = "WSUS Synchronization Started" }
-                        "6702" { $syncStateString = "WSUS Synchronization Done" }
-                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                    }
-                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
-                    if ($syncState.LastSyncState -eq 6702) {
-                        $syncFinished = $true
-                        Write-DscStatus "SUM Sync finished."
-                    }
-                }
-
-                if (-not $syncFinished) {
-                    $i++
-                    Start-Sleep -Seconds 60
-                }
-
-                if ($i -gt 20) {
-                    $syncTimeout = $true
-                    Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                }
-            } until ($syncFinished -or $syncTimeout)
-        }
-    } until ($configured -or $attempts -ge 5)
-
-    if ($configured) {
-        Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync and exiting."
-        Start-Sleep -Seconds 15
-        Sync-CMSoftwareUpdate
+    if ($offlineSUP) {
+        Write-DscStatus "Configuring Offline SUP" 
+        Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -SynchronizeAction DoNotSynchronizeFromMicrosoftUpdateOrUpstreamDataSource -Schedule $NULL
     }
     else {
-        Write-DscStatus "SUM Component Configuration failed."
+        Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
+        $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
+        $attempts = 0
+        $configured = $false
+        do {
+            try {
+                if ($topSite) {
+                    $attempts++
+                    Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempts"
+                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+                    $configured = $true
+                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
+                    Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
+                }
+            }
+            catch {
+                # Run sync to refresh categories, wait for sync, then try again?
+                if (-not $syncTimeout) {
+                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts $_"
+                    Sync-CMSoftwareUpdate
+                    Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
+                }
+                else {
+                    Write-DscStatus "Timed out while waiting for sync to finish. Monitoring again..."
+                }
+                $syncFinished = $syncTimeout = $false
+                $i = 0
+                do {
+                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
+
+                    if (-not $syncState.LastSyncState ) {
+                        Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                        Sync-CMSoftwareUpdate
+                        Start-Sleep -Seconds 120
+                    }
+                    else {
+                        $syncStateString = "Unknown"
+                        switch ($($syncState.LastSyncState)) {
+                            "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                            "6701" { $syncStateString = "WSUS Synchronization Started" }
+                            "6702" { $syncStateString = "WSUS Synchronization Done" }
+                            "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                            "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                            "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                            "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                            "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                            "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                            "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                            "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                        }
+                        Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
+                        if ($syncState.LastSyncState -eq 6702) {
+                            $syncFinished = $true
+                            Write-DscStatus "SUM Sync finished."
+                        }
+                    }
+
+                    if (-not $syncFinished) {
+                        $i++
+                        Start-Sleep -Seconds 60
+                    }
+
+                    if ($i -gt 20) {
+                        $syncTimeout = $true
+                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                    }
+                } until ($syncFinished -or $syncTimeout)
+            }
+        } until ($configured -or $attempts -ge 5)
+
+        if ($configured) {
+            Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync and exiting."
+            Start-Sleep -Seconds 15
+            Sync-CMSoftwareUpdate
+        }
+        else {
+            Write-DscStatus "SUM Component Configuration failed."
+        }
     }
 }
-
 $Configuration.InstallSUP.Status = 'Completed'
 $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

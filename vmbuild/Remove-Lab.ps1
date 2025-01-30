@@ -1,8 +1,15 @@
 #Remove-lab.ps1
+
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $true, ParameterSetName = "Domain")]
     [Parameter(Mandatory = $false, ParameterSetName = "InProgress")]
+    [ArgumentCompleter({
+        param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
+        . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
+        $domainlist = @(Get-DomainList)
+        return $domainlist | Where-Object {$_ -match $WordToComplete}
+    })]
     [string] $DomainName,
     [Parameter(Mandatory = $true, ParameterSetName = "Orphaned")]
     [switch] $Orphaned,

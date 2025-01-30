@@ -11,8 +11,8 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 # Get reguired values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
-$ThisVM = $deployConfig.virtualMachines | where-object {$_.vmName -eq $ThisMachineName}
-
+$ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+$isCas = $ThisVM.Role -eq "CAS"
 # Read Site Code from registry
 Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -51,18 +51,59 @@ Set-Location "$($SiteCode):\" @initParams
 # Keep setting it every 30 seconds, 10 times and bail...
 $enabled = $false
 $attempts = 0
-$maxAttempts = 30
+$maxAttempts = 40
 
 if (-not $FirstRun) {
     # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
     $attempts = $maxAttempts
 }
+else {
+
+    #Hack.. Set to HTTPS first, then back to EHTTP (First Run only):
+
+    if ($isCas) {
+        $NameSpace = "ROOT\SMS\site_$SiteCode"
+        #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+        # Get the WMI object
+        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+        # Get the Props array
+        $props = $component.Props
+        # Find the index of the IISSSLState property in the Props array
+        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+        # Change the Value of the IISSSLState property
+        $props[$index].Value = 63
+        # Assign the modified Props array back to the component
+        $component.Props = $props
+        # Save the changes
+        $component.Put()
+    }
+}
+
 
 Write-DscStatus "Enabling e-HTTP" -NoStatus
 do {
     $attempts++
+   
+
+    if ($isCas) {
+        $NameSpace = "ROOT\SMS\site_$SiteCode"
+        #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+        # Get the WMI object
+        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+        # Get the Props array
+        $props = $component.Props
+        # Find the index of the IISSSLState property in the Props array
+        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+        # Change the Value of the IISSSLState property
+        $props[$index].Value = 1024
+        # Assign the modified Props array back to the component
+        $component.Props = $props
+        # Save the changes
+        $component.Put()
+    }
+
     Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
-    Start-Sleep 15
+    Start-Sleep 10
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
     $enabled = ($prop.Value -band 1024) -eq 1024
     Write-DscStatus "IISSSLState Value is $($prop.Value). e-HTTP enabled: $enabled" -RetrySeconds 15 -NoStatus

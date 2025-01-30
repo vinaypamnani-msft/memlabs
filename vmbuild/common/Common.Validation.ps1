@@ -108,6 +108,8 @@ function Test-ValidVmOptions {
         $pattern2 = "^(10)(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])){2,2}.0$"
         $pattern3 = "^(172).(1[6-9]|2[0-9]|3[0-1])(.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])).0$"
 
+        
+
         if ($ConfigObject.vmOptions.network -eq "10.250.250.0") {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Cluster'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
@@ -120,26 +122,43 @@ function Test-ValidVmOptions {
         if ($ConfigObject.vmOptions.network -eq "172.31.250.0") {
             Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Internet' clients. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
-        elseif (-not ($ConfigObject.vmOptions.network -match $pattern1 -or $ConfigObject.vmOptions.network -match $pattern2 -or $ConfigObject.vmOptions.network -match $pattern3)) {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
-        }
 
-        $existingSubnet = Get-List -Type Network -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) }
-        if ($existingSubnet) {
-            if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
-                Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+
+        $networks = @($ConfigObject.vmOptions.network)
+
+        foreach ($vm in $($ConfigObject.virtualMachines)) {
+            if ($vm.network) {
+                #write-log "Adding $($vm.network)"
+                $networks += $vm.network
+            }
+        }
+        $existingSubnets = Get-List -Type Network -SmartUpdate 
+        foreach ($testNetwork in $networks) {
+            write-log "testing $testNetwork" -Verbose
+            if (-not ($testNetwork -match $pattern1 -or $testNetwork -match $pattern2 -or $testNetwork -match $pattern3)) {
+                Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] value is invalid. You must specify a valid Class C Subnet. For example: 192.168.1.0" -ReturnObject $ReturnObject -Failure
             }
 
-            $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
-            if ($CASorPRIorSEC) {
-                $existingCASorPRIorSEC = @()
-                $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($ConfigObject.vmoptions.network) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
-                if ($existingCASorPRIorSEC.Count -gt 0) {
-                    Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+            $existingSubnet = $existingSubnets | Where-Object { $_.Network -eq $($testNetwork) }
+            if ($existingSubnet) {
+                if (-not ($($ConfigObject.vmoptions.domainName) -in $($existingSubnet.Domain))) {
+                    Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] with vmOptions.domainName [$($ConfigObject.vmoptions.domainName)] is in use by existing Domain [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Failure
                 }
 
+                $CASorPRIorSEC = ($ConfigObject.virtualMachines | where-object { $_.role -in "CAS", "Primary", "Secondary" -and (-not $_.Network) -and (-not $_.Hidden) })
+                if ($CASorPRIorSEC) {
+                    $existingCASorPRIorSEC = @()
+                    $existingCASorPRIorSEC += Get-List -Type VM -SmartUpdate | Where-Object { $_.Network -eq $($testNetwork) } | Where-Object { ($_.Role -in "CAS", "Primary", "Secondary") }
+                    if ($existingCASorPRIorSEC.Count -gt 0) {
+                        if ($ConfigObject.vmOptions.domainName -ne $existingSubnet.Domain) {
+                            Add-ValidationMessage -Message "VM Options Validation: Network [$($testNetwork)] is in use by an existing SiteServer in [$($existingSubnet.Domain)]. You must specify a different network" -ReturnObject $ReturnObject -Warning
+                        }
+                    }
+
+                }
             }
         }
+
 
     }
 }
@@ -163,6 +182,21 @@ function Test-ValidCmOptions {
     # pushClientToDomainMembers
     if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    # pushClientToDomainMembers
+    if ($ConfigObject.cmOptions.usePKI -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    if ($ConfigObject.cmOptions.usePKI) {
+        foreach ($vm in $ConfigObject.virtualMachines) {
+            if ($vm.role -eq "DC" ) {
+                if (-not $vm.InstallCA) {
+                    Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI is enabled but no CA is specified for DC [$($vm.vmName)]." -ReturnObject $ReturnObject -Failure
+                }
+            }            
+        }
     }
 
 }
@@ -208,8 +242,7 @@ function Test-ValidMachineName {
         Add-ValidationMessage -Message "VM Validation: [$vmName] contains invalid characters in $name." -ReturnObject $ReturnObject -Failure
     }
 
-    if ($name.EndsWith("."))
-    {
+    if ($name.EndsWith(".")) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] can not end with '.'." -ReturnObject $ReturnObject -Failure
     }
     
@@ -279,7 +312,7 @@ function Test-ValidVmSupported {
 
     if ($VM.OtherNode) {
         Test-ValidMachineName $VM.OtherNode -ReturnObject $ReturnObject
-        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject
+        Test-MachineNameExists $VM.OtherNode -ReturnObject $ReturnObject -config $ConfigObject        
     }
 
     if ($VM.AlwaysOnListenerName) {
@@ -528,8 +561,14 @@ function Test-ValidRoleDC {
 
     if ($containsDC) {
 
+        if ($DCVM.Count -gt 1) {
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple DC roles found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+        }
+
         if ($existingDC) {
-            Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+            if ($DCVM.VmName -ne $existingDC) {
+                Add-ValidationMessage -Message "$vmRole Validation: DC Role specified in configuration and existing DC [$existingDC] found in this domain [$domain]. Adding a DC to existing environment is not supported. (Use the BDC role instead)" -ReturnObject $ReturnObject -Warning
+            }
         }
 
         # $MyInvocation.BoundParameters.ConfigObject.VirtualMachines | Out-Host
@@ -882,7 +921,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigObject", HelpMessage = "Configuration File")]
         [object]$InputObject,
         [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
-        [switch]$Fast
+        [switch]$Fast,
+        [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
+        [switch]$Final
         #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
         #[bool] $fast = $false
     )
@@ -1003,6 +1044,21 @@ function Test-Configuration {
             # Valid additionalDisks
             Test-ValidVmDisks -VM $vm -ReturnObject $return
 
+
+            if ($vm.Role -eq "Primary") {
+                $passiveSite = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.siteCode -eq $vm.SiteCode }
+                if ($passiveSite) {
+                    write-log -verbose "Checking Passive Site Server has DP in sitecode"
+                    $DPsForSiteCode = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true }
+                    if (-not $DPsForSiteCode) {
+                        Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] SiteCode $($vm.SiteCode) does not contain a DP which is needed with remote contentlib." -ReturnObject $return -Failure
+                    }
+                    else {
+                        write-log -verbose "Passive Site has DP $($DPsForSiteCode.vmName)"
+                    }
+                }
+            }
+
             if ($vm.sqlVersion) {
 
                 # Supported SQL
@@ -1031,7 +1087,7 @@ function Test-Configuration {
                         Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlport: $($vm.sqlport) Out of range" -ReturnObject $return -Warning
                     }
 
-                    if ($vm.sqlport -in 21,80,135,139,443,445,860,1434,2382,2383,2393,2394,2725,3260,3389,4022,5022,7022) {
+                    if ($vm.sqlport -in 21, 80, 135, 139, 443, 445, 860, 1434, 2382, 2383, 2393, 2394, 2725, 3260, 3389, 4022, 5022, 7022) {
                         Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
                     }
                 }
@@ -1241,9 +1297,20 @@ function Test-Configuration {
 
         # Total Memory
         # =============
-        if (-not $fast) {
+        if ($final) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
-            $totalMemory = $deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
+
+            $vms = $deployConfig.virtualMachines
+            $runningVMs = (get-vm | Where-Object { $_.State -eq "Running" }).Name
+            $newvms = @()
+            foreach ($vm in $vms) {
+                if ($vm.vmName -in $runningVMs) {
+                    continue;
+                }
+
+                $newvms += $vm
+            }
+            $totalMemory = $newvms.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
             $totalMemory = $totalMemory.Sum / 1GB
             $availableMemory = Get-AvailableMemoryGB
 
@@ -1252,6 +1319,58 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "Deployment Validation: Total Memory Required [$($totalMemory)GB] is greater than available memory [$($availableMemory)GB] [8GB buffer]." -ReturnObject $return -Warning
                 }
             }
+        }
+
+
+        # Test URLS
+        # ==========
+
+        if ($final) {
+            Write-Progress2 -Activity "Testing URLS" -Status "Testing URLS" -PercentComplete 77
+            Write-Host
+            Write-Log -SubActivity "Testing URLS"
+
+            if (-not $Common.AzureFileList.Urls) {
+                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error                
+            }
+            else {
+                $Common.AzureFileList.Urls | ForEach-Object {
+                    $_.psobject.properties | ForEach-Object {
+                        try {
+                            if (-not (Test-URL -url $_.value -name $_.name )) {
+                                Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                            }
+                        }
+                        catch {
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($_.value) for $($_.name): $($_.Exception.Message)" -ReturnObject $return -Error
+                        }
+                    }
+                }
+            }
+           
+
+            foreach ($version in $common.AzureFileList.CmVersions) {
+                try {
+                    if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                        Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                    }
+                }
+                catch {
+                    Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                }
+            }
+
+            foreach ($sql in $common.AzureFileList.ISO) {
+                try {
+                    if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
+                        Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                    }
+                }
+                catch {
+                    Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                }
+            }
+
         }
 
         # Unique Names

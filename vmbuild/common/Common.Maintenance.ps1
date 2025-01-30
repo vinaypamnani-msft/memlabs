@@ -9,19 +9,24 @@ function Start-Maintenance {
 
     $applyNewOnly = $false
     if ($DeployConfig) {
+        Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
         $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
         $applyNewOnly = $true
     }
     else {
+        Write-log "Start-Maintenance called without DeployConfig"
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
-        $vmsNeedingMaintenance = $allVMs | Where-Object { $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+        $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     }
 
+    Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
+    $countWorked = $countFailed = $countSkipped = 0
     # Filter in-progress
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true }
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not ($_.Role -in @("OSDClient", "Linux", "AADClient")) }
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
+        Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
         $mutexName = $vm.vmName
 
         try {
@@ -35,6 +40,7 @@ function Start-Maintenance {
         }
         if ($Mutex) {
             Write-Log -Verbose "Mutex $mutexName exists.. VM in use."
+            $countSkipped++
             try {
                 [void]$Mutex.ReleaseMutex()
             }
@@ -47,21 +53,29 @@ function Start-Maintenance {
     $text = "Performing maintenance"
     $maintenanceDoNotStart = $false
     Write-Log $text -Activity
-
+    $stoppedCount = 0
+    $stoppedVms = @()
     if ($applyNewOnly -eq $false) {
         if ($vmCount -gt 0) {
-            $response = Read-YesorNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (Y/n)" -HideHelp -Default "y" -timeout 15
+            $response = Read-YesorNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (y/N)" -HideHelp -Default "n" -timeout 15
             if ($response -eq "n") {
                 return
             }
-
-            $response = Read-YesorNoWithTimeout -Prompt "Start VM's that are stopped for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
-            if ($response -eq "y") {
-                Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+            foreach ($vm in $newVmsNeedingMaintenance) {
+                if ($vm.State -ne "Running") {
+                    $stoppedCount++
+                    $stoppedVms += $vm.vmName                
+                }
             }
-            else {
-                Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
-                $maintenanceDoNotStart = $true
+            if ($stoppedCount -gt 0) {
+                $response = Read-YesorNoWithTimeout -Prompt "$stoppedCount VM's stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+                if ($response -eq "y") {
+                    Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+                }
+                else {
+                    Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
+                    $maintenanceDoNotStart = $true
+                }
             }
         }
         else {
@@ -70,69 +84,37 @@ function Start-Maintenance {
         }
     }
 
-    $progressId = Get-Random
-    Write-Progress2 -Id $progressId -Activity $text -Status "Please wait..." -PercentComplete 0
-
-    $i = 0
-    $countWorked = $countFailed = $countSkipped = 0
-
-    # Perform maintenance... run it on DC's first, rest after.
-    $failedDomains = @()
-    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
-        $i++
-        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
-        if ($worked) { $countWorked++ } else {
-            $failedDomains += $vm.domain
-            $countFailed++
-        }
-    }
-
-    # Check if failed domain is -le 211125.1
-    $failedDCs = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -in $failedDomains }
-    $criticalDomains = @()
-    foreach ($dc in $failedDCs) {
-        $vmNote = Get-VMNote $dc.vmName
-        if ($vmNote.memlabsVersion -le "211125.1") {
-            $criticalDomains += $dc.domain
-        }
-    }
-
-    # Perform maintenance on other VM's
-    foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -ne "DC" }) {
-        $i++
+    foreach ($vm in $newVmsNeedingMaintenance) {
         if ($maintenanceDoNotStart) {
             if ($vm.State -ne "Running") {
+                $newVmsNeedingMaintenance = $newVmsNeedingMaintenance | Where-Object { $_.vmName -ne $vm.vmName }
                 $countSkipped++
                 continue
             }
         }
-
-        Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-        if ($vm.domain -in $criticalDomains) {
-            Write-Log "$($vm.vmName)`: Maintenance skipped, DC maintenance failed." -Highlight
-            $countSkipped++
-        }
-        else {
-            try {
-                $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
-            }
-            catch {
-                write-exception $_
-                $worked = $false
-            }
-            if ($worked) { $countWorked++ } else { $countFailed++ }
-        }
     }
 
-    if ($criticalDomains.Count -gt 0) {
-        Write-Log "DC Maintenance failed for the domains ($($criticalDomains -join ',')). Skipping maintenance of VM's in these domain(s)." -LogOnly
-        Show-FailedDomains -failedDomains $criticalDomains
-    }
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance"
+
+    $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+
+    #foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
+    #    $i++
+    #    Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
+    #    $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
+    #    if ($worked) { $countWorked++ } else {
+    #        $failedDomains += $vm.domain
+    #        $countFailed++
+    #    }
+    #}
+
+    $countWorked = $result.Worked
+    $countFailed = $result.Failed
+          
 
     Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
-    Write-Progress2 -Id $progressId -Activity $text -Completed
+
     if ($global:MaintenanceActivity) {
         Write-Progress2 -Activity $global:MaintenanceActivity -Completed
     }
@@ -190,6 +172,8 @@ function Start-VMMaintenance {
         [switch] $ApplyNewOnly
     )
 
+    Write-Log "Starting maintenance for VM: $VMName"
+
     $vmNoteObject = Get-VMNote -VMName $VMName
 
     if (-not $vmNoteObject) {
@@ -232,6 +216,21 @@ function Start-VMMaintenance {
 
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
+        Set-VMNote -vmName $VMName -vmVersion ([string]$latestFixVersion) -forceVersionUpdate
+        $logoffusers = {
+            try {
+                query user 2>&1 | Select-Object -skip 1 | ForEach-Object {
+                    logoff ($_ -split "\s+")[-6]
+                }
+            }
+            catch {}
+        }
+        try {
+            if ($ApplyNewOnly.IsPresent) {
+                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+            }
+        }
+        catch {}
     }
     else {
         Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
@@ -494,6 +493,8 @@ function Get-VMFixes {
     $fixesToPerform = @()
     ### Domain account password expiration
 
+    #region Fix-DomainAccounts
+
     $Fix_DomainAccount = {
         param ($accountName)
         if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
@@ -527,7 +528,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DomainAccounts"
         FixVersion        = "211125.1"
-        AppliesToThisVM   = $false
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("DC")
@@ -536,9 +536,79 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_DomainAccount
         ArgumentList      = @($vmNote.adminName)
     }
-
+    #endregion
     ### Local account password expiration
 
+    #region Fix-Prereq
+    $Fix_Prereq = {
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        if (-not $SiteCode) {
+            Write-host "Umm.. No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
+            return $true
+        }
+        $version = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS' -Name 'Full Version'
+        if (-not $version) {
+            Write-host "Umm.. No Version found in HKLM:\SOFTWARE\Microsoft\SMS\Full Version"
+            return $false
+        }
+
+        if ([System.Version]$version -lt [System.Version]"5.0.9128")
+        {
+            Write-Host "2309 or older.. Should not force EHTTP"
+            return $true
+        }
+        
+        $NameSpace = "ROOT\SMS\site_$SiteCode"
+        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+        $props = $component.Props
+        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+        $value = $props[$index].Value    
+        $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63)
+        if (-not $enabled) {
+            Write-Host  "IISSSLSTATE $value is not correct.. Updated for EHTTP"
+            $props[$index].Value = 1024
+            $component.Props = $props
+            $component.Put()
+            return $true
+        } else {
+            write-host "IISSSLSTATE of $value looks good.. You should not be failing at prereq check"
+            return $true
+        }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-PreReq"
+        FixVersion        = "250116.0"
+        AppliesToNew      = $false
+        AppliesToExisting = $true
+        AppliesToRoles    = @("Primary", "CAS")
+        NotAppliesToRoles = @()
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_Prereq 
+    }
+    #endregion
+
+
+    #region Fix-Upgrade-Console
+    $Fix_UpgradeConsole = {
+        & C:\staging\DSC\phases\Upgrade-Console.ps1
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-Upgrade-Console"
+        FixVersion        = "250107.0"
+        AppliesToNew      = $true
+        AppliesToExisting = $false
+        AppliesToRoles    = @("Primary", "CAS")
+        NotAppliesToRoles = @()
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_UpgradeConsole
+    }
+    #endregion
+
+
+    #region Fix-LocalAccount
     $Fix_LocalAccount = {
         Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -ErrorAction SilentlyContinue -ErrorVariable AccountError
         if ($AccountError.Count -eq 0) {
@@ -552,7 +622,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-LocalAccount"
         FixVersion        = "211125.2"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -560,9 +629,10 @@ function Get-VMFixes {
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAccount
     }
-
+    #endregion
     # Default user profile
 
+    #region Fix-DefaultUserProfile
     $Fix_DefaultProfile = {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
@@ -576,7 +646,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DefaultUserProfile"
         FixVersion        = "211126"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -584,7 +653,9 @@ function Get-VMFixes {
         DependentVMs      = @()
         ScriptBlock       = $Fix_DefaultProfile
     }
+    #endregion
 
+    #region Fix-CMFullAdmin
     # Full Admin in CM
 
     $Fix_CMFullAdmin = {
@@ -730,7 +801,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-CMFullAdmin"
         FixVersion        = "211127"
-        AppliesToThisVM   = $false
         AppliesToNew      = $false
         AppliesToExisting = $true
         AppliesToRoles    = @("CASorStandalonePrimary")
@@ -738,7 +808,9 @@ function Get-VMFixes {
         DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
         ScriptBlock       = $Fix_CMFullAdmin
     }
+    #endregion
 
+    #region Fix-DisableIEESC
     # Disable IE Enhanced Security for all usres via Scheduled task
     $Fix_DisableIEESC = {
 
@@ -788,7 +860,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-DisableIEESC"
         FixVersion        = "220422"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -799,6 +870,72 @@ function Get-VMFixes {
         InjectFiles       = @("Disable-IEESC.ps1") # must exist in filesToInject\staging dir
     }
 
+    #endregion
+
+    #region Fix-CleanupSQL
+
+    $Fix_CleanupSQL = {
+
+
+        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        if ($os) {
+            if ($os.Producttype -eq 1) {
+                return $true # workstation OS, fix not applicable
+            }
+        }
+        else {
+            return $false # failed to determine OS type, fail
+        }
+
+        $taskName = "MemLabs Cleanup SQL"
+        $filePath = "$env:systemdrive\staging\Cleanup-SQL.ps1"
+
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($task) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
+        }
+
+        # Action
+        $taskCommand = "cmd"
+        $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
+        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+
+        # Trigger
+        $trigger = New-ScheduledTaskTrigger -Daily -At 3am
+
+        # Principal
+        $principal = New-ScheduledTaskPrincipal -UserId "System"
+
+        # Task
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Cleanup SQL"
+
+        Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if ($null -ne $task) {
+            return $true
+        }
+        else {
+            return $false
+        }
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-CleanupSQL"
+        FixVersion        = "241124"
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_CleanupSQL
+        RunAsAccount      = $vmNote.adminName
+        InjectFiles       = @("Cleanup-SQL.ps1") # must exist in filesToInject\staging dir
+    }
+
+    #endregion
+
+    #region Fix-EnableLogMachine
 
     $Fix_EnableLogMachine = {
 
@@ -834,11 +971,9 @@ function Get-VMFixes {
             return $false
         }
     }
-
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
         FixVersion        = "240307"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -848,6 +983,10 @@ function Get-VMFixes {
         RunAsAccount      = $vmNote.adminName
         InjectFiles       = @("Enable-LogMachine.ps1") # must exist in filesToInject\staging dir
     }
+
+    #endregion
+
+    #region Fix-AccountExpiry
 
     $Fix_AccountExpiry = {
 
@@ -861,7 +1000,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-AccountExpiry"
         FixVersion        = "230922"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -870,7 +1008,9 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_AccountExpiry
 
     }
+    #endregion
 
+    #region Fix_LocalAdminAccount
     $Fix_LocalAdminAccount = {
         param ($password)
         $p = ConvertTo-SecureString $password -AsPlainText -Force
@@ -882,7 +1022,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_LocalAdminAccount"
         FixVersion        = "240710"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -891,6 +1030,9 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_LocalAdminAccount
         ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
     }
+    #endregion
+
+    #region Fix_ActivateWindows
     $Fix_ActivateWindows = {
 
         $atkms = "azkms.core.windows.net:1688"
@@ -918,7 +1060,6 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
         FixVersion        = "240713"
-        AppliesToThisVM   = $false
         AppliesToNew      = $true
         AppliesToExisting = $true
         AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
@@ -927,6 +1068,8 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_ActivateWindows
         RunAsAccount      = $vmNote.adminName
     }
+    #endregion
+
     # ========================
     # Determine applicability
     # ========================
@@ -948,7 +1091,7 @@ function Get-VMFixes {
                 $applicable = $true
             }
         }
-        $vmFix.AppliesToThisVM = $applicable
+        $vmfix | Add-Member -MemberType NoteProperty -Name AppliesToThisVM -Value $applicable -force
 
         # Filter out null's'
         $vmFix.DependentVMs = $vmFix.DependentVMs | Where-Object { $_ -and $_.Trim() }

@@ -3,7 +3,7 @@ param(
     [string]$ConfigFilePath,
     [string]$LogPath
 )
-
+Write-DscStatus "Started InstallAndUpdateSCCM.ps1"
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
@@ -33,7 +33,7 @@ if ($locale -and $locale -ne "en-US") {
 # Set scenario
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
-
+Write-DscStatus "InstallAndUpdateSCCM.ps1 Scenerio $scenario"
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($ThisVM.cmInstallDir) {
@@ -103,14 +103,8 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
     # Ensure CM files were downloaded
     $cmsourcepath = "c:\$CM"
     if (!(Test-Path $cmsourcepath)) {
-        $cmurl = $ThisVM.thisParams.cmDownloadUrl
-        Write-DscStatus "Downloading $CM installation source..."
-        Start-BitsTransfer -Source $cmurl -Destination $cmpath -Priority Foreground -ErrorAction Stop
-
-        if (!(Test-Path $cmsourcepath)) {
-            #BUG, FIXME, TIMHE: This does not work in 2303. Fix Me
-            Start-Process -Filepath ($cmpath) -ArgumentList ('/Auto "' + $cmsourcepath + '"') -wait
-        }
+        Write-DscStatus "$CM Does not exist. Failed." -Failure
+        return
     }
 
     Write-DscStatus "Creating $scenario.ini file" # Standalone or Hierarchy
@@ -188,6 +182,14 @@ CurrentBranch=1
     # $cmini = $cmini.Replace('%SQLDataFilePath%', $sqlinfo.DefaultData)
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
+
+    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+        $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
+    }
+
+    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+        $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
+    }
 
     if ($installToAO) {
         $cmini = $cmini.Replace('AGBackupShare=', "AGBackupShare=$agBackupShare")
@@ -269,7 +271,9 @@ CurrentBranch=1
         }
     }
 
-    $CMSetupDL = "$CMDir\SMSSETUP\BIN\X64\Setupdl.exe"
+
+    $CMBin = "$CMDir\SMSSETUP\BIN\X64"
+    $CMSetupDL = "$CMBin\Setupdl.exe"
     $CMRedist = "C:\$CM\REdist"
     $CMLog = "C:\ConfigMgrSetup.log"
     $success = 0
@@ -277,6 +281,7 @@ CurrentBranch=1
 
     Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
 
+    $maxTries = 20
     # We require 2 success entries in a row
     while ($success -le 1) {
 
@@ -296,20 +301,35 @@ CurrentBranch=1
         }
         else {
             #If we didnt find it, increment fail count, and bail after 10 fails
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
             $success = 0
             $fail++
             if ($fail -ge 20) {
-                Write-DscStatus "Pre-Req Downloading failed after 20 tries. see $CMLog"
+                Write-DscStatus "Pre-Req Downloading failed after $maxTries tries. see $CMLog"
                 # Set Status to not 'Running' so it can run again.
                 $Configuration.InstallSCCM.Status = 'Failed'
                 $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                 Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
                 return
             }
-            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of 10 See $CMLog for progress"
+            Write-DscStatus "Pre-Req downloading Failed. Try $fail out of $maxTries See $CMLog for progress"
             start-sleep -Seconds 30
         }
     }
+
+    #Fix 0 byte files in CMCB
+
+    # Get-ChildItem $CMBIN | ForEach-Object {
+    #     if(!$_.PSIsContainer -and $_.length -eq 0) {
+    #        write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
+    #        $RedistFile = (Join-Path $CMRedist $_.Name)
+    #        if ((Test-Path $RedistFile)) {
+    #        write-host "found $RedistFile"
+    #        Copy-Item $RedistFile $_.FullName -force
+    #        }
+    #        }
+    #     }
+
     # Create ini
     $cmini > $CMINIPath
 
@@ -335,6 +355,7 @@ CurrentBranch=1
 }
 else {
     Write-DscStatus "ConfigMgr is already installed."
+    Write-DscStatusSetup
 }
 
 # Read Site Code from registry
@@ -392,6 +413,26 @@ if (-not $exists) {
 $UpdateRequired = $false
 if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
     $UpdateRequired = $true
+
+    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+        $UpdateRequired = $false
+    }
+
+    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+        $UpdateRequired = $false        
+    }
+
+}
+
+if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    $UpdateRequired = $false
+    Write-DscStatus "Installing Offline SCP"
+    Add-CMServiceConnectionPoint -SiteSystemServerName "$env:computername.$DomainFullName" -SiteCode $SiteCode -Mode Offline
+}
+
+
+if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
+    $UpdateRequired = $false
 }
 
 if ($UpdateRequired) {
@@ -409,39 +450,67 @@ if ($UpdateRequired) {
     $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 
-    # Wait for 2 mins before checking DMP Downloader status
-    Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
-    Start-Sleep -Seconds 120
+    # Check if DMP Downloader is has recently checked for updates
 
-    # Set var
-    $upgradingfailed = $false
-    $originalbuildnumber = ""
-
-    # Wait for SMS_DMP_DOWNLOADER running
-    $counter = 0
-    $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
-    $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\SMS_DMP_DOWNLOADER")
-    $DMPState = $subKey.GetValue("Current State")
-
-    if ($DMPState -ne "Running") {
-        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+    $registryPath = "HKLM:\Software\Microsoft\SMS\COMPONENTS\SMS_DMP_DOWNLOADER"
+    $valueName = "LastSyncedTime"
+    
+    $lastSyncedTimeHex = (Get-ItemProperty -Path $registryPath -Name $valueName).$valueName
+    
+    $epoch = [DateTime]::ParseExact("1970-01-01", "yyyy-MM-dd", [System.Globalization.CultureInfo]::InvariantCulture)
+    
+    $lastSyncedTime = $epoch.AddSeconds($lastSyncedTimeHex)
+    
+    $currentTimeUTC = (Get-Date).ToUniversalTime()
+    
+    $timeDifference = $currentTimeUTC - $lastSyncedTime
+    
+    # Check if the time difference is less than or equal to 60 minutes
+    if ($timeDifference.TotalMinutes -le 60) {
+        Write-DscStatus "[DMP Downloader] The LastSyncedTime was updated in the last 60 minutes. Checking for updates."
     }
+    else {
+        Write-DscStatus "[DMP Downloader] The LastSyncedTime was not updated in the last 60 minutes."
+        Set-ItemProperty -Path $registryPath -Name $valueName -Value 0 -Force
+        Set-ItemProperty -Path $registryPath -Name "LastSyncRequestTime" -Value 0 -Force
+        # Wait for 2 mins before checking DMP Downloader status
+        Start-Sleep -Seconds 120
+        Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
 
-    while ($DMPState -ne "Running") {
-        $counter += 1
-        Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState" -RetrySeconds 30
-        Start-Sleep -Seconds 30
+        # Set var
+        $upgradingfailed = $false
+        $originalbuildnumber = ""
+
+        # Wait for SMS_DMP_DOWNLOADER running
+        $counter = 0
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\SMS\Components\SMS_Executive\Threads\SMS_DMP_DOWNLOADER")
         $DMPState = $subKey.GetValue("Current State")
 
-        if (0 -eq $counter % 10) {
-            Write-DscStatus "SMS_DMP_DOWNLOADER state is still $DMPState. Restarting SiteComp service."
+        if ($DMPState -ne "Running") {
             Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-            Start-Sleep 30
         }
+
+        while ($DMPState -ne "Running") {
+            $counter += 1
+            Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState" -RetrySeconds 30
+            Start-Sleep -Seconds 30
+            $DMPState = $subKey.GetValue("Current State")
+
+            if (0 -eq $counter % 10) {
+                Write-DscStatus "SMS_DMP_DOWNLOADER state is still $DMPState. Restarting SiteComp service."
+                Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+                Start-Sleep 30
+            }
+        }
+
+
+        Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState. Checking for updates."
+
     }
 
 
-    Write-DscStatus "SMS_DMP_DOWNLOADER state is: $DMPState. Checking for updates."
+
 
     #----------------------------------------------------
     $state = @{
@@ -505,7 +574,7 @@ if ($UpdateRequired) {
             $originalbuildnumber = $sites[0].BuildNumber
         }
     }
-
+    Write-DscStatus "InstallAndUpdateSCCM.ps1 Found Current Build number $originalbuildnumber"
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
@@ -544,6 +613,19 @@ if ($UpdateRequired) {
             break
         }
 
+        if (-not $deployConfig.cmOptions.UsePKI) {
+            # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+            Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Write-DscStatus "EnableEHTTP.ps1 done"
+        }
+        else {
+            Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
+            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Write-DscStatus "EnableHTTPS.ps1 done"
+        }
 
         # Invoke update download
         while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
@@ -555,7 +637,7 @@ if ($UpdateRequired) {
                 Write-DscStatus "Invoking download for '$($updatepack.Name)', waiting for download to begin."
                 Invoke-CMSiteUpdateDownload -Name $updatepack.Name -Force -WarningAction SilentlyContinue
                 Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                Start-Sleep 120
+                Start-Sleep 120                               
 
                 # Check state
                 $updatepack = Get-CMSiteUpdate -Name $updatepack.Name -Fast
@@ -628,16 +710,26 @@ if ($UpdateRequired) {
 
         # trigger prerequisites check after the package downloaded
         Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+        $count = 0
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
+            $count++
+            if ($count -eq 12) {
+                Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+            }
+            if ($count -ge 30) {
+                breaK
+            }
             Write-DscStatus "[$($state[$updatepack.State])] Prereq check for '$($updatepack.Name)'."
-            Start-Sleep 120
+            Start-Sleep 90
             $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            
         }
 
         if ($updatepack.State -eq 196607) {
+            Write-DscStatus "Update State: PREREQ_FAILED"
             $retrytimes++
-            Start-Sleep 300
+            Start-Sleep 100
             continue
         }
 
@@ -650,11 +742,34 @@ if ($UpdateRequired) {
             catch {}
         }
         # trigger setup after the prerequisites check
+        Write-DscStatus "Calling Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force"
+        
         Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {
+        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {   
+            if ($updatepack.Flag -eq 1) {
+                Write-DscStatus "Update State: PREREQ_ONLY"
+                Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+            }    
+            #if ($updatepack.State -eq 131074 -and $updatepack.Flag -eq 1) {
+            # PREREQ_SUCCESS and Flag = 1 means the update is in prereq only mode.
+            #    Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+            #}
+
             Write-DscStatus "Updating to '$($updatepack.Name)'. Current State: $($state[$updatepack.State])"
-            Start-Sleep 120
-            $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            Start-Sleep -Seconds 60
+            try {
+                $instance = Get-CimInstance -Class SMS_CM_UpdatePackDetailedMonitoring -Namespace root/SMS/site_$sitecode -Filter "PackageGuid='$($updatepack.PackageGuid)'" | Where-Object { $_.Progress -and $_.Progress -lt 100 }
+            }
+            catch {}
+            if ($instance) {
+                Write-DscStatus "$($instance[0].MessageTime.ToShortDateString()) $($instance[0].MessageTime.ToLongTimeString()) $($instance[0].Description)" -NoLog
+            }
+            start-sleep -seconds 60
+
+            try {
+                $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+            }
+            catch {}
         }
 
         if ($updatepack.State -eq 196612) {
@@ -697,7 +812,7 @@ if ($UpdateRequired) {
     # Update Action file
     if ($downloadretrycount -ge 2) {
         Write-DscStatus "Failed to download '$($updatepack.Name)'"
-        $Configuration.UpgradeSCCM.Status = 'Completed'
+        $Configuration.UpgradeSCCM.Status = 'Error'
     }
 
     # Update Action file
@@ -816,7 +931,7 @@ else {
             $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
             Write-DscStatus "Waiting for Primary site installation to finish"
             while (!$PSSystemServer) {
-                Write-DscStatus "Waiting for Primary site installation to finish" -NoLog -RetrySeconds 30
+                Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
                 Start-Sleep -Seconds 30
                 $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
             }
@@ -838,10 +953,11 @@ else {
                 $PSSiteCode = $PSVM.siteCode
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-                Start-Sleep -Seconds 30
+                
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
                     Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
                     $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
+                    Start-Sleep -Seconds 30
                 }
                 else {
                     Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
@@ -850,6 +966,7 @@ else {
                     $Configuration.$propName.Status = 'Completed'
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                    Start-Sleep -Seconds 30
                 }
             }
         }

@@ -7,6 +7,9 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+
+Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
+
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
@@ -15,6 +18,10 @@ $CurrentRole = $ThisVM.role
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
 
+$TopLevelSiteServer = $true
+if ($ThisVM.parentSiteCode) {
+    $TopLevelSiteServer = $false
+}
 # contains passive?
 $containsPassive = $false
 $containsSecondary = $false
@@ -209,22 +216,29 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
+    #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
+    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
     if ($containsSecondary) {
-        # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+        # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
-    #Install DP/MP/Client
-    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
+    #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
+    Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
@@ -249,30 +263,37 @@ if ($scenario -eq "Hierarchy") {
     elseif ($CurrentRole -eq "Primary") {
 
         #Install CM and Config
-        Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+        if (-not [string]::IsNullOrWhiteSpace($($ThisVM.thisParams.ParentSiteServer))) {
+            Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+
+        #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
-
+               
         if ($containsSecondary) {
-            # Install Secondary Site Server. Run before InstallDPMPClient.ps1, so it can create proper BGs
+            # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
             Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             Set-Location $LogPath
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
-        #Install DP/MP/Client
-        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
-
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
+         #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
+        Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
     }
 }
@@ -286,7 +307,37 @@ if ($containsPassive) {
 }
 
 
-Write-DscStatus "Finished setting up ConfigMgr."
+Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
+if ($CurrentRole -eq "CAS") {
+    #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
+    # Mark ScriptWorkflow completed for DSC to move on.
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration.ScriptWorkflow.Status = "Completed"
+    $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+}
+
+
+if (-not $deployConfig.cmOptions.UsePKI) {
+    # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
+    Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+}
+else {
+    Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
+    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+}
+
+if ($TopLevelSiteServer) {
+    Write-DScStatus "Loading object pre-population for MEMLABS"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+
+}
 
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -295,22 +346,12 @@ $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 Write-DscStatus "Complete!"
 
-if (-not $deployConfig.cmOptions.UsePKI) {
-    # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
-    Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
-    Write-DscStatus "Complete!"
-}
-else {
-    Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+if ($ThisVM.role -ne "CAS") {
+    Write-DscStatus "Always Running PushClients.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
     Write-DscStatus "Complete!"
 }
 
-Write-DscStatus "Always Running PushClients.ps1"
-$ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
-Set-Location $LogPath
-. $ScriptFile $ConfigFilePath $LogPath
-Write-DscStatus "Complete!"
+

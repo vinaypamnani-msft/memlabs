@@ -10,7 +10,7 @@ param (
                 $FakeBoundParameters
             )
             $ConfigPaths = Get-ChildItem -Path "$PSScriptRoot\config" -Filter *.json | Sort-Object -Property { $_.LastWriteTime -as [Datetime] } -Descending
-            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete) } }
+            if ($WordToComplete) { $ConfigPaths = $ConfigPaths | Where-Object { $_.Name.ToLowerInvariant().StartsWith($WordToComplete.ToLowerInvariant()) } }
             $ConfigNames = ForEach ($Path in $ConfigPaths) {
                 if ($Path.Name -eq "_storageConfig.json") { continue }
                 if ($Path.Name -eq "_storageConfig2022.json") { continue }
@@ -37,34 +37,44 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 9)]
+    [ValidateRange(2, 10)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 9)]
+    [ValidateRange(2, 10)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
     [Parameter(Mandatory = $false, HelpMessage = "Best not to use this. Skips configuration validation.")]
     [switch]$SkipValidation,
     [Parameter(Mandatory = $false, HelpMessage = "Migrate old VMs")]
-    [switch]$Migrate
+    [switch]$Migrate,
+    [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
+    [switch]$Restore,
+    [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
+    [switch]$NoSnapshot
 
 )
 
+$global:NoSnapshot = $NoSnapshot
 
-$desktopPath = [Environment]::GetFolderPath("CommonDesktop")
-$shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
-$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
-$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
+try {
+    $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
+    $shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutLocation)
+    $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
-$shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
-$shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
-$shortcut.Save()
-
-$bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
-# Set byte 21 (0x15) bit 6 (0x20) ON
-$bytes[0x15] = $bytes[0x15] -bor 0x20
-[System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+    $shortcut.TargetPath = Join-Path $scriptDirectory "VmBuild.cmd"
+    $shortcut.IconLocation = "%SystemRoot%\System32\SHELL32.dll,208"
+    $shortcut.Save()
+    $exitcode = 1
+    $bytes = [System.IO.File]::ReadAllBytes($shortcutLocation)
+    # Set byte 21 (0x15) bit 6 (0x20) ON
+    $bytes[0x15] = $bytes[0x15] -bor 0x20
+    [System.IO.File]::WriteAllBytes($shortcutLocation, $bytes)
+}
+catch {
+    write-log -Verbose "Could not Set Shortcut $_" -logonly
+}
 
 # Tell common to re-init
 if ($Common.Initialized) {
@@ -83,6 +93,12 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 
 # Dot source common
 . $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+
+if ($global:init_failed) {
+    Write-Log "Failed to initialize common. Exiting." -Failure
+    exit 1
+}
+
 
 Test-NoRRAS
 
@@ -118,13 +134,13 @@ if (-not $NoWindowResize.IsPresent) {
 # Validate token exists
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
-    return
+    exit 1
 }
 
 # Validate PS7
 if (-not $Common.PS7) {
     Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
-    return
+    exit 1
 }
 
 Set-PS7ProgressWidth
@@ -132,7 +148,14 @@ Set-PS7ProgressWidth
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 
 if (-not $Common.DevBranch) {
-    Clear-Host
+    $image = (Join-Path $PSScriptRoot "MemLabs.png")
+    Set-BackgroundImage $image "right" 5 "uniform"
+    Get-Animate
+}
+else {
+    $image = (Join-Path $PSScriptRoot "DevLabs.png")
+    Set-BackgroundImage $image "right" 5 "uniform"
+    Get-Animate
 }
 
 function Write-Phase {
@@ -181,6 +204,9 @@ function Write-Phase {
         9 {
             Write-Log "Phase $Phase - Setup Multi-Forest ConfigMgr" -Activity
         }
+        10 {
+            Write-Log "Phase $Phase - Run Maintenance" -Activity
+        }
     }
 }
 
@@ -204,11 +230,28 @@ try {
         Write-RedX "MemLabs requires administrative rights to configure. Please run vmbuild.cmd as administrator." -ForegroundColor Red
         Write-Host
         Start-Sleep -seconds 60
-        return $false
+        exit 1
     }
 
     Set-QuickEdit -DisableQuickEdit
     # $phasedRun = $Phase -or $SkipPhase -or $StopPhase -or $StartPhase
+
+    # Automatically update DSC.Zip
+    if ($Common.DevBranch) {
+        $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
+        $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
+        if (Test-Path ".\DSC\DSC.zip") {
+            $zipLastWriteTime = (Get-ChildItem ".\DSC\DSC.zip").LastWriteTime + (New-TimeSpan -Minutes 1)
+        }
+        if (-not $zipLastWriteTime -or ($psdLastWriteTime -gt $zipLastWriteTime) -or ($psmLastWriteTime -gt $zipLastWriteTime)) {
+            powershell .\dsc\createGuestDscZip.ps1 | Out-Host
+            Set-Location $PSScriptRoot | Out-Null
+            $exitcode = 55
+            exit 55
+        }
+    }
+
+
 
     ### Run maintenance
     if (-not $Configuration) {
@@ -223,16 +266,12 @@ try {
 
         # genconfig was called with -Debug true, and returned DeployConfig instead of ConfigFileName
         if ($result.DeployConfig) {
-            return $result
+            exit 0
         }
 
         # genconfig specified not to deploy
-        if (-not $result.DeployNow) {
-            return
-        }
-
         if (-not $($result.DeployNow)) {
-            return
+            exit 0
         }
 
         $Configuration = $result.ConfigFileName
@@ -254,14 +293,14 @@ try {
         else {
             Write-Log $configResult.Message -Failure
             Write-Host
-            return
+            exit 1
         }
     }
     else {
         Write-Host
         Write-Log "No Configuration was specified." -Failure
         Write-Host
-        return
+        exit 1
     }
 
     # Determine if we need to run Phase 1
@@ -281,11 +320,33 @@ try {
 
     # Test Config
     try {
-        $testConfigResult = Test-Configuration -InputObject $userConfig
+        $testConfigResult = Test-Configuration -InputObject $userConfig -Final
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
-            Write-OrangePoint "Configuration validation skipped."
+            if (-not $testConfigResult.Valid) {
+                Write-Host
+                Write-Log "Configuration validation failed." -Failure
+                Write-Host
+                Write-ValidationMessages -TestObject $testConfigResult
+
+                if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
+                    Write-Host       
+                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
+                    if (-not [String]::IsNullOrWhiteSpace($response)) {
+                        if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
+                            write-host
+                            Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
+                            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+                            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+                            write-host
+                            exit 1
+                        }
+                    }
+                }
+                Write-ValidationMessages -TestObject $testConfigResult
+                Write-OrangePoint "Configuration validation skipped."
+            }
         }
         elseif ($testConfigResult.Valid) {
             $deployConfig = $testConfigResult.DeployConfig
@@ -296,28 +357,39 @@ try {
             Write-Log "Configuration validation failed." -Failure
             Write-Host
             Write-ValidationMessages -TestObject $testConfigResult
-            Write-Host
-            return
+            write-host
+            Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
+            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+            write-host
+            exit 1
         }
     }
     catch {
         Write-Log "Failed to load $Configuration.json file. Review vmbuild.log. $_" -Failure
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
         Write-Host
-        return
+        exit 1
     }
- #Create VM Mutexes
- $mtx = New-Object System.Threading.Mutex($false, $mutexName)
- $global:mutexes = @()
- foreach ($vm in $deployConfig.virtualMachines) {
-     $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
-     write-log -Verbose "Created Mutex $($vm.vmName)"
-     $global:mutexes += $mtx
- }
+    #Create VM Mutexes
+    $global:mutexes = @()
+    foreach ($vm in $deployConfig.virtualMachines) {
+        $mtx = New-Object System.Threading.Mutex($false, $vm.vmName)
+        write-log -Verbose "Created Mutex $($vm.vmName)"
+        if ($mtx.WaitOne(1000)) {
+            $global:mutexes += $mtx
+            write-log -Verbose "Acquired Mutex $($vm.vmName)"
+        }
+        else {
+            Write-RedX "Could not acquire mutex for $(vm.vmName).  A deployment for this VM may already be in progress"
+            exit 1
+        }
+        
+    }
     # Skip if any VM in progress
     if ($runPhase1 -and (Test-InProgress -DeployConfig $deployConfig)) {
         Write-Host
-        return
+        exit 1
     }
 
     # Timer
@@ -328,6 +400,20 @@ try {
     $domainName = $deployConfig.vmOptions.domainName
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
+
+    #Rename the old log.
+    try {
+        Get-ChildItem $Common.LogPath -ErrorAction SilentlyContinue | Rename-Item -NewName { $_.BaseName + (Get-Date -Format "yyyyMMdd-HHmmss") + $_.Extension }
+    }
+    catch {
+        Write-Log -verbose "Could not rename existing $($Common.LogPath)"
+    }
+
+
+    if ($Restore) {
+        Write-Log "### RESTORE SNAPSHOT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
+        select-RestoreSnapshotDomain -domain $domainName -auto:$true
+    }
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
@@ -350,7 +436,7 @@ try {
             if (-not $success) {
                 $timer.Stop()
                 Write-Log "Failed to download all required files. Exiting." -Failure
-                return
+                exit 1
             }
         }
 
@@ -359,7 +445,7 @@ try {
             Write-Host
             Write-Log "### SCRIPT FINISHED. Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Success
             Write-Host
-            return
+            exit 0
         }
     }
 
@@ -367,7 +453,7 @@ try {
     $AddedScopes = @($deployConfig.vmOptions.network)
     $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
     if (-not $worked) {
-        return
+        exit 1
     }
 
     # Create additional switches
@@ -381,7 +467,7 @@ try {
             $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
             $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
             if (-not $worked) {
-                return
+                exit 1
             }
         }
     }
@@ -390,7 +476,7 @@ try {
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
     $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
     if ($containsIN -and (-not $worked)) {
-        return
+        exit 1
     }
 
     # AO VM switch and DHCP scope
@@ -398,7 +484,7 @@ try {
     if ($containsAO) {
         $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
         if (-not $worked) {
-            return
+            exit 1
         }
     }
 
@@ -407,7 +493,7 @@ try {
     $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
     if ($service) {
         Write-Log "DHCPServer Service could not be started." -Failure
-        return $false
+        exit 1
     }
 
     # Remove existing jobs
@@ -422,7 +508,7 @@ try {
             }
             catch {
                 write-log "Failed to remove jobs $_"
-                return
+                exit 1
             }
         }
     }
@@ -446,7 +532,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 9
+    $maxPhase = 10
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -505,36 +591,51 @@ try {
     if (-not $prepared -or -not $configured) {
         Write-Host
         Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
+        $NewLabsuccess = $false
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
         if ($currentPhase -ge 2) {
-            Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
             if ($currentPhase -eq 8) {
                 write-host
-                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+
             }
+            else {
+                Write-Host
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
+
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase" 
+
+            }
+
+
         }
         Write-Host
     }
     else {
-        $currentPhase = 9
+        $currentPhase = 10
         foreach ($mutex in $global:mutexes) {
-            try{
-            [void]$mutex.ReleaseMutex()
-            } catch{}
-            try{
-            [void]$mutex.Dispose()
-            } catch{}
+            try {
+                [void]$mutex.ReleaseMutex()
+            }
+            catch {}
+            try {
+                [void]$mutex.Dispose()
+            }
+            catch {}
 
         }
         $global:mutexes = @()
 
-        Start-Maintenance -DeployConfig $deployConfig
+        #This is now done in Phase 10
+        # Start-Maintenance -DeployConfig $deployConfig
 
         $updateExistingRequired = $false
         foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
-            $updateExistingRequired = $true
+            $updateExistingRequired = $true                    
         }
 
         # Update Existing VMs
@@ -552,23 +653,27 @@ try {
         }
 
         Write-Host
+        Set-TitleBar "SCRIPT FINISHED"
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
+        $NewLabsuccess = $true
     }
 
-    $NewLabsuccess = $true
 }
 catch {
     Write-Exception -ExceptionInfo $_ -AdditionalInfo ($deployConfig | ConvertTo-Json)
+    $NewLabsuccess = $false
 }
 finally {
 
     foreach ($mutex in $global:mutexes) {
-        try{
-        [void]$mutex.ReleaseMutex()
-        } catch{}
-        try{
-        [void]$mutex.Dispose()
-        } catch{}
+        try {
+            [void]$mutex.ReleaseMutex()
+        }
+        catch {}
+        try {
+            [void]$mutex.Dispose()
+        }
+        catch {}
 
     }
     $global:mutexes = @()
@@ -582,14 +687,19 @@ finally {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
-
-        if ($currentPhase -ge 2 -and $currentPhase -le 9) {
-            Write-Log "To Retry from the current phase, run the following command from the current powershell window: " -Failure -NoIndent
-            Write-Log "./New-Lab.ps1 -Configuration $Configuration -startPhase $currentPhase"
+        $exitcode = 2
+        if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             if ($currentPhase -eq 8) {
                 write-host
-                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot before retrying." -NoIndent
-                Write-Log "vmbuild -> [D]omain menu -> Select Domain -> [R]estore Snapshot -> Select 'MemLabs Phase 8 AutoSnapshot $ConfigurationShort'" -NoIndent
+                Write-Log "This failed on phase 8, please restore the phase 8 auto snapshot using the -restore option below before retrying." 
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase -restore"
+            }
+            else {
+                write-host
+                Write-Log "To Retry from the current phase, Reboot the VMs and run the following command from the current powershell window: " -Failure -NoIndent
+                Write-Log "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
+                Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Configuration`" -startPhase $currentPhase"
             }
         }
         Write-Host
@@ -597,12 +707,12 @@ finally {
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
-        $job | Stop-Job
+        #  $job | Stop-Job
         Write-Host -NoNewline "."
     }
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
-            $job | Remove-Job
+            #   $job | Remove-Job
             Write-Host -NoNewline "."
         }
     }
@@ -618,6 +728,7 @@ finally {
     if ($global:vm_remove_list.Count -gt 0) {
         if ($NewLabsuccess) {
             Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
+            $NewLabsuccess = $false
         }
         else {
             Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
@@ -628,7 +739,7 @@ finally {
             Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
         }
 
-        Get-Job | Stop-Job
+        # Get-Job | Stop-Job
     }
 
     # Clear vm remove list
@@ -641,5 +752,21 @@ finally {
     Set-QuickEdit
 
     Write-Host
-    Write-Host Script exited.
+    if ($NewLabsuccess -ne $true) {
+        if ($exitcode -ne 2) {
+            Write-Host "Script exited (FAILED)."
+            Set-TitleBar "SCRIPT FAILED"
+        }
+        if ($exitcode -gt 0) {
+            exit $exitcode
+        }
+        else {
+            exit 1
+        }        
+    }
+    else {
+        Write-Host "Script exited. SUCCESS"
+        Set-TitleBar "SCRIPT FINISHED"
+    }
+    
 }

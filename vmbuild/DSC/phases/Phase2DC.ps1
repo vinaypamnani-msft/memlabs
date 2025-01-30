@@ -21,6 +21,19 @@
     $DomainName = $deployConfig.parameters.domainName
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
+
+    $usePKI = $false
+    $prePopulate = $false
+    if ($deployConfig.cmOptions) {
+        if ($deployConfig.cmOptions.UsePKI) {
+            $usePKI = $deployConfig.cmOptions.UsePKI
+        }
+        if ($deployConfig.cmOptions.PrePopulateObjects) {
+            $prePopulate = $deployConfig.cmOptions.PrePopulateObjects
+        }
+    }
+
+
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
@@ -38,7 +51,7 @@
     $adsites = $ThisVM.thisParams.sitesAndNetworks
 
     # Wait on machines to join domain
-    $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
+    [System.Collections.ArrayList]$waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
 
     $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
     $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
@@ -50,14 +63,24 @@
         $OtherDC = $true
     }
 
-    $iiscount = 0
-    [System.Collections.ArrayList]$groupMembers = @()
+ 
+    $sitecount = 0
     $GroupMembersList = @()
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.Hidden }
+    [System.Collections.ArrayList]$cmgroupMembers = @()
+    foreach ($member in $GroupMembersList) {
+        $memberName = $member.vmName + "$"
+        if (-not $cmgroupMembers.Contains($memberName)) {
+            $sitecount = $cmgroupMembers.Add($memberName)
+            $sitecount++
+        }
+    }
+
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallMP -and -not $_.Hidden }
     $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallDP -and -not $_.Hidden }
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden}
-    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden}
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallRP -and -not $_.Hidden }
+    $GroupMembersList += $deployConfig.virtualMachines | Where-Object { $_.InstallSUP -and -not $_.Hidden }
+    $iiscount = 0
     [System.Collections.ArrayList]$iisgroupMembers = @()
     foreach ($member in $GroupMembersList) {
         $memberName = $member.vmName + "$"
@@ -65,7 +88,12 @@
             $iiscount = $iisgroupMembers.Add($memberName)
             $iiscount++
         }
+
+        if (-not $waitOnDomainJoin.Contains($member.vmName)) {
+            $waitOnDomainJoin += $member.vmName
+        }
     }
+
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -97,12 +125,7 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
-        SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InitializeDisks]InitDisks"
-            Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
-        }
+       
 
         WriteStatus SetIPDG {
             DependsOn = "[Computer]NewName"
@@ -142,7 +165,7 @@
         InstallFeatureForSCCM InstallFeature {
             Name      = 'DC'
             Role      = 'DC'
-            DependsOn = "[SetCustomPagingFile]PagingSettings"
+            DependsOn = "[InitializeDisks]InitDisks"
         }
 
         WriteStatus FirstDS {
@@ -150,11 +173,6 @@
             Status    = "Configuring ADDS and setting up the domain. The computer will reboot a couple of times."
         }
 
-        #SetupDomain FirstDS {
-        #    DependsOn                     = "[InstallFeatureForSCCM]InstallFeature"
-        #    DomainFullName                = $DomainName
-        #    SafemodeAdministratorPassword = $DomainCreds
-        #}
         $netbiosName = $deployConfig.vmOptions.domainNetBiosName
 
         ADDomain FirstDS {
@@ -167,13 +185,72 @@
             DomainNetBiosName             = $netbiosName
         }
 
+        $PageFileSize = ($thisVM.memory) / 2MB
+        SetCustomPagingFile PagingSettings {
+            DependsOn   = "[ADDomain]FirstDS"
+            Drive       = 'C:'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
+        }
+
         WriteStatus CreateAccounts {
-            DependsOn = "[ADDomain]FirstDS"
+            DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Creating user accounts and groups"
         }
 
-
         $nextDepend = "[WriteStatus]CreateAccounts"
+
+        WriteStatus InstallDotNet {
+            DependsOn = $nextDepend
+            Status    = "Installing .NET 4.8"
+        }
+
+        InstallDotNet4 DotNet {
+            DownloadUrl = $deployConfig.URLS.DotNet
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+
+        $nextDepend = "[InstallDotNet4]DotNet"
+
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
+            DependsOn = $nextDepend
+        }
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
+            Name      = "DC"
+            Role      = "DC"
+        }
+
+        WriteStatus NetworkDNS {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Status    = "Setting Primary DNS, and DNS Forwarders"
+        }
+
+        DnsServerForwarder DnsServerForwarder {
+            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
+            IsSingleInstance = 'Yes'
+            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+            UseRootHint      = $true
+            EnableReordering = $true
+        }
+
+        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
+        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+
+        Service ADWS {
+            Name      = "ADWS"
+            State     = "Running"
+            DependsOn = $nextDepend
+        }
+
+        $nextDepend = "[Service]ADWS"
+        $waitOnDependency = "[Service]ADWS"
+
         $adObjectDependency = @($nextDepend)
         $i = 0
         foreach ($user in $DomainAccounts) {
@@ -205,7 +282,9 @@
                 DependsOn            = $nextDepend
             }
             $adObjectDependency += "[ADUser]User$($i)"
+           
         }
+       
 
         $i = 0
         foreach ($computer in $DomainComputers) {
@@ -218,12 +297,7 @@
             $adObjectDependency += "[ADComputer]Computer$($i)"
         }
 
-
-        #ADGroup AddToAdmin {
-        #    GroupName        = "Administrators"
-        #    MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
-        #    DependsOn        = $adObjectDependency
-        #}
+       
         AddToAdminGroup AddLocalAdmins {
             DomainName   = "NONE"
             AccountNames = @($DomainAdminName, $Admincreds.UserName)
@@ -276,34 +350,9 @@
             }
             $adSiteDependency += "[ADReplicationSiteLink]HQSiteLink$($i)"
             $adSiteDependency += "[ADReplicationSubnet]ADSubnet$($i)"
+            $nextDepend = $adSiteDependency
         }
-
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
-            DependsOn = $adSiteDependency
-        }
-
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Name      = "DC"
-            Role      = "DC"
-        }
-
-        WriteStatus NetworkDNS {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Setting Primary DNS, and DNS Forwarders"
-        }
-
-        DnsServerForwarder DnsServerForwarder {
-            DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
-            IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-            UseRootHint      = $true
-            EnableReordering = $true
-        }
-
-        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
-        $waitOnDependency = "[DnsServerForwarder]DnsServerForwarder"
+      
 
         if ($OtherDC) {
             DnsServerConditionalForwarder 'Forwarder1' {
@@ -324,7 +373,7 @@
                 TargetCredential     = $Admincreds
                 TrustDirection       = 'Bidirectional'
                 TrustType            = 'Forest'
-                AllowTrustRecreation = $true
+                AllowTrustRecreation = $false
                 DependsOn            = $nextDepend
             }
 
@@ -332,77 +381,149 @@
             $waitOnDependency = "[ADDomainTrust]Trust"
         }
 
+        if ($prePopulate) {
+            ADOrganizationalUnit 'MEMLABS-Users'
+            {
+                Name                            = "MEMLABS-Users"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS auto created users"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+
+            $nextDepend = "[ADOrganizationalUnit]MEMLABS-Users"
+
+            $waitOnDependency = @($nextDepend)
+            # Loop to create 50 users
+            for ($i = 1; $i -le 50; $i++) {
+                # Generate a random username
+                $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+            
+            
+                # Create the new user
+                ADUser "MEMLABS-User$($i)" {
+                    Ensure               = 'Present'
+                    UserPrincipalName    = $Username + '@' + $DomainName
+                    UserName             = $Username
+                    Password             = $DomainCreds
+                    PasswordNeverResets  = $true
+                    PasswordNeverExpires = $true
+                    CannotChangePassword = $true
+                    DomainName           = $DomainName
+                    DependsOn            = $nextDepend
+                    Path                 = "OU=MEMLABS-Users,$DNName"
+                }
+                $waitOnDependency += "[ADUser]MEMLABS-User$($i)"
+            }
+
+            
+
+            # List of department names
+            $Departments = @(
+                "HR",
+                "Finance",
+                "IT",
+                "Marketing",
+                "Sales",
+                "Operations",
+                "Legal",
+                "Customer Service",
+                "Engineering",
+                "Product Management",
+                "Research and Development",
+                "Quality Assurance",
+                "Supply Chain",
+                "Administration",
+                "Facilities",
+                "Procurement",
+                "Training",
+                "Security",
+                "Public Relations",
+                "Compliance"
+            )
+
+            # Loop to create security groups for each department
+            foreach ($Department in $Departments) {
+                $GroupName = "MEMLABS-$Department-SecurityGroup"
+
+                ADGroup $Department {
+                    Ensure      = 'Present'
+                    GroupName   = $GroupName
+                    GroupScope  = "Global"
+                    Category    = "Security"
+                    Description = $GroupName
+                    DependsOn   = $nextDepend
+                    Path        = "OU=MEMLABS-Users,$DNName"
+                }
+                $waitOnDependency += "[ADGroup]$Department"
+            }
+        }
+
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
-                DependsOn = $nextDepend
+                DependsOn = $waitOnDependency
                 Status    = "Installing Certificate Authority"
             }
 
             if ($ThisVM.ThisParams.RootCA) {
                 InstallCA InstallCA {
-                    DependsOn     = $nextDepend
+                    DependsOn     = $waitOnDependency
                     HashAlgorithm = "SHA256"
                     #RootCa        = $ThisVM.ThisParams.RootCA
                 }
             }
             else {
                 InstallCA InstallCA {
-                    DependsOn     = $nextDepend
+                    DependsOn     = $waitOnDependency
                     HashAlgorithm = "SHA256"
                 }
             }
             $nextDepend = "[InstallCA]InstallCA"
 
-            WriteStatus ImportCertifcateTemplate {
-                DependsOn = $nextDepend
-                Status    = "Importing Template to Domain"
-            }
+            if ($usePKI) {
+                
+                WriteStatus ImportCertifcateTemplate {
+                    DependsOn = $nextDepend
+                    Status    = "Importing Template to Domain"
+                }
 
-            $waitOnDependency = @($nextDepend)
+                $waitOnDependency = @($nextDepend)
 
-            if ($iisCount) {
-                ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
-                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                if ($iisCount) {
+                    ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                        DNPath       = $DNName
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+
+                    ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                        TemplateName = "ConfigMgrWebServerCertificate"
+                        DNPath       = $DNName
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                }
+                ImportCertifcateTemplate ConfigMgrClientCertificate {
+                    TemplateName = "ConfigMgrClientCertificate"
                     DNPath       = $DNName
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                ImportCertifcateTemplate ConfigMgrWebServerCertificate {
-                    TemplateName = "ConfigMgrWebServerCertificate"
-                    DNPath       = $DNName
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
             }
-            ImportCertifcateTemplate ConfigMgrClientCertificate {
-                TemplateName = "ConfigMgrClientCertificate"
-                DNPath       = $DNName
-                DependsOn    = $nextDepend
+            else {
+                $waitOnDependency = $nextDepend
             }
-            $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
-
         }
 
-        WriteStatus InstallDotNet {
-            DependsOn = $waitOnDependency
-            Status    = "Installing .NET 4.8"
-        }
-
-        InstallDotNet4 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
-            FileName    = "ndp48-x86-x64-allos-enu.exe"
-            NetVersion  = "528040"
-            Ensure      = "Present"
-            DependsOn   = "[WriteStatus]InstallDotNet"
-        }
-
+       
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = "[InstallDotNet4]DotNet"
+            DependsOn       = $waitOnDependency
         }
 
         FileReadAccessShare DomainSMBShare {
@@ -435,17 +556,7 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
-
-
-
-        $sitecount = 0
-        [System.Collections.ArrayList]$groupMembers = @()
-        $GroupMembersList = $deployConfig.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary", "PassiveSite", "Secondary") -and -not $_.hidden }
-        foreach ($member in $GroupMembersList) {
-            $sitecount = $groupMembers.Add($member.vmName + "$")
-            $sitecount++
-        }
-
+      
         if ($sitecount) {
 
             ADGroup ConfigMgrSiteServers {
@@ -454,7 +565,7 @@
                 GroupScope       = "Global"
                 Category         = "Security"
                 Description      = 'ConfigMgr Site Servers'
-                MembersToInclude = $groupMembers
+                MembersToInclude = $cmgroupMembers
                 DependsOn        = $waitOnDependency
             }
             $waitOnDependency = "[ADGroup]ConfigMgrSiteServers"
@@ -521,6 +632,7 @@
         }
         $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
         $waitOnDependency = $nextDepend
+        
 
         if ($ThisVM.InstallCA) {
 
@@ -533,37 +645,39 @@
             ModuleAdd PSPKI {
                 Key             = 'Always'
                 CheckModuleName = 'PSPKI'
-                DependsOn       = $nextDepend
+                DependsOn       = $waitOnDependency
             }
             $nextDepend = "[ModuleAdd]PSPKI"
             $waitOnDependency = @("[ModuleAdd]PSPKI")
-            if ($iisCount) {
-                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                    GroupName    = 'ConfigMgr IIS Servers'
-                    Permissions  = 'Read, Enroll'
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+            if ($usePKI) {
+                if ($iisCount) {
+                    AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                        GroupName    = 'ConfigMgr IIS Servers'
+                        Permissions  = 'Read, Enroll'
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-                AddCertificateTemplate ConfigMgrWebServerCertificate {
-                    TemplateName = "ConfigMgrWebServerCertificate"
-                    GroupName    = 'ConfigMgr IIS Servers'
-                    Permissions  = 'Read, Enroll'
+                    AddCertificateTemplate ConfigMgrWebServerCertificate {
+                        TemplateName = "ConfigMgrWebServerCertificate"
+                        GroupName    = 'ConfigMgr IIS Servers'
+                        Permissions  = 'Read, Enroll'
+                        DependsOn    = $nextDepend
+                    }
+                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+                }
+                AddCertificateTemplate ConfigMgrClientCertificate {
+                    TemplateName = "ConfigMgrClientCertificate"
+                    GroupName    = 'Domain Computers'
+                    Permissions  = 'Read, Enroll, AutoEnroll'
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
             }
-            AddCertificateTemplate ConfigMgrClientCertificate {
-                TemplateName = "ConfigMgrClientCertificate"
-                GroupName    = 'Domain Computers'
-                Permissions  = 'Read, Enroll, AutoEnroll'
-                DependsOn    = $nextDepend
-            }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
 
-        if ($ThisVM.externalDomainJoinSiteCode) {
+        if ($ThisVM.externalDomainJoinSiteCode -and $ThisVM.externalDomainJoinSiteCode -ne "NONE") {
             [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)
 
             WriteStatus WaitExtSchema {
@@ -592,18 +706,21 @@
                 DependsOn      = $waitOnDependency
                 IsGroup        = $true
             }
-
             $waitOnDependency = "[DelegateControl]AddremoteIISGroup"
-            if ($ThisVM.ForestTrust) {
-                AddToAdminGroup AddRemoteAdmins {
-                    DomainName   = $ThisVM.ForestTrust
-                    AccountNames = @($DomainAdminName, $Admincreds.UserName)
-                    RemoteCreds  = $groupCreds
-                    TargetGroup  = "Administrators"
-                    DependsOn    = $waitOnDependency
-                }
-                $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
+        }
 
+        
+        if ($ThisVM.ForestTrust -and $ThisVM.ForestTrust -ne "NONE") {
+            AddToAdminGroup AddRemoteAdmins {
+                DomainName   = $ThisVM.ForestTrust
+                AccountNames = @($DomainAdminName, $Admincreds.UserName)
+                RemoteCreds  = $groupCreds
+                TargetGroup  = "Administrators"
+                DependsOn    = $waitOnDependency
+            }
+            $waitOnDependency = "[AddToAdminGroup]AddRemoteAdmins"
+
+            if ($ThisVM.ThisParams.RootCA) {
                 AddToAdminGroup AddCertPublisher {
                     DomainName   = $ThisVM.ForestTrust
                     AccountNames = "$($OtherDCVM.VmName)$"
@@ -626,10 +743,11 @@
                 }
                 $waitOnDependency = "[RunPkiSync]RunPkiSync"
             }
-
-
-
         }
+
+
+
+        
         RemoteDesktopAdmin RemoteDesktopSettings {
             IsSingleInstance   = 'yes'
             Ensure             = 'Present'
@@ -637,17 +755,18 @@
             DependsOn          = $waitOnDependency
         }
 
-        WriteStatus Complete {
-            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
-            Status    = "Complete!"
-        }
 
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status    = "Complete!"
         }
     }
 }

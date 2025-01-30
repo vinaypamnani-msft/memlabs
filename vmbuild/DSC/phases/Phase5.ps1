@@ -583,7 +583,7 @@ Configuration Phase5
         WaitForAll AddReplica {
             ResourceName     = '[SqlAGReplica]AddReplica'
             NodeName         = $node2
-            RetryIntervalSec = 4
+            RetryIntervalSec = 6
             RetryCount       = 900
             Dependson        = $nextDepend
             PsDscRunAsCredential = $Admincreds
@@ -642,6 +642,7 @@ Configuration Phase5
         }
 
         SqlScript 'InstallAgentJob' {
+            Id               = 'InstallAgentJob'
             ServerName       = $thisvm.VmName
             InstanceName     = $thisVM.sqlInstanceName
             #Credential       = $Admincreds
@@ -998,6 +999,7 @@ Configuration Phase5
         }
 
         SqlScript 'InstallAgentJob' {
+            Id               = 'InstallAgentJob'
             ServerName       = $node.nodename
             InstanceName     = $node1vm.sqlInstanceName
             #Credential       = $Admincreds
@@ -1041,17 +1043,6 @@ Configuration Phase5
             }
 
             $adGroupDependancy += "[ADGroup]SQLAOGroup$($pNode.vmName)"
-            #ActiveDirectorySPN "SQLAOSPN$i" {
-            #    Key              = "SQLAOSPN$i"
-            #    UserName         = $pNode.thisParams.SQLAO.SqlServiceAccount
-            #    FQDNDomainName   = $DomainName
-            #    OULocationUser   = $pNode.thisParams.SQLAO.OULocationUser
-            #    OULocationDevice = $pNode.thisParams.SQLAO.OULocationDevice
-            #    ClusterDevice    = $pNode.thisParams.SQLAO.ClusterNodes
-            #    UserNameCluster  = $pNode.thisParams.SQLAO.SqlServiceAccount
-            #    Dependson        = "[ADGroup]SQLAOGroup$i"
-            #}
-            #$adGroupDependancy += "[ActiveDirectorySPN]SQLAOSPN$i"
         }
 
         WriteStatus Complete {

@@ -113,18 +113,19 @@
         }
 
         InstallDotNet4 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            DownloadUrl = $deployConfig.URLS.DotNet
             FileName    = "ndp48-x86-x64-allos-enu.exe"
             NetVersion  = "528040"
             Ensure      = "Present"
             DependsOn   = "[WriteStatus]InstallDotNet"
         }
 
+        $PageFileSize = ($thisVM.memory)/2MB
         SetCustomPagingFile PagingSettings {
-            DependsOn   = "[InstallDotNet4]DotNet"
+            DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
         }
 
         WriteStatus InstallFeature {

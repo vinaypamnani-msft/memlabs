@@ -53,13 +53,14 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
+        $PageFileSize = ($thisVM.memory)/2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
-            InitialSize = '8192'
-            MaximumSize = '8192'
+            InitialSize = $PageFileSize
+            MaximumSize = $PageFileSize
         }
-
+        
         WriteStatus InstallFeature {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
             Status    = "Installing required windows features"
@@ -86,6 +87,13 @@
         }
 
         $nextDepend = "[WaitForDomainReady]WaitForDomain"
+
+        #ModuleAdd ActiveDirectory {
+        #    Key             = 'Always'
+        #    CheckModuleName = 'ActiveDirectory'
+        #}
+
+        #$nextDepend = "[ModuleAdd]ActiveDirectory"
 
         WriteStatus NewDS {
             DependsOn = $nextDepend
@@ -148,7 +156,7 @@
         }
 
         InstallDotNet4 DotNet {
-            DownloadUrl = "https://download.visualstudio.microsoft.com/download/pr/7afca223-55d2-470a-8edc-6a1739ae3252/abd170b4b0ec15ad0222a809b761a036/ndp48-x86-x64-allos-enu.exe"
+            DownloadUrl = $deployConfig.URLS.DotNet
             FileName    = "ndp48-x86-x64-allos-enu.exe"
             NetVersion  = "528040"
             Ensure      = "Present"
@@ -186,7 +194,8 @@
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
         }
+
     }
 }

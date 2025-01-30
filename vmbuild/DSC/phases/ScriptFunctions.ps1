@@ -1,10 +1,11 @@
 # ScriptFunctions.ps1
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
-$global:StatusLog = "C:\staging\DSC\InstallCMLog.txt"
+$global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
     $StatusPrefix | Out-File $global:StatusFile -Force
+    start-sleep -seconds 5
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
 }
 
@@ -57,6 +58,7 @@ function Write-DscStatus {
         "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
     }
 
+    write-host $Status
     if ($Failure.IsPresent) {
         # Add a sleep so host VM has had time to poll for this entry
         Start-Sleep -Seconds 10
@@ -121,7 +123,7 @@ function Get-SMSProvider {
         $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
         foreach ($provider in $providers) {
 
-            # Test provider
+            # Test provider Fix me \\server
             Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
             if ($WmiErr.Count -gt 0) {
                 continue
@@ -187,10 +189,12 @@ function Install-DP {
                     }
                     else {
                         "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        $installFailure = $true
                     }
                 }
                 else {
                     "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    $installFailure = $true
                 }
             }
             else {
@@ -261,10 +265,12 @@ function Install-PullDP {
                     }
                     else {
                         "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        $installFailure = $true
                     }
                 }
                 else {
                     "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    $installFailure = $true
                 }
             }
             else {
@@ -459,7 +465,7 @@ function Install-SRP {
             $installed = $true
         }
 
-        ig ($i -eq 5) {
+        if ($i -eq 5) {
             try {
                 Get-Service -Name SMS_EXECUTIVE | Restart-Service
             }
@@ -506,11 +512,16 @@ function Get-UpdatePack {
     )
 
     Write-DscStatus "Get CM Update..." -NoStatus
-
+    $updatepack = ""
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
     $CMPSSuppressFastNotUsedCheck = $true
 
     $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
+    $doneUpdates = Get-CMSiteUpdate | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" }
+    if ($doneUpdates.Count -ge 1 -and $updatepacklist.Count -eq 0) {
+        Write-DscStatus "$UpdateVersion Update already installed. Skipping."
+        return $updatepack
+    }
     $getupdateretrycount = 0
     while ($updatepacklist.Count -eq 0) {
 
@@ -527,7 +538,7 @@ function Get-UpdatePack {
         $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes
     }
 
-    $updatepack = ""
+   
 
     if ($updatepacklist.Count -eq 0) {
         # No updates

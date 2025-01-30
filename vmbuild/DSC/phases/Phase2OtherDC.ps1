@@ -69,6 +69,7 @@
             ReplicationScope = 'Forest'
             Ensure           = 'Present'
             DependsOn        = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+            PsDscRunAsCredential = $Admincreds
         }
 
         $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
@@ -115,12 +116,14 @@
             }
         }
 
+        $waitOnDependency = @()
         if ($iisCount) {
             AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                 TemplateName = "ConfigMgrClientDistributionPointCertificate"
                 GroupName    = "$DomainName\ConfigMgr IIS Servers"
                 Permissions  = 'Read, Enroll'
                 PermissionsOnly = $true
+                SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
@@ -130,31 +133,36 @@
                 GroupName    = "$DomainName\ConfigMgr IIS Servers"
                 Permissions  = 'Read, Enroll'
                 PermissionsOnly = $true
+                SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
             $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
         }
+        
         AddCertificateTemplate ConfigMgrClientCertificate {
             TemplateName = "ConfigMgrClientCertificate"
             GroupName    = "$DomainName\Domain Computers"
             Permissions  = 'Read, Enroll, AutoEnroll'
             PermissionsOnly = $true
+            SkipIfNotExist = $true
             DependsOn    = $nextDepend
         }
         $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
 
 
-        WriteStatus Complete {
-            DependsOn = $nextDepend
-            Status    = "Complete!"
-        }
+       
 
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WriteStatus]Complete"
+            DependsOn = $waitOnDependency
+        }
+
+        WriteStatus Complete {
+            DependsOn = "[WriteEvent]WriteConfigFinished"
+            Status    = "Complete!"
         }
     }
 }

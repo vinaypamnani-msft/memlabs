@@ -30,6 +30,133 @@ Function Get-SupportedOperatingSystemsForRole {
     }
     return $AllList
 }
+function Get-ValidSubnets {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Config")]
+        [object] $configToCheck = $global:config,
+        [Parameter(Mandatory = $false, HelpMessage = "Allow Existing")]
+        [bool] $AllowExisting = $false,
+        [Parameter(Mandatory = $false, HelpMessage = "Networks to Exclude")]
+        [object] $excludeList = @(),
+        [Parameter(Mandatory = $false, HelpMessage = "VM to Check")]
+        [object] $vmToCheck = $null
+
+    )
+
+
+    $usedSubnets = @()
+    $usedSubnets += (Get-NetworkList).Network
+
+    #exclude any networks that already exist on the host
+    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$","0" } )
+    $usedSubnets += $excludeList
+    if (-not $AllowExisting) {
+        $usedSubnets += $configToCheck.vmOptions.network
+        foreach ($vm in $configToCheck.VirtualMachines) {
+            if ($vm.network) {
+                $usedSubnets += $vm.network
+            }
+        }
+    }
+
+    $subnetlist = @()
+    if ($vmToCheck) {
+        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck       
+    }
+
+    $usedSubnets += $subnetList
+    $subnetList = @($subnetList | Sort-Object -Property { [System.Version]$_ } | Get-Unique)
+    $addedsubnets = 0
+
+    for ($i = 1; $i -lt 200; $i++) {
+        $newSubnet = "192.168." + $i + ".0"
+        $found = $false
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
+        }
+        if (-not $found) {
+            $subnetlist += $newSubnet
+            $addedsubnets++
+            if ($addedsubnets -gt 2) {
+                break
+            }
+
+        }
+
+    }
+
+    for ($i = 1; $i -lt 200; $i++) {
+        $newSubnet = "172.16." + $i + ".0"
+        $found = $false
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
+        }
+        if (-not $found) {
+            $subnetlist += $newSubnet
+            $addedsubnets++
+            if ($addedsubnets -gt 5) {
+                break
+            }
+
+        }
+    }
+
+    for ($i = 1; $i -lt 200; $i++) {
+        $newSubnet = "10.0." + $i + ".0"
+        $found = $false
+        if ($usedSubnets -contains $newSubnet) {
+            $found = $true
+            continue
+        }
+        if (-not $found) {
+            $subnetlist += $newSubnet
+            $addedsubnets++
+            if ($addedsubnets -gt 8) {
+                break
+            }
+        }
+    }
+    return $subnetlist | Where-Object { $_ }
+}
+function Get-ValidDomainNames {
+    # Old List.. Some have netbios portions longer than 15 chars
+    #$ValidDomainNames = [System.Collections.ArrayList]("adatum.com", "adventure-works.com", "alpineskihouse.com", "bellowscollege.com", "bestforyouorganics.com", "contoso.com", "contososuites.com",
+    #   "consolidatedmessenger.com", "fabrikam.com", "fabrikamresidences.com", "firstupconsultants.com", "fourthcoffee.com", "graphicdesigninstitute.com", "humongousinsurance.com",
+    #   "lamnahealthcare.com", "libertysdelightfulsinfulbakeryandcafe.com", "lucernepublishing.com", "margiestravel.com", "munsonspicklesandpreservesfarm.com", "nodpublishers.com",
+    #   "northwindtraders.com", "proseware.com", "relecloud.com", "fineartschool.net", "southridgevideo.com", "tailspintoys.com", "tailwindtraders.com", "treyresearch.net", "thephone-company.com",
+    #  "vanarsdelltd.com", "wideworldimporters.com", "wingtiptoys.com", "woodgrovebank.com", "techpreview.com" )
+
+    #Trimmed list, only showing domains with 15 chars or less in netbios portion
+    $ValidDomainNames = @{"adatum.com" = "ADA-" ; "adventure-works.com" = "ADV-" ; "alpineskihouse.com" = "ALP-" ; "bellowscollege.com" = "BLC-" ; "contoso.com" = "CON-" ; "contososuites.com" = "COS-" ;
+        "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
+        "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
+        "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" #; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs
+    }
+    foreach ($domain in (Get-DomainList)) {
+        if ($domain) {
+            $ValidDomainNames.Remove($domain.ToLowerInvariant())
+        }
+    }
+
+    $usedPrefixes = Get-List -Type UniquePrefix
+    $ValidDomainNamesClone = $ValidDomainNames.Clone()
+    foreach ($dname in $ValidDomainNamesClone.Keys) {
+        foreach ($usedPrefix in $usedPrefixes) {
+            if ($usedPrefix -and $ValidDomainNames[$dname]) {
+                if ($ValidDomainNames[$dname].ToLowerInvariant() -eq $usedPrefix.ToLowerInvariant()) {
+                    Write-Verbose ("Removing $dname")
+                    $ValidDomainNames.Remove($dname)
+                }
+            }
+        }
+    }
+    return $ValidDomainNames
+}
+
 
 Function Show-JobsProgress {
     param (
@@ -98,6 +225,9 @@ Function Read-SingleKeyWithTimeout {
     }
 
     $stopTimeout = $false
+    if ($timeout -eq 0) {
+        $stopTimeout = $true
+    }
     $key = $null
     $secs = 0
     $charsToDeleteNextTime = 0
@@ -189,6 +319,8 @@ function write-help {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Default Value")]
+        [String] $WRCurrentValue = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Can Enter escape this menu")]
         [switch] $AllowEscape,
         [Parameter(Mandatory = $false, HelpMessage = "hint for help to show we will return")]
         [bool] $return = $false,
@@ -202,34 +334,46 @@ function write-help {
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Space]" -NoNewline
         Write-Host2 -ForegroundColor $color " to stop the countdown or " -NoNewline
     }
-    if (-not $AllowEscape) {
-        if ($return) {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
-        }
-        else {
-            Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
-        }
+
+    if ($WRCurrentValue) {
+        Write-Host2 -ForegroundColor $color "Press " -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+        Write-Host2 -ForegroundColor $color " to use the DEFAULT value of '" -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "$WRCurrentValue" -NoNewLine
+        Write-Host2 -ForegroundColor $color "' "
+        #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+        #Write-Host2 -ForegroundColor $color " to exit without saving."
     }
     else {
-        if ($return) {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to return to the previous menu or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
+        if (-not $AllowEscape) {
+            if ($return) {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to return to the previous menu "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
+            else {
+                Write-Host2 -ForegroundColor $color "Select an option or " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to exit the script without saving."
+            }
         }
         else {
-            Write-Host2 -ForegroundColor $color "Press " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to skip this section or " -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
-            Write-Host2 -ForegroundColor $color " to exit without saving."
+            if ($return) {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to return to the previous menu "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
+            else {
+                Write-Host2 -ForegroundColor $color "Press " -NoNewline
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Enter]" -NoNewline
+                Write-Host2 -ForegroundColor $color " to skip this section "
+                #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHelpHighlight "[Ctrl-C]" -NoNewline
+                #Write-Host2 -ForegroundColor $color " to exit without saving."
+            }
         }
     }
 }
@@ -254,10 +398,10 @@ function Read-YesorNoWithTimeout {
     }
     if (-not $HideHelp.IsPresent) {
         if ($Default) {
-            write-help -AllowEscape -timeout:$timeoutHelp
+            write-help -AllowEscape -timeout:$timeoutHelp -WRCurrentValue:$currentValue
         }
         else {
-            write-help -timeout:$timeoutHelp
+            write-help -timeout:$timeoutHelp -WRCurrentValue:$currentValue
         }
     }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
@@ -289,87 +433,7 @@ function Read-YesorNoWithTimeout {
 }
 
 
-function Invoke-AutoSnapShotDomain {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain,
-        [Parameter(Mandatory = $true, HelpMessage = "Snapshot name (Must Contain MemLabs)")]
-        [string] $comment
-    )
 
-    #Get Critical Server list.  These VM's should be stopped before snapshot
-    $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
-
-    #Stop all VMs in Domain
-    Invoke-StopVMs -domain $domain -quiet:$true
-
-    #Take Snapshot
-    $failures = Invoke-SnapshotDomain -domain $domain -comment $comment -quiet:$true
-    if ($failures -ne 0) {
-        write-log "$failures VM(s) could not be snapshotted" -Failure
-    }
-
-    #Start VMs in correct order
-    $failures = Invoke-SmartStartVMs -CritList $critlist
-    if ($failures -ne 0) {
-        write-log "$failures VM(s) could not be started" -Failure
-    }
-}
-
-function Invoke-SnapshotDomain {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To SnapShot")]
-        [string] $domain,
-        [Parameter(Mandatory = $false, HelpMessage = "Comment")]
-        [string] $comment = "",
-        [Parameter(Mandatory = $false, HelpMessage = "Quiet Mode")]
-        [bool] $quiet = $false
-    )
-
-
-
-    $vms = get-list -type vm -DomainName $domain
-
-    $date = Get-Date -Format "yyyy-MM-dd hh.mmtt"
-    $snapshot = $date + " (MemLabs) " + $comment
-
-    $failures = 0
-    if (-not $quiet) {
-        Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
-        Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
-    }
-    foreach ($vm in $vms) {
-        $complete = $false
-        $tries = 0
-        While ($complete -ne $true) {
-            try {
-                if ($tries -gt 10) {
-                    $failures++
-                    return $failures
-                }
-                if (-not $quiet) {
-                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
-                }
-
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
-                $complete = $true
-                if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
-                }
-            }
-            catch {
-                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
-                write-log "Error: $_" -LogOnly
-                $tries++
-                stop-vm2 -name $vm.VmName
-                Start-Sleep 10
-            }
-        }
-    }
-    return $failures
-}
 
 function Get-CriticalVMs {
     [CmdletBinding()]
@@ -785,15 +849,22 @@ function ConvertTo-DeployConfigEx {
                         $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
                     }
 
-                    $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
-                    $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
-                    $ExternalTopLevelSiteServer = $ExternalSiteServer
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
-                    if ($RemoteSS.ParentSiteCode) {
-                        $RemoteCAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
-                        $ExternalTopLevelSiteServer = "$($RemoteCAS.VmName).$($thisVM.ForestTrust)"
+                    if ($thisVM.externalDomainJoinSiteCode -ne "NONE") {
+                        $RemoteSS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $thisVM.externalDomainJoinSiteCode -DomainName $thisVM.ForestTrust -type VM
+                        if (-not $RemoteSS.VmName) {
+                            Write-log "Could not find a site server with SiteCode $($thisVM.externalDomainJoinSiteCode) in domain $($thisVM.ForestTrust)" -Failure -OutputStream
+                            return $false
+                        }
+                        $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
+                        $ExternalTopLevelSiteServer = $ExternalSiteServer
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
+                        if ($RemoteSS.ParentSiteCode) {
+                            $RemoteCAS = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
+                            #$RemoteCAS = Get-SiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
+                            $ExternalTopLevelSiteServer = "$($RemoteCAS.VmName).$($thisVM.ForestTrust)"
+                        }
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalTopLevelSiteServer" -Value $ExternalTopLevelSiteServer -Force
                     }
-                    $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalTopLevelSiteServer" -Value $ExternalTopLevelSiteServer -Force
                 }
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
                 #$accountLists.DomainAccounts += get-list2 -DeployConfig $deployConfig | Where-Object { $_.SQLAgentAccount } | Select-Object -ExpandProperty SQLAgentAccount -Unique
@@ -1016,7 +1087,8 @@ function ConvertTo-DeployConfigEx {
             $sqlFile = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $thisVM.sqlVersion }
             $sqlCUUrl = $sqlFile.cuURL
             $thisParams | Add-Member -MemberType NoteProperty -Name "sqlCUURL" -Value $sqlCUUrl -Force
-            $backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
+            #$backupSolutionURL = "https://ola.hallengren.com/scripts/MaintenanceSolution.sql"
+            $backupSolutionURL = $($Common.AzureFileList.Urls.hallengren)
             $thisParams | Add-Member -MemberType NoteProperty -Name "backupSolutionURL" -Value $backupSolutionURL -Force
 
             #if ($thisvm.sqlInstanceName -eq "MSSQLSERVER" ) {
@@ -1186,6 +1258,12 @@ function ConvertTo-DeployConfigEx {
 
         $thisVM | Add-Member -MemberType NoteProperty -Name "thisParams" -Value $thisParams -Force
     }
+
+
+    # Add Apps
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+
     return $deployConfigEx
 }
 

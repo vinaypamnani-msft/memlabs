@@ -43,11 +43,35 @@ function Get-UserConfiguration {
         #Apply Fixes to Config
 
         if ($config.cmOptions) {
+            #Version                   = $latestVersion
+            #Install                   = $true
+            #PushClientToDomainMembers = $true
+            #PrePopulateObjects        = $true
+            #EVALVersion               = $false
+            #InstallSCP                = $true
+            #OfflineSCP                = $false
+            #OfflineSUP                = $false
+            #UsePKI                    = $false
             if ($null -eq ($config.cmOptions.EVALVersion)) {
-                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EVALVersion" -Value $false -Force
             }
             if ($null -eq ($config.cmOptions.UsePKI)) {
-                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.PrePopulateObjects)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "PrePopulateObjects" -Value $true -Force
+            }
+            if ($null -eq ($config.cmOptions.OfflineSCP)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSCP" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.OfflineSUP)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSUP" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.Version)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value "current-branch" -Force
+            }
+            if ($null -eq ($config.cmOptions.Install)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $true -Force
             }
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
@@ -84,6 +108,13 @@ function Get-UserConfiguration {
                 $vm.role = "SiteSystem"
             }
 
+            if ($vm.role -eq "DC") {
+                if ($null -eq $vm.InstallCA) {
+                    if ($config.cmOptions.UsePKI) {                    
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -force
+                    }
+                }
+            }
             #add missing Properties
             if ($vm.Role -in "SiteSystem", "CAS", "Primary") {
                 if ($null -eq $vm.InstallRP) {
@@ -110,6 +141,12 @@ function Get-UserConfiguration {
                         }
                     }
                 }
+            }
+        }
+
+        if ($null -ne $config.cmOptions.Version) {
+            if ($config.cmOptions.Version -eq "current-branch") {
+                $config.cmOptions.Version = Get-CMLatestBaselineVersion
             }
         }
 
@@ -186,6 +223,9 @@ function Get-FilesForConfiguration {
     if ($config) {
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
+        if ($config.cmOptions.PrePopulateObjects) {
+            $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
+        }
     }
 
     Write-Log "Downloading/Verifying Files required by specified config..." -Activity
@@ -221,6 +261,25 @@ function Get-FilesForConfiguration {
         }
     }
 
+    if ($config.cmOptions.PrePopulateObjects) {
+        $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
+        $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+        if (-not $worked) {
+            Write-Log -Verbose "$baselineFile Failed to download via Get-FileFromStorage"
+            $allSuccess = $false
+        }
+
+        foreach ($file in $Common.AzureFileList.OSISO) {
+            if (-not $DownloadAll -and $OsVersionsToGet -notcontains $file.id) { continue }
+            $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+            if (-not $worked) {
+                Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+                $allSuccess = $false
+            }
+        }
+    }
+    
+
     return $allSuccess
 }
 
@@ -232,6 +291,21 @@ function New-DeployConfig {
     )
     try {
 
+
+        if ($null -ne ($configObject.vmOptions.domainName)) { 
+            if (($configObject.vmOptions.domainName) -eq "AUTO") {
+                $domains = (Get-ValidDomainNames)
+                $domainEntry = ($domains.Keys | sort-object { $_.Length } | Select-Object -first 1)
+                $domainPrefix = $domains[$domainEntry] 
+                $configObject.vmOptions.domainName = $domainEntry
+                $configObject.vmOptions.prefix = $domainPrefix
+            }
+        }
+        if ($null -ne ($configObject.vmOptions.network)) { 
+            if (($configObject.vmOptions.network) -eq "AUTO") {                
+                $configObject.vmOptions.network = (Get-ValidSubnets)[0]                
+            }
+        }
         # domainAdminName was renamed, this is here for backward compat
         if ($null -ne ($configObject.vmOptions.domainAdminName)) {
             if ($null -eq ($configObject.vmOptions.adminName)) {
@@ -325,6 +399,9 @@ function New-DeployConfig {
             parameters      = $params
         }
 
+        if ($configObject.domainDefaults) {
+            $deploy | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $configObject.domainDefaults -force
+        }
         return $deploy
     }
     catch {
@@ -344,7 +421,7 @@ function Add-RemoteSQLVMToDeployConfig {
     )
     Write-Log -Verbose "Adding Hidden SQL to config $vmName"
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
-    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true
+    $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
     if (-not $remoteSQLVM) {
         Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
         return
@@ -385,6 +462,12 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $OtherDC.vmName -configToModify $config -OtherDC:$true
             if ($null -ne $dc.externalDomainJoinSiteCode -and $dc.externalDomainJoinSiteCode -ne "NONE") {
                 $RemoteSiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $dc.externalDomainJoinSiteCode -DomainName $dc.ForestTrust -type VM
+                if ($RemoteSiteServer.Role -eq "Secondary") {
+                    write-Log "Remote Site server is a Secondary, adding Primary to list" -LogOnly
+                    $PrimarySiteServer = Get-SiteServerForSiteCode -deployConfig $config -SiteCode $RemoteSiteServer.ParentSiteCode -DomainName $dc.ForestTrust -type VM
+                    write-Log "Adding $($PrimarySiteServer.vmName) to list" -LogOnly
+                    Add-ExistingVMToDeployConfig -vmName $PrimarySiteServer.vmName -configToModify $config
+                }
                 Add-ExistingVMToDeployConfig -vmName $RemoteSiteServer.vmName -configToModify $config
             }
 
@@ -966,6 +1049,83 @@ function Get-ExistingForNetwork {
     }
 }
 
+
+function Get-TopSiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+
+    )
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            $first = $vmList | Select-Object -First 1
+            while ($first.ParentSiteCode) {        
+                $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) })
+                $first = $vmList | Select-Object -First 1
+            }
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+    if ($configVMs) {
+        $first = $configVMs | Select-Object -First 1
+        while ($first.ParentSiteCode) {        
+            $configVMs = @()
+            $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+            $first = $configVMs | Select-Object -First 1
+        }
+        if ($type -eq "Name") {
+            return ($configVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $configVMs | Select-Object -First 1
+        }
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        $first = $existingVMs | Select-Object -First 1
+        while ($first.ParentSiteCode) {        
+            $existingVMs = @()
+            $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) }
+            $first = $existingVMs | Select-Object -First 1
+        }
+        if ($type -eq "Name") {
+            return ($existingVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $existingVMs | Select-Object -First 1
+        }
+    }
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
+    return $null
+}
+
 function Get-SiteServerForSiteCode {
     [CmdletBinding()]
     param (
@@ -1114,12 +1274,22 @@ function Get-VMFromList2 {
         [Parameter(Mandatory = $true, HelpMessage = "vmName")]
         [object] $vmName,
         [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
-        [bool] $SmartUpdate = $true
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Get VMs from all domains")]
+        [bool] $Global = $false
     )
 
     $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.vmName -eq $vmName }
     if ($vm) {
         return $vm
+    }
+    else {
+        if ($Global) {
+            $vm = Get-List -Type VM | Where-Object { $_.vmName -eq $vmName }
+            if ($vm) {
+                return $vm
+            }
+        }
     }
 }
 
@@ -1264,7 +1434,7 @@ function Get-NetworkList {
 function Get-DomainList {
 
     try {
-        return (Get-List -Type UniqueDomain)
+        return (Get-List -Type UniqueDomain | Sort-Object)
     }
     catch {
         Write-Log "Failed to get domain list. $_" -Failure -LogOnly
@@ -1649,7 +1819,7 @@ function Get-List {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "Type")]
-        [ValidateSet("VM", "Switch", "Prefix", "UniqueDomain", "UniqueSwitch", "UniquePrefix", "Network", "UniqueNetwork")]
+        [ValidateSet("VM", "Switch", "Prefix", "UniqueDomain", "UniqueSwitch", "UniquePrefix", "Network", "UniqueNetwork", "ForestTrust")]
         [string] $Type,
         [Parameter(Mandatory = $false, ParameterSetName = "Type")]
         [string] $DomainName,
@@ -1704,7 +1874,13 @@ function Get-List {
         if ($doSmartUpdate) {
             if ($global:vm_List) {
                 try {
-                    $virtualMachines = Get-VM
+                    try {
+                        $virtualMachines = Get-VM
+                    }
+                    catch {
+                        start-sleep -seconds 3
+                        $virtualMachines = Get-VM
+                    }
                     foreach ( $oldListVM in $global:vm_List) {
                         if ($DomainName) {
                             if ($oldListVM.domain -ne $DomainName) {
@@ -1826,6 +2002,10 @@ function Get-List {
         }
         if ($Type -eq "UniqueDomain") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty Domain -Unique -ErrorAction SilentlyContinue
+        }
+        if ($Type -eq "ForestTrust") {
+
+            return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Where-Object { $_.ForestTrust -ne "NONE" -and $_.ForestTrust } | Select-Object -Property @("ForestTrust", "Domain") -Unique -ErrorAction SilentlyContinue
         }
         if ($Type -eq "UniqueSwitch") {
             return $return | where-object { -not [String]::IsNullOrWhiteSpace($_.Domain) } | Select-Object -ExpandProperty 'Switch' -Unique -ErrorAction SilentlyContinue
@@ -2026,6 +2206,42 @@ Function Write-RedX {
     }
 }
 
+Function Write-WhiteI {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [switch] $NoNewLine,
+        [Parameter()]
+        [switch] $NoIndent,
+        [Parameter()]
+        [switch] $WriteLog,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    $text = $text.Replace("Info: ", "")
+    if (-not $NoIndent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host "[" -NoNewLine
+    Write-Host2 -ForeGroundColor White "i" -NoNewline
+    Write-Host "] " -NoNewline
+    if ($ForegroundColor) {
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
+        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+    }
+    else {
+        Write-Host $text -NoNewline
+    }
+    if (!$NoNewLine) {
+        Write-Host
+    }
+    if ($WriteLog.IsPresent) {
+        Write-Log $text -Warning -LogOnly
+    }
+}
+
 Function Write-OrangePoint {
     [CmdletBinding()]
     param (
@@ -2046,6 +2262,9 @@ Function Write-OrangePoint {
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Orange "!" -NoNewline
+    #Write-Host2 -ForeGroundColor Orange "❗" -NoNewline
+    #Write-Host2 -ForeGroundColor Orange "🚩" -NoNewline
+    
     Write-Host "] " -NoNewline
     if ($ForegroundColor) {
         Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
@@ -2062,7 +2281,46 @@ Function Write-OrangePoint {
     }
 }
 
-
+Function Write-OrangePoint2 {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string] $text,
+        [Parameter()]
+        [switch] $NoNewLine,
+        [Parameter()]
+        [switch] $NoIndent,
+        [Parameter()]
+        [switch] $WriteLog,
+        [Parameter()]
+        [string] $ForegroundColor
+    )
+    $text = $text.Replace("WARNING: ", "")
+    if (-not $NoIndent) {
+        Write-Host "  " -NoNewline
+    }
+    Write-Host "[" -NoNewLine
+    Write-Host2 -ForeGroundColor Orange "⚠️" -NoNewline
+    #Write-Host2 -ForeGroundColor Orange "⚠ " -NoNewline
+    #☢️ ⚠️
+    #Write-Host2 -ForeGroundColor Orange "❗" -NoNewline
+    #Write-Host2 -ForeGroundColor Orange "🚩" -NoNewline
+    
+    Write-Host "] " -NoNewline
+    if ($ForegroundColor) {
+        Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
+        #Write-Host -ForegroundColor $ForegroundColor $text -NoNewline
+    }
+    else {
+        Write-Host $text -NoNewline
+    }
+    if (!$NoNewLine) {
+        Write-Host
+    }
+    if ($WriteLog.IsPresent) {
+        Write-Log $text -Warning -LogOnly
+    }
+}
 function Convert-vmNotesToOldFormat {
     [CmdletBinding()]
     param(
@@ -2099,12 +2357,12 @@ Function Get-LinuxImages {
     if (Test-Path $linuxJson -PathType Leaf) {
         #Get a new copy if the existing one is over 5 hours old
         if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
-            & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+            & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
         }
     }
     else {
         # Get a copy if the file doesnt exist
-        & curl -s -L https://go.microsoft.com/fwlink/?linkid=851584 -o $linuxJson
+        & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
     }
     $linux = Get-Content $linuxJson | convertfrom-json
     return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
@@ -2185,7 +2443,7 @@ Function Show-Summary {
     $containsPassive = $fixedConfig.role -contains "PassiveSite"
 
     Write-Verbose "ContainsPS: $containsPS ContainsSiteSystem: $containsSiteSystem ContainsMember: $containsMember ContainsPassive: $containsPassive"
-    if ($DC.ForestTrust) {
+    if ($DC.ForestTrust -and $DC.ForestTrust -ne "NONE") {
         Write-GreenCheck "Forest Trust: This domain will join a Forest Trust with $($DC.ForestTrust)"
         $remoteDC = Get-List -type VM -DomainName $DC.ForestTrust | Where-Object { $_.Role -eq "DC" }
         if ($remoteDC -and $remoteDC.InstallCA) {
@@ -2200,7 +2458,31 @@ Function Show-Summary {
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
         if ($containsPS -or $containsSecondary) {
-            Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+            $versionInfoPrinted = $false
+            $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
+            if ($deployConfig.cmOptions.OfflineSCP) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed."
+                    $versionInfoPrinted = $true
+                }
+            }
+           
+            if (-not $versionInfoPrinted) {
+                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
+                    Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
+                }
+                else {                    
+                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+                }
+
+            }
+           
+            if ($deployConfig.cmOptions.PrePopulateObjects) {
+                Write-GreenCheck "ConfigMgr: Scripts/apps/task sequences/etc will be pre-populated"
+            }
+            else {
+                Write-OrangePoint "ConfigMgr: Scripts/apps/task sequences/etc will NOT be pre-populated"
+            }
 
             $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
             if ($PS) {
@@ -2244,7 +2526,11 @@ Function Show-Summary {
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
         }
-
+        if ($deployConfig.cmOptions.OfflineSCP) {
+            Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
+        }
+ 
+       
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
@@ -2258,6 +2544,9 @@ Function Show-Summary {
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
             Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+            if ($deployConfig.cmOptions.OfflineSUP) {
+                Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
+            }
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
@@ -2326,7 +2615,18 @@ Function Show-Summary {
         Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
     }
 
-    $out = $fixedConfig | Format-table vmName, role, operatingSystem, memory,
+    $out = $fixedConfig | Format-table vmName, 
+    @{Label = "Role"; Expression = { $_.role } },
+    @{Label = "OperatingSystem"; Expression = { $_.operatingSystem } },
+    @{Label = "Memory" ; Expression = {
+            if (($_.dynamicMinRam / 1 ) -lt ($_.memory / 1 ) -and ($_.dynamicMinRam / 1 ) -ne 0 ) {    
+                $_.dynamicMinRam + "-" + $_.memory
+            }
+            else {
+                $_.memory
+            }
+        }
+    },
     @{Label = "Procs"; Expression = { $_.virtualProcs } },
     @{Label = "SiteCode"; Expression = {
             $SiteCode = $_.siteCode
@@ -2375,8 +2675,7 @@ Function Show-Summary {
                 }
             }
         }
-    } `
-    | Out-String
+    } ` | Out-String
     Write-Host
     $outIndented = $out.Trim() -split "\r\n"
     foreach ($line in $outIndented) {

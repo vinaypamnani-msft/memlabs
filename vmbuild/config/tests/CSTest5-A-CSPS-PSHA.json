@@ -19,14 +19,14 @@
       "vmName": "DC1",
       "operatingSystem": "Server 2022",
       "role": "DC",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 4
     },
     {
       "vmName": "DC2",
       "role": "BDC",
       "operatingSystem": "Server 2022",
-      "memory": "2GB",
+      "memory": "4GB",
       "virtualProcs": 2,
       "tpmEnabled": true,
       "network": "192.168.51.0"

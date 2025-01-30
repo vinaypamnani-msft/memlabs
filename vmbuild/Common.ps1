@@ -406,6 +406,7 @@ function Write-Log {
 
     # Write progress if output stream and failure present
     if ($OutputStream.IsPresent -and $Failure.IsPresent) {
+        Write-Error $Text
         Write-Progress -Activity $Text -Status "Failed :-(" -Completed
     }
 
@@ -679,17 +680,26 @@ function Get-File {
 
         if ($Action -eq "Downloading") {
             if ($UseBITS.IsPresent) {
-                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                try {
+                    Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    Write-log "Start-BitsTransfer $_" -LogOnly
+                    if ($_ -Match "the module could not be loaded" ) {
+                        Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
+                    }
+                }
             }
             else {
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
-                    Write-Log "Failed to download file. using curl"
+                    Write-Log "Failed to download file using curl"
                     return $false
                 }
             }
         }
         else {
+
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
         }
 
@@ -738,11 +748,11 @@ function Copy-ItemSafe {
     $location = $PSScriptRoot
     $testpath = Join-Path $location "Common.ps1"
     if (-not (Test-Path -PathType Leaf $testpath)) {
-        write-host "Could not find $testpath"
+        Write-Log "Could not find $testpath" -LogOnly
         $location = Split-Path $location -Parent
         $testpath = Join-Path $location "Common.ps1"
         if (-not (Test-Path -PathType Leaf $testpath)) {
-            write-host "Could not find $testpath"
+            Write-Log "Could not find $testpath" -LogOnly
             return $false
         }
     }
@@ -758,11 +768,11 @@ function Copy-ItemSafe {
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
             if ($ps) {
-                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)"
+                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)" -LogOnly
                 Copy-Item -ToSession $ps -Path $using:Path -Destination $using:Destination -Recurse:$using:Recurse -Container:$using:Container -Force:$using:Force -verbose:$using:enableVerbose -WhatIf:$using:WhatIF
             }
             else {
-                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName"
+                Write-Log "[Copy-ItemSafe] Failed to get Powershell Session for $using:VMName" -Failure
                 return $false
             }
         }
@@ -773,7 +783,7 @@ function Copy-ItemSafe {
         return $true
     }
 
-    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force"
+    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
     $retries = 3
     while ($retries -gt 0) {
@@ -781,21 +791,21 @@ function Copy-ItemSafe {
         $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
         $job
         if ($wait.State -eq "Running") {
-            Stop-Job $job
-            remove-job -job $job
+            Stop-Job $job | out-null
+            remove-job -job $job | out-null
             $retries--
         }
         else {
             if ($wait.State -eq "Completed") {
                 $result = Receive-Job $job
-                write-log "[Copy-ItemSafe] returned: $result"
-                remove-job $job
+                write-log "[Copy-ItemSafe] returned: $result" -LogOnly
+                remove-job $job | out-null
                 return $true
             }
             else {
                 write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
-                Stop-Job $job
-                remove-job $job
+                Stop-Job $job | out-null
+                remove-job $job | out-null
                 $retries--
             }
 
@@ -803,6 +813,53 @@ function Copy-ItemSafe {
     }
     return $false
 
+}
+
+function Test-URL {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $url,
+        [string] $name
+    )
+
+    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    if (-not (Test-Path $curlPath)) {
+        Write-Log "Curl was not found." -Failure
+        return $false
+    }
+
+    try {
+        $output = & $curlPath -s -L --head -f $url
+        if ($LASTEXITCODE -eq 0) {        
+            if ($output -match 'Location: https://www.bing.com') {
+                Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
+                Write-RedX "[$name] $url (Redirects to bing)"
+                return $false
+            }
+            Write-GreenCheck "[$name] $url"
+            Write-Log -LogOnly "[$name] $url Successful"
+            return $true       
+        }
+        else {
+            #ipconfig /flushdns
+            Clear-DnsClientCache
+            start-sleep -seconds 10
+            write-log "Curl retrying.. Last failure $output" -LogOnly
+            $output = & $curlPath -s -L --head -f $url
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE" 
+                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output" -Failure
+                return $false
+            }
+        }
+    }
+    catch {
+        Write-RedX "[$name] An error occurred while testing the URL: $url $_" 
+        Write-Log "An error occurred while testing the URL: $url $_" -Failure
+        return $false
+    }
 }
 function Start-CurlTransfer {
     [CmdletBinding()]
@@ -848,7 +905,7 @@ function Start-CurlTransfer {
         }
         else {
             Write-Host
-            Write-Log "Download failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
+            Write-Log "Download $Source failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
             Write-Host
             Start-Sleep -Seconds 5
         }
@@ -1051,16 +1108,45 @@ function Test-NetworkSwitch {
     )
 
     $notes = $DomainName
+    $doNotRecreate = $false
     if (-not $notes) {
-        if ($NetworkName -eq "cluster") {
+        $notes = $NetworkName
+        if ($NetworkName -eq "Cluster") {
             $notes = "Cluster network shared by all domains"
+            $doNotRecreate = $true
         }
-        else {
-            $notes = $NetworkName
+        if ($NetworkName -eq "Internet") {
+            $notes = "Internet network shared by all domains"
+            $doNotRecreate = $true
         }
     }
-    $exists = Get-VMSwitch2 -NetworkName $NetworkName
-    if (-not $exists) {
+
+    $retries = 10
+    $count = 0
+
+    while ($count -lt $retries) {
+        $count++
+        $exists = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($exists) {
+            if ($exists.Notes -eq $notes -or $doNotRecreate) {
+                Write-Log "HyperV Network switch for '$NetworkName' already exists."
+                break
+            }
+            else {
+                Write-Log "HyperV Network switch for '$NetworkName' already exists, but with different notes. Updating note"
+                Write-Log "Current switch has $($exists.Notes) but we expected $notes"
+                try {
+                    set-vmswitch -name $NetworkName -Notes $notes
+                    #Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
+                }
+                catch {
+                    Write-Log "Failed to set HyperV Network switch for $NetworkName. Trying again in 30 seconds"
+                    start-sleep -seconds 30
+                    Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null                    
+                }
+                continue
+            }
+        }
         Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
         try {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
@@ -1071,15 +1157,21 @@ function Test-NetworkSwitch {
             New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
         }
         Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
+        $exists = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($exists) {
+            break
+        }    
     }
 
-    $exists = Get-VMSwitch2 -NetworkName $NetworkName
-    if (-not $exists) {
-        Write-Log "HyperV Network switch could not be created."
-        return $false
+    try {
+        $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
     }
-
-    $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
+    catch {
+        Write-log "Get-NetAdapter $_" -LogOnly
+        if ($_ -Match "the module could not be loaded" ) {
+            Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+        }
+    }
 
     if (-not $adapter) {
         Write-Log "Network adapter for '$NetworkName' switch was not found."
@@ -1108,6 +1200,16 @@ function Test-NetworkSwitch {
 
 function Test-NoRRAS {
 
+    $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
+    if (test-path $skiprrastxt) {
+        Write-Log "Skipping No RRAS check."
+        $natValid = Test-Networks
+        if (-not $natValid) {
+            exit 1
+        }
+        return
+    }
+
     $router = (get-itemproperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     if ((Get-WindowsFeature Routing).Installed -or $router -eq 0) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
@@ -1119,7 +1221,7 @@ function Test-NoRRAS {
         $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal and IpEnableRouter TCP Value. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
-            Exit
+            Exit 1
         }
         Write-Log "Rebooting computer. Please re-run vmbuild.cmd when it comes up."
         Restart-Computer -Force
@@ -1129,7 +1231,7 @@ function Test-NoRRAS {
         # RRAS not found, test NAT
         $natValid = Test-Networks
         if (-not $natValid) {
-            exit
+            exit 1
         }
     }
 }
@@ -1181,7 +1283,13 @@ function Test-NetworkNat {
     }
 
     try {
-        Write-Log "'$NetworkSubnet' not found in NAT. Adding it."
+        Write-OrangePoint "'$NetworkSubnet' not found in NAT. Adding it."
+        $skiprrastxt = Join-Path $Common.ConfigPath "skipnoRRAS.txt"
+        if (test-path $skiprrastxt) {
+            Write-WhiteI "Restarting RRAS service"
+            Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
+        }
+
         New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
         return $true
     }
@@ -1202,11 +1310,11 @@ function Start-DHCP {
 
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
-        Write-Log "DHCP is not installed. Installing..."
+        Write-OrangePoint "DHCP is not installed. Installing..."
         $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
 
         if (-not $installed.Success) {
-            Write-Log "DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
+            Write-RedX "DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
             return $false
         }
     }
@@ -1292,21 +1400,21 @@ function Test-DHCPScope {
                 $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
                 $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
                 if ($currentDNS -ne $DHCPDNSAddress) {
-                    Write-Log "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
+                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
                     $createScope = $true
                 }
                 else {
-                    Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                    Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
                     $createScope = $false
                 }
             }
             else {
-                Write-Log "'$ScopeID ($ScopeName)' scope is already present in DHCP."
+                Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
                 $createScope = $false
             }
         }
         else {
-            Write-Log "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
+            Write-OrangePoint "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
             $createScope = $true
         }
 
@@ -1336,7 +1444,7 @@ function Test-DHCPScope {
         $retry = 0
         if ($createScope) {
 
-            Write-Log "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
+            Write-WhiteI "Creating '$ScopeID ($ScopeName)' scope with DHCPDefaultGateway: $DHCPDefaultGateway DHCPScopeStart: $DHCPScopeStart DHCPScopeEnd: $DHCPScopeEnd DNSServer: $DHCPDNSAddress "
             while (-not $scope) {
                 try {
                     if ($retry -gt 0) {
@@ -1351,17 +1459,26 @@ function Test-DHCPScope {
                         }
                     }
                     $retry++
-                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop
+                    Add-DhcpServerv4Scope -Name $ScopeName -StartRange $DHCPScopeStart -EndRange $DHCPScopeEnd -SubnetMask 255.255.255.0 -LeaseDuration $leaseTimespan -ErrorAction Stop -ErrorVariable ScopeErr
                     $scope = Get-DhcpServerv4Scope -ScopeId $ScopeID -ErrorVariable ScopeErr -ErrorAction Stop
                     if ($scope) {
-                        Write-Log "'$ScopeID ($ScopeName)' scope added to DHCP."
+                        Write-GreenCheck "'$ScopeID ($ScopeName)' scope added to DHCP."
                     }
                     else {
-                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure
+                        Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP. $ScopeErr" -Failure 
                     }
                 }
                 catch {
-                    Write-Log "Failed to add '$ScopeID ($ScopeName)' to DHCP." -Failure
+                    Write-Log "Exception: Failed to add '$ScopeID ($ScopeName)' to DHCP. $_" -Failure
+                    if ($_ -like '*Failed to get version of the DHCP server*') {
+                        write-log -Failure "DCHP service is not connectable.  Please reboot your LABHOST VM."
+                        return $false
+                    }
+                    $dhcp = Start-DHCP -restart
+                    if (-not $dhcp) {
+                        Write-Log "DHCP Could not be started" -Failure
+                        return $false
+                    }
                 }
             }
 
@@ -1393,7 +1510,7 @@ function Test-DHCPScope {
                 }
 
                 Set-DhcpServerv4OptionValue @HashArguments -Force -ErrorAction Stop
-                Write-Log "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP." -Success
+                Write-GreenCheck "Added/updated scope options for '$ScopeID ($ScopeName)' scope in DHCP."
                 return $true
             }
             catch {
@@ -1457,7 +1574,13 @@ function New-VmNote {
             if ($prop.Name -eq "thisParams" -or $prop.Name -eq "SQLAO") {
                 continue
             }
-            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+            $vmNote | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force            
+        }
+
+        Write-Log "Checking if we can write out domainDefaults"
+        if ($null -ne $DeployConfig.domainDefaults -and $ThisVm.role -eq "DC") {                 
+            Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"   
+            $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force        
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
@@ -1541,7 +1664,7 @@ function Set-VMNote {
         #Old Note may have more properties than the new note, and we dont want to lose those.
         $oldvmNote = Get-VMNote -VMName $vmName
         if ($oldvmNote) {
-            foreach ($note in $vmNote.PSObject.Properties) {
+            foreach ($note in $vmNote.PSObject.Properties) {             
                 $oldvmNote | Add-Member -MemberType NoteProperty -Name $note.Name -Value $note.Value -Force
             }
             $vmNote = $oldvmNote
@@ -1553,7 +1676,7 @@ function Set-VMNote {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
         $vmVersionUpdated = $true
     }
-
+   
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-VM2 $VmName
@@ -1660,6 +1783,141 @@ function Get-DhcpScopeDescription {
     }
 }
 
+function Remove-DHCPReservation {
+    param(
+        [string] $ip,
+        [string] $mac,
+        [string] $vmName
+    )
+  
+    $job = $null
+    $scopes = (Get-DhcpServerv4Scope).ScopeID
+
+    if ($ip) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
+        if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
+            Write-Log -Verbose ($VmName + " Removing Reservation for $ip")
+            $job = Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
+        }   
+    }
+
+    if ($mac) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
+        foreach ($scope in  $scopes) { 
+            #write-Host $scope.ScopeId
+            #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
+            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue 
+
+            if ($reservation) {
+                Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -AsJob
+                break;
+            }
+        }
+    }
+
+    if (-not $ip -and -not $mac) {
+        Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
+        foreach ($scope in $scopes) { 
+            #write-Host $scope.ScopeId
+            #Get-DhcpServerv4Reservation -scope $scope.ScopeID 
+            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+
+            if ($reservation) {
+                Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
+                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob 
+                break;
+            }
+        }       
+    }
+
+    if ($job) {
+        try {
+            $wait = Wait-Job -Timeout 60 -Job $job        
+            if ($wait.State -eq "Running") {
+                Stop-Job $job | out-null
+                remove-job -job $job | out-null
+            }
+            else {
+                if ($wait.State -eq "Completed") {
+                    $result = Receive-Job $job
+                    write-log -logonly "[DHCP] returned: $result"
+                    remove-job $job | out-null
+                }
+                else {
+                    write-log -logonly "[DHCP] State = $($wait.State)" -logonly
+                    Stop-Job $job | out-null
+                    remove-job $job | out-null           
+                }
+            }
+        }
+        catch {
+            Write-Log -LogOnly "Failed to remove job $_"
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+Creates a new virtual machine.
+
+.DESCRIPTION
+The New-VirtualMachine function creates a new virtual machine with the specified parameters.
+
+.PARAMETER VmName
+The name of the virtual machine.
+
+.PARAMETER VmPath
+The path where the virtual machine will be created.
+
+.PARAMETER SourceDiskPath
+The path of the source disk to be used for the virtual machine.
+
+.PARAMETER Memory
+The amount of memory to allocate for the virtual machine.
+
+.PARAMETER Processors
+The number of processors to allocate for the virtual machine.
+
+.PARAMETER Generation
+The generation of the virtual machine.
+
+.PARAMETER SwitchName
+The name of the virtual switch to connect the virtual machine to.
+
+.PARAMETER DiskControllerType
+The type of disk controller to use for the virtual machine. Default value is "SCSI".
+
+.PARAMETER SwitchName2
+The name of an additional virtual switch to connect the virtual machine to.
+
+.PARAMETER AdditionalDisks
+Additional disks to attach to the virtual machine.
+
+.PARAMETER ForceNew
+Forces the creation of a new virtual machine, even if a virtual machine with the same name already exists.
+
+.PARAMETER DeployConfig
+The deployment configuration for the virtual machine.
+
+.PARAMETER OSDClient
+Specifies whether the virtual machine is an OSD client.
+
+.PARAMETER tpmEnabled
+Specifies whether the virtual machine has TPM enabled.
+
+.PARAMETER Migrate
+Specifies whether to migrate the virtual machine.
+
+.PARAMETER WhatIf
+Shows what would happen if the command runs.
+
+.EXAMPLE
+New-VirtualMachine -VmName "MyVM" -VmPath "C:\VMs" -Memory "4GB" -Processors 2 -Generation 2 -SwitchName "VirtualSwitch"
+
+This example creates a new virtual machine named "MyVM" with 4GB of memory, 2 processors, generation 2, and connects it to the "VirtualSwitch" virtual switch.
+
+#>
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -1670,6 +1928,10 @@ function New-VirtualMachine {
         [string]$SourceDiskPath,
         [Parameter(Mandatory = $true)]
         [string]$Memory,
+        [Parameter(Mandatory = $false)]
+        [string]$dynamicMinRam,
+        [Parameter(Mandatory = $false)]
+        [string]$role,
         [Parameter(Mandatory = $true)]
         [int]$Processors,
         [Parameter(Mandatory = $true)]
@@ -1765,6 +2027,21 @@ function New-VirtualMachine {
         # Create new VM
         try {
             $vm = New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop 
+            if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1))) {   
+                $priority = 25
+                $buffer = 10
+                if ($role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                    $priority = 50
+                    $buffer = 20
+                }
+                if (($dynamicMinRam / 1) -gt 40MB) {
+                    Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes ($dynamicMinRam / 1) -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+                }
+                else {
+                    Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                }
+            }
         }
         catch {
             Write-Log "$VmName`: Failed to create new VM. $_ with command 'New-VM -Name $vmName -Path $VmPath -Generation $Generation -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop'"
@@ -1778,32 +2055,32 @@ function New-VirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
-         # Copy sysprepped image to VM location
-         $osDiskName = "$($VmName)_OS.vhdx"
-         $osDiskPath = Join-Path $vm.Path $osDiskName
+        # Copy sysprepped image to VM location
+        $osDiskName = "$($VmName)_OS.vhdx"
+        $osDiskPath = Join-Path $vm.Path $osDiskName
          
-         if (-not $Migrate) {
-             if (-not $OSDClient.IsPresent) {
-                 $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
-                 if (-not $worked) {
-                     Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
-                     return $false
-                 }
-             }
-             else {
-                 Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
-                 $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
-                 if (-not $worked) {
-                     Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
-                     return $false
-                 }
-             }
-         }
+        if (-not $Migrate) {
+            if (-not $OSDClient.IsPresent) {
+                $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath -DisplayName "Making a copy of base image in $osDiskPath" -Action "Copying"
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to copy $SourceDiskPath to $osDiskPath. Exiting."
+                    return $false
+                }
+            }
+            else {
+                Write-Progress2 $Activity -Status "Creating new 127GB C: Drive" -percentcomplete 32 -force
+                $worked = New-VHD -Path $osDiskPath -SizeBytes 127GB
+                if (-not $worked) {
+                    Write-Log "$VmName`: Failed to create new VMD $osDiskPath for OSDClient. Exiting."
+                    return $false
+                }
+            }
+        }
          
-         if (-not (Test-Path $osDiskPath)) {
-             Write-Log "Could not find file $osDiskPath" -Failure
-             return
-         }
+        if (-not (Test-Path $osDiskPath)) {
+            Write-Log "Could not find file $osDiskPath" -Failure
+            return
+        }
 
 
         Write-Log "$VmName`: Enabling Hyper-V Guest Services"
@@ -1878,7 +2155,7 @@ function New-VirtualMachine {
         if ($AdditionalDisks) {
             $count = 0
             $label = "DATA"
-            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force
+            Write-Progress2 $Activity -Status "Adding Additional Disks" -percentcomplete 80 -force -log
             foreach ($disk in $AdditionalDisks.psobject.properties) {
                 $newDiskName = "$VmName`_$label`_$count.vhdx"
                 $newDiskPath = Join-Path $vm.Path $newDiskName
@@ -1938,6 +2215,7 @@ function New-VirtualMachine {
                 if (-not $($vmnet.MacAddress)) {
                     start-sleep -Seconds 60
                     if (-not $($vmnet.MacAddress)) {
+                        #Investigate deleting and re-adding
                         write-log "$VmName`: 2nd NIC does not have a MAC address: $($vmnet)" -Failure
                         return $false
                     }
@@ -1958,6 +2236,7 @@ function New-VirtualMachine {
                 }
 
                 $ip = $null
+                $ipa = $null
                 try {
                     $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
                     if (! $ip) {
@@ -1967,14 +2246,13 @@ function New-VirtualMachine {
                         Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
                         return $false
                     }
-                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $ip
+                    else {     
+                        Remove-DHCPReservation -ip $ip -vmName $VmName                        
                     }
 
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                    Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName                 
+                    Remove-DHCPReservation -vmName $VmName            
 
 
                     Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
@@ -1984,7 +2262,7 @@ function New-VirtualMachine {
                 }
                 catch {
                     #retry
-                    Start-DHCP -Restart
+                    Start-DHCP -Restart | out-null
                     $ip = $null
                     try {
                         $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
@@ -1995,13 +2273,13 @@ function New-VirtualMachine {
                             Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
                             return $false
                         }
-                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $ip }
-                        if ($ipa) {
-                            Remove-DhcpServerv4Reservation -IPAddress $ip
+                        else {
+                            Remove-DHCPReservation -ip $ip -vmName $currentItem.vmName
                         }
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.ClientId -replace "-", "" -eq $($vmnet.MacAddress) } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
-                        Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.Name -like $($currentItem.vmName) + ".*" } | Remove-DhcpServerv4Reservation -ErrorAction SilentlyContinue
+                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
+                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName                        
+                        Remove-DHCPReservation -vmName $currentItem.vmName
+                                            
 
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
@@ -2024,16 +2302,15 @@ function New-VirtualMachine {
                     $clusterIP = $IPs[0]
                     $AGIP = $IPs[1]
 
-
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $clusterIP }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $clusterIP
-                    }
-                    $ipa = Get-DhcpServerv4Reservation -ScopeId "10.250.250.0" | Where-Object { $_.IpAddress -eq $AGIP }
-                    if ($ipa) {
-                        Remove-DhcpServerv4Reservation -IPAddress $AGIP
-                    }
                     write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP"
+
+                    if ($clusterIP) { 
+                        Remove-DHCPReservation -ip $clusterIP -vmName $VmName                          
+                    }
+                    if ($AGIP) {
+                        Remove-DHCPReservation -ip $AGIP -vmName $VmName                           
+                    }
+                    
 
                     if (-not $clusterIP -or -not $AGIP) {
                         write-log -failure "$VmName`:Failed to acquire Cluster or AGIP for SQLAO"
@@ -2125,7 +2402,7 @@ function Wait-ForVm {
     $stopWatch.Start()
     $vmTest = Get-VM2 -Name $VmName
     if ($VmState) {
-        Write-Log "$VmName`: Waiting for VM to go in $VmState state..."
+        Write-Log "$VmName`: Waiting for VM to enter $VmState state..."
         do {
             try {
                 $vmTest = Get-VM2 -Name $VmName
@@ -2136,7 +2413,7 @@ function Wait-ForVm {
                 }
 
                 try {
-                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to go in '$VmState' state. Current State: $($vmTest.State)"
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Waiting for VM to enter '$VmState' state. Current State: $($vmTest.State)"
                 }
                 catch {
 
@@ -2149,7 +2426,7 @@ function Wait-ForVm {
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
         if (-not $ready -and ($vmState -eq "Off")) {
-            stop-vm2 -name $VMName -Force
+            stop-vm2 -name $VMName
         }
     }
 
@@ -2200,7 +2477,7 @@ function Wait-ForVm {
                     [int]$failures++
                 }
                 if ($failures -ge $maxFailures) {
-                    stop-vm2 -force -name $VmName -TurnOff
+                    stop-vm2 -name $VmName -TurnOff
                     start-sleep -seconds 8
                     Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8
@@ -2297,6 +2574,19 @@ function Wait-ForVm {
     }
 
     if ($PathToVerify) {
+
+        if (-not $global:DSC_Copied) {
+            $global:DSC_Copied = @()
+        }
+        if (-not ($VmName -in $global:DSC_Copied)) {
+            #If we already copied a DSC at least once, Disks are valid. Run if this is the first time.
+            Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
+            if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM has no disks attached." -Failure
+                return $false
+            }
+        }
+       
         if ($PathToVerify -eq "C:\Users") {
             $msg = "Waiting for VM to respond"
         }
@@ -2315,7 +2605,10 @@ function Wait-ForVm {
             return
         }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
+        $count = 0
+        $restarted = $false
         do {
+            $count++
             Start-Sleep -Seconds 5
             try {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
@@ -2335,6 +2628,20 @@ function Wait-ForVm {
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
+            else {
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
+                if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
+                    if (-not $restarted) {
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
+                        stop-vm2 -name $vmName
+                        start-sleep -seconds 30
+                        start-vm2 -name $vmName
+                        start-sleep -seconds 30
+                        $restarted = $true
+                    }
+                }
+            }
+        
 
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
 
@@ -2435,11 +2742,16 @@ function Invoke-VmCommand {
         }
 
         if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
-            $domain2 = (Get-VMNote -VMName $vmName).domain
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount "admin" -ShowVMSessionError:$ShowVMSessionError
+            $note = Get-VMNote -VMName $VmName
+            $domain2 = $note.domain
+            $adminName = $note.adminName
+            if (-not $adminName) {
+                $adminName = "admin"
+            }
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
         }
 
-        $failed = $null -eq $ps
+        $failed = ($null -eq $ps)
 
         # Run script block inside VM
         if (-not $failed) {
@@ -2457,11 +2769,17 @@ function Invoke-VmCommand {
                     else {
                         $failed = $true
                         $return.ScriptBlockFailed = $true
+                        if ($Err2.Count -ne 0) {
+                            $OutErr = "$($Err2[0].ToString().Trim())"
+                        }
+                        else {
+                            $OutErr = "Unknown Error"
+                        }
                         if (-not $SuppressLog) {
-                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Failed to run '$DisplayName'. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         if ($job.State -eq "Running") {
-                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $($Err2[0].ToString().Trim())." -Failure
+                            Write-Log "$VmName`: Job '$DisplayName' timed out. Job State: $($job.State) Error: $OutErr." -Failure
                         }
                         Stop-Job $job | Out-Null
                         Remove-Job $job
@@ -2591,16 +2909,17 @@ function Get-VmSession {
 
     $vm = get-vm2 -Name $VmName
     if (-not $vm) {
-        Write-Log "$VmName`: Failed to find VM named $VmName" -Failure -OutputStream
-        return
+        Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
+        return $null
     }
     $failCount = 0
     while ($true) {
         $ps = $null
         $failCount++
-        if ($failCount -gt 1) {
+        if ($failCount -gt 2) {
             start-sleep -seconds 15
         }
+
         if ($failCount -gt 3) {
             break
         }
@@ -2726,6 +3045,7 @@ function Get-StorageConfig {
 
         # See if image list needs to be updated
         if (Test-Path $fileListPath) {
+            Write-Log -Verbose "Reading file list from $fileListPath"
             $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             $updateList = $Common.AzureFileList.UpdateFromStorage
         }
@@ -2733,6 +3053,7 @@ function Get-StorageConfig {
         # Update StorageConfig
 
         if (-not $InJob.IsPresent) {
+           
 
             if ($GetNewStorageConfig) {
                 $storageConfigLocation = "$($StorageConfig.StorageLocation)/$newStorageConfigName"
@@ -2800,7 +3121,18 @@ function Get-StorageConfig {
                 }
             }
 
-
+            if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+                if (test-path "C:\temp\Upgrade2025") {
+                    write-host "Removing 2025 Upgrade Support files - C:\temp\Upgrade2025"
+                    Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                $sourceLocation = Join-Path $Common.AzureFilesPath "support\WindowsServer2025.zip"
+                if (test-path $sourceLocation) {
+                    write-host "Removing 2025 Upgrade Support files - $sourceLocation"
+                    remove-item -Path $sourceLocation -Force -ErrorAction SilentlyContinue                
+                }
+            }
+           
         }
 
         if ($InJob.IsPresent) {
@@ -2898,7 +3230,11 @@ function Get-Tools {
 
         if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { continue }
+        if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { 
+            if (-not $tool.Roles) {
+                continue 
+            }
+        }
 
         $name = $tool.Name
         $url = $tool.URL
@@ -2925,7 +3261,7 @@ function Get-Tools {
         }
 
         if (-not $worked) {
-            Write-Log "Failed to Download or Verify '$name'"
+            Write-RedX "Failed to Download or Verify '$name'"
             $allSuccess = $false
         }
 
@@ -2946,11 +3282,11 @@ function Get-Tools {
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    Write-Log "Extracting $fileName to $fileDestination."
+                    Write-Log -LogOnly "Extracting $fileName to $fileDestination."
                     Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
                 }
                 else {
-                    Write-Log "Copying $fileName to $fileDestination."
+                    Write-Log -LogOnly "Copying $fileName to $fileDestination."
                     try {
                         Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
                     }
@@ -2994,6 +3330,8 @@ function Install-Tools {
         [switch]$IncludeOptional,
         [Parameter(Mandatory = $false)]
         [switch]$ShowProgress,
+        [Parameter(Mandatory = $false)]
+        [boolean]$SkipAutoDeploy = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf
     )
@@ -3030,11 +3368,46 @@ function Install-Tools {
         if ($out.ScriptBlockOutput -ne $true) {
             foreach ($tool in $Common.AzureFileList.Tools) {
 
+                if ($ShowProgress) {
+                    Write-Progress2 "Injecting tools" -Status "Preparing to Inject $($tool.Name) to $VmName"
+                }
+                #SkipAutoDeploy is set when cmoptions.PrePopulateObjects is true
+                if ($SkipAutoDeploy) {
+                    if ($tool.Appinstall -eq $true) {
+                        if ($vm.operatingSystem.Contains("Windows 1")) {
+                            if ($vm.Role -eq "DomainMember") {
+                                #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. dont add it to tools
+                                if ($ShowProgress) {
+                                    Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM"
+                                }
+                                continue
+                                
+                            }
+                        }
+                    }
+                }
+
                 if ($tool.NoUpdate) { continue }
 
                 if ($ToolName -and $tool.Name -ne $ToolName) { continue }
 
-                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { continue }
+                $stop = $true
+                if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { 
+                    if ($tool.Roles) {
+                        if ($vm.Role -in $tool.Roles) {     
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop1 False)"                       
+                            $stop = $false
+                        }
+                        if ($vm.InstallSUP -and "WSUS" -in $tool.Roles) {
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop2 False)"                       
+                            $stop = $false
+                        }
+                    }
+                    if ($stop) {
+                        continue 
+                    }
+                   
+                }
 
                 if ($ShowProgress) {
                     Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
@@ -3043,6 +3416,14 @@ function Install-Tools {
                 $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
                 if (-not $worked) {
                     $success = $false
+                    if ($ShowProgress) {
+                        Write-Progress2 "Injecting tools" -Status "Failed to Inject $($tool.Name) to $VmName"
+                    }
+                }
+                else {
+                    if ($ShowProgress) {
+                        Write-Progress2 "Injecting tools" -Status "Injected $($tool.Name) to $VmName"
+                    }
                 }
             }
         }
@@ -3084,6 +3465,9 @@ function Copy-ToolToVM {
     }
 
     $toolFileName = Split-Path $tool.url -Leaf
+    if ($toolFileName.Contains("?")) {
+        $toolFileName = $toolFileName.Split("?")[0]
+    }
     $fileTargetRelative = Join-Path $tool.Target $toolFileName
 
     Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
@@ -3095,6 +3479,7 @@ function Copy-ToolToVM {
 
     $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
     $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+    $DirTargetPathInVM = Join-Path "C:\" $tool.Target
 
     $isContainer = $false
     if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
@@ -3105,6 +3490,7 @@ function Copy-ToolToVM {
     if ($tool.Name -eq "WMI Explorer") {
         $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
         $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+        $DirTargetPathInVM = "C:\$fileTargetRelative"
     }
 
     Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
@@ -3112,14 +3498,19 @@ function Copy-ToolToVM {
     try {
         $progressPref = $ProgressPreference
         $ProgressPreference = "SilentlyContinue"
+        try {
+            Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+        }
+        catch {}
         if ($isContainer) {
-            #Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         else {
-            #Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-            Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
+        Write-Log "$vmName`: Done Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
     }
     catch {
         Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
@@ -3316,6 +3707,9 @@ function Get-FileFromStorage {
         $fileUrl = "$($StorageConfig.StorageLocation)/$($filename)"
         $worked = Get-FileWithHash -FileName $fileName -FileDisplayName $imageName -FileUrl $fileUrl -ExpectedHash $fileHash -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -HashAlg $hashAlg -UseCDN:$UseCDN -WhatIf:$WhatIf
         $success = $($worked.success)
+        if (-not $success) {
+            Write-Log "Failed to download/verify $imageName from $fileUrl" -Failure
+        }
     }
 
     Write-Log -Verbose "Returning $success"
@@ -3356,7 +3750,7 @@ function Get-FileWithHash {
         download = $false
     }
 
-    Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
+    #Write-Log "Downloading/Verifying '$FileDisplayName'" -SubActivity
 
     if (Test-Path $localImagePath) {
 
@@ -3378,9 +3772,9 @@ function Get-FileWithHash {
         # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
         if ($ExpectedHash -ne "NONE") {
             if ($localFileHash -eq $ExpectedHash) {
-                Write-Log "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                Write-GreenCheck "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
                 if ($ForceDownload.IsPresent) {
-                    Write-Log "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
+                    Write-WhiteI "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
                     Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
                     $return.download = $true
                 }
@@ -3391,9 +3785,9 @@ function Get-FileWithHash {
                 }
             }
             else {
-                Write-Log "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -WhatIf:$WhatIf | Out-Null
+                Write-OrangePoint "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
+                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
                 $return.download = $true
             }
         }
@@ -3410,20 +3804,21 @@ function Get-FileWithHash {
         else {
             if ($ExpectedHash -ne "NONE") {
                 # Calculate file hash, save to local hash file
-                Write-Log "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
+                Write-WhiteI "Calculating $hashAlg hash for downloaded $FileName in $($Common.AzureFilesPath)..."
                 $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
                 $localFileHash = $hashFileResult.Hash
                 if ($localFileHash -eq $ExpectedHash) {
                     $localFileHash | Out-File -FilePath $localImageHashPath -Force
-                    Write-Log "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
+                    Write-GreenCheck "Downloaded $FileName in $($Common.AzureFilesPath) has expected hash $ExpectedHash."
                     $return.success = $true
                 }
                 else {
                     if ($IgnoreHashFailure) {
+                        Write-WhiteI "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash."
                         $return.success = $true
                     }
                     else {
-                        Write-Log "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash." -Failure
+                        Write-RedX "Downloaded $filename in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash."
                         $return.success = $false
                     }
                 }
@@ -3556,7 +3951,7 @@ function Set-SupportedOptions {
     )
 
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSMSS")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 
@@ -3584,6 +3979,9 @@ function Set-SupportedOptions {
 function Get-CMVersions {
     $cmVersions = @()
     foreach ($version in $Common.AzureFileList.CMVersions) {
+        if ($version -eq "current-branch") {
+            continue
+        }
         $cmversions += $version.versions
     }
     $cmVersions = $cmVersions | Sort-Object -Descending
@@ -3656,7 +4054,65 @@ Function Set-PS7ProgressWidth {
         $PSStyle.Progress.MaxWidth = $maxWidth
     }
 }
+Function Install-HostToServer2025 {
+    $server2025 = $common.azureFilelist.SupportFiles | Where-Object { $_.id -like "*Server 2025*" }
+    Get-FileFromStorage $server2025
+    $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
+    if (Test-Path $filename) {
 
+        $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host? (Y/n)" -HideHelp -Default "y" -timeout 180
+        if ($response -eq "n") {
+            return
+        }
+
+        $expandLocation = "C:\temp\Upgrade2025"
+        Expand-Archive -Path  $filename -DestinationPath $expandLocation -Force    
+    }
+    else {
+        Write-Log "Failed to download $filename" -Failure
+        return
+    }
+    $exeLocation = (Join-Path $expandLocation "Windows Server 2025")
+    $exe = (Join-Path $exeLocation "setup.exe")
+    if (Test-Path $exe) {
+        if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+            write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
+        }
+        else {
+            Write-Host "Stopping all VMs"
+
+            Get-VM | Where-Object { $_.State -eq "Running" } | Stop-VM -Force
+            Get-VM | Where-Object { $_.State -ne "Off" } | Stop-VM -TurnOff -Force
+            Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
+            Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
+        }
+    }
+    
+}
+
+Function Add-CmdHistory {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $Text
+    )
+    if (-not $common.PS7) {
+        return
+    }
+
+    if ($global:AddHistoryLine) {
+        return
+    }
+
+    $global:AddHistoryLine = $Text
+
+    try {
+        [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory($Text)
+    }
+    catch {}
+
+}
 Function Set-TitleBar {
     [CmdletBinding()]
     param (
@@ -3665,9 +4121,9 @@ Function Set-TitleBar {
         $Text
     )
 
-    $VersionString = "MemLabs version $($global:Common.MemLabsVersion)"
+    $VersionString = "MemLabs $($global:Common.MemLabsVersion)"
     if ($devBranch) {
-        $VersionString = $VersionString + " (DevBranch)"
+        $VersionString = "DevLabs $($global:Common.MemLabsVersion)"        
     }
 
     if ($Global:ConfigFile) {
@@ -3692,6 +4148,8 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
+. $PSScriptRoot\common\Common.snapshots.ps1
+. $PSScriptRoot\common\Common.menu.ps1
 
 ############################
 ### Common Object        ###
@@ -3699,179 +4157,191 @@ Function Set-TitleBar {
 
 if (-not $Common.Initialized) {
 
-    # Write progress
+
     Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
-
     $global:vm_remove_list = @()
+    $global:init_failed = $false
+    $global:AddHistoryLine = $null
 
-    ###################
-    ### GIT BRANCH  ###
-    ###################
-    Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
-    write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
-    $devBranch = $false
     try {
-        if ($pwd.Path -like '*memlabs*') {
-            $currentBranch = Get-BranchName
-        }
-    }
-    catch {}
-    if ($currentBranch -and $currentBranch -notmatch "main") {
-        $devBranch = $true
-    }
-
-    # PS Version
-    $PS7 = $false
-    Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
-    if ($PSVersionTable.PSVersion.Major -eq 7) {
-        $PS7 = $true
-        $PSStyle.Progress.Style = "`e[38;5;123m"
-        $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
-        $psstyle.Formatting.Warning = "`e[33m"
-
-    }
-
-    # Set-StrictMode -Off
-    # if ($devBranch) {
-    #     Set-StrictMode -Version 1.0
-    # }
-    Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
-    # Paths
-    $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
-    $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
-    $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
-    $desktopPath = [Environment]::GetFolderPath("Desktop")
-
-    # Get latest hotfix version
-
-
-    Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
-    # Common global props
-
-    $colors = Get-Colors
-
-    $global:Common = [PSCustomObject]@{
-        MemLabsVersion        = "240920"
-        LatestHotfixVersion   = "240710"
-        PS7                   = $PS7
-        Initialized           = $true
-        TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
-        ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
-        # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
-        CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
-        SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
-        NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
-        AzureFilesPath        = $storagePath                                                              # Path for downloaded files
-        AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-        AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-        AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
-        StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
-        StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
-        StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-        StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-        StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-        LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
-        CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
-        RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
-        VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
-        DevBranch             = $devBranch                                                                # Git dev branch
-        Supported             = $null                                                                     # Supported Configs
-        AzureFileList         = $null
-        LocalAdmin            = $null
-        FatalError            = $null
-        Colors                = $colors
-    }
-
-    # Storage config
-    $global:StorageConfig = [PSCustomObject]@{
-        StorageLocation = $null
-        StorageToken    = $null
-    }
-    Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
-
-    Set-TitleBar "Init Phase"
-    Write-Log "Loading required modules." -Verbose
-
-    ### Test Storage config and access
-    Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
-    $getresults = Get-StorageConfig 
-    if ($getresults -eq $false){
-        Write-Log "failed to get the storage JSON file" -Failure
-        return 
-    }
-
-
-
-    Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-    $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
-
-    ### Set supported options
-    Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
-    Set-SupportedOptions
-
-    # Generate cache
-    $i = 14
-    if (-not $InJob.IsPresent) {
-
-        #disable Sticky Keys
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
-        Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
-
+        ###################
+        ### GIT BRANCH  ###
+        ###################        
+        Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
+        write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
+        $image = (Join-Path $PSScriptRoot "MemLabs.png")    
+        $devBranch = $false
         try {
-            if ($global:common.CachePath) {
-                $threshold = 2
-                Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+            if ($pwd.Path -like '*memlabs*') {
+                $currentBranch = Get-BranchName
+            }
+            else {
+                #Set the current location to the script root
+                Set-Location -Path $PSScriptRoot
+                $currentBranch = Get-BranchName
             }
         }
         catch {}
-
-        try {
-            Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+        if ($currentBranch -and $currentBranch -notmatch "main") {
+            $devBranch = $true
         }
-        catch {}
 
-        # Retrieve VM List, and cache results
-        Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
-        $list = Get-List -Type VM -ResetCache
-        foreach ($vm in $list) {
+        if ($devBranch) {
+            $image = (Join-Path $PSScriptRoot "DevLabs.png")    
+        }
+       
+        # Write progress
+        Set-BackgroundImage $image "right" (50 - 1) "uniform" -InJob:$InJob
+        # PS Version
+        $PS7 = $false
+        Set-BackgroundImage $image "right" (50 - 3) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
+        if ($PSVersionTable.PSVersion.Major -eq 7) {
+            $PS7 = $true
+            $PSStyle.Progress.Style = "`e[38;5;123m"
+            $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
+            $psstyle.Formatting.Warning = "`e[33m"
+
+        }
+
+        # Set-StrictMode -Off
+        # if ($devBranch) {
+        #     Set-StrictMode -Version 1.0
+        # }
+        Set-BackgroundImage $image "right" (50 - 5) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
+        # Paths
+        $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
+        $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
+        $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
+        $desktopPath = [Environment]::GetFolderPath("Desktop")
+
+        # Get latest hotfix version
+
+        Set-BackgroundImage $image "right" (50 - 7) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
+        # Common global props
+
+        $colors = Get-Colors
+
+        $global:Common = [PSCustomObject]@{
+            MemLabsVersion        = "250130.0"
+            LatestHotfixVersion   = "250107.0"
+            PS7                   = $PS7
+            Initialized           = $true
+            TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
+            ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+            # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
+            CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
+            SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
+            NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
+            AzureFilesPath        = $storagePath                                                              # Path for downloaded files
+            AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+            AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+            AzureOSIsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
+            AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
+            StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
+            StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
+            StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+            StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+            StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+            LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
+            CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
+            RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
+            VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+            DevBranch             = $devBranch                                                                # Git dev branch
+            Supported             = $null                                                                     # Supported Configs
+            AzureFileList         = $null
+            LocalAdmin            = $null
+            FatalError            = $null
+            Colors                = $colors
+        }
+
+        # Storage config
+        $global:StorageConfig = [PSCustomObject]@{
+            StorageLocation = $null
+            StorageToken    = $null
+        }
+        $global:DSC_Copied = @()
+
+        Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
+
+        Set-TitleBar "Init Phase"
+        Write-Log "Loading required modules." -Verbose
+
+        ### Test Storage config and access
+        Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
+        $getresults = Get-StorageConfig 
+        if ($getresults -eq $false) {
+            $global:init_failed = $true
+            Write-Log "failed to get the storage JSON file" -Failure
+            return 
+        }
+
+
+        Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+        $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+
+        ### Set supported options
+        Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
+        Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
+        Set-SupportedOptions
+
+        # Generate cache
+        $i = 14
+        if (-not $InJob.IsPresent) {
+
+            Start-DHCP | out-null
+            #disable Sticky Keys
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
+
+            try {
+                if ($global:common.CachePath) {
+                    $threshold = 2
+                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+                }
+            }
+            catch {}
+
+            try {
+                Get-ChildItem -Force 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles' -Recurse | ForEach-Object { $_.PSChildName } | ForEach-Object { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\$($_)" -Name "Category" -Value 1 }
+            }
+            catch {}
+
+            # Retrieve VM List, and cache results
+            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+            Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
+            $list = Get-List -Type VM -ResetCache
+            foreach ($vm in $list) {
+                $i++
+                if ($i -ge 98) {
+                    $i = 98
+                }
+                Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+                Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
+                $vm2 = Get-VM -id $vm.vmId
+                Update-VMInformation -vm $vm2
+            }
+
             $i++
-            if ($i -ge 98) {
-                $i = 98
-            }
-            Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
-            $vm2 = Get-VM -id $vm.vmId
-            Update-VMInformation -vm $vm2
+            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+            Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
+
+            # Add HGS Registry key to allow local CA Cert
+            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
         }
-
-
-        $i++
-        Write-Progress2 "Loading required modules." -Status "Moving Logs" -PercentComplete $i
-
-        # Starting 2/1/2022, all logs should be in logs directory. Move logs to the logs folder, if any at root.
-        Get-ChildItem -Path $PSScriptRoot -Filter *.log | Move-Item -Destination $logsPath -Force -ErrorAction SilentlyContinue
-        $oldCrashPath = Join-Path $PSScriptRoot "crashlogs"
-        if (Test-Path $oldCrashPath) {
-            Get-ChildItem -Path $oldCrashPath -Filter *.txt | Move-Item -Destination $Common.CrashLogsPath -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path $oldCrashPath -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
-        }
-
-        # Starting 3/11/2022, we changed the log format, remove older format logs
-        $logPath = Join-Path $PSScriptRoot "logs"
-        foreach ($log in (Get-ChildItem $logPath -Filter *.log )) {
-            $logLine = Get-Content $log.FullName -TotalCount 1
-            if ($logLine -and -not $logLine.StartsWith("<![LOG[")) {
-                Remove-Item -Path $log.FullName -Force -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-
-        $i++
-        Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
-
-        # Add HGS Registry key to allow local CA Cert
-        New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+        Set-BackgroundImage $image "right" 5 "uniform" -InJob:$InJob
+        # Write progress
+        Write-Progress2 "Loading required modules." -Completed
     }
-    # Write progress
-    Write-Progress2 "Loading required modules." -Completed
+    catch {
+        Write-Log "Failed to initialize MemLabs. $_" -Failure
+        $global:init_failed = $true
+        return
+    }
 
 }

@@ -17,9 +17,7 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
-$ClientNames = $thisVM.thisParams.ClientPush
-$cm_svc = "$NetbiosDomainName\cm_svc"
-$pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
+
 $usePKI = $deployConfig.cmOptions.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
@@ -55,25 +53,6 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
     return $false
 }
 
-$cm_svc_file = "$LogPath\cm_svc.txt"
-if (Test-Path $cm_svc_file) {
-    # Add cm_svc user as a CM Account
-    $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
-    Write-DscStatus "Adding cm_svc domain account as CM account"
-    Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-    Remove-Item -Path $cm_svc_file -Force -Confirm:$false
-
-    # Set client push account
-    Write-DscStatus "Setting the Client Push Account"
-    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
-    Start-Sleep -Seconds 5
-
-    # Restart services to make sure push account is acknowledged by CCM
-    Write-DscStatus "Restarting services"
-    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
-}
 
 $DPs = @()
 $MPs = @()
@@ -121,7 +100,6 @@ $MPNames = $MPs.ServerName | Where-Object { $_ -and $_.Trim() }
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
 Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
-Write-DscStatus "Client push candidates are '$ClientNames'"
 
 foreach ($DP in $DPs) {
 
@@ -177,171 +155,3 @@ if ($mpCount -eq 0) {
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
-# Create Boundary groups
-$bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
-$bgsCount = $bgs.count
-Write-DscStatus "Create $bgsCount Boundary Groups"
-foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
-    $siteStatus = Get-CMSite -SiteCode $bgsitecode
-    if ($siteStatus.Status -eq 1) {
-        $sitesystems = @()
-        $sitesystems += (Get-CMDistributionPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMManagementPoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $bgsitecode).NetworkOSPath -replace "\\", ""
-        $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
-        try {
-            $exists = Get-CMBoundaryGroup -Name $bgsitecode
-            if ($exists) {
-                Write-DscStatus "Updating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
-                Set-CMBoundaryGroup -Name $bgsiteCode -AddSiteSystemServerName $sitesystems
-            }
-            else {
-                Write-DscStatus "Creating Boundary Group '$bgsitecode' with Site Systems $($sitesystems -join ',')"
-                New-CMBoundaryGroup -Name $bgsitecode -DefaultSiteCode $SiteCode -AddSiteSystemServerName $sitesystems
-            }
-        }
-        catch {
-            Write-DscStatus "Failed to create Boundary Group '$bgsitecode'. Error: $_"
-        }
-    }
-    else {
-        Write-DscStatus "Skip creating Boundary groups for site $bgsitecode because Site Status is not 'Active'."
-    }
-    Start-Sleep -Seconds 5
-}
-
-# Create Boundaries for each subnet and add to BG
-Write-DscStatus "Create Boundaries for each subnet and add to BG"
-foreach ($bg in $bgs) {
-    $exists = Get-CMBoundary -BoundaryName $bg.Subnet
-    if ($exists) {
-        try {
-            Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-            Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
-        }
-        catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
-        }
-    }
-    else {
-        try {
-            Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
-            $IP = $bg.Subnet
-            $mask = '255.255.255.0'
-            $IPBits = [int[]]$IP.Split('.')
-            $MaskBits = [int[]]$Mask.Split('.')
-            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
-            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
-            $NetworkID = $NetworkIDBits -join '.'
-            $Broadcast = $BroadcastBits -join '.'
-            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
-            try {
-                Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-                Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
-            }
-            catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
-            }
-        }
-        catch {
-            Write-DscStatus "Failed to create boundary '$($bg.Subnet)'. Error: $_"
-        }
-    }
-
-    Start-Sleep -Seconds 5
-}
-
-# Setup System Discovery
-Write-DscStatus "Enabling AD system discovery"
-$lastdomainname = $DomainFullName.Split(".")[-1]
-do {
-    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
-
-    if ($adiscovery.Value1.ToLower() -ne "active") {
-        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
-    }
-    else {
-        Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)"
-    }
-} until ($adiscovery.Value1.ToLower() -eq "active")
-
-# Run discovery
-Write-DscStatus "Invoking AD system discovery"
-Start-Sleep -Seconds 5
-Invoke-CMSystemDiscovery
-Start-Sleep -Seconds 5
-
-if ($ThisVm.thisParams.PassiveNode) {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    $pushClients = $false
-    #return
-}
-
-# Push Clients
-#==============
-if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
-    $Configuration.InstallClient.Status = 'NotRequested'
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    return
-}
-
-# Wait for collection to populate
-$CollectionName = "All Systems"
-if ($ClientNames) {
-    Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
-}
-else {
-    Write-DscStatus "Skipping Client Push. No Clients to push."
-    $Configuration.InstallClient.Status = 'Completed'
-    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-    return
-}
-
-$ClientNameList = $ClientNames.split(",")
-$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-Start-Sleep -Seconds 5
-
-foreach ($client in $ClientNameList) {
-
-    if ([string]::IsNullOrWhiteSpace($client)) {
-        continue
-    }
-
-    $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-    if (-not $testClient.TcpTestSucceeded) {
-        # Don't wait for client to appear in collection if it's not online
-        Write-DscStatus "Could not test SMB connection to $client. Skipping."
-        continue
-    }
-
-    $failCount = 0
-    $success = $true
-    while ($machinelist -notcontains $client) {
-        if ($failCount -gt 30) {
-            $success = $false
-            break
-        }
-        Invoke-CMSystemDiscovery
-        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
-
-        Write-DscStatus "Waiting for $client to appear in '$CollectionName'" -RetrySeconds 30
-        Start-Sleep -Seconds 30
-        $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-        $failCount++
-    }
-    if ($success) {
-        Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-        Start-Sleep -Seconds 5
-    }
-}
-
-# Update actions file
-$Configuration.InstallClient.Status = 'Completed'
-$Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

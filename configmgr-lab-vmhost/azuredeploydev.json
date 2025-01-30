@@ -26,10 +26,9 @@
     },
     "windowsOSVersion": {
       "type": "string",
-      "defaultValue": "2022-datacenter-g2",
+      "defaultValue": "2025-datacenter-g2",
       "allowedValues": [
-        "2022-datacenter-g2",
-        "2019-datacenter-gensecond"
+        "2025-datacenter-g2"
       ],
       "metadata": {
         "description": "Windows version for the VM."
@@ -307,7 +306,8 @@
       },
       "tags": {
         "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore"
+        "Automation": "Ignore",
+        "CostControl": "Ignore"
       }
     },
     {

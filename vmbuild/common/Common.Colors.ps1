@@ -5,6 +5,114 @@ try {
 catch {}
 
 
+function Set-BackgroundImage {
+
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the path to the image file")]
+        [string] $file,        
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the alignment of the image")]
+        [ValidateSet("center", "left", "right", "top", "bottom", "topLeft", "topRight", "bottomLeft", "bottomRight")]
+        [string] $alignment,
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the opacity of the image as a percentage (5-100)")]
+        [int] $opacityPercent,
+        [Parameter(Mandatory = $true, HelpMessage = "Enter the stretch mode of the image")]
+        [ValidateSet("none", "fill", "uniform", "uniformToFill")]
+        [string] $stretchMode,
+        [bool] $InJob = $false
+    )
+    
+    if ($InJob) {
+        return
+    }
+    if (-not (Test-Path $file)) {
+        return 
+    }
+    
+    
+    $LocalAppData = $env:LOCALAPPDATA
+    $SettingsJson = (Join-Path $LocalAppData "Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json")
+    if (-not (Test-Path $SettingsJson)) {
+        return 
+    }
+
+    if ($opacityPercent -lt 5) {
+        $opacityPercent = 5        
+    }
+
+    if ($opacityPercent -gt 100) {
+        $opacityPercent = 100
+    }
+
+    
+
+    $a = Get-Content $SettingsJson | ConvertFrom-Json   
+    $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
+    
+    if (-not $a.profiles.defaults) {
+        $defaults = [PSCustomObject]@{
+            backgroundImage            = $file
+            backgroundImageAlignment   = $alignment
+            backgroundImageOpacity     = ($opacityPercent / 100)
+            backgroundImageStretchMode = $stretchMode
+            antialiasingMode           = "cleartype"
+        }
+        $a.profiles | Add-Member -MemberType NoteProperty -Name "defaults" -Value $defaults -Force
+    }
+    else {
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImage" -Value $file -Force
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageAlignment" -Value $alignment -Force
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageOpacity" -Value ($opacityPercent / 100) -Force
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageStretchMode" -Value $stretchMode -Force
+        $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "antialiasingMode" -Value "cleartype" -Force
+    
+    }
+    
+    $a | ConvertTo-Json -Depth 100 | Out-File -encoding utf8 $SettingsJson
+}
+function Get-Animate {
+    # Clear the screen
+    Write-Host "`e[2J`e[H"
+    
+    # Define the Unicode text art for "MemLabs"
+    $textArt = @"
+     ███    ███ ███████ ███    ███     ██       █████  ██████  ███████ 
+     ████  ████ ██      ████  ████     ██      ██   ██ ██   ██ ██      
+     ██ ████ ██ █████   ██ ████ ██     ██      ███████ ██████  ███████ 
+     ██  ██  ██ ██      ██  ██  ██     ██      ██   ██ ██   ██      ██ 
+     ██      ██ ███████ ██      ██     ███████ ██   ██ ██████  ███████ 
+"@
+    
+    # Convert the text art into an array of lines
+    $lines = $textArt -split "`n"
+    
+    # Get the dimensions of the console
+    $rows, $columns = $Host.UI.RawUI.WindowSize.Height, $Host.UI.RawUI.WindowSize.Width
+    
+    # Calculate the start position for centering the text
+    $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
+    $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
+    $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+    $resetCode = "`e[0m"               # Reset ANSI formatting
+    # Animation function to reveal characters one at a time
+    
+    # Loop through each line and character
+    for ($lineIndex = 0; $lineIndex -lt $lines.Length; $lineIndex++) {
+        for ($charIndex = 0; $charIndex -lt $lines[$lineIndex].Length; $charIndex++) {
+            # Set cursor position and write the character
+            $char = $lines[$lineIndex][$charIndex]
+            if ($char -ne ' ') {
+                $row = $startRow + $lineIndex
+                $col = $startCol + $charIndex
+                Write-Host "`e[${row};${col}H$colorCode$char$resetCode" -NoNewline                    
+                Start-Sleep -Milliseconds 0 # Faster reveal
+            }
+            Start-Sleep -Milliseconds 0 # Faster reveal
+        }
+        Start-Sleep -Milliseconds 100 # Faster reveal    
+    }
+    
+}
+
 function Get-Colors {
     $colors = [PSCustomObject]@{
         #--- Create Config"
@@ -29,8 +137,8 @@ function Get-Colors {
         GenConfigNonDefaultNumber  = "LightSteelBlue"
 
         # [N] New Virtual Machine
-        GenConfigNewVM             = "DarkGreen"
-        GenConfigNewVMNumber       = "Green"
+        GenConfigNewVM             = "Chartreuse"
+        GenConfigNewVMNumber       = "Chartreuse"
 
         # [D] Deploy Config
         GenConfigDeploy            = "Green"
