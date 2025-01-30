@@ -4225,7 +4225,7 @@ if (-not $Common.Initialized) {
         $colors = Get-Colors
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion        = "250107.0"
+            MemLabsVersion        = "250130.0"
             LatestHotfixVersion   = "250107.0"
             PS7                   = $PS7
             Initialized           = $true
