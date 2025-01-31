@@ -140,7 +140,7 @@ $apps | ForEach-Object {
     #Remove-CMPackage -Id "CS100023" -Force
 
     Write-DscStatus "$Tag Creating an MEMLBAS pacakage deployment for $($_.Name) as Package model"
-    $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn /l*v c:\windows\temp\$($_.Name).log"
+    $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
     # Create a Program for the Package
     New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
     Write-DscStatus "$Tag Sucessfully created a MEMLBAS pacakage deployment for $($_.Name) as Package model"
@@ -319,6 +319,8 @@ if (!$taskSequences) {
     $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
     $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
     $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
+    $domainshortname= $deployConfig.parameters.domainName -replace "\.com$", ""
+
     $tstimezone = [System.TimeZoneInfo]::FindSystemTimeZoneById($deployconfig.vmOptions.timeZone)
     if (Test-Path $cm_svc_file) {
         # Add cm_svc user as a CM Account
@@ -352,7 +354,7 @@ if (!$taskSequences) {
         GeneratePassword                   = $true
         TimeZone                           = $tstimezone
         JoinDomain                         = "WorkgroupType"
-        WorkgroupName                      = "groupwork"
+        WorkgroupName                      = "Workgroup"
         ClientPackagePackageId             = $ClientPackagePackageId
         InstallationProperty               = $clientProps
         ApplicationName                    = "Admin Console"
@@ -382,7 +384,7 @@ if (!$taskSequences) {
         GeneratePassword                   = $true
         TimeZone                           = $tstimezone
         JoinDomain                         = "WorkgroupType"
-        WorkgroupName                      = "groupwork"
+        WorkgroupName                      = "workgroup"
         ClientPackagePackageId             = $ClientPackagePackageId
         InstallationProperty               = $clientProps
         ApplicationName                    = "Admin Console"
@@ -422,7 +424,7 @@ if (!$taskSequences) {
         JoinDomain                      = "DomainType"
         DomainAccount                   = "$DomainFullName\$AdminName"
         DomainName                      = "$DomainFullName"
-        DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
+        DomainOrganizationUnit          = "LDAP://CN=Computers,DC=$domainshortname,DC=com"
         DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
         ClientPackagePackageId          = $ClientPackagePackageId
         InstallationProperty            = $clientProps
@@ -455,7 +457,7 @@ if (!$taskSequences) {
         JoinDomain                      = "DomainType"
         DomainAccount                   = "$DomainFullName\$AdminName"
         DomainName                      = "$DomainFullName"
-        DomainOrganizationUnit          = "LDAP://OU=Workstations,OU=Devices,DC=na,DC=$DomainFullName,DC=com"
+        DomainOrganizationUnit          = "LDAP://CN=Computers,DC=$domainshortname,DC=com"
         DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
         ClientPackagePackageId          = $ClientPackagePackageId
         InstallationProperty            = $clientProps
@@ -518,7 +520,7 @@ ForEach ($ConfigName in $ConfigNames) {
 
         # Deploy the configuration baseline to a collection
 
-        New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" 
+        New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
         Write-DscStatus "$Tag Succesfully deployed the baseline $baselinename to All systems"
 
     }
