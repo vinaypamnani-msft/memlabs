@@ -290,7 +290,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"P" = "Show Passwords" }
         $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "---  Other%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+        if ([Environment]::OSVersion.Version -ge [System.version]"11.0.26100.0") {
             #Do nothing as we are on server 2025
         }
         else {

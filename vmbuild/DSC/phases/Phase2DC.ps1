@@ -398,7 +398,7 @@
             # Loop to create 50 users
             for ($i = 1; $i -le 50; $i++) {
                 # Generate a random username
-                $Username = "MEMLABS-User" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+                $Username = "MEMLABS-User" + $i
             
             
                 # Create the new user
