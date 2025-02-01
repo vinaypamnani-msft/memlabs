@@ -2149,12 +2149,14 @@ Function Write-GreenCheck {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
-        [string] $ForegroundColor
-    )
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
+    )        
     $CHECKMARK = ([char]8730)
     $text = $text.Replace("SUCCESS: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor LimeGreen "$CHECKMARK" -NoNewline
@@ -2183,12 +2185,15 @@ Function Write-RedX {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("ERROR: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
+        
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Red "x" -NoNewline
     Write-Host "] " -NoNewline
@@ -2293,11 +2298,13 @@ Function Write-OrangePoint2 {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("WARNING: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Orange "⚠️" -NoNewline

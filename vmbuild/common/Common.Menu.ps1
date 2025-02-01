@@ -475,7 +475,7 @@ function Select-StartDomain {
         $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
+            $response = Get-Menu2 -MenuName "Start VMs" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
         }
         else {
             $response = $preResponse
@@ -483,7 +483,7 @@ function Select-StartDomain {
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X") {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X" -or $response -eq "ESCAPE") {
             return
         }
         if ($response -eq "A" -or $response -eq "C") {
@@ -545,14 +545,17 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -CurrentValue "None" -timeout 10 -test:$false
+            $response = Get-Menu2 -MenuName "Select VMs to Stop" -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -CurrentValue "A" -timeout 10 -test:$false
         }
         else {
             $response = $preResponse
             $preResponse = $null
         }
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        if ($response -eq "ESCAPE") {
+            return "ESCAPE"
+        }
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
             return
         }
         if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
@@ -599,9 +602,9 @@ function Select-DeleteDomain {
             return
         }
         $customOptions = [ordered]@{"D" = "Delete All VMs" }
-        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return
+        $response = Get-Menu2 -MenuName "Delete VMs" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return
 
-        if ([string]::IsNullOrWhiteSpace($response)) {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
             return
         }
         if ($response -eq "D") {

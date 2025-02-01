@@ -99,8 +99,8 @@ function select-DeleteSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false -return
-    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+    $response = get-menu2 -MenuName "VM Snapshot merge" -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false -return
+    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
         return
     }
 
@@ -163,7 +163,10 @@ function select-SnapshotDomain {
     Write-Host
     Write-Host2 -ForegroundColor Orange "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     #Invoke-StopVMs -domain $domain
-    Select-StopDomain -domain $domain
+    $result = Select-StopDomain -domain $domain
+    if ($result -eq "ESCAPE") {
+        return
+    }
     get-SnapshotDomain -domain $domain
 
     #$critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
@@ -229,8 +232,8 @@ function select-RestoreSnapshotDomain {
         Write-Log "Auto restoring snapshot $response" -SubActivity
     }
     else {
-        $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        $response = get-menu2 -MenuName "Snapshot Restore" -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
             return
         }
     }    

@@ -4150,6 +4150,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.HyperV.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.menu.ps1
+. $PSScriptRoot\common\Common.NewMenu.ps1
 
 ############################
 ### Common Object        ###
@@ -4162,6 +4163,7 @@ if (-not $Common.Initialized) {
     $global:vm_remove_list = @()
     $global:init_failed = $false
     $global:AddHistoryLine = $null
+    $Global:MenuHistory = $null
 
     try {
         ###################
