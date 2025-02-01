@@ -35,7 +35,7 @@ function Get-ToolsForBaseImage {
             Write-Log "Found $fileName in $($Common.TempPath)."
             if ($ForceTools.IsPresent) {
                 Write-Log "ForceTools switch present. Removing pre-existing $fileName file..." -Warning -Verbose
-                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null 
             }
             else {
                 # Write-Log "ForceTools switch not present. Skip downloading/recopying '$fileName'." -Warning

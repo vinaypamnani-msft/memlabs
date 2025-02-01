@@ -68,7 +68,7 @@ function Add-MenuItem {
     if ($Global:MenuHistory) {
         if ($Global:MenuHistory[$menuName]) {
             $currentItem = $Global:MenuHistory[$menuName]
-            Write-Log "found $currentItem for $menuName"
+            #Write-Log "found $currentItem for $menuName"
         }              
     }
 
@@ -106,7 +106,7 @@ function Get-MenuItems {
     if ($Global:MenuHistory) {
         if ($Global:MenuHistory[$menuName]) {
             $currentItem = $Global:MenuHistory[$menuName]
-            Write-Log "found $currentItem for $menuName"
+            #Write-Log "found $currentItem for $menuName"
         }              
     }
 
@@ -424,6 +424,14 @@ function Get-Menu2 {
 }
 
 
+function Get-RoomLeftFromCurrentPosition {
+    $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
+    $CurrentPosition = Get-CursorPosition
+    $MenuStart = $CurrentPosition.Y
+    $RoomLeft = ([int]$WindowSizeY - [int]$MenuStart)
+    return $RoomLeft
+}
+
 # Read the array of menu items and the selected index and display the menu
 function Show-Menu {
     [CmdletBinding()]
@@ -437,17 +445,54 @@ function Show-Menu {
 
     )
     While ($true) {
+
+
+        $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
+        $CurrentPosition = Get-CursorPosition
+        $MenuStart = $CurrentPosition.Y
+        $RoomLeft = Get-RoomLeftFromCurrentPosition
+
+        if ($NoClear -and $RoomLeft -lt $menuItems.Count) {
+            $NoClear = $false
+        }
+
         if (-not $NoClear) {
             Write-Host "`e[2J`e[H"
         }
+
         Write-Log -Activity $menuName
 
+        $RoomLeft = Get-RoomLeftFromCurrentPosition
+
+        if ($RoomLeft -lt $menuItems.Count) {
+            Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
+        }
+
+        $RoomLeft = Get-RoomLeftFromCurrentPosition
+        if ($RoomLeft -lt $menuItems.Count) {        
+            $shrink = $true    
+            $roomsaved = 0
+            foreach ($menuItem in $menuItems) {
+                if (-not $menuItem.Selectable) {
+                    if (-not [string]::IsNullOrWhiteSpace($menuItem.Text)) {
+                        $roomsaved = $roomsaved + 1
+                    }                
+                }
+            }
+        }
+        if ($RoomLeft -lt ($menuItems.Count - $roomsaved)) {
+            $Maxshrink = $true
+        }
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         foreach ($menuItem in $menuItems) {
+            $CurrentPosition = Get-CursorPosition
+            Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
             if ($menuItem.Function) {
-                Invoke-Expression -Command $menuItem.Function
+                if (-not $Maxshrink) {
+                    Invoke-Expression -Command $menuItem.Function
+                }
                 continue
             }
             if ($menuItem.Selected) {
@@ -460,10 +505,17 @@ function Show-Menu {
         
             $CurrentPosition = Get-CursorPosition
             $menuItem | Add-Member -MemberType NoteProperty -Name "CurrentPosition" -Value $CurrentPosition.Y -force
-            if ($menuItem.Selectable) {            
+            if ($menuItem.Selectable) {    
+                Set-CursorPosition -x 3 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line       
                 Write-Option $menuItem.itemName $menuItem.Text -color $menuItem.Color1 -Color2 $menuItem.Color1
             }
             else {
+                if ($Maxshrink) {
+                    continue
+                }
+                if ($shrink -and [string]::IsNullOrWhiteSpace($menuItem.Text)) {
+                    continue
+                }
                 write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
             }                        
         }   
