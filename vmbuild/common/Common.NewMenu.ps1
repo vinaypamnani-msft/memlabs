@@ -521,16 +521,10 @@ function Show-Menu {
         }   
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
-        $prompt = "Press Enter to select, Up/Down to navigate, ESC to exit: "
+        $prompt = "Press Enter to select, Up/Down to navigate, ESC to exit"
         #$currentValue = "T"
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
-        $PromptPosition = Get-CursorPosition
-        if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
-            Write-Host " [" -NoNewline
-            Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPromptCurrentItem $currentValue -NoNewline
-            Write-Host "] " -NoNewline
-        }
-        $PromptPosition = Get-CursorPosition
+        $PromptPosition = Get-CursorPosition       
 
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition 
         if ($return) {
@@ -583,6 +577,52 @@ function Set-CursorPositionToTopOfMenu {
     Set-CursorPosition -X $cursorPosition.X -Y $cursorPosition.Y
 }
 
+
+function Update-Prompt {
+    param (
+        [Parameter(Mandatory = $true)] # Mandatory parameter
+        [object]$PromptPosition, # The cursor position
+
+        [Parameter(Mandatory = $false)] # Mandatory parameter
+        [string]$buffer, # The buffer to display
+
+        [Parameter(Mandatory = $false)] # Mandatory parameter
+        [object]$MenuItems = $null,
+
+        [Parameter(Mandatory = $false)] # Mandatory parameter
+        [int]$SelectedIndex = -1
+
+    )
+    $CurrentValue = $null
+    $cursorPosition = Get-CursorPosition # Get the current cursor position
+    Set-CursorPosition -X $PromptPosition.X -Y $PromptPosition.Y # Set the cursor position to the prompt position
+    write-host "             " -NoNewline
+    Set-CursorPosition -X $PromptPosition.X -Y $PromptPosition.Y # Set the cursor position to the prompt position
+    if ($MenuItems -and $selectedIndex -ne -1) {
+        $CurrentValue = $MenuItems[$selectedIndex].ItemName
+    }
+    if (-not [String]::IsNullOrWhiteSpace($CurrentValue)) {
+        Write-Host " [" -NoNewline
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPromptCurrentItem $CurrentValue -NoNewline
+        Write-Host "]" -NoNewline
+    }
+    else {
+        Write-Host " [" -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigError2
+        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigError1 "!!" -NoNewline
+        Write-Host "]" -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigError2
+    }
+    Write-Host ": " -NoNewLine
+    if ($buffer) {
+        write-host2 $buffer -NoNewline -ForegroundColor Yellow
+        [System.Console]::CursorVisible = $true 
+    }
+    else {
+        [System.Console]::CursorVisible = $false
+        Set-CursorPosition -X $cursorPosition.X -Y $cursorPosition.Y # Set the cursor position to the original position
+    }
+    
+}
+
 # Start the navigation menu
 # The navigation menu is started with the specified menu items and selected index
 function Start-Navigation {
@@ -620,16 +660,8 @@ function Start-Navigation {
             return
         }
 
-        if ($buffer) {
-            Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-            write-host "       " -NoNewline
-            Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-            write-host2 $buffer -NoNewline -ForegroundColor Yellow
-            [System.Console]::CursorVisible = $true 
-        }
-        else {
-            [System.Console]::CursorVisible = $false
-        }
+        Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+        
         $key = Get-KeyStroke # Get the key stroke from the user
         $currentsize = $Host.UI.RawUI.WindowSize
         if ($currentsize -ne $startSize) {
@@ -648,11 +680,8 @@ function Start-Navigation {
                         }
                     }
                 }
-                Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                write-host "       " -NoNewline
-                Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                write-host2 $buffer -NoNewline -ForegroundColor Yellow
-                [System.Console]::CursorVisible = $true 
+                $selectedIndex = -1
+                Update-Prompt -PromptPosition $PromptPosition -buffer $buffer
                 continue
                
             }
@@ -666,6 +695,7 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 38) {
             # 38 = Up arrow key
             # If the selected index is greater than 0, move the selection up
+            $buffer = $null
             $i = 0
             while ($true) {
                 if ($i -gt $menuItems.Count) {
@@ -690,6 +720,7 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 40) {
             # 40 = Down arrow key
             # If the selected index is less than the last item, move the selection down
+            $buffer = $null
             $i = 0
             while ($true) {
                 if ($i -gt $menuItems.Count) {
@@ -738,18 +769,12 @@ function Start-Navigation {
                         }
                         $i++       
                     }
-                    Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                    write-host "       " -NoNewline
-                    Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                    write-host2 $buffer -NoNewline -ForegroundColor Yellow
-                    [System.Console]::CursorVisible = $true 
+                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer
                 }
             }
             if (-not $buffer) {
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex
-                [System.Console]::CursorVisible = $false
-                Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                write-host "    " -NoNewline
+                Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             }
         }
         
@@ -762,12 +787,11 @@ function Start-Navigation {
 
         if ($key.Character.ToString().ToUpperInvariant() -in $ValidChars -or ($buffer -and $key.Character.ToString() -in @(0..9))) {
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex -1
-            [System.Console]::CursorVisible = $true 
-            Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
             $buffer = $buffer + $key.Character.ToString().ToUpperInvariant()
-            write-host2 $buffer -NoNewline -ForegroundColor Yellow
+
             if ($buffer) {
                 $i = 0
+                $selectedIndex = -1
                 foreach ($menuItem in $menuItems) {
                     if ($menuItem.ItemName) {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
@@ -779,7 +803,7 @@ function Start-Navigation {
                     $i++       
                 }
             }
-            #$PromptPosition.X = ($($PromptPosition.X) + 1)
+            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
     }
 

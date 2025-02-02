@@ -2151,32 +2151,43 @@ class AddUserToLocalAdminGroup {
     [string] $NetbiosDomainName
 
     [void] Set() {
-        if ($(Test-ComputerSecureChannel) -eq $False) { 
-            Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
-            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-            $global:DSCMachineStatus = 1
-        }
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-        $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Status "Adding $_DomainName\$_Name to administrators group"
-        if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
-            $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        try {
+            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
+            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+            Write-Status "Adding $_DomainName\$_Name to administrators group"
+            if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
+                $GroupObj.Add("WinNT://$_DomainName/$_Name")
+            }
         }
-
+        catch {
+            Write-Status "AddUserToLocalAdminGroup: Failed to add $_DomainName\$_Name to administrators group $_"
+            if ($(Test-ComputerSecureChannel) -eq $False) { 
+                Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+            }
+        }
+    
     }
 
     [bool] Test() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-        $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
-        if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
-            return $true
+        try {
+            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
+            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
+            if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
+                return $true
+            }
+            return $false
         }
-        return $false
+        catch {
+            Write-Verbose "AddUserToLocalAdminGroup: Failed to test $_DomainName\$_Name in administrators group $_"
+            return $false
+        }
     }
 
     [AddUserToLocalAdminGroup] Get() {
@@ -2569,7 +2580,7 @@ class InstallFeatureForSCCM {
         # Install on all devices
         try {
             Write-Status "Installing Windows Feature TelnetClient"
-            dism /online /Enable-Feature /FeatureName:TelnetClient
+            dism / online / Enable-Feature / FeatureName:TelnetClient
         }
         catch {}
         #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
