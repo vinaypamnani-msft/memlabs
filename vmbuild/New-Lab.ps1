@@ -124,6 +124,9 @@ if (-not $NoWindowResize.IsPresent) {
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
         }
 
+        if ($host.UI.RawUI.WindowSize.Height -lt 50) {
+            $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($host.UI.RawUI.WindowSize.Width, 50)
+        }
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning

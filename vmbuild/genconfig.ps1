@@ -608,6 +608,10 @@ function get-VMOptionsSummary {
     }
     $domainName = "[$($options.domainName)]".PadRight(21)
     $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)] [Locale $($options.locale)]"
+    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 34)
+    if ($Output.Length -ge $MaxWidth) {
+        $Output = $Output.Substring(0, $MaxWidth - 3) + "..."
+    }
     return $Output
 }
 
@@ -755,7 +759,7 @@ function Select-MainMenu {
         $global:StartOver = $false
         Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t`t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global SCCM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         }
@@ -2210,6 +2214,10 @@ function Get-EnhancedSubnetList {
         if ($machines) {
             if ($machines.vmName) {
                 $entry = $entry + " [$($machines.vmName -join ", ")]"
+                $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 58)
+                if ($entry.Length -ge $MaxWidth) {
+                    $entry = $entry.Substring(0, $MaxWidth - 3) + "..."
+                }
             }
         }
         if ($entry) {
@@ -5044,7 +5052,12 @@ function get-VMString {
 
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
     if ($virtualMachine.memory) {
-        $mem = $($virtualMachine.memory).PadLeft(4, " ")
+        if ($virtualMachine.dynamicMinRam -and ($($virtualMachine.dynamicMinRam)/1) -lt ($($virtualMachine.memory)/1)) {
+            $mem = $($($virtualMachine.dynamicMinRam) + "-" + $($virtualMachine.memory)).PadLeft(4, " ") 
+        }
+        else {
+            $mem = $($virtualMachine.memory).PadLeft(4, " ")
+        }
     }
     else { $mem = "n/a" }
     if ($virtualMachine.virtualProcs) {
@@ -5155,6 +5168,11 @@ function get-VMString {
     }
 
     write-log "Name is $name" -verbose
+    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 8)
+    if ($name.Length -ge $MaxWidth) {
+        $name = $name.Substring(0, $MaxWidth - 3) + "..."
+    }
+  
 
     $CASColors = @("%PaleGreen", "%YellowGreen", "%SeaGreen", "%MediumSeaGreen", "%SpringGreen", "%Lime", "%LimeGreen")
     $PRIColors = @("%LightSkyBlue", "%CornflowerBlue", "%SlateBlue", "%DeepSkyBlue", "%Turquoise", "%Cyan", "%MediumTurquoise", "%Aquamarine", "%SteelBlue", "%Blue")
@@ -5423,26 +5441,24 @@ function Add-NewVMForRole {
             else {
                 $OSList = Get-SupportedOperatingSystemsForRole -role $role
                 if ($role.Contains("Client")) {
-                    $operatingSystem = "Windows 10 Latest (64-bit)"
+                    $DefaultOperatingSystem = "Windows 10 Latest (64-bit)"
                     if ($ConfigToModify.domainDefaults.DefaultClientOS) {
                         $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
                     }
                 }
                 else {
-                    $OperatingSystem = "Server 2022"
+                    $DefaultOperatingSystem = "Server 2022"
                     if ($ConfigToModify.domainDefaults.DefaultClientOS) {
                         $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
                     }
                 }
                 if ($null -ne $OSList) {
-                    if ($OperatingSystem -like "*Server*" -and $ConfigToModify.domainDefaults.DefaultServerOS) {                       
-                        $OperatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
-                    }
-                    else {
+                    if (-not $OperatingSystem) {                        
                         Write-Log -Verbose "No Default OS defined" 
                         Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                        $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $operatingSystem
+                        $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $DefaultOperatingSystem
                         if ($OperatingSystem -eq "ESCAPE") {
+                            $OperatingSystem = $DefaultOperatingSystem
                             return
                         }
                     }

@@ -359,7 +359,7 @@ function Get-Menu2 {
         [switch] $NoClear
     )
 
-
+    $host.ui.RawUI.FlushInputBuffer()
 
     if (!$NoNewLine) {
         write-Host
@@ -425,7 +425,7 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Get the height of the console window, subtract 1 since its 0 based
     $CurrentPosition = Get-CursorPosition
     $MenuStart = $CurrentPosition.Y
     $RoomLeft = ([int]$WindowSizeY - [int]$MenuStart)
@@ -620,7 +620,16 @@ function Start-Navigation {
             return
         }
 
-       
+        if ($buffer) {
+            Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+            write-host "       " -NoNewline
+            Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+            write-host2 $buffer -NoNewline -ForegroundColor Yellow
+            [System.Console]::CursorVisible = $true 
+        }
+        else {
+            [System.Console]::CursorVisible = $false
+        }
         $key = Get-KeyStroke # Get the key stroke from the user
         $currentsize = $Host.UI.RawUI.WindowSize
         if ($currentsize -ne $startSize) {
@@ -639,6 +648,12 @@ function Start-Navigation {
                         }
                     }
                 }
+                Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+                write-host "       " -NoNewline
+                Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+                write-host2 $buffer -NoNewline -ForegroundColor Yellow
+                [System.Console]::CursorVisible = $true 
+                continue
                
             }
             else {
@@ -708,7 +723,7 @@ function Start-Navigation {
                     $buffer = $buffer.Substring(0, $buffer.Length - 1)
                 }
                 Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
-                write-host $buffer -NoNewline
+                write-host2 $buffer -NoNewline -ForegroundColor Yellow
                 write-host " " -NoNewline
 
                 if ($buffer) {
@@ -723,6 +738,11 @@ function Start-Navigation {
                         }
                         $i++       
                     }
+                    Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+                    write-host "       " -NoNewline
+                    Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
+                    write-host2 $buffer -NoNewline -ForegroundColor Yellow
+                    [System.Console]::CursorVisible = $true 
                 }
             }
             if (-not $buffer) {
@@ -736,7 +756,7 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 27 -or $key.VirtualKeyCode -eq 37) {
             # 27 = Escape key
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
-            Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
+            #Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
             return "ESCAPE"
         }
 
@@ -745,7 +765,7 @@ function Start-Navigation {
             [System.Console]::CursorVisible = $true 
             Set-CursorPosition -X $PromptPosition.x -Y $PromptPosition.y
             $buffer = $buffer + $key.Character.ToString().ToUpperInvariant()
-            write-host $buffer -NoNewline
+            write-host2 $buffer -NoNewline -ForegroundColor Yellow
             if ($buffer) {
                 $i = 0
                 foreach ($menuItem in $menuItems) {
