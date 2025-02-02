@@ -384,6 +384,18 @@ function Select-ConfigMenu {
             "t" { Select-ToolsMenu }
             "P" { Select-PasswordMenu }
             "u" { Install-HostToServer2025 }
+            "#" {
+                if ($common.DevBranch) {
+                    & git checkout main
+                    Write-Host "Your branch is now main. Please close this window and restart the shortcut."
+                    exit 0
+                }
+                else {
+                    & git checkout develop
+                    Write-Host "Your branch is now develop. Please close this window and restart the shortcut."
+                    exit 0
+                }
+            }
             Default {}
         }
         if ($SelectedConfig) {
@@ -455,7 +467,18 @@ function Select-VMMenu {
       
     }
 }
-
+function List-VMsInDomain {
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
+        [string] $DomainName
+    )
+    Write-Log -Activity "$domain Resources"
+    $vmsInDomain = get-list -type vm  -DomainName $domain
+    if (-not $vmsInDomain) {
+        return
+    }
+    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+}
 function Select-DomainMenu {
 
     # Write-Log -Activity "Domain Management Menu" -NoNewLine
@@ -481,17 +504,11 @@ function Select-DomainMenu {
     Write-Verbose "2 Select-DomainMenu"
     while ($true) {
 
-        Write-Log -Activity "$domain Resources"
-        $vmsInDomain = get-list -type vm  -DomainName $domain
-        if (-not $vmsInDomain) {
-            return
-        }
-        ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
-        #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
+       
 
-        Write-log -Activity "Domain Management Menu" -NoNewLine
 
         $customOptions = [ordered]@{
+            "*F1" = "List-VMsInDomain -DomainName $domain" 
             "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
             "1"   = "Start VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
             "2"   = "Stop VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
@@ -5052,7 +5069,7 @@ function get-VMString {
 
     $name = "$machineName " + $("[" + $($virtualmachine.role) + "]").PadRight(17, " ")
     if ($virtualMachine.memory) {
-        if ($virtualMachine.dynamicMinRam -and ($($virtualMachine.dynamicMinRam)/1) -lt ($($virtualMachine.memory)/1)) {
+        if ($virtualMachine.dynamicMinRam -and ($($virtualMachine.dynamicMinRam) / 1) -lt ($($virtualMachine.memory) / 1)) {
             $mem = $($($virtualMachine.dynamicMinRam) + "-" + $($virtualMachine.memory)).PadLeft(4, " ") 
         }
         else {
