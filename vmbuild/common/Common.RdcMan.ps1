@@ -299,7 +299,7 @@ function New-RDCManFileFromHyperV {
             Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
             $p = Get-Process -Name rdcman -ea Ignore
             if ($p) {
-                $p | Stop-Process
+                $p | Stop-Process -force
                 $killedAlready = $true
             }
             Start-Sleep 1

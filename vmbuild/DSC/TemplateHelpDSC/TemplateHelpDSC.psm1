@@ -2151,6 +2151,11 @@ class AddUserToLocalAdminGroup {
     [string] $NetbiosDomainName
 
     [void] Set() {
+        if ($(Test-ComputerSecureChannel) -eq $False) { 
+            Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+        }
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
         $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name

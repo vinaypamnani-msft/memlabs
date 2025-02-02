@@ -730,7 +730,7 @@ function Start-Navigation {
                     $i = 0
                     foreach ($menuItem in $menuItems) {
                         if ($menuItem.ItemName) {
-                            if ($menuItem.ItemName.ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
+                            if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
                                 $selectedIndex = $i
                                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex
                                 break
