@@ -876,7 +876,6 @@ function Get-VMFixes {
 
     $Fix_CleanupSQL = {
 
-
         $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
         if ($os) {
             if ($os.Producttype -eq 1) {
