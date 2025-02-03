@@ -3403,7 +3403,12 @@ function Install-Tools {
             foreach ($tool in $Common.AzureFileList.Tools) {
 
                 $i++
+                if ($TotalCount -gt 0) {
                 $percent = [Math]::Round(($i / $TotalCount) * 100)
+                }
+                else {
+                    $percent = 100
+                }
                 #SkipAutoDeploy is set when cmoptions.PrePopulateObjects is true
                 if ($SkipAutoDeploy) {
                     if ($tool.Appinstall -eq $true) {
