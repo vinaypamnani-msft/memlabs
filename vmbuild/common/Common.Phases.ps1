@@ -9,11 +9,12 @@ function Write-JobProgress {
         $latestActivity = $null
         $latestStatus = $null
         #Make sure the first child job exists
-        if ($null -ne $job -and $null -ne $Job.ChildJobs -and $null -ne $Job.ChildJobs[0].Progress) {
+        $childJobs = $Job.ChildJobs
+        if ($null -ne $job -and $null -ne $childJobs -and $null -ne $childJobs.Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
-            $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            $lastProgress = $childJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -125,7 +126,10 @@ function Start-NormalJobs {
     param (
         [object]$machines,
         [object]$scriptBlock,
-        [object]$phase
+        [object]$phase,
+        [Object]$argument1,
+        [Object]$argument2,
+        [Object]$argument3
     )
 
     [System.Collections.ArrayList]$jobs = @()
@@ -146,7 +150,13 @@ function Start-NormalJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
+        if ($argument1) {
+        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+        } 
+        else {
+            $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        }
         if (-not $job) {
             Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++

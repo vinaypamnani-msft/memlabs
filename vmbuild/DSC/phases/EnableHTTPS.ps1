@@ -76,6 +76,10 @@ if (-not (Test-Path $CertPath)) {
 do {
     $attempts++   
     Write-DscStatus "Enable HTTPS"
+    $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+    if ($prop.Value -eq 1472 -or $prop.Value -eq 63) {
+        break
+    }
     if ($isCas) {
         $NameSpace = "ROOT\SMS\site_$SiteCode"
         #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:

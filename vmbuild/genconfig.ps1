@@ -63,45 +63,23 @@ Function Select-ToolsMenu {
         switch ($response.ToLowerInvariant()) {
             "1" {
                 while ($true) {
-                    $customOptions2 = [ordered]@{"A" = "All Tools" }
+                    #$customOptions2 = [ordered]@{"A" = "All Tools" }
                     $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
                     #Write-Log -SubActivity "Tool Selection"
-                    $tool = Get-Menu2 -MenuName "Tool Selection" -Prompt "Select tool to Install" -OptionArray $toolList -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -CurrentValue "A"
+                    $tool = Get-Menu2 -MenuName "Tool Selection" -Prompt "Select tool to Install" -OptionArray $toolList -NoNewLine -test:$false -return -MultiSelect
                     if (-not $tool -or $tool -eq "ESCAPE") {
                         break
                     }
                     while ($true) {
-                        $customOptions2 = [ordered]@{"A" = "All VMs" }
+                        #$customOptions2 = [ordered]@{"A" = "All VMs" }
                         $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
                         #Write-Log -SubActivity "Tool deployment VM Selection"
-                        $vmName = Get-Menu2 -MenuName "$tool deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -CurrentValue "A"
+                        $vmName = Get-Menu2 -MenuName "$($tool -join ",") deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -MultiSelect
                         if (-not $vmName -or $vmName -eq "ESCAPE") {
                             break
                         }
-            
 
-                        #All VMs
-                        if ($vmName -eq "A") {
-                            if ($tool -eq "A") {
-                                #All Tools
-                                Get-tools -Inject | out-null
-                            }
-                            else {
-                                #Specific Tool
-                                Get-Tools -Inject -ToolName $tool
-                            }
-                        } #Specific VM
-                        else {
-                            if ($tool -eq "A") {
-                                #all Tools
-                                Get-Tools -Inject -vmName $vmName
-                            }
-                            else {
-                                #Specific Tool
-                                Get-Tools -Inject -vmName $vmName -ToolName $tool
-                            }
-                        }
-
+                        Get-Tools -Inject -vmName $vmName -ToolName $tool                       
                     }            
                 }
 
@@ -110,27 +88,21 @@ Function Select-ToolsMenu {
                 while ($true) {
                     $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
                     #Write-Log -SubActivity "Optional Tool Selection"
-                    $tool = Get-Menu2 -MenuName "Optional Tool Selection" -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return -CurrentValue "A"
+                    $tool = Get-Menu2 -MenuName "Optional Tool Selection" -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return -MultiSelect
                     if (-not $tool -or $tool -eq "ESCAPE") {
                         break
                     }
                     while ($true) {
-                        $customOptions2 = [ordered]@{"A" = "All VMs listed above" }
+                        #$customOptions2 = [ordered]@{"A" = "All VMs listed above" }
                         $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
                         #Write-Log -SubActivity "Optional Tool deployment VM Selection"
-                        $vmName = Get-Menu2 -MenuName  "$tool deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -CurrentValue "A"
+                        $vmName = Get-Menu2 -MenuName  "$($tool -join ",") Optional deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -MultiSelect
                         if (-not $vmName -or $vmName -eq "ESCAPE") {
                             break
                         }
-                        if ($vmName -eq "A") {
-                            foreach ($vmName in $runningVMs) {
-                                Get-Tools -Inject -ToolName $tool -vmName $vmName
-
-                            }
-                        }
-                        else {
-                            Get-Tools -Inject -ToolName $tool -vmName $vmName
-                        }
+                        
+                        Get-Tools -Inject -ToolName $tool -vmName $vmName
+                        
                     }
                 }
 
@@ -1427,7 +1399,7 @@ function Select-NewDomainConfig {
         DefaultClientOS     = "Windows 11 Latest"
         DefaultServerOS     = "Server 2022"
         DefaultSqlVersion   = "Sql Server 2022"
-        UseDynamicMemory    = $false
+        UseDynamicMemory    = $true
         IncludeClients      = $true
         IncludeSSMSOnNONSQL = $true
     }

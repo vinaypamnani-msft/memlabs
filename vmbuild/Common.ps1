@@ -3201,9 +3201,9 @@ function Get-Tools {
         [Parameter(Mandatory = $false, HelpMessage = "Force redownloading the file, if it exists.")]
         [switch]$ForceDownloadFiles,
         [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
-        [string]$VmName,
+        [object]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Optional Tool Name.")]
-        [string]$ToolName,
+        [object]$ToolName,
         [Parameter(Mandatory = $false)]
         [switch]$UseCDN,
         [Parameter(Mandatory = $false)]
@@ -3216,10 +3216,15 @@ function Get-Tools {
 
     $allSuccess = $true
 
-    if ($ToolName -and $Common.AzureFileList.Tools.Name -notcontains $ToolName) {
-        Write-Log "Invalid Tool Name ($ToolName) specified." -Warning
+
+    $ToolName | Where-Object { $_ -NotIn $Common.AzureFileList.Tools.Name -or (-not $_) } | ForEach-Object {
+        Write-Log "Invalid Tool Name ($_) specified." -Warning
         return $false
     }
+    #if ($ToolName -and $Common.AzureFileList.Tools.Name -notcontains $ToolName) {
+    #    Write-Log "Invalid Tool Name ($ToolName) specified." -Warning
+    #    return $false
+    #}
 
     if ($VmName) {
         $Inject = $true
@@ -3228,7 +3233,8 @@ function Get-Tools {
     Write-Log "Downloading/Verifying Tools that need to be injected in Virtual Machines..." -Activity
     foreach ($tool in $Common.AzureFileList.Tools) {
 
-        if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+
+        if ($ToolName -and ($tool.Name -NotIn $ToolName)) { continue }
 
         if (-not $ToolName -and $tool.Optional -and -not $IncludeOptional.IsPresent) { 
             if (-not $tool.Roles) {
@@ -3302,11 +3308,14 @@ function Get-Tools {
         Write-Log "Injecting $ToolName to $VmName..." -Activity
         $HashArguments = @{
             WhatIf          = $WhatIf
-            IncludeOptional = $IncludeOptional
+            IncludeOptional = $IncludeOptional            
         }
 
         if ($VmName) { $HashArguments.Add("VmName", $VmName) }
-        if ($ToolName) { $HashArguments.Add("ToolName", $ToolName) }
+        if ($ToolName) { 
+            $HashArguments.Add("ToolName", $ToolName) 
+            $HashArguments.Add("Force", $true) 
+        }
         $HashArguments.Add("ShowProgress", $true)
         $injected = Install-Tools @HashArguments
 
@@ -3323,9 +3332,9 @@ function Install-Tools {
 
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Optional VM Name.")]
-        [string]$VmName,
+        [object]$VmName,
         [Parameter(Mandatory = $false, HelpMessage = "Optional ToolName Name.")]
-        [string]$ToolName,
+        [object]$ToolName,
         [Parameter(Mandatory = $false)]
         [switch]$IncludeOptional,
         [Parameter(Mandatory = $false)]
@@ -3333,25 +3342,46 @@ function Install-Tools {
         [Parameter(Mandatory = $false)]
         [boolean]$SkipAutoDeploy = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$Force
     )
 
-    Write-Log "Install-Tools called. ${$VmName}"
+    Write-Log "Install-Tools called. $($VmName) $($ToolName -join ",")"
     if ($VmName) {
-        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+        $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -in $VmName }
     }
     else {
         $allVMs = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmbuild -eq $true } | Sort-Object -Property State -Descending
     }
 
     $success = $true
-    foreach ($vm in $allVMs) {
 
+    $InjectToolsScriptBlock = {
+        param (  
+            [object] $vm,                      
+            [array] $ToolName,
+            [boolean] $force = $true,
+            [boolean] $SkipAutoDeploy = $false,
+            [string] $ScriptRoot
+        )
+
+        #$rootPath = Split-Path $ScriptRoot -Parent
+        if (test-path $ScriptRoot\Common.ps1) {
+            . $ScriptRoot\Common.ps1 -InJob
+        }
+        else {
+            $rootPath = Split-Path $ScriptRoot -Parent
+            . $rootPath\Common.ps1 -InJob
+        }
+
+        $ToolName = $ToolName | ForEach-Object { $_ }
+        $TotalCount = $ToolName.Count
+        $success = $true
         if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
         if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
 
         $vmName = $vm.vmName
-        Write-Log "$vmName`: Injecting Tools to C:\tools directory inside the VM" -Activity
+        Write-Log "$vmName`: Injecting Tools $($ToolName -join ",") to C:\tools directory inside the VM" -Activity
 
         # Get VM Session
         if ($vm.State -ne "Running") {
@@ -3364,22 +3394,23 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             continue
         }
-        $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
-        if ($out.ScriptBlockOutput -ne $true) {
+        if (-not $Force) {
+            $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        }
+        if ($Force -or $out.ScriptBlockOutput -ne $true) {
+            $i = 0
+            $ToolList = @()
             foreach ($tool in $Common.AzureFileList.Tools) {
 
-                if ($ShowProgress) {
-                    Write-Progress2 "Injecting tools" -Status "Preparing to Inject $($tool.Name) to $VmName"
-                }
+                $i++
+                $percent = [Math]::Round(($i / $TotalCount) * 100)
                 #SkipAutoDeploy is set when cmoptions.PrePopulateObjects is true
                 if ($SkipAutoDeploy) {
                     if ($tool.Appinstall -eq $true) {
                         if ($vm.operatingSystem.Contains("Windows 1")) {
                             if ($vm.Role -eq "DomainMember") {
                                 #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. dont add it to tools
-                                if ($ShowProgress) {
-                                    Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM"
-                                }
+                                Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM" -Log
                                 continue
                                 
                             }
@@ -3387,53 +3418,98 @@ function Install-Tools {
                     }
                 }
 
-                if ($tool.NoUpdate) { continue }
+                if (-not $ToolName -and $tool.NoUpdate) { 
+                    Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
+                    continue 
+                }
 
-                if ($ToolName -and $tool.Name -ne $ToolName) { continue }
+                if ($ToolName -and $tool.Name -NotIn $ToolName) { 
+                    Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's not in the list." -Verbose
+                    continue 
+                }
 
+                #Write-Progress2 "Injecting tools" -Status "Preparing to Inject $($tool.Name) to $VmName" -Log
+                
                 $stop = $true
                 if (-not $ToolName -and ($tool.Optional -and -not $IncludeOptional.IsPresent)) { 
                     if ($tool.Roles) {
                         if ($vm.Role -in $tool.Roles) {     
-                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop1 False)"                       
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop1 False)" -Log                       
                             $stop = $false
                         }
                         if ($vm.InstallSUP -and "WSUS" -in $tool.Roles) {
-                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop2 False)"                       
+                            Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName (Stop2 False)"  -Log                     
                             $stop = $false
                         }
                     }
                     if ($stop) {
                         continue 
-                    }
-                   
+                    } 
                 }
 
-                if ($ShowProgress) {
-                    Write-Progress2 "Injecting tools" -Status "Injecting $($tool.Name) to $VmName"
-                }
-
-                $worked = Copy-ToolToVM -Tool $tool -VMName $vm.vmName -WhatIf:$WhatIf
-                if (-not $worked) {
-                    $success = $false
-                    if ($ShowProgress) {
-                        Write-Progress2 "Injecting tools" -Status "Failed to Inject $($tool.Name) to $VmName"
-                    }
-                }
-                else {
-                    if ($ShowProgress) {
-                        Write-Progress2 "Injecting tools" -Status "Injected $($tool.Name) to $VmName"
-                    }
-                }
+                $ToolList += $tool
+                #Write-Progress2 "Injecting tool" -Status "Injecting $($tool.Name) to $($vm.vmName)" -Log -percentcomplete $percent                
+                
             }
+            $fast = $true
+            if ($vm.operatingSystem -like "*2016*") 
+            {
+                $fast = $false
+            }
+            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast
+            if (-not $worked) {
+                $success = $false
+                Write-Progress2 "Injecting tools" -Status "Failed to Inject at least one tool to $VmName" -Log
+                Write-Log "$vmName`: Failed to inject at least one tool" -Failure -OutputStream
+                start-sleep -seconds 5
+                    
+            }
+            else {                    
+                #Write-Progress2 "Injecting tools" -Status "Injected $($tool.Name) to $VmName" -Log
+                Write-Log "$vmName`: Successfully injected '$($ToolList.Name -Join ",")'" -Success
+                    
+            }
+
+            if ($success) {
+                Write-Progress2 "Injecting tools" -Status "All Tools successfully copied to  $VmName" -Log -Completed
+                return $true
+            }
+            else {
+                Write-Progress2 "Injecting tools" -Status "All Tools copied to $VmName, but at least 1 has failed." -Log -Completed
+                return $false
+            }
+        }
+        
+    }
+    Write-Log -Verbose "Injecting Tools $($ToolName -join ",") to Virtual Machines $($allVMs.vmName -join ",")"
+    if ($allVMs.Count -gt 1) {
+        $start = Start-NormalJobs -machines $allVMs -ScriptBlock $InjectToolsScriptBlock -Phase "Tool Install" -argument1 $ToolName -argument2 $force -argument3 $SkipAutoDeploy
+
+        $result = Wait-Phase -Phase "Tool Install" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+
+        if ($ShowProgress) {
+            $countWorked = $result.Success
+            $countFailed = $result.Failed
+            
+            Write-Host
+            Write-Log "Finished Injecting Tools. Success: $countWorked; Failures: $countFailed" -SubActivity
+    
+            Write-Progress2 "Injecting tools Completed. Success: $countWorked; Failures: $countFailed" -Status "Done" -Completed
+        }
+        $success = ($result.Failed -eq 0)
+    }
+    else {
+        $success = $InjectToolsScriptBlock.Invoke($allVMs[0], $ToolName, $force, $SkipAutoDeploy, $PSScriptRoot)
+        if ($ShowProgress) {
+            
+            Write-Log "Finished Injecting Tools. Success: $success" -SubActivity
+    
+            Write-Progress2 "Injecting tools Completed. Success: $success" -Status "Done" -Completed
         }
     }
 
-    Write-Host2
-
-    if ($ShowProgress) {
-        Write-Progress2 "Injecting tools" -Status "Done" -Completed
-    }
+   
+    $success = ($result.Failed -eq 0)
     return $success
 }
 
@@ -3444,7 +3520,9 @@ function Copy-ToolToVM {
         [Parameter(Mandatory = $true, HelpMessage = "VM Name to inject tool in.")]
         [string]$VMName,
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [Parameter(Mandatory = $false, HelpMessage = "Fast.. Might hang.")]
+        [switch]$Fast
     )
 
     $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
@@ -3459,68 +3537,83 @@ function Copy-ToolToVM {
         return $false
     }
 
-    if ($tool.NoUpdate -eq $true) {
-        Write-Log "$vmName`: Skipped injecting '$($tool.Name) since it's marked NoUpdate." -Verbose
-        return $true
-    }
-
-    $toolFileName = Split-Path $tool.url -Leaf
-    if ($toolFileName.Contains("?")) {
-        $toolFileName = $toolFileName.Split("?")[0]
-    }
-    $fileTargetRelative = Join-Path $tool.Target $toolFileName
-
-    Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
-
-    if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
-        Write-Log "$vmName`: File is marked to extract '$($tool.Name) since ExtractFolderIfZip is true" -Verbose
-        $fileTargetRelative = $tool.Target
-    }
-
-    $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
-    $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
-    $DirTargetPathInVM = Join-Path "C:\" $tool.Target
-
-    $isContainer = $false
-    if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
-        $isContainer = $true
-        $fileTargetPathInVM = "C:\tools"
-    }
-
-    if ($tool.Name -eq "WMI Explorer") {
-        $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
-        $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
-        $DirTargetPathInVM = "C:\$fileTargetRelative"
-    }
-
-    Write-Log "$vmName`: Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
-
-    try {
-        $progressPref = $ProgressPreference
-        $ProgressPreference = "SilentlyContinue"
-        try {
-            Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+    $success = $true
+    foreach ($ToolItem in $Tool) {
+        if ($ToolItem.NoUpdate -eq $true) {
+            Write-Log "$vmName`: Skipped injecting '$($ToolItem.Name) since it's marked NoUpdate." -Verbose
+            continue
         }
-        catch {}
-        if ($isContainer) {
-            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+
+        $toolFileName = Split-Path $ToolItem.url -Leaf
+        if ($toolFileName.Contains("?")) {
+            $toolFileName = $toolFileName.Split("?")[0]
+        }
+        $fileTargetRelative = Join-Path $ToolItem.Target $toolFileName
+
+        Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
+
+        if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $ToolItem.ExtractFolderIfZip) {
+            Write-Log "$vmName`: File is marked to extract '$($ToolItem.Name) since ExtractFolderIfZip is true" -Verbose
+            $fileTargetRelative = $ToolItem.Target
+        }
+
+        $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+        $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
+        $DirTargetPathInVM = Join-Path "C:\" $ToolItem.Target
+
+        $isContainer = $false
+        if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
+            $isContainer = $true
+            $fileTargetPathInVM = "C:\tools"
+        }
+
+        if ($ToolItem.Name -eq "WMI Explorer") {
+            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
+            $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
+            $DirTargetPathInVM = "C:\$fileTargetRelative"
+        }
+
+        Write-Log "$vmName`: Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+
+        if ($Fast) {
+            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName) (Fast mode)" -Log -percentcomplete $percent               
         }
         else {
-            Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-            #Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName)" -Log -percentcomplete $percent
         }
-        Write-Log "$vmName`: Done Injecting '$($tool.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+        try {
+            $progressPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            try {
+                Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+            }
+            catch {}
+            if ($isContainer) {
+                if ($Fast) {
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+                }else {
+                    Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
+                }                
+            }
+            else {
+                if ($Fast) {
+                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop                
+                }
+                else {
+                    Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
+                }
+            }
+            Write-Log "$vmName`: Done Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+        }
+        catch {
+            Write-Log "$vmName`: Failed to inject '$($ToolItem.Name)'. $_" -Failure
+            $success = $false
+        }
+        finally {
+            $ProgressPreference = $progressPref
+        }
     }
-    catch {
-        Write-Log "$vmName`: Failed to inject '$($tool.Name)'. $_" -Failure
-        return $false
-    }
-    finally {
-        $ProgressPreference = $progressPref
-    }
-
-    return $true
+    return $success
 }
 
 function Copy-LanguagePacksToVM {
@@ -4231,6 +4324,7 @@ if (-not $Common.Initialized) {
             LatestHotfixVersion   = "250107.0"
             PS7                   = $PS7
             Initialized           = $true
+            InJob                 = $InJob
             TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
             ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
             # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files

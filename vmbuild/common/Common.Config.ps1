@@ -1676,9 +1676,11 @@ function Get-VMFromHyperV {
     )
 
     #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-    $sizeCache = Get-VMSizeCached -vm $vm
-    $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
-    $diskSizeGB = $sizeCache.diskSize / 1GB
+    if (-not $common.InJob) {
+        $sizeCache = Get-VMSizeCached -vm $vm
+        $diskSizeGB = $sizeCache.diskSize / 1GB
+        $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
+    }       
 
     if (-not $memoryStartupGB) {
         $memoryStartupGB = 0

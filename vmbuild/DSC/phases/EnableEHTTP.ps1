@@ -47,6 +47,12 @@ while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction Si
 # Set the current location to be the site code.
 Set-Location "$($SiteCode):\" @initParams
 
+
+$prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+if ($prop.value -in (63, 1472, 1504)){
+    return
+}
+
 # Enable EHTTP, some components are still installing and they reset it to Disabled.
 # Keep setting it every 30 seconds, 10 times and bail...
 $enabled = $false
@@ -58,7 +64,7 @@ if (-not $FirstRun) {
     $attempts = $maxAttempts
 }
 else {
-
+   
     #Hack.. Set to HTTPS first, then back to EHTTP (First Run only):
 
     if ($isCas) {

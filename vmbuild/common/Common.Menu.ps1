@@ -332,7 +332,9 @@ function Write-Option {
         [Parameter(Mandatory = $false, HelpMessage = "Description Color")]
         [object] $color,
         [Parameter(Mandatory = $false, HelpMessage = "Option Color")]
-        [object] $color2
+        [object] $color2,
+        [switch] $MultiSelect = $false,
+        [switch] $MultiSelected = $false
     )
 
     if ($null -eq $color) {
@@ -342,9 +344,26 @@ function Write-Option {
     if ($null -eq $color2) {
         $color2 = $color
     }
-    write-host "[" -NoNewline
+    if ($MultiSelect) {
+        $optionInt = $option -as [int]
+        if ($optionInt) {                    
+            write-host2 "[" -NoNewline -ForegroundColor Yellow
+            if ($MultiSelected) {
+                $CHECKMARK = ([char]8730)
+                Write-Host2 -ForegroundColor green $CHECKMARK -NoNewline
+            }
+            else {
+                Write-Host2 -ForegroundColor Yellow " " -NoNewline
+            }
+            write-host2 "] " -NoNewline -ForegroundColor Yellow
+        }
+        else {
+            write-host "    " -NoNewline
+        }
+    }
+    write-host2 "[" -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     Write-Host2 -ForegroundColor $color2 $option -NoNewline
-    Write-Host "] ".PadRight(4 - $option.Length) -NoNewLine
+    Write-Host2 "] ".PadRight(4 - $option.Length) -NoNewLine -ForegroundColor $Global:Common.Colors.GenConfigBrackets
 
     Write-ColorizedBrackets -ForeGroundColor $color $text
     write-host

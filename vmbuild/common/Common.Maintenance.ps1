@@ -108,7 +108,7 @@ function Start-Maintenance {
     #    }
     #}
 
-    $countWorked = $result.Worked
+    $countWorked = $result.Success
     $countFailed = $result.Failed
           
 
@@ -563,7 +563,7 @@ function Get-VMFixes {
         $props = $component.Props
         $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
         $value = $props[$index].Value    
-        $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63)
+        $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63) -or ($value -eq 1472) -or ($value -eq 1504)
         if (-not $enabled) {
             Write-Host  "IISSSLSTATE $value is not correct.. Updated for EHTTP"
             $props[$index].Value = 1024
