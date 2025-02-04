@@ -611,7 +611,7 @@ function Show-Menu {
             $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
         }
         else {
-            $prompt = "No Selections.  Press Left or Escape to exit"
+            $prompt = "No Selections.  Press Left/Enter or Escape to exit"
         }
         #$currentValue = "T"
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
@@ -780,7 +780,7 @@ function Start-Navigation {
             if ($NumSelectable -eq 0) {
                 return "ESCAPE"
             }
-            
+
             if ($MultiSelect) {
                 $optionInt = ($($menuItems[$selectedIndex].ItemName) -as [int])
                 if ($optionInt) {                

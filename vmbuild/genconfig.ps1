@@ -258,7 +258,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"4" = '$HIDDEN'; }
-            $customOptions += [ordered]@{"X" = "Load TEST config from File%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+            $customOptions += [ordered]@{"X" = "Load TEST config from File (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
         }
 
 
@@ -774,7 +774,7 @@ function Select-MainMenu {
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
-            $preOptions += [ordered]@{"C" = "Global SCCM Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+            $preOptions += [ordered]@{"C" = "Global ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         }
         
         $customOptions = [ordered]@{}
