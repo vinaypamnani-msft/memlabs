@@ -742,10 +742,12 @@ function Start-Navigation {
 
     $i = 0
     $selectedIndex = 0
+    $NumSelectable = 0
     $ValidChars = @()
     foreach ($menuItem in $menuItems) {
         if ($null -ne $menuItem.itemName -and $menuItem.Selectable) {
             $ValidChars += $menuItem.itemName.ToString().Substring(0, 1).ToUpperInvariant()
+            $NumSelectable++
         }
 
         if ($menuItem.Selected) {
@@ -775,6 +777,10 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
 
+            if ($NumSelectable -eq 0) {
+                return "ESCAPE"
+            }
+            
             if ($MultiSelect) {
                 $optionInt = ($($menuItems[$selectedIndex].ItemName) -as [int])
                 if ($optionInt) {                

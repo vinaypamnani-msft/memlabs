@@ -244,7 +244,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
         $customOptions += [ordered]@{ "*B0" = "---  Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
         if ($domainCount -gt 0) {
-            $customOptions += [ordered]@{ "1" = "Create New Domain or Expand Existing domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "1" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
             #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
         }
         else {
