@@ -1562,6 +1562,14 @@ Function Get-ConfigFiles {
     return $files
 }
 
+function Show-ConfigLegend {
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
+    Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"
+    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNormal   "  == Normal - Not Deployed - Needs existing domain" 
+    Write-Host2
+}
+
 # Gets the json files from the config\samples directory, and offers them up for selection.
 # if 'M' is selected, shows the json files from the config directory.
 function Select-Config {
@@ -1584,10 +1592,7 @@ function Select-Config {
     $responseValid = $false
     while ($responseValid -eq $false) {
         $optionArray = @()
-        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
-        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
-        Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"
-        Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNormal   "  == Normal - Not Deployed - Needs existing domain"   
+
 
         If ($SortByName) {
             Write-Log -SubActivity "Viewing config files located in $ConfigPath -- Sorted by Name"
@@ -1665,7 +1670,8 @@ function Select-Config {
         else {
             $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $response = Get-Menu2 -MenuName "Select Config File to load" -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
+        $preOptionsArray = [ordered]@{"*F5" = "Show-ConfigLegend" }
+        $response = Get-Menu2 -MenuName "Select Config File to load" -prompt "Which config do you want to load" -preOptions $preOptionsArray -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
         if ($response.ToLowerInvariant() -eq "s") {
             $SortByName = !$SortByName

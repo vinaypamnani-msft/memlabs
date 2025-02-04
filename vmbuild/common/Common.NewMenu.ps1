@@ -542,7 +542,7 @@ function Show-Menu {
     While ($true) {
 
         if ($operation -eq "PGUP") {
-            foreach ($menuitem in $menuItems){
+            foreach ($menuitem in $menuItems) {
                 $menuitem.Displayed = $false
             }
             $operation = ""
@@ -594,7 +594,7 @@ function Show-Menu {
                     continue
                 }
                 if (-not $menuItem.Displayed -and $menuItem.Selectable) {
-                    $operation = ""
+                    $operation = "PGDNDone"
                 }
             }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
@@ -606,16 +606,18 @@ function Show-Menu {
             Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
             if ($menuItem.Function) {
-                if (-not $Maxshrink) {
-                    Invoke-Expression -Command $menuItem.Function
-                }
+               
+                Invoke-Expression -Command $menuItem.Function
+                
                 continue
             }
-            if ($menuItem.Selected) {
-                Write-Host "-> " -ForegroundColor Yellow -NoNewline
-            }
-            else {
-                Write-Host "   " -ForegroundColor Cyan -NoNewline
+            if ($menuitem.Selectable) {
+                if ($menuItem.Selected) {
+                    Write-Host "-> " -ForegroundColor Yellow -NoNewline
+                }
+                else {
+                    Write-Host "   " -ForegroundColor Cyan -NoNewline
+                }
             }
 
         
@@ -648,6 +650,10 @@ function Show-Menu {
         #$currentValue = "T"
         if (-not $Maxshrink) {
             Write-Host ""
+        }
+        if ($Operation -eq "PGDNDone") {
+            $Operation = ""
+            Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition       
