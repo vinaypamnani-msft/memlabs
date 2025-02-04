@@ -270,6 +270,7 @@ function Get-MenuItems {
                 Selected      = $false
                 Function      = $null
                 MultiSelected = $false
+                Displayed     = $false
             }
 
 
@@ -463,7 +464,7 @@ function Get-Menu2 {
         $ReturnValue = @($response | Select-Object -ExpandProperty Text)
         $Global:MenuHistory[$menuName] = $ReturnValue
         write-log -verbose "[MenuHistory] [Array] Setting $menuName to $ReturnValue with $($ReturnValue.Count) items"
-        $returnValue = @($ReturnValue | ForEach-Object {$_})
+        $returnValue = @($ReturnValue | ForEach-Object { $_ })
         return $returnValue
     }
     else {
@@ -537,8 +538,15 @@ function Show-Menu {
         [Switch]$MultiSelect = $false
 
     )
+    $Operation = ""
     While ($true) {
 
+        if ($operation -eq "PGUP") {
+            foreach ($menuitem in $menuItems){
+                $menuitem.Displayed = $false
+            }
+            $operation = ""
+        }
 
         $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
@@ -551,6 +559,7 @@ function Show-Menu {
 
         if (-not $NoClear) {
             Write-Host "`e[2J`e[H"
+            $NoClear = $true
         }
 
         Write-Log -Activity $menuName
@@ -577,8 +586,17 @@ function Show-Menu {
             $Maxshrink = $true
         }
         $CurrentPosition = Get-CursorPosition
-        $MenuStart = $CurrentPosition.Y
+        $MenuStart = $CurrentPosition.Y        
         foreach ($menuItem in $menuItems) {
+            if ($operation -eq "PGDN") {
+                if ($menuItem.Displayed -and $menuItem.Selectable) {
+                    $menuItem.Displayed = $false
+                    continue
+                }
+                if (-not $menuItem.Displayed -and $menuItem.Selectable) {
+                    $operation = ""
+                }
+            }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
             if ($RoomLeft -le 2) {
                 Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
@@ -606,6 +624,7 @@ function Show-Menu {
             if ($menuItem.Selectable) {    
                 Set-CursorPosition -x 3 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line       
                 Write-Option $menuItem.itemName $menuItem.Text -color $menuItem.Color1 -Color2 $menuItem.Color1 -MultiSelect:$MultiSelect -MultiSelected:$menuItem.MultiSelected
+                $menuItem.Displayed = $true
             }
             else {
                 if ($Maxshrink) {
@@ -635,7 +654,14 @@ function Show-Menu {
 
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -MultiSelect:$MultiSelect
         if ($return) {
-            return $return
+            if ($return.Action) {
+                $operation = $return.Action
+                write-log -verbose "OP: $operation"
+                #Start-Sleep -seconds 1
+            }
+            else {
+                return $return
+            }
         }
     }
 
@@ -654,6 +680,9 @@ function Set-PointerDisplayAsPerMenu {
     )
 
     for ($i = 0; $i -lt $menuItems.Count; $i++) {
+        if (-not ($menuItems[$i].Displayed)) {
+            continue
+        }
         Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
         if ($i -eq $selectedIndex) {
             $menuItems[$i].Selected = $true
@@ -793,16 +822,16 @@ function Start-Navigation {
         }
         # Handle the key stroke
 
-        if ($key.VirtualKeyCode -eq 33) {
+        if ($key.VirtualKeyCode -eq 34) {
             $return = [PSCustomObject]@{
-                Name = "PGDN"
+                Action      = "PGDN"
                 CurrentMenu = $MenuItems
             }
             return $return
         }
-        if ($key.VirtualKeyCode -eq 34) {
+        if ($key.VirtualKeyCode -eq 33) {
             $return = [PSCustomObject]@{
-                Name = "PGUP"
+                Action      = "PGUP"
                 CurrentMenu = $MenuItems
             }
             return $return
@@ -887,7 +916,7 @@ function Start-Navigation {
             # If the selected index is greater than 0, move the selection up
             $buffer = $null
             $i = 0
-            while ($true) {
+            while ($true) {                
                 if ($i -gt $menuItems.Count) {
                     $selectedIndex = -1
                     break
@@ -899,7 +928,7 @@ function Start-Navigation {
                     # If already at the top, cycle to the bottom
                     $selectedIndex = $menuItems.Count - 1
                 }
-                if ($menuItems[$selectedIndex].Selectable) {
+                if ($menuItems[$selectedIndex].Selectable -and $menuItems[$selectedIndex].Displayed) {
                     break
                 }
                 $i++
@@ -924,7 +953,7 @@ function Start-Navigation {
                     # If already at the bottom, cycle to the top
                     $selectedIndex = 0
                 }
-                if ($menuItems[$selectedIndex].Selectable) {
+                if ($menuItems[$selectedIndex].Selectable -and $menuItems[$selectedIndex].Displayed) {
                     break
                 }
                 $i++
