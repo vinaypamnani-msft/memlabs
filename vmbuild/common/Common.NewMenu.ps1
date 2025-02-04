@@ -101,7 +101,8 @@ function Get-MenuItems {
         [Parameter(Mandatory = $false, HelpMessage = "Pre Menu options, in dictionary format.. X = Exit")]
         [object] $preOptions = $null,
         [object] $menuItems = $null,
-        [switch] $MultiSelect
+        [switch] $MultiSelect,
+        [switch] $AllSelected
     )
 
 
@@ -109,11 +110,12 @@ function Get-MenuItems {
         if ($Global:MenuHistory[$menuName]) {
             $currentItem = $Global:MenuHistory[$menuName]
             Write-Log -verbose "[MenuHistory] found '$($currentItem -join ",")' for '$menuName'"
+            $AllSelected = $false
         }              
     }
 
     $foundSelected = $false
-
+    $FoundMultiSelectItem = $false
     #Define an array of MenuItems
     if ($null -eq $menuItems) {
         $MenuItems = @()
@@ -122,6 +124,7 @@ function Get-MenuItems {
         $foundSelected = $true
     }
 
+    
     if ($null -ne $preOptions) {
         foreach ($item in $preOptions.keys) {
             $MenuItem = [PSCustomObject]@{
@@ -180,7 +183,8 @@ function Get-MenuItems {
                 }
                 $MenuItem.itemName = $item
                 $MenuItem.Text = $TextValue[0]
-                $MenuItems += $MenuItem                
+                $MenuItems += $MenuItem
+                             
             }
         }
     }
@@ -216,10 +220,15 @@ function Get-MenuItems {
                 }
                 if (-not $foundSelected) {
                     if ($MultiSelect) {
-                        if ($currentItem) {
-                            if ($TextValue[0] -in $currentItem ) {
-                                $MenuItem.MultiSelected = $true
-                            }                            
+                        if ($AllSelected) {
+                            $MenuItem.MultiSelected = $true                            
+                        }
+                        else {
+                            if ($currentItem) {
+                                if ($TextValue[0] -in $currentItem ) {
+                                    $MenuItem.MultiSelected = $true
+                                }                            
+                            }
                         }
                     }
                     else {
@@ -239,7 +248,8 @@ function Get-MenuItems {
                 }
                 $MenuItem.itemName = $i
                 $MenuItem.Text = $TextValue[0]
-                $MenuItems += $MenuItem                   
+                $MenuItems += $MenuItem   
+                $FoundMultiSelectItem = $true                   
             }
         }
     }
@@ -308,7 +318,7 @@ function Get-MenuItems {
         }
     }
 
-    if ($MultiSelect) {
+    if ($MultiSelect -and $FoundMultiSelectItem) {
         $MenuItem = [PSCustomObject]@{
             itemName      = "*B"
             Text          = $null              
@@ -420,7 +430,8 @@ function Get-Menu2 {
         [object] $menuItems = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Do Not clear the screen.. Dangerous")]
         [switch] $NoClear,
-        [switch] $MultiSelect
+        [switch] $MultiSelect,
+        [switch] $AllSelected
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -431,7 +442,7 @@ function Get-Menu2 {
     }
 
     if ($null -eq $menuItems) {
-        $menuItems = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect
+        $menuItems = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected
         Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
     }
    
@@ -441,16 +452,17 @@ function Get-Menu2 {
 
     $response = Show-Menu -menuItems $menuItems -menuName $MenuName -NoClear:$NoClear -MultiSelect:$MultiSelect
     if ($response -is [array] -or $response.MultiSelected) {
-        $response = @($response | Select-Object -ExpandProperty Text)
-        $Global:MenuHistory[$menuName] = $response
-        write-log "[MenuHistory] [Array] Setting $menuName to $response"
-        return $response
+        $ReturnValue = @($response | Select-Object -ExpandProperty Text)
+        $Global:MenuHistory[$menuName] = $ReturnValue
+        write-log -verbose "[MenuHistory] [Array] Setting $menuName to $ReturnValue with $($ReturnValue.Count) items"
+        $returnValue = @($ReturnValue | ForEach-Object {$_})
+        return $returnValue
     }
     else {
         if ($response.itemName) {
             $response = $response.itemName
             $Global:MenuHistory[$menuName] = $response   
-            write-log "[MenuHistory] Setting $menuName to $response"   
+            write-log -verbose "[MenuHistory] Setting $menuName to $response"   
         }
     }
     write-host
@@ -594,7 +606,13 @@ function Show-Menu {
         }   
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
-        $prompt = "Press Enter to select, Up/Down to navigate, ESC to exit"
+        $AnySelections = $menuItems | Where-Object { $_.Selectable }
+        if ($AnySelections) {
+            $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
+        }
+        else {
+            $prompt = "No Selections.  Press Left or Escape to exit"
+        }
         #$currentValue = "T"
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition       
@@ -754,7 +772,7 @@ function Start-Navigation {
             return
         }
         # Handle the key stroke
-        if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39) {
+        if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
 
             if ($MultiSelect) {
@@ -913,7 +931,7 @@ function Start-Navigation {
         
         if ($key.VirtualKeyCode -eq 27 -or $key.VirtualKeyCode -eq 37) {
             if ($MultiSelect) {
-                $Global:MenuHistory[$menuName] =  @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
+                $Global:MenuHistory[$menuName] = @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
             }
             else {
                 $Global:MenuHistory[$menuName] = $MenuItems[$selectedIndex].ItemName                

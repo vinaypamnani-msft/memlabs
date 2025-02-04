@@ -8,7 +8,7 @@ $global:Phase10Job = {
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
         # Get variables from parent scope
         $currentItem = $using:currentItem
@@ -96,7 +96,7 @@ $global:VM_Create = {
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
@@ -112,7 +112,7 @@ $global:VM_Create = {
 
         # Validate token exists
         if ($Common.FatalError) {
-            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
+            Write-Output "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
             return
         }
 
@@ -728,7 +728,7 @@ $global:VM_Config = {
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
@@ -746,7 +746,7 @@ $global:VM_Config = {
     try {
         # Validate token exists
         if ($Common.FatalError) {
-            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
+            Write-Output "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
             return
         }
 

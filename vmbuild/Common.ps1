@@ -4,7 +4,9 @@ param (
     [Parameter()]
     [switch]$InJob,
     [Parameter()]
-    [switch]$VerboseEnabled
+    [switch]$VerboseEnabled,
+    [Parameter()]
+    [switch]$DevBranch
 )
 
 ########################
@@ -763,7 +765,7 @@ function Copy-ItemSafe {
             # Dot source common
             $rootPath = $using:location
             #Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
-            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
@@ -3218,8 +3220,10 @@ function Get-Tools {
 
 
     $ToolName | Where-Object { $_ -NotIn $Common.AzureFileList.Tools.Name -or (-not $_) } | ForEach-Object {
-        Write-Log "Invalid Tool Name ($_) specified." -Warning
-        return $false
+        if (-not [String]::IsNullOrWhiteSpace($_)) {
+            Write-Log "Invalid Tool Name ($_) specified." -Warning
+            return $false
+        }
     }
     #if ($ToolName -and $Common.AzureFileList.Tools.Name -notcontains $ToolName) {
     #    Write-Log "Invalid Tool Name ($ToolName) specified." -Warning
@@ -3404,7 +3408,7 @@ function Install-Tools {
 
                 $i++
                 if ($TotalCount -gt 0) {
-                $percent = [Math]::Round(($i / $TotalCount) * 100)
+                    $percent = [Math]::Round(($i / $TotalCount) * 100)
                 }
                 else {
                     $percent = 100
@@ -3457,8 +3461,7 @@ function Install-Tools {
                 
             }
             $fast = $true
-            if ($vm.operatingSystem -like "*2016*") 
-            {
+            if ($vm.operatingSystem -like "*2016*") {
                 $fast = $false
             }
             $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast
@@ -3596,7 +3599,8 @@ function Copy-ToolToVM {
             if ($isContainer) {
                 if ($Fast) {
                     Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }else {
+                }
+                else {
                     Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
                 }                
             }
@@ -4257,7 +4261,7 @@ Function Set-TitleBar {
 if (-not $Common.Initialized) {
 
 
-    Write-Progress2 "Loading required modules." -Status "Please wait..." -PercentComplete 1
+    Write-Progress2 "MemLabs initializing" -Status "Please wait..." -PercentComplete 1
     $global:vm_remove_list = @()
     $global:init_failed = $false
     $global:AddHistoryLine = $null
@@ -4267,27 +4271,30 @@ if (-not $Common.Initialized) {
         ###################
         ### GIT BRANCH  ###
         ###################        
-        Write-Progress2 "Loading required modules." -Status "Checking Git Status" -PercentComplete 2
-        write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
-        $image = (Join-Path $PSScriptRoot "MemLabs.png")    
-        $devBranch = $false
-        try {
-            if ($pwd.Path -like '*memlabs*') {
-                $currentBranch = Get-BranchName
+        
+        $image = (Join-Path $PSScriptRoot "MemLabs.png")   
+        if (-not $PSBoundParameters.ContainsKey('DevBranch')) {
+            Write-Progress2 "MemLabs initializing" -Status "Checking Git Status" -PercentComplete 2
+            write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly            
+            $devBranch = $false
+            try {
+                if ($pwd.Path -like '*memlabs*') {
+                    $currentBranch = Get-BranchName
+                }
+                else {
+                    #Set the current location to the script root
+                    Set-Location -Path $PSScriptRoot
+                    $currentBranch = Get-BranchName
+                }
             }
-            else {
-                #Set the current location to the script root
-                Set-Location -Path $PSScriptRoot
-                $currentBranch = Get-BranchName
+            catch {}
+            if ($currentBranch -and $currentBranch -notmatch "main") {
+                $devBranch = $true
             }
-        }
-        catch {}
-        if ($currentBranch -and $currentBranch -notmatch "main") {
-            $devBranch = $true
-        }
 
-        if ($devBranch) {
-            $image = (Join-Path $PSScriptRoot "DevLabs.png")    
+            if ($devBranch) {
+                $image = (Join-Path $PSScriptRoot "DevLabs.png")    
+            }
         }
        
         # Write progress
@@ -4295,7 +4302,7 @@ if (-not $Common.Initialized) {
         # PS Version
         $PS7 = $false
         Set-BackgroundImage $image "right" (50 - 3) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Checking PS Version" -PercentComplete 3
+        Write-Progress2 "MemLabs initializing" -Status "Checking PS Version" -PercentComplete 3
         if ($PSVersionTable.PSVersion.Major -eq 7) {
             $PS7 = $true
             $PSStyle.Progress.Style = "`e[38;5;123m"
@@ -4309,7 +4316,7 @@ if (-not $Common.Initialized) {
         #     Set-StrictMode -Version 1.0
         # }
         Set-BackgroundImage $image "right" (50 - 5) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Checking Directories" -PercentComplete 5
+        Write-Progress2 "MemLabs initializing" -Status "Checking Directories" -PercentComplete 5
         # Paths
         $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
         $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
@@ -4319,14 +4326,16 @@ if (-not $Common.Initialized) {
         # Get latest hotfix version
 
         Set-BackgroundImage $image "right" (50 - 7) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Loading Global Configuration" -PercentComplete 7
+        Write-Progress2 "MemLabs initializing" -Status "Loading Global Configuration" -PercentComplete 7
         # Common global props
 
-        $colors = Get-Colors
+        if (-not $InJob) {
+            $colors = Get-Colors
+        }
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion        = "250131.0"
-            LatestHotfixVersion   = "250107.0"
+            MemLabsVersion        = "250204.0"
+            LatestHotfixVersion   = "250204.0"
             PS7                   = $PS7
             Initialized           = $true
             InJob                 = $InJob
@@ -4364,15 +4373,16 @@ if (-not $Common.Initialized) {
             StorageToken    = $null
         }
         $global:DSC_Copied = @()
-
-        Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
-
-        Set-TitleBar "Init Phase"
-        Write-Log "Loading required modules." -Verbose
+        
+        if (-not $InJob) {
+            Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
+            Set-TitleBar "Init Phase"
+            Write-Log "Loading required modules." -Verbose
+        }
 
         ### Test Storage config and access
         Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Checking Storage Config" -PercentComplete 9
+        Write-Progress2 "MemLabs initializing" -Status "Checking Storage Config" -PercentComplete 9
         $getresults = Get-StorageConfig 
         if ($getresults -eq $false) {
             $global:init_failed = $true
@@ -4381,13 +4391,15 @@ if (-not $Common.Initialized) {
         }
 
 
-        Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-        $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+        if (-not $InJob) {
+            Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
+            Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+            $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+        }
 
         ### Set supported options
         Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
-        Write-Progress2 "Loading required modules." -Status "Gathering Supported Options" -PercentComplete 13
+        Write-Progress2 "MemLabs initializing" -Status "Gathering Supported Options" -PercentComplete 13
         Set-SupportedOptions
 
         # Generate cache
@@ -4415,29 +4427,33 @@ if (-not $Common.Initialized) {
 
             # Retrieve VM List, and cache results
             Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
-            Write-Progress2 "Loading required modules." -Status "Reset Cache" -PercentComplete $i
-            $list = Get-List -Type VM -ResetCache
-            foreach ($vm in $list) {
-                $i++
-                if ($i -ge 98) {
-                    $i = 98
+
+            if (-not $InJob) {
+                Write-Progress2 "MemLabs initializing" -Status "Reset Cache" -PercentComplete $i
+                $list = Get-List -Type VM -ResetCache
+                foreach ($vm in $list) {
+                    $i++
+                    if ($i -ge 98) {
+                        $i = 98
+                    }
+                    Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+                    Write-Progress2 "MemLabs initializing" -Status "Updating VM Cache" -PercentComplete $i
+                    $vm2 = Get-VM -id $vm.vmId
+                    Update-VMInformation -vm $vm2
                 }
+                $i++
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
-                Write-Progress2 "Loading required modules." -Status "Updating VM Cache" -PercentComplete $i
-                $vm2 = Get-VM -id $vm.vmId
-                Update-VMInformation -vm $vm2
+                Write-Progress2 "MemLabs initializing" -Status "Finalizing" -PercentComplete $i
+    
+                # Add HGS Registry key to allow local CA Cert
+                New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
             }
 
-            $i++
-            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
-            Write-Progress2 "Loading required modules." -Status "Finalizing" -PercentComplete $i
-
-            # Add HGS Registry key to allow local CA Cert
-            New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+           
         }
         Set-BackgroundImage $image "right" 5 "uniform" -InJob:$InJob
         # Write progress
-        Write-Progress2 "Loading required modules." -Completed
+        Write-Progress2 "MemLabs initializing" -Completed
     }
     catch {
         Write-Log "Failed to initialize MemLabs. $_" -Failure

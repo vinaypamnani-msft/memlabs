@@ -298,7 +298,7 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase

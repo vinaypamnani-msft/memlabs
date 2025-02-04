@@ -477,25 +477,33 @@ function Select-DomainMenu {
     while ($true) {
 
        
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        $CustomOptions = [ordered]@{}
 
+        $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
+        $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
+
+
+        $checkPoint = $null
+        $DC = $vms | Where-Object { $_.role -eq "DC" }
+        if ($DC) {
+            $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
+        }
+        
 
         $customOptions = [ordered]@{
             "*F1" = "List-VMsInDomain -DomainName $domain" 
             "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
-            "1"   = "Start VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-            "2"   = "Stop VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-            "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+            "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+            "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+            "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
             "*S"  = "";
             "*S1" = "---  Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
             "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         }
-        $checkPoint = $null
-        $DC = get-list -type vm -DomainName $domain | Where-Object { $_.role -eq "DC" }
-        if ($DC) {
-            $checkPoint = Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }
-        }
+              
         if ($checkPoint) {
-            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         $response = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
@@ -524,27 +532,15 @@ function Select-DomainMenu {
 
 
 
-
-
-
-
-function select-OptimizeDomain {
+function Optimize-VHDX {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
-        [string] $domain
+        [object] $VMs
     )
-    $result = select-StopDomain $domain
-    if ($result -eq "ESCAPE") {
-        return
-    }
 
-    $vms = get-list -type vm -DomainName $domain
-
-    $size = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
-    write-Host "Total size of VMs in $domain before optimize: $([math]::Round($size,2))GB"
-    foreach ($vm in $vms) {
-        #Get-VHD -VMId $vm.VmId | Optimize-VHD -Mode Full
+    foreach ($vm in $VMs) {
+        stop-vm2 -name $vm.vmName 
         foreach ($hd in Get-VHD -VMId $vm.VmId) {
             #    Mount-VHD -Path $hd.Path
             try {
@@ -556,8 +552,36 @@ function select-OptimizeDomain {
             }
         }
     }
+}
 
-    get-list -type VM -SmartUpdate | out-null
+
+
+function select-OptimizeDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
+        [string] $domain
+    )
+
+    $CustomOptions = @{}
+    $vms = get-list -type vm -DomainName $domain -SmartUpdate
+
+    $vmsname = $vms | Select-Object -ExpandProperty vmName
+    #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
+    
+    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
+    
+    
+    if ($response -eq "ESCAPE") {
+        return "ESCAPE"
+    }
+    $sizeBefore = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
+    write-Host "Total size of VMs in $domain before optimize: $([math]::Round($sizeBefore,2))GB"
+    $VmList = $vms | Where-Object {$_.VmName -in $response}
+    Optimize-VHDX -VMs $VmList
+    
+    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse    
+    get-list -type VM -SmartUpdate -ResetCache | out-null
     $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
     write-host
@@ -1755,8 +1779,8 @@ function Show-ExistingNetwork2 {
             $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
 
-        $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        #$customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
+        #$customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
         $response = Get-Menu2 -MenuName "Create new domain -or- modify existing domain" -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
         if ($response.ToLowerInvariant() -eq "!" -or $response.ToLowerInvariant() -eq "escape") {

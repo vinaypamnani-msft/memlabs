@@ -471,6 +471,7 @@ function Select-StartDomain {
         [string] $response = $null
     )
 
+    $preResponse = $null
     if ($response) {
         $preResponse = $response
     }
@@ -479,38 +480,43 @@ function Select-StartDomain {
         Write-Host
 
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        $CustomOptions = [ordered]@{}
 
         $notRunning = $vms | Where-Object { $_.State -ne "Running" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
             Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
         }
         else {
-            Write-GreenCheck "All VM's in '$domain' are already Running"
-            return
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***"}
+            #Write-GreenCheck "All VM's in '$domain' are already Running"
+            #return
         }
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
+        #$customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
-            $response = Get-Menu2 -MenuName "Start VMs" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
+            $response = $null
+            $ReturnVal = $null
+            $ReturnVal = Get-Menu2 -MenuName "Start VMs in $domain" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
+            Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
         }
         else {
-            $response = $preResponse
+            $ReturnVal = $preResponse
             $preResponse = $null
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X" -or $response -eq "ESCAPE") {
+        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE") {
             return
         }
-        if ($response -eq "A" -or $response -eq "C") {
+        if ($ReturnVal -eq "A" -or $ReturnVal -eq "C") {
             $CriticalOnly = $false
-            if ($response -eq "C") {
+            if ($ReturnVal -eq "C") {
                 $CriticalOnly = $true
             }
-            $response = $null
+            $ReturnVal = $null
             $crit = Get-CriticalVMs -domain $domain
 
             $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
@@ -523,12 +529,20 @@ function Select-StartDomain {
 
         }
         else {
-            start-vm2 $response
+            write-Log -Verbose "$($ReturnVal.Count) Vms returned $ReturnVal"
+            $crit = Get-CriticalVMs -domain $domain -vmNames $ReturnVal            
+            
+            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+
+            if ($failures -ne 0) {
+                Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+            }
+            #start-vm2 $response
             #get-job | wait-job | out-null
-            Show-JobsProgress -Activity "Starting VMs"
-            get-job | remove-job | out-null
+            #Show-JobsProgress -Activity "Starting VMs"
+            #get-job | remove-job | out-null
             #get-list -type VM -SmartUpdate | out-null
-            $response = $null
+            $ReturnVal = $null
         }
     }
     get-list -type VM -SmartUpdate | out-null
@@ -544,6 +558,7 @@ function Select-StopDomain {
         [string] $response = $null
     )
 
+    $customOptions = @{}
     if ($response) {
         $preResponse = $response
     }
@@ -558,13 +573,14 @@ function Select-StopDomain {
         }
         else {
             Write-host "All VM's in '$domain' are already turned off."
-            return
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }
+            
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
+        #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu2 -MenuName "Select VMs to Stop" -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -CurrentValue "A" -timeout 10 -test:$false
+            $response = Get-Menu2 -MenuName "Select VMs to Stop in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
         }
         else {
             $response = $preResponse
@@ -601,8 +617,10 @@ function Select-StopDomain {
             return
         }
         else {
-            stop-vm2 $response
-            get-list -type VM -SmartUpdate | out-null
+            If ($vmlist -and $vmList.Count -ge 1) {
+                Invoke-StopVMs -domain $domain -vmList $vmList
+                get-list -type VM -SmartUpdate | out-null
+            }
         }
 
     }

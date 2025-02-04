@@ -49,7 +49,7 @@ function Get-ValidSubnets {
     $usedSubnets += (Get-NetworkList).Network
 
     #exclude any networks that already exist on the host
-    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$","0" } )
+    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$", "0" } )
     $usedSubnets += $excludeList
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
@@ -441,7 +441,7 @@ function Get-CriticalVMs {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "VMs to bucketize, names only")]
-        [string[]] $vmNames = $null
+        [object] $vmNames = $null
     )
 
     $return = [pscustomObject]@{
@@ -454,7 +454,9 @@ function Get-CriticalVMs {
         NONCRIT = @()
     }
 
+    $allvms = @()
     if ($vmNames) {
+        write-log -verbose "[Get-CriticalVMs] Found $vmNames"
         $allvms += get-list -type vm -SmartUpdate
     }
     else {
@@ -463,9 +465,10 @@ function Get-CriticalVMs {
 
     $vms = @()
     if ($vmNames) {
-        foreach ($vm in $vmNames) {
-            $vms += $allvms | Where-Object { $_.vmName -eq $vm }
-        }
+        #foreach ($vm in $vmNames) {
+            $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
+            write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
+        #}
     }
     else {
         $vms += $allvms
@@ -698,13 +701,21 @@ function Invoke-StopVMs {
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Moden")]
         [bool] $quiet = $false
     )
+    
 
     if (-not $vmList) {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
     }
     foreach ($vm in $vmList) {
+        $vm2 = $null
+        if ($vm -is [String]) {
+            $vm = Get-VM2 -name $vm -ErrorAction SilentlyContinue
+            $vm2 = $vm
+        }
         if ($vm.State -eq "Running") {
-            $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            if (-not $vm2) {
+                $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            }
             if (-not $quiet) {
                 Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }

@@ -1459,6 +1459,9 @@ function Get-VMSizeCached {
     if (Test-Path $cacheFile) {
         try {
             $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+            if ($common.InJob) {
+                return $vmCacheEntry
+            }
         }
         catch {}
     }
@@ -1475,7 +1478,14 @@ function Get-VMSizeCached {
 
     #write-host "Making new Entry for $($vm.vmName)"
     # if we didnt return the cache entry, get new data, and add it to cache
-    $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+    if (-not $Common.InJob) {
+        $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+        $MemoryStartup = $vm.MemoryStartup
+    }
+    else {
+        $diskSize = 0
+        $MemoryStartup = 0
+    }
     $MemoryStartup = $vm.MemoryStartup
     $vmCacheEntry = [PSCustomObject]@{
         vmId          = $vm.vmID
@@ -1483,7 +1493,9 @@ function Get-VMSizeCached {
         MemoryStartup = $MemoryStartup
         EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
-    ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
+    if (-not $Common.InJob) {
+        ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
+    }
     return $vmCacheEntry
 }
 
@@ -1503,6 +1515,9 @@ function Get-VMNetworkCached {
     if (Test-Path $cacheFile) {
         try {
             $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+            if ($common.InJob) {
+                return $vmCacheEntry
+            }
         }
         catch {}
     }
@@ -1514,7 +1529,6 @@ function Get-VMNetworkCached {
         }
     }
 
-
     # if we didnt return the cache entry, get new data, and add it to cache
     $vmNet = ($vm | Get-VMNetworkAdapter)
     $vmCacheEntry = [PSCustomObject]@{
@@ -1524,7 +1538,7 @@ function Get-VMNetworkCached {
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
 
-    if ($vmNet.SwitchName) {
+    if ($vmNet.SwitchName -and -not $Common.InJob) {
         ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     }
     return $vmCacheEntry
