@@ -63,6 +63,7 @@ function Add-MenuItem {
         Selected      = $Selected
         Function      = $Function
         MultiSelected = $false
+        Displayed     = $false
     }
 
     
@@ -136,6 +137,7 @@ function Get-MenuItems {
                 Selected      = $false
                 Function      = $null
                 MultiSelected = $false
+                Displayed     = $false
             }
             $value = $preOptions."$($item)"
 
@@ -204,6 +206,7 @@ function Get-MenuItems {
                 Selected      = $false
                 Function      = $null
                 MultiSelected = $false
+                Displayed     = $false
             }
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
@@ -328,6 +331,7 @@ function Get-MenuItems {
             Selected      = $false
             Function      = $null
             MultiSelected = $false
+            Displayed     = $false
         }
         $MenuItems += $MenuItem 
         $MenuItem = [PSCustomObject]@{
@@ -339,6 +343,7 @@ function Get-MenuItems {
             Selected      = $false
             Function      = $null
             MultiSelected = $false
+            Displayed     = $false
         }
         $MenuItems += $MenuItem 
         $MenuItem = [PSCustomObject]@{
@@ -350,6 +355,7 @@ function Get-MenuItems {
             Selected      = $false
             Function      = $null
             MultiSelected = $false
+            Displayed     = $false
         }
         $MenuItems += $MenuItem 
         $MenuItem = [PSCustomObject]@{
@@ -361,6 +367,7 @@ function Get-MenuItems {
             Selected      = $true
             Function      = $null
             MultiSelected = $false
+            Displayed     = $false
         }
         $MenuItems += $MenuItem 
 
@@ -393,6 +400,7 @@ function Get-MenuItems {
             Selected      = $false
             Function      = $null
             MultiSelected = $false
+            Displayed     = $false
         }
         $MenuItems += $MenuItem
     }
@@ -786,10 +794,18 @@ function Start-Navigation {
         # Handle the key stroke
 
         if ($key.VirtualKeyCode -eq 33) {
-            return "PGDN"
+            $return = [PSCustomObject]@{
+                Name = "PGDN"
+                CurrentMenu = $MenuItems
+            }
+            return $return
         }
         if ($key.VirtualKeyCode -eq 34) {
-            return "PGUP"
+            $return = [PSCustomObject]@{
+                Name = "PGUP"
+                CurrentMenu = $MenuItems
+            }
+            return $return
         }
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key

@@ -807,7 +807,12 @@ function Select-MainMenu {
             }
         }
         catch {
-            write-Verbose "Exception from global:Config.virtualMachines: $($global.Config)"
+            if (-not $global:Config) {
+                Write-RedX "Global:Config is missing.  Please restart the script."
+                exit 1
+            }
+            write-Log "Exception from global:Config.virtualMachines: $($global.Config)"
+
             $global:Config.virtualMachines = @()
         }
         if ($global:config.virtualMachines) {
