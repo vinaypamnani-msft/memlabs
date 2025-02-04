@@ -611,7 +611,7 @@ function Show-Menu {
             $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
         }
         else {
-            $prompt = "No Selections.  Press Left/Enter or Escape to exit"
+            $prompt = "No Selections. Press Left/Enter or Escape to exit"
         }
         #$currentValue = "T"
         if (-not $Maxshrink) {
