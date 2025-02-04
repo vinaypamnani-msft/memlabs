@@ -370,7 +370,7 @@ function Select-ConfigMenu {
             }
             Default {}
         }
-        if ($SelectedConfig) {
+        if ($SelectedConfig -and $SelectedConfig -ne "ESCAPE") {
             Write-Verbose "SelectedConfig : $SelectedConfig"
             if (-not $SelectedConfig.VirtualMachines) {
 
@@ -1432,7 +1432,11 @@ function Select-NewDomainConfig {
 
     #write-log -Activity "New Domain Wizard - Default Settings"
     #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
-    Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true
+    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true
+
+    if ($result -eq "ESCAPE") {
+        return $result
+    }
     
     write-log -Activity "New Domain Wizard"
  
@@ -1786,12 +1790,15 @@ function Show-ExistingNetwork2 {
         if ($response.ToLowerInvariant() -eq "!" -or $response.ToLowerInvariant() -eq "escape") {
             return
         }
-        if ([string]::isnullorwhitespace($response)) {
-            return Select-NewDomainConfig
-        }
-        if ($response.ToLowerInvariant() -eq "n") {
-            return Select-NewDomainConfig
-        }
+        if ([string]::isnullorwhitespace($response) -or $response.ToLowerInvariant() -eq "n") {
+            $result = Select-NewDomainConfig
+            if ($result -eq "ESCAPE") {
+                continue
+            }
+            else {
+                return $result
+            }
+        }       
 
         $i = 0
         foreach ($domain in $domainList) {
@@ -1805,25 +1812,27 @@ function Show-ExistingNetwork2 {
         $list = get-list -Type VM -DomainName $response
         if ($list) {
             Write-Log -Activity "Modify $response"
-            get-list -Type VM -DomainName $response | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
+            #get-list -Type VM -DomainName $response | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
         }
         else {
             Write-RedX "Could not find domain $response"
+            start-sleep -seconds 5
             continue
         }
         $domain = $response
 
-        Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
-        $response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
-        if (-not [String]::IsNullOrWhiteSpace($response)) {
-            if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-                continue
-            }
-            else {
-                break
-            }
-        }
-        else { break }
+        break
+        #Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
+        #$response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
+        #if (-not [String]::IsNullOrWhiteSpace($response)) {
+        #    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+        #        continue
+        #    }
+        #    else {
+        #        break
+        #    }
+        #}
+        #else { break }
 
     }
 
@@ -1837,58 +1846,6 @@ function Show-ExistingNetwork2 {
         }
 
     }
-    #[string]$role = Select-RolesForExisting
-
-
-    #if ($role -eq "H") {
-    #    $role = "PassiveSite"
-    #}
-    #if ($role -eq "L") {
-    #    $role = "Linux"
-    #}
-
-    #if ($role) {
-    #    $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $domain
-    #}
-   
-    #if ($role -eq "Secondary") {
-    #    if (-not $parentSiteCode) {
-    #        return
-    #    }
-    #}
-    #if ($role -eq "PassiveSite") {
-    #    if (-not $global:Config) {
-    #        $existingPassive = Get-List -type VM -domain $domain | Where-Object { $_.Role -eq "PassiveSite" }
-    #    }
-    #    else {
-    #        $existingPassive = Get-List2 -deployConfig $global:Config | Where-Object { $_.Role -eq "PassiveSite" }
-    #    }
-    #    $existingSS = Get-List -Type VM -Domain $domain | Where-Object { $_.Role -eq "CAS" -or $_.Role -eq "Primary" }
-
-    #    $PossibleSS = @()
-    #    foreach ($item in $existingSS) {
-    #        if ($existingPassive.SiteCode -contains $item.Sitecode) {
-    #            continue
-    #        }
-    #        $PossibleSS += $item
-    #    }
-
-    #    if ($PossibleSS.Count -eq 0) {
-    #        Write-Host
-    #        Write-Host "No siteservers found that are elegible for HA"
-    #        return
-    #    }
-    #    $result = Get-Menu -Prompt "Select sitecode to expand to HA" -OptionArray $PossibleSS.Sitecode -Test $false -return
-    #    if ([string]::IsNullOrWhiteSpace($result)) {
-    #        return
-    #    }
-    #    $SiteCode = $result
-    #}
-
-    #if ($role -eq "SiteSystem") {
-    #    $SiteCode = Get-SiteCodeForDPMP -Domain $domain
-    #    #write-host "Get-SiteCodeForDPMP return $SiteCode"
-    #}
 
     [string]$subnet = (Get-List -type VM -DomainName $domain | Where-Object { $_.Role -eq "DC" } | Select-Object -First 1).network
     if (-not $subnet) {
@@ -4656,7 +4613,10 @@ function Select-Options {
         $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight 
         $response = Get-Menu2 -MenuName $MenuName -menuItems $MenuItems -Prompt $prompt -HideHelp:$true -test:$false  
 
-        if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE" -or $response -eq "!") {
+        if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
+            return "ESCAPE"
+        }
+        if ($response -eq "!") {
             return
         }
         if ($response -is [bool]) {
