@@ -547,6 +547,20 @@ function Show-Menu {
             }
             $operation = ""
         }
+        $found = $false
+        if ($operation -eq "PGDN") {
+            foreach ($menuitem in $menuItems) {
+                if ($menuitem.Displayed -eq $false -and $menuitem.Selectable) {
+                    $found = $true
+                }
+            }
+            if (-not $found) {
+                foreach ($menuitem in $menuItems) {
+                    $menuitem.Displayed = $false
+                }
+                $operation = ""
+            }
+        }
 
         $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
@@ -589,24 +603,25 @@ function Show-Menu {
         $MenuStart = $CurrentPosition.Y        
         foreach ($menuItem in $menuItems) {
             if ($operation -eq "PGDN") {
-                if ($menuItem.Displayed -and $menuItem.Selectable) {
+                if ($menuItem.Displayed) {
                     $menuItem.Displayed = $false
                     continue
                 }
-                if (-not $menuItem.Displayed -and $menuItem.Selectable) {
+                if (-not $menuItem.Displayed -and $menuitem.Selectable) {
                     $operation = "PGDNDone"
                 }
             }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
             if ($RoomLeft -le 2) {
-                Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
-                break
+                $menuItem.Displayed = $false                
+                $Operation = "PgDnNeeded"
+                continue
             }
             $CurrentPosition = Get-CursorPosition
             Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
             if ($menuItem.Function) {
-               
+                $menuItem.Displayed = $true
                 Invoke-Expression -Command $menuItem.Function
                 
                 continue
@@ -636,6 +651,7 @@ function Show-Menu {
                     continue
                 }
                 write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
+                $menuItem.Displayed = $true
             }                        
         }   
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
@@ -654,6 +670,10 @@ function Show-Menu {
         if ($Operation -eq "PGDNDone") {
             $Operation = ""
             Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
+        }
+        if ($Operation -eq "PGDNNeeded") {
+            $Operation = ""
+            Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition       
@@ -689,15 +709,17 @@ function Set-PointerDisplayAsPerMenu {
         if (-not ($menuItems[$i].Displayed)) {
             continue
         }
-        Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
-        if ($i -eq $selectedIndex) {
-            $menuItems[$i].Selected = $true
-            Write-Host "-> " -ForegroundColor Cyan
+        if ($menuItems[$i].Selectable) {
+            Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
+            if ($i -eq $selectedIndex) {
+                $menuItems[$i].Selected = $true
+                Write-Host "-> " -ForegroundColor Cyan
             
-        }
-        else {
-            $menuItems[$i].Selected = $false
-            Write-Host "   "
+            }
+            else {
+                $menuItems[$i].Selected = $false
+                Write-Host "   "
+            }
         }
         if ($MultiSelect) {
             Set-CursorPosition -x 4 -y $menuItems[$i].CurrentPosition
@@ -795,19 +817,29 @@ function Start-Navigation {
     $selectedIndex = 0
     $NumSelectable = 0
     $ValidChars = @()
+    $foundSelected = $false
     foreach ($menuItem in $menuItems) {
         if ($null -ne $menuItem.itemName -and $menuItem.Selectable) {
             $ValidChars += $menuItem.itemName.ToString().Substring(0, 1).ToUpperInvariant()
             $NumSelectable++
         }
 
-        if ($menuItem.Selected) {
+        if ($menuItem.Selected -and $menuItem.Displayed) {
+            $foundSelected = $true
             $selectedIndex = $i
         }
         $i++       
     }
-    #VK_PRIOR	0x21	PAGE UP key //33
-    #VK_NEXT	0x22	PAGE DOWN key //34
+    $i = 0
+    if (-not $foundSelected) {
+        foreach ($menuItem in $menuItems) {
+            if ($menuItem.Selectable -and $menuItem.Displayed) {
+                $selectedIndex = $i
+                break
+            }
+            $i++
+        }
+    }
 
     $CPosition = Get-CursorPosition # Get the current cursor position
     [System.Console]::CursorVisible = $false # Hide the cursor

@@ -2757,6 +2757,9 @@ Function Set-ParentSiteCodeMenu {
 
 
         $value = Get-ParentSiteCodeMenu -role $property.role -CurrentValue $CurrentValue -domain $global:config.vmOptions.domainName
+        if (-not $value) {
+            return
+        }
         if ($value.Trim()) {
             $property."$name" = $value
         }
@@ -4041,6 +4044,11 @@ function Get-AdditionalValidations {
             }
         }
         "siteCode" {
+            if ($property.siteCode.Length -ne 3) {
+                write-host2 -ForegroundColor OrangeRed "SiteCode must be exactly 3 characters long. Unable to change sitecode."
+                $property.siteCode = $CurrentValue
+                return
+            }
             if ($property.RemoteSQLVM) {
                 $newSQLName = $value + "SQL"
                 #Check if the new name is already in use:

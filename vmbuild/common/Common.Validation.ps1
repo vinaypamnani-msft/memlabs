@@ -641,7 +641,7 @@ function Test-ValidRoleSiteServer {
     $vmRole = $VM.role
 
     # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -ne "Secondary") {
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -in ("CAS","Primary")) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
@@ -716,10 +716,10 @@ function Test-ValidRoleSiteServer {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
 
-    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
+    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode } | Where-Object {$_.Role -in "CAS", "Primary", "Secondary"}
     foreach ($vmWithSiteCode in $otherVMs) {
         if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -1142,7 +1142,7 @@ function Test-Configuration {
                 }
 
                 # Validate CAS role
-                Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 #}
             }
@@ -1156,6 +1156,9 @@ function Test-Configuration {
                 if ($vm.siteName.Length -gt 127) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$($vm.vmName)] siteName is greater than 127 chars" -ReturnObject $return -Warning
                 }
+            }
+            if ($vm.SiteCode) {
+            Test-ValidRoleSiteServer -VM $vm -ConfigObject $deployConfig -ReturnObject $return
             }
         }
 
@@ -1173,7 +1176,7 @@ function Test-Configuration {
                 $vmName = $PSVM.vmName
                 $vmRole = $PSVM.role
                 $psParentSiteCode = $PSVM.parentSiteCode
-                Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 # Valid parent Site Code
                 if ($psParentSiteCode) {
@@ -1214,7 +1217,7 @@ function Test-Configuration {
 
             # Prep for multi-subnet, but blocked right now by Test-SingleRole
             foreach ($SECVM in $SecondaryVMs) {
-                Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
             }
 
             #}
