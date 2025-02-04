@@ -2485,7 +2485,7 @@ Function Show-Summary {
             $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
             if ($deployConfig.cmOptions.OfflineSCP) {
                 if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed."
+                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed"
                     $versionInfoPrinted = $true
                 }
             }
@@ -2495,7 +2495,7 @@ Function Show-Summary {
                     Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
                 }
                 else {                    
-                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed"
                 }
 
             }
@@ -2540,7 +2540,7 @@ Function Show-Summary {
             }
         }
         else {
-            Write-RedX "ConfigMgr will not be installed."
+            Write-RedX "ConfigMgr will not be installed"
         }
 
         if ($deployConfig.cmOptions.usePKI) {
@@ -2605,7 +2605,7 @@ Function Show-Summary {
             $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         }
         else {
-            Write-RedX "ConfigMgr will not be installed."
+            Write-RedX "ConfigMgr will not be installed"
         }
     }
 

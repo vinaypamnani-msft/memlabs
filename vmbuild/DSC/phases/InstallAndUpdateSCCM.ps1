@@ -354,7 +354,7 @@ CurrentBranch=1
 
 }
 else {
-    Write-DscStatus "ConfigMgr is already installed."
+    Write-DscStatus "ConfigMgr is already installed"
     Write-DscStatusSetup
 }
 
