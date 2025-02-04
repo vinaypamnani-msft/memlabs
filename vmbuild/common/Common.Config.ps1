@@ -2544,7 +2544,7 @@ Function Show-Summary {
         }
 
         if ($deployConfig.cmOptions.usePKI) {
-            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
+            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and Reporting Point role"
         }
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
@@ -2556,17 +2556,17 @@ Function Show-Summary {
        
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
-            Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "DP role: $($testSystem.vmName -Join ",")"
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.InstallMP }
         if ($testSystem) {
-            Write-GreenCheck "MP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "MP role: $($testSystem.vmName -Join ",")"
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
-            Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "SUP role: $($testSystem.vmName -Join ",")"
             if ($deployConfig.cmOptions.OfflineSUP) {
                 Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
             }
@@ -2574,7 +2574,7 @@ Function Show-Summary {
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
         if ($testSystem) {
-            Write-GreenCheck "Reporting Point role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "RP role: $($testSystem.vmName -Join ",")"
         }
 
 
