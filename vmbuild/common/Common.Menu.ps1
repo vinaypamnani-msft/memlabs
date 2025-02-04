@@ -529,7 +529,7 @@ function Select-StartDomain {
 
         }
         else {
-            write-Log -Verbose "$($ReturnVal.Count) Vms returned $ReturnVal"
+            write-Log -Verbose "$($ReturnVal.Count) VMs returned $ReturnVal"
             $crit = Get-CriticalVMs -domain $domain -vmNames $ReturnVal            
             
             $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly

@@ -68,7 +68,7 @@ function Start-Maintenance {
                 }
             }
             if ($stoppedCount -gt 0) {
-                $response = Read-YesorNoWithTimeout -Prompt "$stoppedCount VM's stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+                $response = Read-YesorNoWithTimeout -Prompt "$stoppedCount VMs stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
                 if ($response -eq "y") {
                     Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
                 }

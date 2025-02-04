@@ -317,7 +317,7 @@ try {
         Write-Log -Verbose "Phase 1 is scheduled to run"
     }
     else {
-        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
+        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVMs = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
 
 

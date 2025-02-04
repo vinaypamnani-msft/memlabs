@@ -254,7 +254,7 @@ function select-RestoreSnapshotDomain {
         $startAll = "A"
     }
     else {
-        $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp -Default "y"
+        $startAll = Read-YesorNoWithTimeout -Prompt "Start All VMs after restore? (Y/n)" -HideHelp -Default "y"
         if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
             $startAll = $null
         }

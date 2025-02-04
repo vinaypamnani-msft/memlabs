@@ -522,7 +522,7 @@ function Get-CriticalVMs {
 function Invoke-SmartStartVMs {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Vms To Start, from Get-CriticalVMs")]
+        [Parameter(Mandatory = $true, HelpMessage = "VMs To Start, from Get-CriticalVMs")]
         [psCustomObject] $CritList,
         [Parameter(Mandatory = $false, HelpMessage = "Critical Only")]
         [switch] $CriticalOnly = $false,

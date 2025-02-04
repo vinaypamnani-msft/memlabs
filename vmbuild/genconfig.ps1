@@ -1737,7 +1737,7 @@ Function Get-DomainStatsLine {
             $stats += "[SQL VMs: $ExistingSQLCount] "
         }
         if ($ExistingDPMPCount -gt 0) {
-            $stats += "[DPMP Vms: $ExistingDPMPCount] "
+            $stats += "[DPMP VMs: $ExistingDPMPCount] "
         }
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
