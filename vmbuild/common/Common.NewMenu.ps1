@@ -614,6 +614,9 @@ function Show-Menu {
             $prompt = "No Selections.  Press Left/Enter or Escape to exit"
         }
         #$currentValue = "T"
+        if (-not $Maxshrink) {
+            Write-Host ""
+        }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition       
 
