@@ -571,6 +571,11 @@ function Show-Menu {
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         foreach ($menuItem in $menuItems) {
+            $RoomLeft = Get-RoomLeftFromCurrentPosition
+            if ($RoomLeft -le 2) {
+                Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
+                break
+            }
             $CurrentPosition = Get-CursorPosition
             Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
@@ -758,6 +763,8 @@ function Start-Navigation {
         }
         $i++       
     }
+    #VK_PRIOR	0x21	PAGE UP key //33
+    #VK_NEXT	0x22	PAGE DOWN key //34
 
     $CPosition = Get-CursorPosition # Get the current cursor position
     [System.Console]::CursorVisible = $false # Hide the cursor
@@ -777,6 +784,13 @@ function Start-Navigation {
             return
         }
         # Handle the key stroke
+
+        if ($key.VirtualKeyCode -eq 33) {
+            return "PGDN"
+        }
+        if ($key.VirtualKeyCode -eq 34) {
+            return "PGUP"
+        }
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
 

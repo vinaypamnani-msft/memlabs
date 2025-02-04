@@ -1570,7 +1570,7 @@ function Select-Config {
     )
 
 
-    Write-Log -Activity "Select Config File to load"
+    #Write-Log -Activity "Select Config File to load"
     $SortByName = $false
     if ($ConfigPath.EndsWith("tests")) {
         $SortByName = $true
@@ -1632,9 +1632,7 @@ function Select-Config {
                     }
                 }
                 $hasDC = $savedConfigJson.virtualMachines | Where-Object { $_.role -eq "DC" }
-
-                $savedNotes += "[Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
-                $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
+                
 
                 if ($hasDC) {
                     $savedNotes += " [New Domain: $($savedConfigJson.vmoptions.domainName)]"
@@ -1649,6 +1647,8 @@ function Select-Config {
                         $color = $Global:Common.Colors.GenConfigJsonBad
                     }
                 }
+                $savedNotes += "[Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
+                $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
             }
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
             $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
@@ -1660,7 +1660,7 @@ function Select-Config {
         else {
             $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $response = Get-Menu -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
+        $response = Get-Menu2 -MenuName "Select Config File to load" -prompt "Which config do you want to load" -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
         if ($response.ToLowerInvariant() -eq "s") {
             $SortByName = !$SortByName
@@ -1668,7 +1668,7 @@ function Select-Config {
         }
 
         $responseValid = $true
-        if (-not $response) {
+        if (-not $response -or $response -eq "ESCAPE") {
             return
         }
     }
@@ -6323,7 +6323,7 @@ function Select-VirtualMachines {
                     #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                     $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
                     #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
-                    if (([string]::IsNullOrEmpty($newValue))) {
+                    if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                         return
                     }
                     if ($newValue -eq "REFRESH") {
@@ -6504,7 +6504,7 @@ function Select-VirtualMachines {
                         $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
                         #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                         $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
-                        if (([string]::IsNullOrEmpty($newValue))) {
+                        if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                             return
                         }
                         if ($newValue -eq "REFRESH") {
