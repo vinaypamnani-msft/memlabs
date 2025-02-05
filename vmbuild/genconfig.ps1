@@ -245,6 +245,7 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{ "*B0" = "---  Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
         if ($domainCount -gt 0) {
             $customOptions += [ordered]@{ "1" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            #$customOptions += [ordered]@{ "H1" = "This option allows you to create a new domain, or edit one you previously created." }
             #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
         }
         else {
@@ -444,7 +445,7 @@ function List-VMsInDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string] $DomainName
     )
-    Write-Log -Activity "$domain Resources"
+    #Write-Log -Activity "$domain Resources"
     $vmsInDomain = get-list -type vm  -DomainName $domain
     if (-not $vmsInDomain) {
         return
@@ -468,7 +469,7 @@ function Select-DomainMenu {
         return
     }
 
-    $domain = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
+    $domain = Get-Menu2 -MenuName "Select Existing Domain" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
     if ([string]::isnullorwhitespace($domain) -or $domain -eq "ESCAPE") {
         return
     }
@@ -506,7 +507,7 @@ function Select-DomainMenu {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-        $response = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
+        $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
         write-Verbose "1 response $response"
         if (-not $response -or $response -eq "ESCAPE") {

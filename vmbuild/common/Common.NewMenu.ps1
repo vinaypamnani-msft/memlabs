@@ -88,6 +88,33 @@ function Add-MenuItem {
 
 }
 
+function New-MenuItem {
+    [CmdletBinding()]
+    param (
+        [string]$itemname,
+        [string]$text,
+        [string]$color1 = $Global:Common.Colors.GenConfigDefault,
+        [string]$color2 = $Global:Common.Colors.GenConfigDefaultNumber,
+        [switch]$selectable = $false,
+        [switch]$selected = $false,
+        [string]$function,
+        [switch]$multiSelected = $false,
+        [switch]$displayed = $false
+    )
+    $MenuItem = [PSCustomObject]@{
+        itemName      = $itemname
+        Text          = $text               
+        Color1        = $color1
+        Color2        = $color2
+        Selectable    = $selectable
+        Selected      = $selected
+        Function      = $function
+        MultiSelected = $multiSelected
+        Displayed     = $displayed
+    }
+    return $MenuItem
+}
+
 function Get-MenuItems {
     [CmdletBinding()]
     param (
@@ -128,17 +155,7 @@ function Get-MenuItems {
     
     if ($null -ne $preOptions) {
         foreach ($item in $preOptions.keys) {
-            $MenuItem = [PSCustomObject]@{
-                itemName      = $null
-                Text          = $null                
-                Color1        = $Global:Common.Colors.GenConfigDefault
-                Color2        = $Global:Common.Colors.GenConfigDefaultNumber
-                Selectable    = $true
-                Selected      = $false
-                Function      = $null
-                MultiSelected = $false
-                Displayed     = $false
-            }
+           $MenuItem = New-MenuItem -selectable
             $value = $preOptions."$($item)"
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
@@ -197,17 +214,7 @@ function Get-MenuItems {
         if (-not [String]::IsNullOrWhiteSpace($option)) {
             $i = $i + 1
             $item = $option
-            $MenuItem = [PSCustomObject]@{
-                itemName      = $null
-                Text          = $null                
-                Color1        = $Global:Common.Colors.GenConfigNormal
-                Color2        = $Global:Common.Colors.GenConfigDefaultNumber
-                Selectable    = $true
-                Selected      = $false
-                Function      = $null
-                MultiSelected = $false
-                Displayed     = $false
-            }
+            $MenuItem = New-MenuItem -selectable -color1 $Global:Common.Colors.GenConfigNormal -color2 $Global:Common.Colors.GenConfigDefaultNumber           
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $item -split "%"
@@ -261,18 +268,7 @@ function Get-MenuItems {
         foreach ($item in $additionalOptions.keys) {
             $value = $additionalOptions."$($item)"
 
-            $MenuItem = [PSCustomObject]@{
-                itemName      = $null
-                Text          = $null                
-                Color1        = $Global:Common.Colors.GenConfigDefault
-                Color2        = $Global:Common.Colors.GenConfigDefaultNumber
-                Selectable    = $true
-                Selected      = $false
-                Function      = $null
-                MultiSelected = $false
-                Displayed     = $false
-            }
-
+            $MenuItem = New-MenuItem -selectable 
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
@@ -323,54 +319,11 @@ function Get-MenuItems {
     }
 
     if ($MultiSelect -and $FoundMultiSelectItem) {
-        $MenuItem = [PSCustomObject]@{
-            itemName      = "*B"
-            Text          = $null              
-            Color1        = $Global:Common.Colors.GenConfigDefault
-            Color2        = $Global:Common.Colors.GenConfigDefaultNumber
-            Selectable    = $false
-            Selected      = $false
-            Function      = $null
-            MultiSelected = $false
-            Displayed     = $false
-        }
-        $MenuItems += $MenuItem 
-        $MenuItem = [PSCustomObject]@{
-            itemName      = "A"
-            Text          = "All Entries"               
-            Color1        = $Global:Common.Colors.GenConfigTrue 
-            Color2        = $Global:Common.Colors.GenConfigTrue 
-            Selectable    = $true
-            Selected      = $false
-            Function      = $null
-            MultiSelected = $false
-            Displayed     = $false
-        }
-        $MenuItems += $MenuItem 
-        $MenuItem = [PSCustomObject]@{
-            itemName      = "N"
-            Text          = "No Entries"               
-            Color1        = $Global:Common.Colors.GenConfigFalse
-            Color2        = $Global:Common.Colors.GenConfigFalse
-            Selectable    = $true
-            Selected      = $false
-            Function      = $null
-            MultiSelected = $false
-            Displayed     = $false
-        }
-        $MenuItems += $MenuItem 
-        $MenuItem = [PSCustomObject]@{
-            itemName      = "D"
-            Text          = "Done with selections"               
-            Color1        = $Global:Common.Colors.GenConfigDefault
-            Color2        = $Global:Common.Colors.GenConfigDefaultNumber
-            Selectable    = $true
-            Selected      = $true
-            Function      = $null
-            MultiSelected = $false
-            Displayed     = $false
-        }
-        $MenuItems += $MenuItem 
+        
+        $MenuItems += New-MenuItem -ItemName "*B"
+        $MenuItems += New-MenuItem -ItemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable         
+        $MenuItem2 += New-MenuItem -ItemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable           
+        $MenuItems += New-MenuItem -ItemName "D" -text "Done with selections" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -selected       
 
     }
     
