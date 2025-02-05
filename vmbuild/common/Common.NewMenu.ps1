@@ -680,14 +680,18 @@ function Show-Menu {
 
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -MultiSelect:$MultiSelect
         if ($return) {
-            if ($return.Action) {
+            if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
                 $operation = $return.Action
                 write-log -verbose "OP: $operation"
                 #Start-Sleep -seconds 1
             }
             else {
+                write-log -verbose "Ret: $return"
                 return $return
             }
+        }
+        else {
+            write-log -verbose "NoRet: $return"
         }
     }
 
@@ -877,7 +881,7 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
 
-            if ($NumSelectable -eq 0) {
+            if ($NumSelectable -eq 0 -and $MultiSelect -eq $false) {
                 return "ESCAPE"
             }
 

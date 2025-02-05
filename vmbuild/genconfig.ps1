@@ -503,7 +503,7 @@ function Select-DomainMenu {
         }
               
         if ($checkPoint) {
-            $customOptions += [ordered]@{ "R" = "Restore all VM's to last snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
         $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         $response = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
@@ -570,8 +570,7 @@ function select-OptimizeDomain {
     #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
     
     $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
-    
-    
+        
     if ($response -eq "ESCAPE") {
         return "ESCAPE"
     }
