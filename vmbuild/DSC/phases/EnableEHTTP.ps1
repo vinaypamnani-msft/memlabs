@@ -49,7 +49,9 @@ Set-Location "$($SiteCode):\" @initParams
 
 
 $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-if ($prop.value -in (63, 1472, 1504)){
+$value = $prop.value
+$enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63) -or ($value -eq 1472) -or ($value -eq 1504)
+if ($enabled){
     return
 }
 

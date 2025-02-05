@@ -676,8 +676,7 @@ function Show-Menu {
             Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
-        $PromptPosition = Get-CursorPosition       
-
+        $PromptPosition = Get-CursorPosition               
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -MultiSelect:$MultiSelect
         if ($return) {
             if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
@@ -926,7 +925,7 @@ function Start-Navigation {
                 }
 
                 if ($($menuItems[$selectedIndex].ItemName) -eq "D") {
-                    return @($menuItems | Where-Object { $_.MultiSelected -eq $true })
+                    return [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
                 }
             }
 

@@ -77,8 +77,10 @@ do {
     $attempts++   
     Write-DscStatus "Enable HTTPS"
     $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-    if ($prop.Value -eq 1472 -or $prop.Value -eq 63) {
-        break
+    $value = $prop.value
+    $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63) -or ($value -eq 1472) -or ($value -eq 1504)
+    if ($enabled) {
+        return
     }
     if ($isCas) {
         $NameSpace = "ROOT\SMS\site_$SiteCode"

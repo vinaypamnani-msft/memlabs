@@ -543,12 +543,12 @@ function Get-VMFixes {
     $Fix_Prereq = {
         $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
         if (-not $SiteCode) {
-            Write-host "Umm.. No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
+            Write-host "No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
             return $true
         }
         $version = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS' -Name 'Full Version'
         if (-not $version) {
-            Write-host "Umm.. No Version found in HKLM:\SOFTWARE\Microsoft\SMS\Full Version"
+            Write-host "No Version found in HKLM:\SOFTWARE\Microsoft\SMS\Full Version"
             return $false
         }
 
@@ -581,7 +581,7 @@ function Get-VMFixes {
         FixVersion        = "250116.0"
         AppliesToNew      = $false
         AppliesToExisting = $true
-        AppliesToRoles    = @("Primary", "CAS")
+        AppliesToRoles    = @("CAS")
         NotAppliesToRoles = @()
         DependentVMs      = @()
         ScriptBlock       = $Fix_Prereq 
