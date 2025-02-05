@@ -965,8 +965,8 @@ function ConvertTo-DeployConfigEx {
                         }
                     }
                 }
-                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID")  {
-                    $sqlVM = get-list -type VM -domain $DomainName | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer  }
+                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID")  {                    
+                    $sqlVM = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer  }
                     
                     Add-VMToAccountLists -thisVM $thisVM -VM $sqlVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -SQLSysAdminAccounts -WaitOnDomainJoin
                 }
