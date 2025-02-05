@@ -577,7 +577,7 @@ function select-OptimizeDomain {
     }
     $sizeBefore = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain before optimize: $([math]::Round($sizeBefore,2))GB"
-    $VmList = $vms | Where-Object {$_.VmName -in $response}
+    $VmList = $vms | Where-Object { $_.VmName -in $response }
     Optimize-VHDX -VMs $VmList
     
     Remove-Item -Path $common.CachePath -include "*.Json" -Recurse    
@@ -3174,11 +3174,10 @@ Function Set-SiteServerLocalSql {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-        if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
-        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
+        
     }
-    if ($virtualMachine.Role -eq "WSUS") {
+    if ($virtualMachine.Role -eq "WSUS" -or $virtualMachine.Role -eq "SiteSystem") {
         $virtualMachine.virtualProcs = 4
         $virtualMachine.memory = "6GB"
     }
@@ -3259,7 +3258,69 @@ Function Set-SiteServerRemoteSQL {
         }
     }
 }
+Function Get-WsusDBName {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Base Property Object")]
+        [Object] $property,
+        [Parameter(Mandatory = $false, HelpMessage = "Name of Notefield to Modify")]
+        [string] $name,
+        [Parameter(Mandatory = $false, HelpMessage = "Current value")]
+        [Object] $CurrentValue
+    )
+    $valid = $false
+    while ($valid -eq $false) {
+        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on this Server)" }
+        $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
+        $additionalOptions += [ordered] @{ "W" = "Use Local WID for SQL" }
 
+
+
+        $validVMs = @($Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) } | Select-Object -ExpandProperty vmName)
+
+        $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $Global:Config -SiteCode $property.siteCode -type VM
+
+        $sql = Get-SqlServerForSiteCode -siteCode $property.SiteCode -deployConfig $Global:Config -type VM
+        if (-not $ActiveVM.InstallSUP) {
+            if (-not $sql.InstallSUP) {
+                $validVMs += $($sql.vmName)
+            }
+        }
+        $validVMs = $validVMs | Get-Unique
+
+        $result = Get-Menu2 -MenuName "Select WSUS SQL" -Prompt "Select SQL Options" -OptionArray $($validVMs) -CurrentValue $CurrentValue -Test:$false -additionalOptions $additionalOptions -return
+
+        if (-not $result -or $result -eq "ESCAPE") {
+            return "REFRESH"
+        }
+        switch ($result.ToLowerInvariant()) {
+        "l" {
+            Set-SiteServerLocalSql $property
+            $property."$name" = $property.VmName
+            $valid = $true
+        }
+        "n" {
+            $VMname = $($property.SiteCode) + "WSUSSQL"
+            Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $VMname -network:$property.network
+            $property."$name" = $VMname
+            $valid = $true
+            #Set-SiteServerRemoteSQL $property $name
+        }
+        "w" {
+            $property."$name" = "WID"
+            $valid = $true
+        }
+        Default {
+            if ([string]::IsNullOrWhiteSpace($result)) {
+                continue
+            }
+            $property."$name" = $result
+            $valid = $true
+        }
+    }
+
+    }
+}
 Function Get-remoteSQLVM {
     [CmdletBinding()]
     param (
@@ -3898,7 +3959,7 @@ function Get-AdditionalValidations {
                 }
             }
         }
-
+       
         "installSUP" {
             if ($value -eq $true) {
                 if (-not $property.siteCode) {
@@ -3906,6 +3967,8 @@ function Get-AdditionalValidations {
                 }
                 if (-not $property.siteCode) {
                     $property.installSUP = $false
+                    $property.PsObject.Members.Remove("wsusContentDir")
+                    $property.PsObject.Members.Remove("wsusDataBaseServer")
                 }
 
                 if ($property.ParentSiteCode -or $property.SiteCode) {
@@ -3920,6 +3983,8 @@ function Get-AdditionalValidations {
                         $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
                         if (-not $existingSUP) {
                             $property.installSUP = $false
+                            $property.PsObject.Members.Remove("wsusContentDir")
+                            $property.PsObject.Members.Remove("wsusDataBaseServer")
                             Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
                         }
                     }
@@ -3927,6 +3992,21 @@ function Get-AdditionalValidations {
                 }
 
                 if ($property.Role -ne "WSUS") {
+                    $DataBase = "WID"
+                    if ($property.SqlVersion) {
+                        $Database = $property.VMName
+                    }
+                    else {
+                        $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $Global:Config -SiteCode $property.siteCode -type VM
+
+                        $sql = Get-SqlServerForSiteCode -siteCode $property.SiteCode -deployConfig $Global:Config -type VM
+                        if (-not $ActiveVM.InstallSUP) {
+                            if (-not $sql.InstallSUP) {
+                                $database = $($sql.vmName)
+                            }
+                        }
+                    }
+                    $property | Add-Member -MemberType NoteProperty -Name "wsusDataBaseServer" -Value $database -Force
                     $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
                     if ($null -eq $property.additionalDisks) {
                         $disk = [PSCustomObject]@{"E" = "600GB" }
@@ -3947,6 +4027,8 @@ function Get-AdditionalValidations {
             else {
                 if ($property.Role -ne "WSUS") {
                     $property.PsObject.Members.Remove("wsusContentDir")
+                    $property.PsObject.Members.Remove("wsusDataBaseServer")
+
                 }
             }
 
@@ -4806,6 +4888,10 @@ function Select-Options {
                 "domainUser" {
                     Get-domainUser -property $property -name $name -CurrentValue $value
                     return "REFRESH"
+                }
+                "wsusDataBaseServer" {
+                    Get-WsusDBName -property $property -name $name -CurrentValue $value
+                    continue MainLoop
                 }
                 "siteCode" {
                     if ($property.role -eq "PassiveSite") {

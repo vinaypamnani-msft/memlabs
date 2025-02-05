@@ -580,34 +580,36 @@ function Select-StopDomain {
         $vmsname = $running | Select-Object -ExpandProperty vmName
         #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu2 -MenuName "Select VMs to Stop in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
+            $results = @()
+            $results = Get-Menu2 -MenuName "Select VMs to Stop in $domain" -Prompt "Select VMs to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
         }
         else {
-            $response = $preResponse
+            $results = $preResponse
             $preResponse = $null
         }
-
-        if ($response -eq "ESCAPE") {
+        write-log -Verbose "StopVMs returned '$results' $($results.Count) $($results.GetType())"
+        if ($results -eq "ESCAPE") {
             return "ESCAPE"
         }
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
+        if ([string]::IsNullOrWhiteSpace($results) -or $results -eq "None" -or $results -eq "ESCAPE") {
+            write-log -Verbose "StopVMs Escape"
             return
         }
-        if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
+        if ($results -eq "A" -or $results -eq "C" -or $results -eq "N") {
 
             $vmList = @()
 
-            if ($response -eq "A") {
+            if ($results -eq "A") {
                 $vmList = $running
             }
             else {
                 $crit = Get-CriticalVMs -domain $domain
 
-                if ($response -eq "N") {
+                if ($results -eq "N") {
                     $vmList = $crit.NONCRIT
 
                 }
-                if ($response -eq "C") {
+                if ($results -eq "C") {
                     $vmList = $crit.ALLCRIT
                 }
             }
@@ -617,8 +619,8 @@ function Select-StopDomain {
             return
         }
         else {
-            If ($vmlist -and $vmList.Count -ge 1) {
-                Invoke-StopVMs -domain $domain -vmList $vmList
+            If ($results -and $results.Count -ge 1) {
+                Invoke-StopVMs -domain $domain -vmList $results
                 get-list -type VM -SmartUpdate | out-null
             }
         }

@@ -326,6 +326,12 @@ function New-DeployConfig {
                 $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
             }
 
+            if ($item.wsusDataBaseServer -and -not $item.wsusDataBaseServer.StartsWith($configObject.vmOptions.prefix)) {
+                if ($item.wsusDataBaseServer -ne "WID") {
+                    $item.wsusDataBaseServer = $configObject.vmOptions.prefix + $item.wsusDataBaseServer
+                }
+            }
+
             if ($item.domainUser) {
                 $item.domainUser = $configObject.vmOptions.prefix + $item.domainUser
             }
@@ -483,7 +489,7 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
                 Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
-            }
+            }            
         }
         $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
@@ -494,6 +500,14 @@ function Add-ExistingVMsToDeployConfig {
         }
         if ($systemSite.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
+        }
+        if ($system.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $system.RemoteSQLVM -configToModify $config
+        }
+        if ($system.wsusDataBaseServer) {
+            if ($system.wsusDataBaseServer -ne "WID") {
+                Add-RemoteSQLVMToDeployConfig -vmName $system.wsusDataBaseServer -configToModify $config
+            }
         }
     }
 
@@ -544,6 +558,11 @@ function Add-ExistingVMsToDeployConfig {
     foreach ($vm in $vms) {
         if ($vm.RemoteSQLVM) {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
+        }
+        if ($vm.wsusDataBaseServer) {
+            if ($vm.wsusDataBaseServer -ne "WID") {
+                Add-RemoteSQLVMToDeployConfig -vmName $vm.wsusDataBaseServer -configToModify $config
+            }
         }
     }
 

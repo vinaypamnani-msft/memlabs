@@ -641,7 +641,7 @@ function Test-ValidRoleSiteServer {
     $vmRole = $VM.role
 
     # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -in ("CAS","Primary")) {
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -in ("CAS", "Primary")) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
@@ -685,13 +685,15 @@ function Test-ValidRoleSiteServer {
 
     }
     else {
-        # Local SQL
-        $minMem = 6
-        if ($vmRole -eq "Secondary") { $minMem = 3 }
+        if ($VM.SqlVersion) {
+            # Local SQL
+            $minMem = 6
+            if ($vmRole -eq "Secondary") { $minMem = 3 }
 
-        # Minimum Memory
-        if ($VM.memory / 1 -lt $minMem * 1GB) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
+            # Minimum Memory
+            if ($VM.memory / 1 -lt $minMem * 1GB) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has SQL; must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -716,17 +718,19 @@ function Test-ValidRoleSiteServer {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
 
-    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode } | Where-Object {$_.Role -in "CAS", "Primary", "Secondary"}
-    foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+    if ($vm.Role -in "CAS", "Primary", "Secondary" ) {
+        $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode } | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" }
+        foreach ($vmWithSiteCode in $otherVMs) {
+            if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+            }
         }
-    }
 
-    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $null -ne $_.siteCode }
-    foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+        $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $null -ne $_.siteCode } | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" }
+        foreach ($vmWithSiteCode in $otherVMs) {
+            if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -1158,7 +1162,7 @@ function Test-Configuration {
                 }
             }
             if ($vm.SiteCode) {
-            Test-ValidRoleSiteServer -VM $vm -ConfigObject $deployConfig -ReturnObject $return
+                Test-ValidRoleSiteServer -VM $vm -ConfigObject $deployConfig -ReturnObject $return
             }
         }
 

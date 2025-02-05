@@ -30,50 +30,84 @@ configuration Phase6
         $standalone = ($thisVM.Role -eq "WSUS")
         $wsusFeatures = @("UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI")
         $sqlServer = "WID"
-        if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer) {
-            $wsusFeatures += "UpdateServices-DB"
 
-            if ($thisVm.sqlVersion) {
-                $sqlServer = $thisVM.vmName
-            }
-            else {
-                if ($thisVM.remoteSQLVM) {
-                    $sqlServer = $thisVM.remoteSQLVM
-                }
-                else {
-                    if ( $thisVM.thisParams.WSUSSqlServer) {
-                        $sqlServer = $thisVM.thisParams.WSUSSqlServer
-                    }
-                }
-
-            }
-
-            $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
-            #
-            if ($sqlServerVM.sqlInstanceName) {
-                if ($sqlServerVM.sqlInstanceName -ne "MSSQLSERVER") {
-                    $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
-                }
-            }
-
-            if ($sqlServerVM.sqlPort) {
-                $sqlPort = $sqlServerVM.sqlPort
-            }
-            else {
-                $sqlPort = 1433
-            }
-            if ($sqlPort -ne 1433) {
+        if ($thisVM.wsusDataBaseServer) {
+            if ($thisVM.wsusDataBaseServer -ne "WID") {
+                $wsusFeatures += "UpdateServices-DB"
+                $sqlServer = $thisVM.wsusDataBaseServer
+                $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
+                #
                 if ($sqlServerVM.sqlInstanceName) {
-                    if ($sqlServerVM.sqlInstanceName -eq "MSSQLSERVER") {
+                    if ($sqlServerVM.sqlInstanceName -ne "MSSQLSERVER") {
                         $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
                     }
                 }
-                $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
-            }
 
+                if ($sqlServerVM.sqlPort) {
+                    $sqlPort = $sqlServerVM.sqlPort
+                }
+                else {
+                    $sqlPort = 1433
+                }
+                if ($sqlPort -ne 1433) {
+                    if ($sqlServerVM.sqlInstanceName) {
+                        if ($sqlServerVM.sqlInstanceName -eq "MSSQLSERVER") {
+                            $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                        }
+                    }
+                    $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
+                }
+            }
+            else {
+                $wsusFeatures += "UpdateServices-WidDB"
+            }
         }
         else {
-            $wsusFeatures += "UpdateServices-WidDB"
+            if ($thisVM.sqlVersion -or $thisVM.remoteSQLVM -or $thisVM.thisParams.WSUSSqlServer -or $thisVM.wsusDataBaseServer) {
+                $wsusFeatures += "UpdateServices-DB"
+
+                if ($thisVm.sqlVersion) {
+                    $sqlServer = $thisVM.vmName
+                }
+                else {
+                    if ($thisVM.remoteSQLVM) {
+                        $sqlServer = $thisVM.remoteSQLVM
+                    }
+                    else {
+                        if ( $thisVM.thisParams.WSUSSqlServer) {
+                            $sqlServer = $thisVM.thisParams.WSUSSqlServer
+                        }
+                    }
+
+                }
+
+                $sqlServerVM = $deployConfig.VirtualMachines | where-object { $_.vmName -eq $sqlServer }
+                #
+                if ($sqlServerVM.sqlInstanceName) {
+                    if ($sqlServerVM.sqlInstanceName -ne "MSSQLSERVER") {
+                        $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                    }
+                }
+
+                if ($sqlServerVM.sqlPort) {
+                    $sqlPort = $sqlServerVM.sqlPort
+                }
+                else {
+                    $sqlPort = 1433
+                }
+                if ($sqlPort -ne 1433) {
+                    if ($sqlServerVM.sqlInstanceName) {
+                        if ($sqlServerVM.sqlInstanceName -eq "MSSQLSERVER") {
+                            $sqlServer = $sqlServer + "\" + $sqlServerVM.sqlInstanceName
+                        }
+                    }
+                    $sqlServer = $sqlServer + "," + $sqlServerVM.sqlPort
+                }
+
+            }
+            else {
+                $wsusFeatures += "UpdateServices-WidDB"
+            }
         }
 
         WriteStatus UpdateServices {
@@ -139,8 +173,8 @@ configuration Phase6
 
         if ($standalone) {            
             WSUSSync WSUSSync {
-                DependsOn    = $nextDepend
-                ServerName   = $thisVM.vmName + "." + $DomainName
+                DependsOn  = $nextDepend
+                ServerName = $thisVM.vmName + "." + $DomainName
             }
             $nextDepend = "[WSUSSync]WSUSSync"
         }
