@@ -126,7 +126,7 @@ if (-not $NoWindowResize.IsPresent) {
         }
 
         if ($host.UI.RawUI.WindowSize.Height -lt 50 -or $host.UI.RawUI.WindowSize.Width -lt 155) {
-            $percent = 0.85
+            $percent = 0.90
             $width = $screen.Bounds.Width * $percent
             $height = $screen.Bounds.Height * $percent
     
