@@ -662,8 +662,9 @@ function Select-DeleteDomain {
         if (-not $vms) {
             return
         }
-        $customOptions = [ordered]@{"D" = "Delete All VMs" }
-        $response = Get-Menu2 -MenuName "Delete VMs" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return
+       # $customOptions = [ordered]@{"D" = "Delete All VMs" }
+        $customOptions = $null
+        $response = Get-Menu2 -MenuName "Delete VMs in $domain" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return -MultiSelect
 
         if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
             return
@@ -679,15 +680,16 @@ function Select-DeleteDomain {
             }
         }
         else {
-            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($response)? (Y/n)" -HideHelp -timeout 180 -Default "y"
+            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM(s) $($response -Join ",")? (Y/n)" -HideHelp -timeout 180 -Default "y"
 
             if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue
             }
             else {
-                Remove-VirtualMachine -VmName $response
-                Get-List -type VM -SmartUpdate | Out-Null
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                Remove-Domain -DomainName $domain -vmList $response
+                #Remove-VirtualMachine -VmName $response
+                #Get-List -type VM -SmartUpdate | Out-Null
+                #New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                 continue
             }
         }

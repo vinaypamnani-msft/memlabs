@@ -749,7 +749,10 @@ function Show-Menu {
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition               
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -MultiSelect:$MultiSelect
+        Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
+        write-host
         if ($return) {
+            
             if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
                 $operation = $return.Action
                 write-log -verbose "OP: $operation"

@@ -279,17 +279,25 @@ function Remove-Domain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
+        [object]$VMList,
         [Parameter()]
         [switch] $WhatIf
     )
 
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
-    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    if ($VMList) {
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName | Where-Object { $_.vmName -in $VMList }
+    }
+    else {
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster"} # Internet subnet could be shared between multiple domains
 
-    Remove-ForestTrust -DomainName $DomainName
+    if ($DC) {
+        Remove-ForestTrust -DomainName $DomainName
+    }
     $DeleteVMs = {
     
         try {
@@ -320,7 +328,7 @@ function Remove-Domain {
     }
 
 
-
+if ($DC) {
     if ($scopesToDelete) {
         Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
         foreach ($scope in $scopesToDelete) {
@@ -332,6 +340,7 @@ function Remove-Domain {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
         }
     }
+}
 
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
