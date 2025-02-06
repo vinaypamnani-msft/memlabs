@@ -132,7 +132,10 @@ if (-not $NoWindowResize.IsPresent) {
     
             # Set Window
             Set-Window -ProcessID $PID -X 10 -Y 10 -Width $width -Height $height
-            
+            if ($parent) {
+                # set parent, cmd -> ps
+                Set-Window -ProcessID $parent -X 10 -Y 10 -Width $width -Height $height
+            }
         }
     }
     catch {
