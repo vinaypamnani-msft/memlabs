@@ -76,7 +76,7 @@ if (-not (Test-Path $flagPath)) {
         "Shortcuts Enabled" | Out-File $flagPath -Force
     }
 }
-$fixFlag = "ServerShortcuts2.done"
+$fixFlag = "ServerShortcuts3.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
@@ -84,6 +84,7 @@ if (-not (Test-Path $flagPath)) {
         # Create the new shortcut if the path exists
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Console.lnk")
         $shortcut.TargetPath = $CMexe
+        $shortcut.Arguments = "sms:debugview"
         $shortcut.Save()
 
         $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Powershell.lnk")
