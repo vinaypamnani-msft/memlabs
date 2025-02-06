@@ -125,8 +125,14 @@ if (-not $NoWindowResize.IsPresent) {
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
         }
 
-        if ($host.UI.RawUI.WindowSize.Height -lt 50) {
-            $host.UI.RawUI.WindowSize = New-Object System.Management.Automation.Host.Size($host.UI.RawUI.WindowSize.Width, 50)
+        if ($host.UI.RawUI.WindowSize.Height -lt 50 -or $host.UI.RawUI.WindowSize.Width -lt 155) {
+            $percent = 0.85
+            $width = $screen.Bounds.Width * $percent
+            $height = $screen.Bounds.Height * $percent
+    
+            # Set Window
+            Set-Window -ProcessID $PID -X 10 -Y 10 -Width $width -Height $height
+            
         }
     }
     catch {
