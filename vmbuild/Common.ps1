@@ -4178,14 +4178,14 @@ Function Install-HostToServer2025 {
     $exe = (Join-Path $exeLocation "setup.exe")
     if (Test-Path $exe) {
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
-            write-host "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
+            write-Log "Host is already on Server 2025. Not running $exe /auto upgrade /dynamicupdate disable /eula accept"
         }
         else {
-            Write-Host "Stopping all VMs"
+            write-Log "Stopping all VMs"
 
             Get-VM | Where-Object { $_.State -eq "Running" } | Stop-VM -Force
             Get-VM | Where-Object { $_.State -ne "Off" } | Stop-VM -TurnOff -Force
-            Write-Host "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
+            write-Log "Running $exe /auto upgrade /dynamicupdate disable /eula accept /imageindex 4"            
             Start-Process -FilePath $exe -ArgumentList "/auto upgrade /dynamicupdate disable /eula accept /imageindex 4" -Wait
         }
     }
