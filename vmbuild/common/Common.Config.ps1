@@ -2229,9 +2229,9 @@ Function Write-RedX {
         Write-Host "$(" " * $indent)" -NoNewline
     }
         
-    Write-Host "[" -NoNewLine
+    Write-Host2 "[" -NoNewLine -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     Write-Host2 -ForeGroundColor Red "x" -NoNewline
-    Write-Host "] " -NoNewline
+    Write-Host2 "] " -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     if ($ForegroundColor) {
         Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
 

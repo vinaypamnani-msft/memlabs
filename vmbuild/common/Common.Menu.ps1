@@ -139,7 +139,7 @@ function Get-Menu {
     $totalOptions = $preOptions + $additionalOptions
 
 
-    Show-GenConfigErrorMessages
+    #Show-GenConfigErrorMessages
     #Write-Verbose "Calling Get-ValidResponse with -return:true"
     $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
 
@@ -377,15 +377,29 @@ function Write-Option {
     write-host
 }
 
+
+function Get-GenConfigErrorMessagesLineCount {
+    $count = ($global:GenConfigErrorMessages | Measure-Object).Count
+
+    if ($count -gt 0) {
+        $count+=4 #Add 1 line for header, Add 3 for extra lines
+    }
+    return $count
+}
+
 function Show-GenConfigErrorMessages {
 
-    if ((($global:GenConfigErrorMessages | Measure-Object).Count) -gt 0) {
-        Write-Host
+    $count = ($global:GenConfigErrorMessages | Measure-Object).Count
+    if ($count -gt 0) {
+        #Write-host2 "┃" -NoNewline -ForegroundColor Crimson
         Write-Verbose "Showing Show-GenConfigErrorMessages"
-        Write-Host2 ">>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
+        Write-Host2 "┍━━━━━━━━━━━━━━━━━━━  ERROR: Validation Failures were encountered:" -ForegroundColor Crimson
+        Write-host2 "│" -ForegroundColor Crimson
         foreach ($err in $global:GenConfigErrorMessages) {
-            write-redx $err.message
+            Write-host2 "│" -NoNewline -ForegroundColor Crimson
+            write-redx $err.message -ForegroundColor White
         }
+        Write-host2 "│" -ForegroundColor Crimson
         Write-Host
         $global:GenConfigErrorMessages = $null
     }

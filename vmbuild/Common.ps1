@@ -338,10 +338,10 @@ function Write-Log {
         Set-TitleBar $Text
         Write-Host
         if ($NoNewLine.IsPresent) {
-            $Text = "=== $Text"
+            $Text = "╭── $Text"
         }
         else {
-            $Text = "=== $Text`r`n"
+            $Text = "╭── $Text`r`n"
         }
 
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
@@ -349,7 +349,7 @@ function Write-Log {
 
     If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
-        $Text = "  === $Text"
+        $Text = "  ╭── $Text"
         $HashArguments.Add("ForegroundColor", "LightSkyBlue")
     }
 
@@ -381,7 +381,7 @@ function Write-Log {
     If ($Highlight.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "  +++ $Text"
+        $Text = "  ╱╱╱ $Text"
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
@@ -4017,39 +4017,38 @@ function Set-QuickEdit() {
 function Set-SupportedOptions {
 
     $roles = @(
-        "DC",
-        "BDC",
+        "DomainMember",
+        "WorkgroupMember",
+        "InternetClient",
+        "AADClient",
+        "OSDClient",
         "CAS",
         "Primary",
         "Secondary",
         "SiteSystem",
         "PassiveSite",
         "FileServer",
-        "SQLAO",
-        "DomainMember",
-        "WorkgroupMember",
-        "InternetClient",
-        "AADClient",
-        "OSDClient",
-        "WSUS"
-
+        "SQLAO",        
+        "WSUS",
+        "DC",
+        "BDC"
     )
 
     $rolesForExisting = @(
-        "CAS",
-        "BDC",
-        "Primary",
-        "Secondary",
-        "SiteSystem",
-        "PassiveSite",
-        "FileServer",
         "DomainMember",
         "WorkgroupMember",
         "InternetClient",
         "AADClient",
         "OSDClient",
+        "CAS",
+        "Primary",
+        "Secondary",
+        "SiteSystem",
+        "PassiveSite",
+        "FileServer",       
         "SQLAO",
-        "WSUS"
+        "WSUS",
+        "BDC"
     )
 
 

@@ -590,11 +590,13 @@ function Show-Menu {
             $operation = ""
         }
 
+        
+       
         $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $RoomLeft = Get-RoomLeftFromCurrentPosition
-
+        $RoomLeft -= $ErrorCount
         if ($NoClear -and $RoomLeft -lt $menuItems.Count) {
             $NoClear = $false
         }
@@ -603,7 +605,7 @@ function Show-Menu {
             Write-Host "`e[2J`e[H"
             $NoClear = $true
         }
-
+        
         Write-Log -Activity $menuName
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
@@ -656,7 +658,11 @@ function Show-Menu {
             }
             if ($menuitem.Selectable) {
                 if ($menuItem.Selected) {
-                    Write-Host "-> " -ForegroundColor Yellow -NoNewline
+                    #$arrow = "-> " 
+                    #$arrow = "⟶ "
+                    #$arrow = "➤ "
+                    $arrow = "━➤ "
+                    Write-Host $arrow -ForegroundColor Yellow -NoNewline
                 }
                 else {
                     Write-Host "   " -ForegroundColor Cyan -NoNewline
@@ -785,7 +791,11 @@ function Set-PointerDisplayAsPerMenu {
             Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
             if ($i -eq $selectedIndex) {
                 $menuItems[$i].Selected = $true
-                Write-Host "-> " -ForegroundColor Yellow
+                
+                $arrow = "━➤ "
+                
+                Write-Host $arrow -ForegroundColor Yellow -NoNewline
+                #Write-Host $arrow -ForegroundColor Yellow
             
             }
             else {

@@ -754,6 +754,7 @@ function Select-MainMenu {
         $global:StartOver = $false
         Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
+        $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages"}
         $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
@@ -1924,8 +1925,8 @@ function Select-RolesForExisting {
             switch ($item) {
                 "CAS" { $existingRoles2 += "CAS and Primary" }
                 "DomainMember" {
-                    $existingRoles2 += "DomainMember (Server)"
                     $existingRoles2 += "DomainMember (Client)"
+                    $existingRoles2 += "DomainMember (Server)"                    
                     $existingRoles2 += "Sqlserver"
                 }
                 "PassiveSite" {}
@@ -4678,7 +4679,7 @@ function Select-Options {
             $null = Get-MenuItems -MenuName $MenuName -ExistingMenuItems ([ref]$MenuItems) -additionalOptions $additionalOptions                  
         }
 
-        Show-GenConfigErrorMessages
+        #Show-GenConfigErrorMessages
 
 
         #if ($ContinueMode) {
