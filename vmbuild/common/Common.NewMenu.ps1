@@ -35,7 +35,8 @@ function Add-MenuItem {
         #[AllowEmptyCollection()]
         [Parameter(Mandatory = $true, HelpMessage = "Menu Name")]
         [string] $MenuName,
-        [array] $MenuItems,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList][ref] $MenuItems,
         [string] $ItemName,
         [string] $ItemText,
         [string] $Color1 = $Global:Common.Colors.GenConfigNormal,
@@ -54,7 +55,7 @@ function Add-MenuItem {
             }
         }
     }
-    $MenuItem = New-MenuItem -itemName $ItemName -text $ItemText -color1 $color1 -color2 $color2 -selectable:$selectable -selected:$selected -function $funtion        
+    $MenuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -itemName $ItemName -text $ItemText -color1 $color1 -color2 $color2 -selectable:$selectable -selected:$selected -function $funtion        
 
     
     if ($Global:MenuHistory) {
@@ -73,8 +74,9 @@ function Add-MenuItem {
 
     }
     
-    $MenuItems += $MenuItem
-    return $MenuItems
+    #$MenuItems.Add($MenuItem) | out-null
+    write-log -LogOnly "$($MenuItems.Count) Adding $MenuItem"
+    return $MenuItem
 
 }
 
@@ -84,7 +86,8 @@ function Update-MenuItem {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [object]$menuItems,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList][ref]$menuItems,
         [Parameter(Mandatory = $true)]
         [string]$itemname,
         [string]$text,
@@ -100,6 +103,7 @@ function Update-MenuItem {
 
     foreach ($menuItem in $menuItems) {
         if ($menuItem.ItemName -eq $itemname) {
+            write-Log -verbose "Updating $menuItem"
             if ($text) {
                 $menuItem.Text = $text
             }
@@ -127,7 +131,7 @@ function Update-MenuItem {
             if ($helptext) {
                 $menuItem.helptext = $helptext
             }
-
+            break
         }
     }
     return $menuItems
@@ -135,7 +139,11 @@ function Update-MenuItem {
 
 function New-MenuItem {
     [CmdletBinding()]
+    [OutputType([PSCustomObject])]
     param (
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList][ref]$menuItems,
         [string]$itemname,
         [string]$text,
         [string]$color1 = $Global:Common.Colors.GenConfigDefault,
@@ -147,7 +155,7 @@ function New-MenuItem {
         [switch]$displayed = $false,
         [string]$helptext
     )
-    
+    write-log -Verbose "Adding $itemName to menu.. Current Count $($menuItems.Count)"
     if ($text) {
         $TextValue = $text -split "%"
 
@@ -167,6 +175,12 @@ function New-MenuItem {
     }
 
     if ($itemName) {
+        if ($itemName.StartsWith("H")) {
+            $itemName = $itemName.SubString(1)
+            write-log -verbose "Updated MenuItem with itemname '$itemName' with helptext $text"
+            #Update-MenuItem -menuItems $menuItems -itemname $itemName -helptext $text
+            return
+        }
         if ($itemName.StartsWith("*")) {            
             $selectable = $false
             if ($itemName.StartsWith("*F")) {
@@ -176,7 +190,7 @@ function New-MenuItem {
             else {                    
                 $function = $null                
             }   
-            $itemName = $null        
+            #$itemName = $null        
         }
     }
 
@@ -192,7 +206,11 @@ function New-MenuItem {
         Displayed     = $displayed
         HelpText      = $helptext
     }
+    $MenuItems.Add($MenuItem) | out-null
+    Write-Log -Verbose "Returning $MenuItem"    
+    
     return $MenuItem
+    
 }
 
 function Get-MenuItems {
@@ -208,7 +226,8 @@ function Get-MenuItems {
         [object] $additionalOptions = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Pre Menu options, in dictionary format.. X = Exit")]
         [object] $preOptions = $null,
-        [object] $menuItems = $null,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList] $ExistingmenuItems = $null,
         [switch] $MultiSelect,
         [switch] $AllSelected
     )
@@ -226,19 +245,26 @@ function Get-MenuItems {
     $foundSelected = $false
     $FoundMultiSelectItem = $false
     #Define an array of MenuItems
-    if ($null -eq $menuItems) {
-        $MenuItems = @()
-    }
-    else {
+
+    $MenuItems = [System.Collections.ArrayList]@()
+  
+    if ($ExistingmenuItems) {
+        #$MenuItems = $ExistingmenuItems
         $foundSelected = $true
+        foreach ($MenuItem in $ExistingmenuItems) {
+            $MenuItems.Add($MenuItem) | out-null
+        }
     }
+    #else {
+    #    $MenuItems = [System.Collections.ArrayList]@()
+    #}
 
     
     if ($null -ne $preOptions) {
         foreach ($item in $preOptions.keys) {
             
             $value = $preOptions."$($item)"
-            $MenuItem = New-MenuItem -selectable -text $value -itemname $item
+            $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $value -itemname $item
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
 
@@ -267,7 +293,7 @@ function Get-MenuItems {
                 }
                 #$MenuItem.itemName = $item
                 #$MenuItem.Text = $TextValue[0]
-                $MenuItems += $MenuItem
+                #$MenuItems += $MenuItem
                              
             }
         }
@@ -279,7 +305,7 @@ function Get-MenuItems {
         if (-not [String]::IsNullOrWhiteSpace($option)) {
             $i = $i + 1
             $item = $option
-            $MenuItem = New-MenuItem -selectable -text $item -color1 $Global:Common.Colors.GenConfigNormal -color2 $Global:Common.Colors.GenConfigDefaultNumber           
+            $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $item -color1 $Global:Common.Colors.GenConfigNormal -color2 $Global:Common.Colors.GenConfigDefaultNumber           
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $item -split "%"
@@ -318,9 +344,9 @@ function Get-MenuItems {
                         }
                     }
                 }
-                $MenuItem.itemName = $i
+                $MenuItem.itemName = [string]$i
                 #$MenuItem.Text = $TextValue[0]
-                $MenuItems += $MenuItem   
+                #$MenuItems += $MenuItem   
                 $FoundMultiSelectItem = $true                   
             }
         }
@@ -329,9 +355,9 @@ function Get-MenuItems {
     if ($null -ne $additionalOptions) {
         foreach ($item in $additionalOptions.keys) {
             $value = $additionalOptions."$($item)"
-
-            $MenuItem = New-MenuItem -selectable -text $value -itemname $item
-
+            Write-Log -verbose "MenuItem Before $MenuItem"
+            $MenuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $value -itemname $item
+            Write-Log -verbose "New-MenuItem returned $MenuItem"
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
                 
@@ -347,9 +373,9 @@ function Get-MenuItems {
                     }
                     if ($CurrentValue) {
                         if ($item -eq $CurrentValue) {
+                            Write-Log -verbose "8FoundSelected True $item $MenuItem"
                             $MenuItem.Selected = $true
-                            $foundSelected = $true
-                            Write-Log -verbose "8FoundSelected True $item"
+                            $foundSelected = $true                            
                         }
                         if ($TextValue[0] -eq $CurrentValue) {
                             $MenuItem.Selected = $true
@@ -360,17 +386,17 @@ function Get-MenuItems {
                 }
                 #$MenuItem.itemName = $item
                 #$MenuItem.Text = $TextValue[0]
-                $MenuItems += $MenuItem   
+                #$MenuItems += $MenuItem   
             }
         }
     }
 
     if ($MultiSelect -and $FoundMultiSelectItem) {
         
-        $MenuItems += New-MenuItem -ItemName "*B"
-        $MenuItems += New-MenuItem -ItemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable         
-        $MenuItems += New-MenuItem -ItemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable           
-        $MenuItems += New-MenuItem -ItemName "D" -text "Done with selections" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -selected       
+        $null = New-MenuItem -MenuItems ([ref]$MenuItems) -ItemName "*B"
+        $null = New-MenuItem -MenuItems ([ref]$MenuItems) -ItemName "A" -text "All Entries" -color1 $Global:Common.Colors.GenConfigTrue -color2 $Global:Common.Colors.GenConfigTrue -selectable         
+        $null = New-MenuItem -MenuItems ([ref]$MenuItems) -ItemName "N" -text "No Entries" -color1 $Global:Common.Colors.GenConfigFalse -color2 $Global:Common.Colors.GenConfigFalse -selectable           
+        $null = New-MenuItem -MenuItems ([ref]$MenuItems) -ItemName "D" -text "Done with selections" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -selected       
 
     }
     
@@ -392,7 +418,7 @@ function Get-MenuItems {
         }
     }
     if ($MenuItems.Count -eq 0) {       
-        $MenuItems += New-MenuItem
+        $null = New-MenuItem -MenuItems ([ref]$MenuItems)
     }
     return $MenuItems # Return the menu items
 }
@@ -425,7 +451,8 @@ function Get-Menu2 {
         [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return from this menu on enter")]
         [switch] $return,
         [Parameter(Mandatory = $false, HelpMessage = "PrePopulated MenuItems")]
-        [object] $menuItems = $null,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList] $menuItems = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Do Not clear the screen.. Dangerous")]
         [switch] $NoClear,
         [switch] $MultiSelect,
@@ -447,8 +474,11 @@ function Get-Menu2 {
     if (-not $Global:MenuHistory) {
         $Global:MenuHistory = @{}
     }
-
-    $response = Show-Menu -menuItems $menuItems -menuName $MenuName -NoClear:$NoClear -MultiSelect:$MultiSelect
+    Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
+    #foreach ($menuItem in $menuItems) {
+    #    write-host "[Get-Menu2] Item: $menuItem"
+    #}
+    $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$NoClear -MultiSelect:$MultiSelect
     if ($response -is [array] -or $response.MultiSelected) {
         $ReturnValue = @()
         foreach ($item in $response) {
@@ -526,33 +556,38 @@ function Show-Menu {
         [string]$menuName, # The name of the menu
 
         [Parameter(Mandatory = $true)] # Mandatory parameter
-        [array]$menuItems, # The array of menu items
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList][ref]$menuItems, # The array of menu items
         [Switch]$NoClear = $false,
         [Switch]$MultiSelect = $false
 
     )
+    $LongestBreakLine = 0
     $Operation = ""
     While ($true) {
-
-        if ($operation -eq "PGUP") {
-            foreach ($menuitem in $menuItems) {
+        $found = $false
+        foreach ($menuitem in $menuItems) {
+            if ($operation -eq "PGUP") {
                 $menuitem.Displayed = $false
             }
-            $operation = ""
-        }
-        $found = $false
-        if ($operation -eq "PGDN") {
-            foreach ($menuitem in $menuItems) {
+
+            if ($operation -eq "PGDN") {
                 if ($menuitem.Displayed -eq $false -and $menuitem.Selectable) {
                     $found = $true
                 }
             }
-            if (-not $found) {
-                foreach ($menuitem in $menuItems) {
-                    $menuitem.Displayed = $false
+            if ($menuitem.itemName.StartsWith("*B")) {
+                $len = $menuitem.Text.Length
+                if ($len -gt $LongestBreakLine) {
+                    $LongestBreakLine = $len
                 }
-                $operation = ""
             }
+        }
+        if ($operation -eq "PGDN" -and -not $found) {
+            foreach ($menuitem in $menuItems) {
+                $menuitem.Displayed = $false
+            }
+            $operation = ""
         }
 
         $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
@@ -629,6 +664,8 @@ function Show-Menu {
             }
 
         
+
+            
             $CurrentPosition = Get-CursorPosition
             $menuItem | Add-Member -MemberType NoteProperty -Name "CurrentPosition" -Value $CurrentPosition.Y -force
             if ($menuItem.Selectable) {    
@@ -643,9 +680,43 @@ function Show-Menu {
                 if ($shrink -and [string]::IsNullOrWhiteSpace($menuItem.Text)) {
                     continue
                 }
-                write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
+
+                $StartDashColor = "SlateGray"
+                $EndDashColor = "SlateGray"
+                $indentSpaces = 3
+                $center = $true
+                $SpacesAroundWords = 4
+                $StartDashes = 3
+                if ($menuItem.itemName.StartsWith("*B") -and -not [string]::isnullorwhitespace($menuitem.Text)) {
+                    if ($center) {
+
+                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
+                        $breakPrefix = "─" * $NumOfDash
+                        if([bool](($LongestBreakLine - $menuitem.Text.Length) %2)) {
+                            $NumOfDash +=1
+                        }
+                        $breakPostfix = "─" * $NumOfDash                        
+                    }
+                    else {
+                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) - $StartDashes))
+                        $breakPrefix = "─" * $StartDashes
+                        $breakPostfix = "─" * $NumOfDash 
+                    }
+                    $WordSpace = " " * $SpacesAroundWords
+                    
+                    Write-Host2 $(" " * $indentSpaces) -NoNewline
+                    Write-Host2 -ForegroundColor $StartDashColor $($breakPrefix + $WordSpace) -NoNewline
+                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text -NoNewline
+                    Write-Host2 -ForegroundColor $EndDashColor $($WordSpace + $breakPostfix)
+                    
+                }
+                else {
+                    #Write-Host2 -ForegroundColor "MediumPurple" $menuItem.itemName -NoNewline
+                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
+                }
                 $menuItem.Displayed = $true
             }                        
+            
         }   
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
@@ -680,8 +751,8 @@ function Show-Menu {
             else {
                 write-log -verbose "Ret: '$return' Type: $($return.GetType())"
                 #if ($return.GetType() -eq "System.Object[]") {
-                    $return = $return | ForEach-Object {$_}
-                    write-log -verbose "Ret2: '$return' Type: $($return.GetType()) count: $($return.Count)"
+                $return = $return | ForEach-Object { $_ }
+                write-log -verbose "Ret2: '$return' Type: $($return.GetType()) count: $($return.Count)"
                 #}
                 return $return
             }
@@ -698,7 +769,8 @@ function Show-Menu {
 function Set-PointerDisplayAsPerMenu {
     param (
         [Parameter(Mandatory = $true)] # Mandatory parameter
-        [array]$menuItems, # The array of menu items
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$menuItems, # The array of menu items
 
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [int]$selectedIndex,
@@ -713,7 +785,7 @@ function Set-PointerDisplayAsPerMenu {
             Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
             if ($i -eq $selectedIndex) {
                 $menuItems[$i].Selected = $true
-                Write-Host "-> " -ForegroundColor Cyan
+                Write-Host "-> " -ForegroundColor Yellow
             
             }
             else {
@@ -763,7 +835,8 @@ function Update-Prompt {
         [string]$buffer, # The buffer to display
 
         [Parameter(Mandatory = $false)] # Mandatory parameter
-        [object]$MenuItems = $null,
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$MenuItems = $null,
 
         [Parameter(Mandatory = $false)] # Mandatory parameter
         [int]$SelectedIndex = -1
@@ -804,7 +877,8 @@ function Update-Prompt {
 function Start-Navigation {
     param (
         [Parameter(Mandatory = $true)] # Mandatory parameter
-        [array]$menuItems, # The array of menu items
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$menuItems, # The array of menu items
         
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [int]$startOfmenu, # The selected index
@@ -958,9 +1032,14 @@ function Start-Navigation {
             
         }
         
-        if ($key.VirtualKeyCode -eq 38) {
+        if ($key.VirtualKeyCode -eq 38 -or $key.VirtualKeyCode -eq 0x23) {
             # 38 = Up arrow key
+            # 0x23 = END key
+
             # If the selected index is greater than 0, move the selection up
+            if ($key.VirtualKeyCode -eq 0x23) {
+                $selectedIndex = -1
+            }
             $buffer = $null
             $i = 0
             while ($true) {                
@@ -983,10 +1062,14 @@ function Start-Navigation {
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
         }
         
-        if ($key.VirtualKeyCode -eq 40) {
+        if ($key.VirtualKeyCode -eq 40 -or $key.VirtualKeyCode -eq 0x24) {
             # 40 = Down arrow key
+            # 0x24 = HOME key
             # If the selected index is less than the last item, move the selection down
             $buffer = $null
+            if ($key.VirtualKeyCode -eq 0x24) {
+                $selectedIndex = 0
+            }
             $i = 0
             while ($true) {
                 if ($i -gt $menuItems.Count) {

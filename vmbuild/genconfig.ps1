@@ -142,8 +142,7 @@ function Check-OverallHealth {
     $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
     $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
 
-    Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "    ---  Quick Stats"
-    
+   
     $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
     $vmsTotal = (Get-List -Type VM | Measure-Object).Count
     
@@ -234,19 +233,17 @@ function Check-OverallHealth {
 function Select-ConfigMenu {
     $Global:EnterKey = $true
     while ($true) {
-        #Write-Log -Activity "MemLabs Main Menu"
-
-        #Check-OverallHealth
-        #$customOptions = [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+  
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions = [ordered]@{}
-        #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "---  Create or Modify domain configs"
+
+        $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
         $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
-        $customOptions += [ordered]@{ "*B0" = "---  Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
         if ($domainCount -gt 0) {
             $customOptions += [ordered]@{ "1" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            #$customOptions += [ordered]@{ "H1" = "This option allows you to create a new domain, or edit one you previously created." }
-            #   $customOptions += [ordered]@{"2" = "Expand Existing Domain [$($domainCount) existing domain(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; }
+            $customOptions += [ordered]@{ "H1" = "This option allows you to create a new domain, or edit one you previously created." }
+  
         }
         else {
             $customOptions += [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
@@ -254,18 +251,16 @@ function Select-ConfigMenu {
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"3" = '$HIDDEN' }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"4" = '$HIDDEN'; }
             $customOptions += [ordered]@{"X" = "Load TEST config from File (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
         }
 
 
         $customOptions += [ordered]@{"*B3" = ""; }
        
-        $customOptions += [ordered]@{"*BREAK2" = "---  Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"D" = "Manage Domains [Start/Stop/Snapshot/Delete Virtual Machines]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         #$customOptions += [ordered]@{"E" = "Toggle <Enter> to finalize prompts%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
         #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
@@ -273,26 +268,26 @@ function Select-ConfigMenu {
         
 
 
-        $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "---  List Resources%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
 
         $customOptions += [ordered]@{"P" = "Show Passwords" }
-        $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "---  Other%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             #Do nothing as we are on server 2025
         }
         else {
-            $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "---  Host machine needs to be on server 2025 to activate Server 2025 VMs" }
+            $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
             $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
         }
         if ($common.DevBranch) {
-            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "---  Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
             $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
         else {
-            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "---  Currently on Main Branch%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Main Branch $breakPrefix%$($Global:Common.Colors.GenConfigHeader)" }
             $customOptions += [ordered]@{"#" = "Switch to development branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
@@ -301,8 +296,7 @@ function Select-ConfigMenu {
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
         }
-        #Write-Host
-        #Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigHeader "---  Create or Modify domain configs"
+
         $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
         write-Verbose "1 response $response"
@@ -417,19 +411,7 @@ function Select-VMMenu {
     Write-Verbose "2 Select-VMMenu"
     while ($true) {
        
-        #get-list -Type VM -DomainName $domain | Format-Table | Out-Host
-
-        #$customOptions = [ordered]@{
-        #    "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
-        #    "1"   = "Start VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-        #    "2"   = "Stop VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-        #    "3"   = "Compact all VHDX's in domain (requires domain to be stopped)%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-        #    "*S"  = "";
-        #    "*S1" = "---  Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-        #    "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-        #}
-
-        #$customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+       
         $customOptions = [ordered]@{"*F" = "Show-VMS" }
         $response = Get-Menu2 -MenuName "Currently Deployed VMs" -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true -test:$false
 
@@ -494,19 +476,19 @@ function Select-DomainMenu {
 
         $customOptions = [ordered]@{
             "*F1" = "List-VMsInDomain -DomainName $domain" 
-            "*d1" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)";
+            "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
             "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
             "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
             "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
             "*S"  = "";
-            "*S1" = "---  Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
+            "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
             "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         }
               
         if ($checkPoint) {
             $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
         }
-        $customOptions += [ordered]@{"*Z" = ""; "*Z1" = "---  Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+        $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
         $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
         write-Verbose "1 response $response"
@@ -772,7 +754,7 @@ function Select-MainMenu {
         $global:StartOver = $false
         Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*G" = "---  Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         }
@@ -786,7 +768,7 @@ function Select-MainMenu {
 
 
         if ($global:existingMachines) {
-            $preOptions += [ordered]@{ "*V1" = ""; "*V" = "---  Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+            $preOptions += [ordered]@{ "*B1" = ""; "*B2" = "Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
             foreach ($existingVM in $global:existingMachines) {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
@@ -795,7 +777,7 @@ function Select-MainMenu {
             }
         }
         $customOptions += [ordered]@{"*V2" = "" }
-        $customOptions += [ordered]@{"*VV" = "---  Virtual Machines to be deployed%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*B3" = "Virtual Machines to be deployed%$($Global:Common.Colors.GenConfigHeader)" }
         try {
             if ($global:Config.virtualMachines) {
                 $virtualMachines = @($global:Config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
@@ -830,7 +812,7 @@ function Select-MainMenu {
         }
 
         $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
-        $customOptions += [ordered]@{ "*D1" = ""; "*D" = "---  Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{ "*D1" = ""; "*BD" = "Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         if ($InternalUseOnly.IsPresent) {
@@ -1373,14 +1355,13 @@ function Show-NewDomainTip {
 function Select-DeploymentType {
     $response = $null
 
-    #write-log -Activity "New Domain Wizard - Change Deployment type" -NoNewLine
     $customOptions = [ordered]@{"*F1" = "Show-NewDomainTip" }
-    $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "---  DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" }
     $customOptions += [ordered]@{ "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" }
-    # $customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
+
 
     $response = $null
     while (-not $response) {       
@@ -1785,18 +1766,15 @@ function Show-ExistingNetwork2 {
     while ($true) {
 
         Write-log -Activity "Create new domain -or- modify existing domain"
-        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "---  New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "---  Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
         $i = 0
         foreach ($domain in $domainList) {
             $i++
             $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
 
-        #$customOptions += [ordered]@{"*B2" = ""; "*BREAK2" = "---  Other Options%$($Global:Common.Colors.GenConfigHeader)" }
-        #$customOptions += [ordered]@{ "!" = "Return to Main Menu%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        #$domain = Get-Menu -Prompt "Select existing domain" -OptionArray $domainList -additionalOptions $customOptions -Split -test:$false -return -CurrentValue "N"
         $response = Get-Menu2 -MenuName "Create new domain -or- modify existing domain" -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
         if ($response.ToLowerInvariant() -eq "!" -or $response.ToLowerInvariant() -eq "escape") {
             return
@@ -4614,7 +4592,7 @@ function Select-Options {
     $newName = $null
     :MainLoop
     while ($true) {
-        $MenuItems = @()
+        $MenuItems = [System.Collections.ArrayList]@()
         if ($null -eq $property -and $null -ne $Rootproperty) {
             $property = $Rootproperty."$propertyName"
         }
@@ -4669,7 +4647,7 @@ function Select-Options {
             }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
-                $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName " " -ItemText "$($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "$($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
 
@@ -4682,7 +4660,7 @@ function Select-Options {
                 $fakeNetwork = $i
                 $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
                 #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
-                $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true
                 #Write-Option $i "$($("network").PadRight($padding," "")) = $network"
                 $i++
             }
@@ -4691,13 +4669,13 @@ function Select-Options {
             #write-log "Get-AdditionalInformation $item $value"
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             $color = Get-AdditionalInformationColor -item $item -data $value
-            $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color
+            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
 
        
         if ($null -ne $additionalOptions) {
-            $MenuItems = Get-MenuItems -MenuName $MenuName -MenuItems $MenuItems -additionalOptions $additionalOptions           
+            $null = Get-MenuItems -MenuName $MenuName -ExistingMenuItems ([ref]$MenuItems) -additionalOptions $additionalOptions                  
         }
 
         Show-GenConfigErrorMessages
@@ -4709,10 +4687,10 @@ function Select-Options {
         #else {
         #    $response = get-ValidResponse $prompt $i $null $additionalOptions -return:$true
         #}
-        $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
-        $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName "*B" -ItemText "-------" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
-        $MenuItems = Add-MenuItem -MenuName $MenuName -MenuItems $MenuItems -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight 
-        $response = Get-Menu2 -MenuName $MenuName -menuItems $MenuItems -Prompt $prompt -HideHelp:$true -test:$false  
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight 
+        $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false  
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
             return "ESCAPE"
@@ -6375,7 +6353,7 @@ function Select-VirtualMachines {
                     $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
-                    $customOptions += [ordered]@{"*N2" = ""; "*N" = "---  Add new Disk%$($Global:Common.Colors.GenConfigHeader)"; "N" = "Add a new VHDX to this VM" }
+                    $customOptions += [ordered]@{"*N2" = ""; "*BN" = "Add new Disk%$($Global:Common.Colors.GenConfigHeader)"; "N" = "Add a new VHDX to this VM" }
                     if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
 
@@ -6384,7 +6362,7 @@ function Select-VirtualMachines {
                             if (-not $existingPassive) {
                                 
                                 # No Passive Site for this sitecode.. We can offer it here.
-                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  CM High Availability%$($Global:Common.Colors.GenConfigHeader)"; "H" = "Add a Passive Node for this Site Server" }
+                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "CM High Availability%$($Global:Common.Colors.GenConfigHeader)"; "H" = "Add a Passive Node for this Site Server" }
 
                             }
                         }
@@ -6546,14 +6524,14 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                        $customOptions = [ordered]@{ "*B1" = ""; "*B" = "---  Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
+                        $customOptions = [ordered]@{ "*B1" = ""; "*B" = "Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
                         if ($null -eq $virtualMachine.additionalDisks) {
                         }
                         else {
                             $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
                         }
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                            $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
+                            $customOptions += [ordered]@{"*B2" = ""; "*BS" = "ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
                             $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                             if ($PassiveNode) {
                                 $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
@@ -6565,10 +6543,10 @@ function Select-VirtualMachines {
                         else {
                             if ($virtualMachine.Role -eq "DomainMember") {
                                 if (-not $virtualMachine.domainUser) {
-                                    $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Add domain user as admin on this machine" }
+                                    $customOptions += [ordered]@{"*U" = ""; "*BU2" = "Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Add domain user as admin on this machine" }
                                 }
                                 else {
-                                    $customOptions += [ordered]@{"*U" = ""; "*U2" = "---  Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
+                                    $customOptions += [ordered]@{"*U" = ""; "*BU2" = "Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
                                 }
                             }
                             if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
@@ -6578,13 +6556,13 @@ function Select-VirtualMachines {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         switch ($virtualMachine.Role) {
                                             "Secondary" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
                                             }
                                             "WSUS" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
                                             }
                                             Default {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
                                             }
                                         }
                                     }
@@ -6592,13 +6570,13 @@ function Select-VirtualMachines {
 
                                         switch ($virtualMachine.Role) {
                                             "Secondary" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
                                             }
                                             "WSUS" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
                                             }
                                             Default {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*S" = "---  SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
                                             }
                                         }
                                     }
@@ -6606,7 +6584,7 @@ function Select-VirtualMachines {
                             }
                         }
 
-                        $customOptions += [ordered]@{"*B3" = ""; "*D" = "---  VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+                        $customOptions += [ordered]@{"*B3" = ""; "*BD" = "VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
                         #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                         $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
                         if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {

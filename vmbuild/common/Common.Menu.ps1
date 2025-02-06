@@ -62,9 +62,17 @@ function Get-Menu {
                     continue
                 }
 
-                if ($item.StartsWith("*")) {
-                    write-host2 -ForeGroundColor $color1 $TextValue[0]
-                    continue
+                if ($item.StartsWith("*B")) {
+                    $breakPrefix = " t───── "
+                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix -NoNewline
+                    write-host2 -ForeGroundColor $color1 $TextValue[0] -NoNewline
+                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix
+                }
+                else {
+                    if ($item.StartsWith("*")) {
+                        write-host2 -ForeGroundColor $color1 $TextValue[0]
+                        continue
+                    }
                 }
                 Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
             }
@@ -487,7 +495,7 @@ function Select-StartDomain {
             Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
         }
         else {
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***"}
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***" }
             #Write-GreenCheck "All VM's in '$domain' are already Running"
             #return
         }
