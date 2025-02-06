@@ -215,6 +215,7 @@ function New-MenuItem {
 
 function Get-MenuItems {
     [CmdletBinding()]
+    [OutputType([System.Collections.ArrayList])]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Menu Name")]
         [string] $MenuName,
@@ -247,6 +248,7 @@ function Get-MenuItems {
     #Define an array of MenuItems
 
     $MenuItems = [System.Collections.ArrayList]@()
+    Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
   
     if ($ExistingmenuItems) {
         #$MenuItems = $ExistingmenuItems
@@ -254,17 +256,14 @@ function Get-MenuItems {
         foreach ($MenuItem in $ExistingmenuItems) {
             $MenuItems.Add($MenuItem) | out-null
         }
-    }
-    #else {
-    #    $MenuItems = [System.Collections.ArrayList]@()
-    #}
-
-    
+    }    
+    Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
     if ($null -ne $preOptions) {
         foreach ($item in $preOptions.keys) {
             
             $value = $preOptions."$($item)"
             $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $value -itemname $item
+            Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
 
@@ -305,7 +304,8 @@ function Get-MenuItems {
         if (-not [String]::IsNullOrWhiteSpace($option)) {
             $i = $i + 1
             $item = $option
-            $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $item -color1 $Global:Common.Colors.GenConfigNormal -color2 $Global:Common.Colors.GenConfigDefaultNumber           
+            $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $item -color1 $Global:Common.Colors.GenConfigNormal -color2 $Global:Common.Colors.GenConfigDefaultNumber  
+            Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"         
 
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $item -split "%"
@@ -357,6 +357,7 @@ function Get-MenuItems {
             $value = $additionalOptions."$($item)"
             Write-Log -verbose "MenuItem Before $MenuItem"
             $MenuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $value -itemname $item
+            Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
             Write-Log -verbose "New-MenuItem returned $MenuItem"
             if (-not [String]::IsNullOrWhiteSpace($item)) {
                 $TextValue = $value -split "%"
@@ -399,7 +400,7 @@ function Get-MenuItems {
         $null = New-MenuItem -MenuItems ([ref]$MenuItems) -ItemName "D" -text "Done with selections" -color1 $Global:Common.Colors.GenConfigDefault -color2 $Global:Common.Colors.GenConfigDefaultNumber -selectable -selected       
 
     }
-    
+    Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
     if (-not $foundSelected) {
         foreach ($menuItem in $MenuItems) {
             if ($menuItem.Selected) {
@@ -420,7 +421,8 @@ function Get-MenuItems {
     if ($MenuItems.Count -eq 0) {       
         $null = New-MenuItem -MenuItems ([ref]$MenuItems)
     }
-    return $MenuItems # Return the menu items
+    write-log -verbose "Returning $MenuItems of type $($MenuItems.GetType())"
+    return (,[System.Collections.ArrayList]$MenuItems) # Return the menu items
 }
 
 function Get-Menu2 {
@@ -467,7 +469,10 @@ function Get-Menu2 {
     }
 
     if ($null -eq $menuItems) {
-        $menuItems = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected
+        
+        $temp = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected
+        write-log -verbose "Get-MenuItems returned $temp. type: $($temp.GetType())"
+        $menuItems =$temp
         Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
     }
    
