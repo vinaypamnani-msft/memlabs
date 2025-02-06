@@ -175,7 +175,7 @@ function New-MenuItem {
     }
 
     if ($itemName) {
-        if ($itemName.StartsWith("H")) {
+        if ($itemName.StartsWith("H") -and $ItemName.Length -gt 1) {
             $itemName = $itemName.SubString(1)
             write-log -verbose "Updated MenuItem with itemname '$itemName' with helptext $text"
             #Update-MenuItem -menuItems $menuItems -itemname $itemName -helptext $text
@@ -251,11 +251,7 @@ function Get-MenuItems {
     Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
   
     if ($ExistingmenuItems) {
-        #$MenuItems = $ExistingmenuItems
-        $foundSelected = $true
-        foreach ($MenuItem in $ExistingmenuItems) {
-            $MenuItems.Add($MenuItem) | out-null
-        }
+        $MenuItems = $ExistingmenuItems       
     }    
     Write-Log -Verbose "MenuItems is currently $MenuItems $($MenuItems.GetType())"
     if ($null -ne $preOptions) {
