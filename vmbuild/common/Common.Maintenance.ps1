@@ -349,6 +349,20 @@ function Start-VMFix {
         return $return
     }
 
+    $HashArguments = @{
+        VmName       = $VMName
+        VMDomainName = $vmDomain
+        DisplayName  = "Testing for Memlabs files"
+        ScriptBlock  = {Test-Path "C:\Staging"}
+    }
+
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
+    if ($result.ScriptBlockOutput -eq $false) {
+        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success -OutputStream
+        $return.Success = $true
+        return $return
+    }
+
     # Apply Fix
     $HashArguments = @{
         VmName       = $VMName

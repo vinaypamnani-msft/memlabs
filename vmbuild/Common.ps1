@@ -6,7 +6,9 @@ param (
     [Parameter()]
     [switch]$VerboseEnabled,
     [Parameter()]
-    [switch]$DevBranch
+    [switch]$DevBranch,
+    [Parameter()]
+    [switch]$GetLastestHotfixVersion
 )
 
 ########################
@@ -4390,7 +4392,7 @@ if (-not $Common.Initialized) {
         }
 
 
-        if (-not $InJob) {
+        if (-not $InJob -or $GetLastestHotfixVersion) {
             Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
             Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
             $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
