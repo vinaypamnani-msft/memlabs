@@ -281,7 +281,7 @@ function Start-VMFixes {
         return $true
     }
 
-    $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+    $copyResults = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
