@@ -9,7 +9,7 @@ $global:Phase10Job = {
 
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLastestHotfixVersion
-
+     
         # Get variables from parent scope
         $currentItem = $using:currentItem
         $Phase = $using:Phase

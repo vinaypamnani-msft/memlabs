@@ -258,6 +258,31 @@ function Start-VMFixes {
     $success = $false
     $toStop = @()
 
+    $rootPath = Split-Path $PSScriptRoot -Parent
+
+    $vmNote = Get-VMNote -VMName $vmName
+    $vmDomain = $vmNote.domain
+
+    if (-not $vmDomain) {
+        Write-log "No domain found in VMNote for $vmName.. assuming unmanaged. Return true" -LogOnly
+        return $true
+    }
+
+    $HashArguments = @{
+        VmName       = $vmName
+        VMDomainName = $vmDomain
+        DisplayName  = "Testing for Memlabs files"
+        ScriptBlock  = {Test-Path "C:\Staging"}
+    }
+
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
+    if ($result.ScriptBlockOutput -eq $false) {
+        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success -OutputStream
+        return $true
+    }
+
+    $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
         $toStop += $status.VMsToStop
@@ -351,21 +376,7 @@ function Start-VMFix {
     if ($status.StartFailed) {
         return $return
     }
-
-    $HashArguments = @{
-        VmName       = $VMName
-        VMDomainName = $vmDomain
-        DisplayName  = "Testing for Memlabs files"
-        ScriptBlock  = {Test-Path "C:\Staging"}
-    }
-
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
-    if ($result.ScriptBlockOutput -eq $false) {
-        Write-Log "C:\Staging not found in vm $VMName.  Machine may no longer be managed by MemLabs.  Returning success." -Success -OutputStream
-        $return.Success = $true
-        return $return
-    }
-
+    
     # Apply Fix
     $HashArguments = @{
         VmName       = $VMName
