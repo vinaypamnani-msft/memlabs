@@ -163,7 +163,7 @@ function select-SnapshotDomain {
     Write-Host
     Write-Host2 -ForegroundColor Orange "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     #Invoke-StopVMs -domain $domain
-    $result = Select-StopDomain -domain $domain
+    $result = Select-StopDomain -domain $domain -AllSelected
     if ($result -eq "ESCAPE") {
         return
     }

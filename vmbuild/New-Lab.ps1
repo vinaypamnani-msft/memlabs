@@ -112,9 +112,10 @@ if (-not $NoWindowResize.IsPresent) {
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
-        $percent = 0.70
+        $percent = 0.85
+        $percentheight = 0.90
         $width = $screen.Bounds.Width * $percent
-        $height = $screen.Bounds.Height * $percent
+        $height = $screen.Bounds.Height * $percentheight
 
         # Set Window
         Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
@@ -123,20 +124,7 @@ if (-not $NoWindowResize.IsPresent) {
         if ($parent) {
             # set parent, cmd -> ps
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
-        }
-
-        if ($host.UI.RawUI.WindowSize.Height -lt 50 -or $host.UI.RawUI.WindowSize.Width -lt 155) {
-            $percent = 0.90
-            $width = $screen.Bounds.Width * $percent
-            $height = $screen.Bounds.Height * $percent
-    
-            # Set Window
-            Set-Window -ProcessID $PID -X 10 -Y 10 -Width $width -Height $height
-            if ($parent) {
-                # set parent, cmd -> ps
-                Set-Window -ProcessID $parent -X 10 -Y 10 -Width $width -Height $height
-            }
-        }
+        }       
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning

@@ -418,7 +418,7 @@ function Get-MenuItems {
         $null = New-MenuItem -MenuItems ([ref]$MenuItems)
     }
     write-log -verbose "Returning $MenuItems of type $($MenuItems.GetType())"
-    return (,[System.Collections.ArrayList]$MenuItems) # Return the menu items
+    return (, [System.Collections.ArrayList]$MenuItems) # Return the menu items
 }
 
 function Get-Menu2 {
@@ -468,7 +468,7 @@ function Get-Menu2 {
         
         $temp = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected
         write-log -verbose "Get-MenuItems returned $temp. type: $($temp.GetType())"
-        $menuItems =$temp
+        $menuItems = $temp
         Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
     }
    
@@ -699,8 +699,8 @@ function Show-Menu {
 
                         $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
                         $breakPrefix = "─" * $NumOfDash
-                        if([bool](($LongestBreakLine - $menuitem.Text.Length) %2)) {
-                            $NumOfDash +=1
+                        if ([bool](($LongestBreakLine - $menuitem.Text.Length) % 2)) {
+                            $NumOfDash += 1
                         }
                         $breakPostfix = "─" * $NumOfDash                        
                     }
@@ -862,7 +862,9 @@ function Update-Prompt {
     write-host "             " -NoNewline
     Set-CursorPosition -X $PromptPosition.X -Y $PromptPosition.Y # Set the cursor position to the prompt position
     if ($MenuItems -and $selectedIndex -ne -1) {
-        $CurrentValue = $MenuItems[$selectedIndex].ItemName
+        if ($MenuItems[$selectedIndex].Selectable) {
+            $CurrentValue = $MenuItems[$selectedIndex].ItemName
+        }
     }
     if (-not [String]::IsNullOrWhiteSpace($CurrentValue)) {
         Write-Host " [" -NoNewline
@@ -1017,8 +1019,7 @@ function Start-Navigation {
 
                 if ($($menuItems[$selectedIndex].ItemName) -eq "D") {
 
-                    $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
-                    Write-Log -verbose -LogOnly "Entering return function - D selected returning : $return $($return.count) $($return.GetType()) $menuItems"
+                    $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })                     
                     return $return
                 }
             }

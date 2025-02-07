@@ -436,78 +436,83 @@ function List-VMsInDomain {
 }
 function Select-DomainMenu {
 
-    # Write-Log -Activity "Domain Management Menu" -NoNewLine
-    $domainList = @()
-    foreach ($item in (Get-DomainList)) {
-        $stats = Get-DomainStatsLine -DomainName $item
-
-        $domainList += "$($item.PadRight(22," ")) $stats"
-    }
-
-    if ($domainList.Count -eq 0) {
-        Write-Host
-        Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
-
-        return
-    }
-
-    $domain = Get-Menu2 -MenuName "Select Existing Domain" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
-    if ([string]::isnullorwhitespace($domain) -or $domain -eq "ESCAPE") {
-        return
-    }
-
-    Write-Verbose "2 Select-DomainMenu"
     while ($true) {
+        # Write-Log -Activity "Domain Management Menu" -NoNewLine
+        $domainList = @()
+        foreach ($item in (Get-DomainList)) {
+            $stats = Get-DomainStatsLine -DomainName $item
 
-       
-        $vms = get-list -type vm -DomainName $domain -SmartUpdate
-        $CustomOptions = [ordered]@{}
-
-        $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
-        $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
-
-
-        $checkPoint = $null
-        $DC = $vms | Where-Object { $_.role -eq "DC" }
-        if ($DC) {
-            $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
+            $domainList += "$($item.PadRight(22," ")) $stats"
         }
-        
 
-        $customOptions = [ordered]@{
-            "*F1" = "List-VMsInDomain -DomainName $domain" 
-            "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
-            "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-            "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-            "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-            "*S"  = "";
-            "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-            "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-        }
-              
-        if ($checkPoint) {
-            $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
-        }
-        $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-        $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
+        if ($domainList.Count -eq 0) {
+            Write-Host
+            Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
 
-        write-Verbose "1 response $response"
-        if (-not $response -or $response -eq "ESCAPE") {
             return
         }
 
-        switch ($response.ToLowerInvariant()) {
-            "2" { $result = Select-StopDomain -domain $domain }
-            "1" { Select-StartDomain -domain $domain }
-            "3" { select-OptimizeDomain -domain $domain }
-            "d" {
-                Select-DeleteDomain -domain $domain
-                return
+        $domain = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
+        if ($domain -eq "ESCAPE") {
+            return
+        }
+        if ([string]::isnullorwhitespace($domain)) {
+            continue
+        }
+
+        Write-Verbose "2 Select-DomainMenu"
+        while ($true) {
+
+       
+            $vms = get-list -type vm -DomainName $domain -SmartUpdate
+            if (-not $vms) { break }
+            $CustomOptions = [ordered]@{}
+
+            $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
+            $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
+
+
+            $checkPoint = $null
+            $DC = $vms | Where-Object { $_.role -eq "DC" }
+            if ($DC) {
+                $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
             }
-            "s" { select-SnapshotDomain -domain $domain }
-            "r" { select-RestoreSnapshotDomain -domain $domain }
-            "x" { select-DeleteSnapshotDomain -domain $domain }
-            Default {}
+        
+
+            $customOptions = [ordered]@{
+                "*F1" = "List-VMsInDomain -DomainName $domain" 
+                "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
+                "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "*S"  = "";
+                "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
+                "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            }
+              
+            if ($checkPoint) {
+                $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            }
+            $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+            $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
+
+            write-Verbose "1 response $response"
+            if (-not $response -or $response -eq "ESCAPE") {
+                break
+            }
+
+            switch ($response.ToLowerInvariant()) {
+                "2" { $result = Select-StopDomain -domain $domain }
+                "1" { Select-StartDomain -domain $domain }
+                "3" { select-OptimizeDomain -domain $domain }
+                "d" {
+                    Select-DeleteDomain -domain $domain                
+                }
+                "s" { select-SnapshotDomain -domain $domain }
+                "r" { select-RestoreSnapshotDomain -domain $domain }
+                "x" { select-DeleteSnapshotDomain -domain $domain }
+                Default {}
+            }
         }
     }
 }
@@ -754,7 +759,7 @@ function Select-MainMenu {
         $global:StartOver = $false
         Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages"}
+        $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
         $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
@@ -1292,6 +1297,9 @@ function select-NewDomainName {
             while (-not $domain -and $domain -ne "ESCAPE") {
                 $domain = Get-Menu2 -MenuName "Select a pre-approved domain name from the list, or use 'C' for a custom name." -Prompt "Select Domain" -OptionArray $($ValidDomainNames.Keys | Sort-Object { $_.length }) -additionalOptions $customOptions -CurrentValue $CurrentValue -Test:$false
 
+                if ($domain -eq "ESCAPE") {
+                    return
+                }
                 if ($domain -and ($domain.ToLowerInvariant() -eq "c")) {
                     write-host
                     write-host
@@ -1425,7 +1433,7 @@ function Select-NewDomainConfig {
         return $result
     }
     
-    write-log -Activity "New Domain Wizard"
+    #write-log -Activity "New Domain Wizard"
  
 
     $valid = $false
@@ -1478,7 +1486,13 @@ function Select-NewDomainConfig {
             $valid = $false
             while ($valid -eq $false) {
                 if (-not $newconfig.domainDefaults.DomainName) {
-                    $newconfig.domainDefaults.DomainName = select-NewDomainName -ConfigToCheck $newConfig
+                    $result = select-NewDomainName -ConfigToCheck $newConfig
+                    if (-not [string]::IsNullOrEmpty($result) -and $result -ne "ESCAPE") {                        
+                        $newconfig.domainDefaults.DomainName = $result
+                    }
+                    else {
+                        continue
+                    }
                 }
                 if (-not $prefix) {
                     $prefix = get-PrefixForDomain -Domain $newconfig.domainDefaults.DomainName
@@ -3273,30 +3287,30 @@ Function Get-WsusDBName {
             return "REFRESH"
         }
         switch ($result.ToLowerInvariant()) {
-        "l" {
-            Set-SiteServerLocalSql $property
-            $property."$name" = $property.VmName
-            $valid = $true
-        }
-        "n" {
-            $VMname = $($property.SiteCode) + "WSUSSQL"
-            Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $VMname -network:$property.network
-            $property."$name" = $VMname
-            $valid = $true
-            #Set-SiteServerRemoteSQL $property $name
-        }
-        "w" {
-            $property."$name" = "WID"
-            $valid = $true
-        }
-        Default {
-            if ([string]::IsNullOrWhiteSpace($result)) {
-                continue
+            "l" {
+                Set-SiteServerLocalSql $property
+                $property."$name" = $property.VmName
+                $valid = $true
             }
-            $property."$name" = $result
-            $valid = $true
+            "n" {
+                $VMname = $($property.SiteCode) + "WSUSSQL"
+                Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $VMname -network:$property.network
+                $property."$name" = $VMname
+                $valid = $true
+                #Set-SiteServerRemoteSQL $property $name
+            }
+            "w" {
+                $property."$name" = "WID"
+                $valid = $true
+            }
+            Default {
+                if ([string]::IsNullOrWhiteSpace($result)) {
+                    continue
+                }
+                $property."$name" = $result
+                $valid = $true
+            }
         }
-    }
 
     }
 }
@@ -4782,15 +4796,17 @@ function Select-Options {
                 }
                 "domainName" {
                     $domain = select-NewDomainName
-                    $property.domainName = $domain
-                    if ($property.prefix) {
-                        $property.prefix = get-PrefixForDomain -Domain $domain
-                    }
-                    if ($property.domainNetBiosName) {
-                        $netbiosName = $domain.Split(".")[0]
-                        $property.domainNetBiosName = $netbiosName
+                    if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {    
+                        $property.domainName = $domain
+                        if ($property.prefix) {
+                            $property.prefix = get-PrefixForDomain -Domain $domain
+                        }
+                        if ($property.domainNetBiosName) {
+                            $netbiosName = $domain.Split(".")[0]
+                            $property.domainNetBiosName = $netbiosName
                     
-                        Get-TestResult -SuccessOnError | out-null
+                            Get-TestResult -SuccessOnError | out-null
+                        }
                     }
                     continue MainLoop
                 }
@@ -6262,10 +6278,18 @@ function show-NewVMMenu {
 
     $machineName = Add-NewVMForRole -Role $Role -Domain $Global:Config.vmOptions.domainName -ConfigToModify $global:config  -parentSiteCode $parentSiteCode -SiteCode $siteCode -ReturnMachineName $true
     if ($role -eq "DC") {
-        $Global:Config.vmOptions.domainName = select-NewDomainName
-        $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
-        $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
-        $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
+        while ($true) {
+            $domain = select-NewDomainName
+            if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {   
+                $Global:Config.vmOptions.domainName = $domain
+            }else {
+                continue
+            }
+            $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
+            $netbiosName = $Global:Config.vmOptions.domainName.Split(".")[0]
+            $Global:Config.vmOptions.DomainNetBiosName = $netbiosName
+            break
+        }
     }
     Get-TestResult -SuccessOnError | out-null
     if (-not $machineName) {

@@ -973,7 +973,7 @@ function Get-VMFixes {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
         FixVersion        = "250206"
-        AppliesToNew      = $true
+        AppliesToNew      = $true 
         AppliesToExisting = $true
         AppliesToRoles    = @()
         NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
