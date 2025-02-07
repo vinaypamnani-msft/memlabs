@@ -271,9 +271,12 @@ function Start-VMFixes {
 
     if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
         foreach ($vm in $toStop) {
+            if ([string]::isnullorwhitespace($vm)) {
+                continue
+            }
             $vmNote = Get-VMNote -VMName $vm
             if ($vmNote.role -ne "DC") {
-                Write-Progress2 -Activity $global:MaintenanceActivity -Status  "Shutting down VM."
+                Write-Progress2 -Activity $global:MaintenanceActivity -Status  "Shutting down VM "
                 Stop-Vm2 -Name $vm -retryCount 5 -retrySeconds 3
             }
         }
