@@ -765,6 +765,83 @@ function Get-ExistingVMs {
     return $existingMachines
 }
 
+function Get-GenericHelp {
+    param(
+        $text       
+    )
+
+    switch (($text -split "=")[0].Trim()) {
+        "DeploymentType" { "Selects the default type of deployment, Primary, Heirarchy, or Technical Preview" }
+        "DomainName" { "Change the FQDN of the domain" }
+        "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
+        "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
+        "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
+        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
+        "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
+        "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "Done with changes" {"All the settings look good.  Move onto next menu"}
+
+        # Global VM
+
+        "Prefix" {"Change the prefix of all machines in the domain.  This is used to ensure unique machine names across all domains."}
+        "AdminName" {"Change the default administrator name for all machines and domains. Not reccommended to change."}
+        "BasePath" {"Change the location to save hyper-v VHDX and other files. Not reccommended to change."}
+        "domainNetBiosName" {"Change the netbios name of the domain.  This will result in a disjoined namespace if it does not match the FQDN"}
+        "locale" {"If you have configured _localconfig.json, you can change the default language of your VM via language packs"}
+        "timeZone" {"Change the timezone of all new VMs deployed in this session."}
+
+        # Global CM
+
+        "Version" {"Change the version of CM to install. By default, we select the newest baseline version."}
+        "Install" {"Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand"}
+        "EVALVersion" {"Install the EVAL license for ConfigMgr.  This will expire in 6 months."}
+        "UsePKI" {"Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP."}
+        "OfflineSCP" {"Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros"}
+        "OfflineSUP" {"Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information"}
+        "PushClientToDomainMembers" {"Disable this setting to prevent client push from CM.  Clients will not be installed automatically"}
+        "PrePopulateObjects" {"This setting will pre populate a number of objects in the CM database, such as packages, scripts, OSD TS's, Baselines, etc"}
+
+        # VM
+
+        "vmName" {"Change the name of the VM"}
+        "Role" {"Change the role of the VM. Not reccommended to change."}
+        "Memory" {"Change the starting and Maximum memory for this VM."}
+        "DynamicMinRam" {"Enables Dynamic Memory.  Sets the Minimum amount of RAM."}
+        "VirtualProcs" {"Change the number of virtual processors assigned to this VM"}
+        "OperatingSystem" {"Change the Operating System that will be installed on this VM"}
+        "tpmEnabled" {"Enable the virtual TPM on this VM."}
+        "InstallCA" {"Installs and configures a Certificate Authority on this VM"}
+        "ForestTrust" {"This option allows you to create a Forest Trust between this domain, and another already deployed domain."}
+        "Add Additional Disk" {"Adds another VHDX to this VM"}
+        "Remove Last Additional Disk" {"Removes the last VHDX added to this machine"}
+        "Remove this VM from config" {"'Deletes' the VM. Since its not actually deployed yet, just prevents it from being deployed."}
+        "SiteCode" {"Changes the sitecode for this site"}
+        "InstallSSMS" {"SQL Server Management Studio will be installed on this VM"}
+        "InstallDP" {"Install the Distribution Point role on this VM"}
+        "InstallMP" {"Install the Management Point role on this VM"}
+        "InstallRP" {"Install SSRS and the Reporting point role on this VM"}
+        "InstallSUP" {"Install WSUS and the Software Update Point role on this VM"}
+        "wsusContentDir" {"Change the location where WSUS will store its content"}
+        "wsusDataBaseServer" {"Change the database WSUS will use.  Can be WID, or a local or remote SQL Server"}
+        "Add SQL" {"Adds a SQL Instance to this VM"}
+        "Remove SQL" {"Removes SQL from this VM"}
+        "sqlVersion" {"Change the version of SQL installed on this VM"}
+        "sqlInstanceName" {"Change the instance name that SQL will use when installing"}
+        "sqlInstanceDir" {"Change the location where this instance of SQL will be installed"}
+        "sqlPort" {"Change the port number this instance of SQL will use"}
+        "SqlAgentAccount" {"Change the account sql will use for the SQL Agent service. Account will be created in the domain."}
+        "SqlServiceAccount" {"Change the account sql will use for the SQL Server service. Account and SPNs will be created in the domain."} 
+        "useFakeWSUSServer" {"Adds a fake WSUS server to the registry, which will prevent the machine from automatically updating from windows update"} 
+        "Add domain user as admin on this machine" {"Creates an Active Directory user, and assigns it as the primary admin of this machine"}
+        "Remove domainUser from this machine" {"Removes the Active Directory user assigned as admin to this machine"}
+        "DomainUser" {"Change the name of the domain user assigned as admin on this machine"}
+        default { "Help Missing for $text" }
+    }
+    
+}
+
 function Select-MainMenu {
     $global:existingMachines = Get-ExistingVMs -config $global:config
     $VMNameToNumberMap = @{}
@@ -874,11 +951,11 @@ function Select-MainMenu {
             }
             "v" { 
                 #Write-Log -Activity -NoNewLine "Global VM Options Menu"
-                Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
+                Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" -HelpFunction "Get-GenericHelp"
             }
             "c" { 
                 #Write-Log -Activity -NoNewLine "Global Configuration Manager Menu"
-                Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" 
+                Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" -HelpFunction "Get-GenericHelp"
             }
             "d" {
                 foreach ($virtualMachine in $global:existingMachines) {
@@ -4415,6 +4492,12 @@ function Get-SortedProperties {
     if ($members.Name -contains "sqlPort") {
         $sorted += "sqlPort"
     }
+    if ($members.Name -contains "SqlAgentAccount") {
+        $sorted += "SqlAgentAccount"
+    }
+    if ($members.Name -contains "SqlServiceAccount") {
+        $sorted += "SqlServiceAccount"
+    }    
     if ($members.Name -contains "remoteSQLVM") {
         $sorted += "RemoteSQLVM"
     }
@@ -4502,6 +4585,8 @@ function Get-SortedProperties {
         "sqlInstanceName" {  }
         "sqlInstanceDir" { }
         "sqlPort" { }
+        "SqlAgentAccount" { }
+        "SqlServiceAccount" { }
         "additionalDisks" { }
         "cmInstallDir" { }
         "DeploymentType" { }
@@ -4589,6 +4674,12 @@ function Get-AdditionalInformationColor {
         "SqlInstanceDir" {
             $color = $Global:Common.Colors.GenConfigSQLProp
         }
+        "SqlAgentAccount" {
+            $color = $Global:Common.Colors.GenConfigSQLProp
+        }
+        "SqlServiceAccount" {
+            $color = $Global:Common.Colors.GenConfigSQLProp
+        }        
 
     }
     switch ($value) {
@@ -5048,7 +5139,7 @@ function Select-Options {
             # If the property is another PSCustomObject, recurse, and call this function again with the inner object.
             # This is currently only used for AdditionalDisks
             if ($value -is [System.Management.Automation.PSCustomObject]) {
-                Select-Options -MenuName "$Name" -Rootproperty $property -PropertyName "$Name" -Prompt "Select data to modify" | out-null
+                Select-Options -MenuName "$Name" -Rootproperty $property -PropertyName "$Name" -Prompt "Select data to modify" -HelpFunction "Get-GenericHelp" | out-null
             }
             else {
                 #The option was not a known name with its own menu, and it wasnt another PSCustomObject.. We can edit it directly.
@@ -6544,7 +6635,7 @@ function Select-VirtualMachines {
                         $machineName = $virtualMachine.vmName
                     }
                     #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
-                    $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true
+                    $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true -HelpFunction "Get-GenericHelp"
                     #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
                     if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                         return
@@ -6726,7 +6817,7 @@ function Select-VirtualMachines {
 
                         $customOptions += [ordered]@{"*B3" = ""; "*BD" = "VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
                         #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
-                        $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false
+                        $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
                         if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                             return
                         }
