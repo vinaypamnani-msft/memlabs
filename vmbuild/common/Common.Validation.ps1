@@ -689,7 +689,7 @@ function Test-ValidRoleSiteServer {
             # Local SQL
             $minMem = 6
             if ($vmRole -eq "Secondary") { $minMem = 3 }
-
+            if ($vmRole -eq "SiteSystem")  {$minMem = 4 }
             # Minimum Memory
             if ($VM.memory / 1 -lt $minMem * 1GB) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has SQL; must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure

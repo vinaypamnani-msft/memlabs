@@ -351,7 +351,7 @@ function Write-Log {
 
     If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
-        $Text = "  ╭── $Text"
+        $Text = "  ─── $Text"
         $HashArguments.Add("ForegroundColor", "LightSkyBlue")
     }
 
@@ -4262,11 +4262,16 @@ Function Set-TitleBar {
 if (-not $Common.Initialized) {
 
 
+    try{
     Write-Progress2 "MemLabs initializing" -Status "Please wait..." -PercentComplete 1
+    $handle = (Get-WmiObject win32_process -Filter "ProcessID=$PID").Handle
+    } catch {}
+    ([wmi]"win32_process.handle='$handle'").setPriority(128) | out-null
     $global:vm_remove_list = @()
     $global:init_failed = $false
     $global:AddHistoryLine = $null
     $Global:MenuHistory = $null
+    $global:GenConfigErrorMessages = $null
 
     try {
         ###################

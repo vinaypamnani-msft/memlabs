@@ -530,7 +530,7 @@ function Select-StartDomain {
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE") {
+        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE" -or $ReturnVal -eq "NOITEMS") {
             return
         }
         if ($ReturnVal -eq "A" -or $ReturnVal -eq "C") {
@@ -611,7 +611,7 @@ function Select-StopDomain {
             $preResponse = $null
         }
         write-log -Verbose "StopVMs returned '$results' $($results.Count) $($results.GetType())"
-        if ($results -eq "ESCAPE") {
+        if ($results -eq "ESCAPE" -or [string]::IsNullOrWhiteSpace($results) -or $results -eq "NOITEMS") {
             return "ESCAPE"
         }
         if ([string]::IsNullOrWhiteSpace($results) -or $results -eq "None" -or $results -eq "ESCAPE") {
@@ -667,7 +667,7 @@ function Select-DeleteDomain {
         $customOptions = $null
         $response = Get-Menu2 -MenuName "Delete VMs in $domain" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return -MultiSelect
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE" -or $response -eq "NOITEMS") {
             return
         }
         if ($response -eq "D") {

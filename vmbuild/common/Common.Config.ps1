@@ -76,7 +76,7 @@ function Get-UserConfiguration {
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
-                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force
             }
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
@@ -86,19 +86,19 @@ function Get-UserConfiguration {
             if ($null -ne $vm.SQLInstanceName) {
                 if ($null -eq $vm.sqlPort) {
                     if ($vm.SQLInstanceName -eq "MSSQLSERVER") {
-                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433"
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433" -force
                     }
                     else {
-                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433"
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433" -force
                     }
                 }
             }
             if ($null -ne $vm.AlwaysOnName ) {
                 if ($null -eq ($vm.AlwaysOnGroupName)) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName -force
                 }
                 if ($null -eq ($vm.AlwaysOnListenerName)) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName -force
                 }
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
@@ -159,7 +159,7 @@ function Get-UserConfiguration {
 
         if ($null -eq $config.vmOptions.domainNetBiosName ) {
             $netbiosName = $config.vmOptions.domainName.Split(".")[0]
-            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName
+            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName -force
         }
 
         if ($null -ne $config.cmOptions.installDPMPRoles) {
@@ -309,7 +309,7 @@ function New-DeployConfig {
         # domainAdminName was renamed, this is here for backward compat
         if ($null -ne ($configObject.vmOptions.domainAdminName)) {
             if ($null -eq ($configObject.vmOptions.adminName)) {
-                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName -force
             }
             $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
@@ -1606,7 +1606,7 @@ function Update-VMInformation {
             $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                 if ($null -eq $vmNoteObject.LastKnownIP) {
-                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
+                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress -force
                 }
                 else {
                     $vmNoteObject.LastKnownIP = $IPAddress
@@ -1625,7 +1625,7 @@ function Update-VMInformation {
         # Detect if we need to update VM VMName, if VM Note doesn't have vmName prop
 
         if (-not $vmNoteObject.vmName) {
-            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "vmName" -Value $vm.Name
+            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "vmName" -Value $vm.Name -force
             Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
         }
 

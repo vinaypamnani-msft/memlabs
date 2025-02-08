@@ -179,7 +179,7 @@ if (-not $Configuration.InstallSUP) {
         StartTime = ''
         EndTime   = ''
     }
-    $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item
+    $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item -force
 }
 
 $Configuration.ScriptWorkflow.Status = "Running"

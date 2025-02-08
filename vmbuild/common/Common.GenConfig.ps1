@@ -808,10 +808,10 @@ function ConvertTo-DeployConfigEx {
 
             "OtherDC" {
                 $ODC = Get-list -Type VM | Where-Object { $_.vmName -eq $thisVm.VmName }
-                $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain
+                $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain -force
                 $ODCIP = $ODC.network -replace "\d{1,3}$", "1"
 
-                $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP
+                $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP -force
             }
             "DC" {
                 $DomainAccountsUPN = @()

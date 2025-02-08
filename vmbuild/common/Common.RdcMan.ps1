@@ -418,15 +418,15 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
-            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
 
             if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
                 if ( $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                 }
                 else {
                     if (-not ($vm.deployedOS.Contains("Server"))) {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient" -force
                     }
                 }
 
@@ -434,10 +434,10 @@ function New-RDCManFileFromHyperV {
 
             if ($vm.Role -eq "WSUS") {
                 if ($vm.installSUP) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)"
+                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)" -force
                 }
                 else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                 }
             }
 
@@ -450,11 +450,11 @@ function New-RDCManFileFromHyperV {
                 }
                 $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary","CAS" }
                 if ($SiteServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
+                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)" -force
                 }
                 else {
                     if ($vm.Role -eq "DomainMember") {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                     }
                 }
             }
@@ -610,7 +610,7 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $unknownVMs) {
             Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
-            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
             $comment = $c | ConvertTo-Json
             $name = $($vm.VmName)
             $displayName = $($vm.VmName)

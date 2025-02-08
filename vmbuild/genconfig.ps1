@@ -67,7 +67,7 @@ Function Select-ToolsMenu {
                     $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
                     #Write-Log -SubActivity "Tool Selection"
                     $tool = Get-Menu2 -MenuName "Tool Selection" -Prompt "Select tool to Install" -OptionArray $toolList -NoNewLine -test:$false -return -MultiSelect
-                    if (-not $tool -or $tool -eq "ESCAPE") {
+                    if (-not $tool -or $tool -eq "ESCAPE" -or $tool -eq "NOITEMS") {
                         break
                     }
                     while ($true) {
@@ -75,7 +75,7 @@ Function Select-ToolsMenu {
                         $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
                         #Write-Log -SubActivity "Tool deployment VM Selection"
                         $vmName = Get-Menu2 -MenuName "$($tool -join ",") deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -MultiSelect
-                        if (-not $vmName -or $vmName -eq "ESCAPE") {
+                        if (-not $vmName -or $vmName -eq "ESCAPE" -or $vmName -eq "NOITEMS") {
                             break
                         }
 
@@ -89,7 +89,7 @@ Function Select-ToolsMenu {
                     $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
                     #Write-Log -SubActivity "Optional Tool Selection"
                     $tool = Get-Menu2 -MenuName "Optional Tool Selection" -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return -MultiSelect
-                    if (-not $tool -or $tool -eq "ESCAPE") {
+                    if (-not $tool -or $tool -eq "ESCAPE" -or $tool -eq "NOITEMS") {
                         break
                     }
                     while ($true) {
@@ -97,7 +97,7 @@ Function Select-ToolsMenu {
                         $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
                         #Write-Log -SubActivity "Optional Tool deployment VM Selection"
                         $vmName = Get-Menu2 -MenuName  "$($tool -join ",") Optional deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -MultiSelect
-                        if (-not $vmName -or $vmName -eq "ESCAPE") {
+                        if (-not $vmName -or $vmName -eq "ESCAPE" -or $vmName -eq "NOITEMS") {
                             break
                         }
                         
@@ -247,54 +247,68 @@ function Select-ConfigMenu {
         }
         else {
             $customOptions += [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "H1" = "You don't have any existing domains. Use this option to create a new one!" }
         }
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HL" = "You can find all your previously saved configuration files here" }
         if ($Global:common.Devbranch) {
             $customOptions += [ordered]@{"X" = "Load TEST config from File (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+            $customOptions += [ordered]@{ "HX" = "Here you can find some preconfigured test configuration files." }
         }
 
 
         $customOptions += [ordered]@{"*B3" = ""; }
        
         $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"D" = "Manage Domains [Start/Stop/Snapshot/Delete Virtual Machines]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"D" = "Manage Domains%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HD" = "This allows you to manage virtual machines in a domain [Start/Stop/Snapshot/Delete/...]" }
         #$customOptions += [ordered]@{"E" = "Toggle <Enter> to finalize prompts%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
         #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
         
 
 
         $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HV" = "Show stats about currently deployed Virtual Machines" }
         $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HN" = "Show network subnets currently in use by your VMs" }
 
         $customOptions += [ordered]@{"P" = "Show Passwords" }
+        $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
         $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             #Do nothing as we are on server 2025
         }
         else {
             $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
             $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
         }
         if ($common.DevBranch) {
             $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
             $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $customOptions += [ordered]@{ "H#" = "Are you having an issue in the developer branch, switch back to the official branch" }
         }
         else {
             $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Main Branch $breakPrefix%$($Global:Common.Colors.GenConfigHeader)" }
             $customOptions += [ordered]@{"#" = "Switch to development branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new featues in the development branch" }
         }
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
         $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
+            $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
         }
 
         $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
@@ -559,7 +573,7 @@ function select-OptimizeDomain {
     
     $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
         
-    if ($response -eq "ESCAPE") {
+    if ($response -eq "ESCAPE" -or $response -eq "NOITEMS") {
         return "ESCAPE"
     }
     $sizeBefore = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
@@ -742,7 +756,7 @@ function Get-ExistingVMs {
             $evm.PsObject.Members.Remove("DiskUsedGB")
         }
         if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
-            $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
+            $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"  -force
         }
     }
 
@@ -760,9 +774,12 @@ function Select-MainMenu {
         Write-Log -Activity "VM Deployment Menu" -NoNewLine
         $preOptions = [ordered]@{}
         $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
-        $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)"; "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
+        $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
         if ($Global:Config.cmOptions) {
             $preOptions += [ordered]@{"C" = "Global ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+            $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
         }
         
         $customOptions = [ordered]@{}
@@ -779,6 +796,7 @@ function Select-MainMenu {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
                 $customOptions += [ordered]@{"$i" = "$name" }
+                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $existingVM. Only some properties can be adjusted." }
                 $VMNameToNumberMap[$i.ToString()] = $existingVM.vmName
             }
         }
@@ -812,22 +830,30 @@ function Select-MainMenu {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
                 $customOptions += [ordered]@{"$i" = "$name" }
+                $customOptions += [ordered]@{"H$i" = "Modify the installation properties for $($virtualMachine.Vmname). This is a new VM that has not yet deployed." }
                 $VMNameToNumberMap[$i.ToString()] = $virtualMachine.vmName
                 #write-Option "$i" "$($name)"
             }
         }
 
         $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
+        $customOptions += [ordered]@{ "HN" = "Adds a new VM to this deployment. You can add clients, servers, or even new siteservers." }
         $customOptions += [ordered]@{ "*D1" = ""; "*BD" = "Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "H!" = "Saves the current configuration, and returns to the main menu.  You can return to this deployment from the main menu." }
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "HS" = "Saves the current configuration to your config folder, but does not deploy. You can load it from the main menu" }
         if ($InternalUseOnly.IsPresent) {
             $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+            $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }
             $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+            $customOptions += [ordered]@{ "HQ" = "Exits the script. Warning: Does not save." }
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
+            $customOptions += [ordered]@{ "HR" = "Debug option to return `$deployconfig" }
             $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
+            $customOptions += [ordered]@{ "HZ" = "Debug option to regenerate DSC.ZIP" }
         }
 
         #Write-Log -Activity "VM Deployment Menu" -NoNewLine
@@ -1398,6 +1424,27 @@ function Select-DeploymentType {
     
 }
 
+function Get-NewDomainConfigHelp {
+    param(
+        $text       
+    )
+
+    switch (($text -split "=")[0].Trim()) {
+        "DeploymentType" { "Selects the default type of deployment, Primary, Heirarchy, or Technical Preview" }
+        "DomainName" { "Change the FQDN of the domain" }
+        "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
+        "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
+        "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
+        "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
+        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
+        "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
+        "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "Done with changes" {"All the settings look good.  Move onto next menu"}
+        default { "Help Missing for $text" }
+    }
+    
+}
 
 function Select-NewDomainConfig {
 
@@ -1427,7 +1474,8 @@ function Select-NewDomainConfig {
 
     #write-log -Activity "New Domain Wizard - Default Settings"
     #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
-    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true
+    #$additionalOptions = [ordered]@{"*HF" = "Get-NewDomainConfigHelp"}
+    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp"
 
     if ($result -eq "ESCAPE") {
         return $result
@@ -1601,8 +1649,9 @@ function Select-Config {
 
         $i = 0
         $currentVMs = Get-List -type VM
-
         $maxLength = 40
+        $MaxWidth = ($host.UI.RawUI.WindowSize.Width - $maxLength - 9)
+        
         foreach ($file in $files) {
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
             $len = $filename.Length
@@ -1655,6 +1704,11 @@ function Select-Config {
                 }
                 $savedNotes += "[Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
                 $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
+                
+                if ($savedNotes.Length -ge $MaxWidth) {
+                    $savedNotes = $savedNotes.Substring(0, $MaxWidth - 3) + "..."
+                }
+               
             }
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
             $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
@@ -1781,13 +1835,18 @@ function Show-ExistingNetwork2 {
     while ($true) {
 
         Write-log -Activity "Create new domain -or- modify existing domain"
-        $customOptions = [ordered]@{"*B1" = ""; "*BREAK1" = "New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
+        $customOptions = [ordered]@{ "*HF" = "Get-DomainHelpLine" }
+        $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        $customOptions += [ordered]@{ "HN" = "Use this option to configure and deploy a new domain.  You can have as many domains as you want!" }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
         $i = 0
         foreach ($domain in $domainList) {
             $i++
             $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $domainshort = $domain -Split " " | Select-Object -First 1
+            $customOptions += [ordered]@{ "H$i" = "Add additional VM's or change some settings in $domainshort" }
+
         }
 
         $response = Get-Menu2 -MenuName "Create new domain -or- modify existing domain" -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
@@ -1956,7 +2015,7 @@ function Select-RolesForExisting {
     $OptionArray = @{ "H" = $ha_Text }
     $OptionArray += @{  "L" = "Add Linux VM from Hyper-V Gallery" }
     #Write-Log -Activity -NoNewLine "Add roles to Existing domain"
-    $role = Get-Menu2 -MenuName "Add roles to Existing domain" -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
+    $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
     if ($role -eq "ESCAPE") {
         return
@@ -3139,6 +3198,13 @@ Function Get-TargetSitesForDomain {
             #Write-Log -Activity -NoNewLine "Remote domain Management Server for this domains clients"
             $result = Get-Menu2 -MenuName "Remote domain Management Server for this domains clients" -Prompt "Select Target site code in $Domain to configure to manage clients in this domain" -OptionArray $($targetPrimaries) -CurrentValue "NONE" -Test:$false
             if ($result -eq "ESCAPE") {
+                if ($property.externalDomainJoinSiteCode) {
+                    $result = $property.externalDomainJoinSiteCode
+                }
+                else {
+                    $result = "NONE"
+                }
+                $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
                 return
             }   
             $property | Add-Member -MemberType NoteProperty -Name "externalDomainJoinSiteCode" -Value $result -Force
@@ -3163,10 +3229,10 @@ Function Set-SiteServerLocalSql {
         if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
             $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
         }
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion -force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL" -force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
         
     }
@@ -3187,10 +3253,10 @@ Function Set-SiteServerLocalSql {
     else {
 
         if ($null -eq $virtualMachine.additionalDisks.E) {
-            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB"
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB" -force
         }
         if ($null -eq $virtualMachine.additionalDisks.F) {
-            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "200GB"
+            $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name "F" -Value "200GB" -force
         }
     }
 
@@ -3243,7 +3309,7 @@ Function Set-SiteServerRemoteSQL {
         }
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
     }
-    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName
+    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName -force
     $newSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $vmName }
     if ($newSQLVM) {
         if (-not $newSQLVM.InstallRP) {
@@ -3298,8 +3364,26 @@ Function Get-WsusDBName {
                 $property."$name" = $VMname
                 $valid = $true
                 #Set-SiteServerRemoteSQL $property $name
+                $property.psobject.properties.remove('sqlversion')
+                $property.psobject.properties.remove('sqlInstanceDir')
+                $property.psobject.properties.remove('sqlInstanceName')
+                $property.psobject.properties.remove('sqlPort')
+                $property.psobject.properties.remove('SqlServiceAccount')
+                $property.psobject.properties.remove('SqlAgentAccount')
+                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                }
             }
             "w" {
+                $property.psobject.properties.remove('sqlversion')
+                $property.psobject.properties.remove('sqlInstanceDir')
+                $property.psobject.properties.remove('sqlInstanceName')
+                $property.psobject.properties.remove('sqlPort')
+                $property.psobject.properties.remove('SqlServiceAccount')
+                $property.psobject.properties.remove('SqlAgentAccount')
+                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                }
                 $property."$name" = "WID"
                 $valid = $true
             }
@@ -3309,6 +3393,15 @@ Function Get-WsusDBName {
                 }
                 $property."$name" = $result
                 $valid = $true
+                $property.psobject.properties.remove('sqlversion')
+                $property.psobject.properties.remove('sqlInstanceDir')
+                $property.psobject.properties.remove('sqlInstanceName')
+                $property.psobject.properties.remove('sqlPort')
+                $property.psobject.properties.remove('SqlServiceAccount')
+                $property.psobject.properties.remove('SqlAgentAccount')
+                if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
+                }
             }
         }
 
@@ -3987,7 +4080,7 @@ function Get-AdditionalValidations {
                 if ($property.Role -ne "WSUS") {
                     $DataBase = "WID"
                     if ($property.SqlVersion) {
-                        $Database = $property.VMName
+                        $Database = $property.VMName                        
                     }
                     else {
                         $ActiveVM = Get-ActiveSiteServerForSiteCode -deployConfig $Global:Config -SiteCode $property.siteCode -type VM
@@ -4003,12 +4096,12 @@ function Get-AdditionalValidations {
                     $property | Add-Member -MemberType NoteProperty -Name "wsusContentDir" -Value "E:\WSUS" -Force
                     if ($null -eq $property.additionalDisks) {
                         $disk = [PSCustomObject]@{"E" = "600GB" }
-                        $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                        $property | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
                     }
                     else {
 
                         if ($null -eq $property.additionalDisks.E) {
-                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB"
+                            $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB" -force
                         }
                     }
                 }
@@ -4600,7 +4693,8 @@ function Select-Options {
         [Parameter(Mandatory = $false, HelpMessage = "Let the prompt help show we will continue on enter")]
         [bool] $ContinueMode = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
-        [bool] $Test = $true
+        [bool] $Test = $true,
+        [string] $HelpFunction = $null
     )
 
     $property = $null
@@ -4662,7 +4756,7 @@ function Select-Options {
             }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
-                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "$($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "$($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
 
@@ -4675,7 +4769,7 @@ function Select-Options {
                 $fakeNetwork = $i
                 $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
                 #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
-                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true -HelpFunction $HelpFunction
                 #Write-Option $i "$($("network").PadRight($padding," "")) = $network"
                 $i++
             }
@@ -4684,7 +4778,7 @@ function Select-Options {
             #write-log "Get-AdditionalInformation $item $value"
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             $color = Get-AdditionalInformationColor -item $item -data $value
-            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color
+            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
 
@@ -4704,7 +4798,7 @@ function Select-Options {
         #}
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
-        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight 
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction
         $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false  
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
@@ -4756,7 +4850,7 @@ function Select-Options {
                 }
                 if ($isExisting) {
                     if ($null -eq $property."$($item + "-Original")") {
-                        $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)"
+                        $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)" -force
                     }
                 }
                 $value = $property."$($item)"
@@ -4783,7 +4877,10 @@ function Select-Options {
                     continue MainLoop
                 }
                 "remoteContentLibVM" {
-                    $property.remoteContentLibVM = select-FileServerMenu -HA:$true -CurrentValue $value
+                    $result = select-FileServerMenu -HA:$true -CurrentValue $value
+                    if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                        $property.remoteContentLibVM = $result
+                    }
                     continue MainLoop
                 }
                 "pullDPSourceDP" {
@@ -4791,7 +4888,10 @@ function Select-Options {
                     continue MainLoop
                 }
                 "fileServerVM" {
-                    $property.fileServerVM = select-FileServerMenu -HA:$false -CurrentValue $value
+                    $result = select-FileServerMenu -HA:$false -CurrentValue $value
+                    if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                        $property.fileServerVM = $result
+                    }
                     continue MainLoop
                 }
                 "domainName" {
@@ -4812,8 +4912,10 @@ function Select-Options {
                 }
                 "timeZone" {
                     $timezone = Select-TimeZone
-                    $property.timeZone = $timezone
-                    Get-TestResult -SuccessOnError | out-null
+                    if (-not [string]::isnullorwhitespace($timezone) -and $timezone -ne "ESCAPE") {
+                        $property.timeZone = $timezone
+                        Get-TestResult -SuccessOnError | out-null
+                    }
                     continue MainLoop
                 }
                 "locale" {
@@ -4878,11 +4980,13 @@ function Select-Options {
                 }
                 "remoteSQLVM" {
                     Get-remoteSQLVM -property $property -name $name -CurrentValue $value
-                    return "REFRESH"
+                    Continue MainLoop
+                    #return "REFRESH"
                 }
                 "domainUser" {
                     Get-domainUser -property $property -name $name -CurrentValue $value
-                    return "REFRESH"
+                    Continue MainLoop
+                    #return "REFRESH"
                 }
                 "wsusDataBaseServer" {
                     Get-WsusDBName -property $property -name $name -CurrentValue $value
@@ -5590,7 +5694,7 @@ function Add-NewVMForRole {
     }
 
     if ($network) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
     if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS -force
@@ -5598,7 +5702,7 @@ function Add-NewVMForRole {
 
     #Match Windows 10 or 11
     if ($operatingSystem.Contains("Windows 1")) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
     }
 
     $existingDPMP = $null
@@ -5608,8 +5712,8 @@ function Add-NewVMForRole {
             $virtualMachine.Memory = "6GB"
             #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $true
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             #if (-not $SiteCode) {
             #    $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
             #    if ($test) {
@@ -5634,18 +5738,18 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
                 $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion 
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion  -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
             $virtualMachine.tpmEnabled = $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
         }
         "SQLAO" {
@@ -5654,12 +5758,12 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
                 $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $virtualMachine.Memory = "7GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem
@@ -5673,26 +5777,26 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
                 $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr" -force
             $disk = [PSCustomObject]@{"E" = "250GB"; "F" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS" -force
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
             $virtualMachine.operatingSystem = $OperatingSystem   
             if (-not $test) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
                 }
             }
         }
@@ -5705,19 +5809,19 @@ function Add-NewVMForRole {
             if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
                 $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
             }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "F:\SQL" -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value "E:\ConfigMgr" -force
             $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site" -force
 
             $virtualMachine.Memory = "10GB"
             $virtualMachine.virtualProcs = 8
@@ -5726,26 +5830,26 @@ function Add-NewVMForRole {
             if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
                 }
             }
 
         }
         "Secondary" {
             $virtualMachine.memory = "3GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'parentSiteCode' -Value $parentSiteCode -force
             $virtualMachine.operatingSystem = $OperatingSystem
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Secondary Site"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr' -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Secondary Site" -force
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
                 }
             }
 
@@ -5753,15 +5857,15 @@ function Add-NewVMForRole {
         "PassiveSite" {
             $virtualMachine.memory = "3GB"
             $NewFSServer = $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr'
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $SiteCode -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmInstallDir' -Value 'E:\ConfigMgr' -force
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
 
             if (-not $test -and (-not $network)) {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig  -ReturnIfNotNeeded:$true
                 if ($network) {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
                 }
             }
         }
@@ -5782,7 +5886,7 @@ function Add-NewVMForRole {
                         $i++
                     }
                     else {
-                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
+                        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName -force
                         break
                     }
                 }
@@ -5797,7 +5901,7 @@ function Add-NewVMForRole {
                 else {
                     $virtualMachine.operatingSystem = "Windows 10 Latest (64-bit)"
                 }
-                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
             }
             else {
                 $virtualMachine.operatingSystem = $OperatingSystem
@@ -5815,7 +5919,7 @@ function Add-NewVMForRole {
                     $i++
                 }
                 else {
-                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName
+                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'domainUser' -Value $noPrefixUserName -force
                     break
                 }
 
@@ -5828,17 +5932,17 @@ function Add-NewVMForRole {
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'vmGeneration' -Value "2" -force
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
         "SiteSystem" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
@@ -5876,13 +5980,13 @@ function Add-NewVMForRole {
         "FileServer" {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "600GB"; "F" = "200GB" }
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $virtualMachine.tpmEnabled = $false
         }
         "DC" {
             $virtualMachine.memory = "4GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE"
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE" -force
             $virtualMachine.tpmEnabled = $false
         }
         "BDC" {
@@ -5932,7 +6036,7 @@ function Add-NewVMForRole {
                 OfflineSUP                = $false
                 UsePKI                    = $false
             }
-            $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions
+            $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
         }
     }
 
@@ -5967,38 +6071,47 @@ function Add-NewVMForRole {
     if ($Role -eq "SQLAO" -and (-not $secondSQLAO)) {
         write-host "$($virtualMachine.VmName) is the 1st SQLAO"
         $SQLAONode = Add-NewVMForRole -Role SQLAO -Domain $Domain -ConfigToModify $ConfigToModify -OperatingSystem $OperatingSystem -Name $Name2 -secondSQLAO:$true -Quiet:$Quiet -ReturnMachineName:$true -network:$network
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'OtherNode' -Value $SQLAONode -force
         if ($test -eq $false ) {
             $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$false
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName
+            if ($FSName -eq "ESCAPE") {
+                Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $ConfigToModify
+                Remove-VMFromConfig -vmName $SQLAONode -ConfigToModify $ConfigToModify
+                return
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'fileServerVM' -Value $FSName -force
         }
         #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'SQLAgentAccount' -Value "SqlAgentUser"
         #$virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "SqlServiceUser"
         $ClusterName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -ClusterName:$true -SkipOne:$true
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ClusterName' -Value $ClusterName -force
         $AOName = Get-NewMachineName -vm $virtualMachine -ConfigToCheck $ConfigToModify -AOName:$true -SkipOne:$true
         $AGName = "SQL"
         if ($SiteCode) {
             $AGName = $siteCode
         }
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $($AGName + " Availibility Group")
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnListenerName' -Value $AOName
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnGroupName' -Value $($AGName + " Availibility Group") -force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'AlwaysOnListenerName' -Value $AOName -force
 
         $ServiceAccount = "$($ClusterName)Svc"
         $AgentAccount = "$($ClusterName)Agent"
 
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount -force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount -force
 
         $otherNode = $ConfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $SQLAONode }
-        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount
-        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount
+        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value $ServiceAccount -force
+        $otherNode | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value $AgentAccount -force
 
 
     }
     if ($NewFSServer -eq $true) {
         #Get-PSCallStack | out-host
         $FSName = select-FileServerMenu -ConfigToModify $ConfigToModify -HA:$true
+        if ($FSName -eq "ESCAPE") {
+            Remove-VMFromConfig -vmName $virtualMachine.vmName -ConfigToModify $ConfigToModify
+            return
+        }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteContentLibVM' -Value $FSName
     }
     #Get-PSCallStack | out-host
@@ -6095,7 +6208,8 @@ function select-FileServerMenu {
     else {
         $additionalOptions += @{ "N" = "Create a New FileServer VM" }
     }
-    while ([string]::IsNullOrWhiteSpace($result) -or $result -eq "ESCAPE") {
+    while ([string]::IsNullOrWhiteSpace($result) ) {
+        #Allow ESCAPE to pass thru.. handled by caller
         #Write-Log -Activity "Fileserver selection.  FileServer is needed for Remote ContentLib (HA), and Quorum for SQLAO"
         $result = Get-Menu2 -MenuName "Fileserver selection.  FileServer is needed for Remote ContentLib (HA), and Quorum for SQLAO" -prompt "Select FileServer VM" -optionArray $(Get-ListOfPossibleFileServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
     }
@@ -6282,7 +6396,8 @@ function show-NewVMMenu {
             $domain = select-NewDomainName
             if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {   
                 $Global:Config.vmOptions.domainName = $domain
-            }else {
+            }
+            else {
                 continue
             }
             $Global:Config.vmOptions.prefix = get-PrefixForDomain -Domain $($Global:Config.vmOptions.domainName)
@@ -6670,21 +6785,21 @@ function Select-VirtualMachines {
                                 if ($ConfigToModify.domainDefaults.DefaultSqlVersion) {
                                     $SqlVersion = $ConfigToModify.domainDefaults.DefaultSqlVersion
                                 }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlVersion' -Value $SqlVersion -force
                                 if ($virtualMachine.AdditionalDisks.E) {
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "E:\SQL" -force
                                 }
                                 else {
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceDir' -Value "C:\SQL" -force
                                 }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem"
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem"
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlServiceAccount' -Value "LocalSystem" -force
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'SqlAgentAccount' -Value "LocalSystem" -force
                                 if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
                                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $true -force
                                 }
                                 if ($virtualMachine.Role -ne "Secondary") {
-                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433"
+                                    $virtualMachine | Add-Member -MemberType NoteProperty -Name 'sqlPort' -Value "1433" -force
                                 }
                                 $virtualMachine.virtualProcs = 4
                                 if ($($virtualMachine.memory) / 1GB -lt "4GB" / 1GB) {
@@ -6715,7 +6830,7 @@ function Select-VirtualMachines {
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
                                 $disk = [PSCustomObject]@{"E" = "400GB" }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk
+                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
                             }
                             else {
                                 $letters = 69
@@ -6724,7 +6839,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($letters -lt 90) {
                                     $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB"
+                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB" -force
                                 }
                             }
                         }
