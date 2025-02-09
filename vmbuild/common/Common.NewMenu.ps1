@@ -211,7 +211,7 @@ function New-MenuItem {
     }
 
     if (-not $helptext -and $helpFunction) {
-        Write-Log "Running $HelpFunction $text"
+        Write-Log -Verbose "Running $HelpFunction $text"
         $HelpText = Invoke-Expression -Command "$HelpFunction -Text ""$text"""
     }
 
@@ -375,7 +375,7 @@ function Get-MenuItems {
                 $MenuItem.itemName = [string]$i
 
                 if ($HelpFunction) {
-                    Write-Log "Running $HelpFunction $item"
+                    Write-Log -Verbose "Running $HelpFunction $item"
                     if ($HelpFunction -eq "Get-NewDomainConfigHelp") {
                         $menuItem.HelpText = Get-NewDomainConfigHelp $item
                     }

@@ -51,8 +51,14 @@ Function Select-ToolsMenu {
 
     while ($true) {
         #Write-Log -Activity "Tools Menu"
-        $customOptions = [ordered]@{"1" = "Update Tools On all Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{"2" = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions = [ordered]@{
+            "1"  = "Update Tools On Currently Running VMs (C:\Tools)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" 
+            "H1" = "Refresh or add tools that are usually installed at lab deployment to any running VMs"
+        }
+        $customOptions += [ordered]@{
+            "2"  = "Copy Optional Tools (eg Windbg)%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" 
+            "H2" = "Add additional tools, like windbg, Azure Data Studio, and others to a running VM"
+        }
 
         $response = Get-Menu2 -MenuName "Tools Menu" -Prompt "Select tools option" -AdditionalOptions $customOptions -NoNewLine -test:$false -return
 
@@ -267,8 +273,6 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"D" = "Manage Domains%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HD" = "This allows you to manage virtual machines in a domain [Start/Stop/Snapshot/Delete/...]" }
-        #$customOptions += [ordered]@{"E" = "Toggle <Enter> to finalize prompts%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"; }
-        #$customOptions += [ordered]@{"D" = "Domain Hyper-V management (Start/Stop/Snapshot/Compact/Delete) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
         
@@ -497,15 +501,24 @@ function Select-DomainMenu {
                 "*F1" = "List-VMsInDomain -DomainName $domain" 
                 "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
                 "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H1"  = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
                 "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H2"  = "Select any running VMs to stop.  List will be empty if nothing is running."
                 "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H3"  = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
                 "*S"  = "";
                 "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
                 "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                "HS"  = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
             }
               
             if ($checkPoint) {
-                $customOptions += [ordered]@{ "R" = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"; "X" = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+                $customOptions += [ordered]@{ 
+                    "R"  = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                    "HR" = "Restore a domain checkpoint/snapshot taken by this script. All VMs in the snapshot will be restored"
+                    "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" 
+                    "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
+                }
             }
             $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
@@ -781,62 +794,75 @@ function Get-GenericHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
-        "Done with changes" {"All the settings look good.  Move onto next menu"}
+        "Done with changes" { "All the settings look good.  Move onto next menu" }
 
         # Global VM
 
-        "Prefix" {"Change the prefix of all machines in the domain.  This is used to ensure unique machine names across all domains."}
-        "AdminName" {"Change the default administrator name for all machines and domains. Not reccommended to change."}
-        "BasePath" {"Change the location to save hyper-v VHDX and other files. Not reccommended to change."}
-        "domainNetBiosName" {"Change the netbios name of the domain.  This will result in a disjoined namespace if it does not match the FQDN"}
-        "locale" {"If you have configured _localconfig.json, you can change the default language of your VM via language packs"}
-        "timeZone" {"Change the timezone of all new VMs deployed in this session."}
+        "Prefix" { "Change the prefix of all machines in the domain.  This is used to ensure unique machine names across all domains." }
+        "AdminName" { "Change the default administrator name for all machines and domains. Not reccommended to change." }
+        "BasePath" { "Change the location to save hyper-v VHDX and other files. Not reccommended to change." }
+        "domainNetBiosName" { "Change the netbios name of the domain.  This will result in a disjoined namespace if it does not match the FQDN" }
+        "locale" { "If you have configured _localconfig.json, you can change the default language of your VM via language packs" }
+        "timeZone" { "Change the timezone of all new VMs deployed in this session." }
 
         # Global CM
 
-        "Version" {"Change the version of CM to install. By default, we select the newest baseline version."}
-        "Install" {"Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand"}
-        "EVALVersion" {"Install the EVAL license for ConfigMgr.  This will expire in 6 months."}
-        "UsePKI" {"Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP."}
-        "OfflineSCP" {"Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros"}
-        "OfflineSUP" {"Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information"}
-        "PushClientToDomainMembers" {"Disable this setting to prevent client push from CM.  Clients will not be installed automatically"}
-        "PrePopulateObjects" {"This setting will pre populate a number of objects in the CM database, such as packages, scripts, OSD TS's, Baselines, etc"}
+        "Version" { "Change the version of CM to install. By default, we select the newest baseline version." }
+        "Install" { "Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand" }
+        "EVALVersion" { "Install the EVAL license for ConfigMgr.  This will expire in 6 months." }
+        "UsePKI" { "Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP." }
+        "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
+        "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
+        "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
+        "PrePopulateObjects" { "This setting will pre populate a number of objects in the CM database, such as packages, scripts, OSD TS's, Baselines, etc" }
 
         # VM
 
-        "vmName" {"Change the name of the VM"}
-        "Role" {"Change the role of the VM. Not reccommended to change."}
-        "Memory" {"Change the starting and Maximum memory for this VM."}
-        "DynamicMinRam" {"Enables Dynamic Memory.  Sets the Minimum amount of RAM."}
-        "VirtualProcs" {"Change the number of virtual processors assigned to this VM"}
-        "OperatingSystem" {"Change the Operating System that will be installed on this VM"}
-        "tpmEnabled" {"Enable the virtual TPM on this VM."}
-        "InstallCA" {"Installs and configures a Certificate Authority on this VM"}
-        "ForestTrust" {"This option allows you to create a Forest Trust between this domain, and another already deployed domain."}
-        "Add Additional Disk" {"Adds another VHDX to this VM"}
-        "Remove Last Additional Disk" {"Removes the last VHDX added to this machine"}
-        "Remove this VM from config" {"'Deletes' the VM. Since its not actually deployed yet, just prevents it from being deployed."}
-        "SiteCode" {"Changes the sitecode for this site"}
-        "InstallSSMS" {"SQL Server Management Studio will be installed on this VM"}
-        "InstallDP" {"Install the Distribution Point role on this VM"}
-        "InstallMP" {"Install the Management Point role on this VM"}
-        "InstallRP" {"Install SSRS and the Reporting point role on this VM"}
-        "InstallSUP" {"Install WSUS and the Software Update Point role on this VM"}
-        "wsusContentDir" {"Change the location where WSUS will store its content"}
-        "wsusDataBaseServer" {"Change the database WSUS will use.  Can be WID, or a local or remote SQL Server"}
-        "Add SQL" {"Adds a SQL Instance to this VM"}
-        "Remove SQL" {"Removes SQL from this VM"}
-        "sqlVersion" {"Change the version of SQL installed on this VM"}
-        "sqlInstanceName" {"Change the instance name that SQL will use when installing"}
-        "sqlInstanceDir" {"Change the location where this instance of SQL will be installed"}
-        "sqlPort" {"Change the port number this instance of SQL will use"}
-        "SqlAgentAccount" {"Change the account sql will use for the SQL Agent service. Account will be created in the domain."}
-        "SqlServiceAccount" {"Change the account sql will use for the SQL Server service. Account and SPNs will be created in the domain."} 
-        "useFakeWSUSServer" {"Adds a fake WSUS server to the registry, which will prevent the machine from automatically updating from windows update"} 
-        "Add domain user as admin on this machine" {"Creates an Active Directory user, and assigns it as the primary admin of this machine"}
-        "Remove domainUser from this machine" {"Removes the Active Directory user assigned as admin to this machine"}
-        "DomainUser" {"Change the name of the domain user assigned as admin on this machine"}
+        "vmName" { "Change the name of the VM" }
+        "Role" { "Change the role of the VM. Not reccommended to change." }
+        "Memory" { "Change the starting and Maximum memory for this VM." }
+        "DynamicMinRam" { "Enables Dynamic Memory.  Sets the Minimum amount of RAM." }
+        "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
+        "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
+        "tpmEnabled" { "Enable the virtual TPM on this VM." }
+        "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
+        "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
+        "Add Additional Disk" { "Adds another VHDX to this VM" }
+        "Remove Last Additional Disk" { "Removes the last VHDX added to this machine" }
+        "Remove this VM from config" { "'Deletes' the VM. Since its not actually deployed yet, just prevents it from being deployed." }
+        "SiteCode" { "Changes the sitecode for this site" }
+        "InstallSSMS" { "SQL Server Management Studio will be installed on this VM" }
+        "InstallDP" { "Install the Distribution Point role on this VM" }
+        "InstallMP" { "Install the Management Point role on this VM" }
+        "InstallRP" { "Install SSRS and the Reporting point role on this VM" }
+        "InstallSUP" { "Install WSUS and the Software Update Point role on this VM" }
+        "wsusContentDir" { "Change the location where WSUS will store its content" }
+        "wsusDataBaseServer" { "Change the database WSUS will use.  Can be WID, or a local or remote SQL Server" }
+        "Add SQL" { "Adds a SQL Instance to this VM" }
+        "Remove SQL" { "Removes SQL from this VM" }
+        "sqlVersion" { "Change the version of SQL installed on this VM" }
+        "sqlInstanceName" { "Change the instance name that SQL will use when installing" }
+        "sqlInstanceDir" { "Change the location where this instance of SQL will be installed" }
+        "sqlPort" { "Change the port number this instance of SQL will use" }
+        "SqlAgentAccount" { "Change the account sql will use for the SQL Agent service. Account will be created in the domain." }
+        "SqlServiceAccount" { "Change the account sql will use for the SQL Server service. Account and SPNs will be created in the domain." } 
+        "useFakeWSUSServer" { "Adds a fake WSUS server to the registry, which will prevent the machine from automatically updating from windows update" } 
+        "Add domain user as admin on this machine" { "Creates an Active Directory user, and assigns it as the primary admin of this machine" }
+        "Remove domainUser from this machine" { "Removes the Active Directory user assigned as admin to this machine" }
+        "DomainUser" { "Change the name of the domain user assigned as admin on this machine" }
+        "RemoteContentLibVM" { "This is the FileServer VM that will be used for the remote ContentLib" }
+        "cmInstallDir" { "This is the location in the VM where CM will be installed" }
+        "AdditionalDisks" { "This is the list of additional disks created during deployment. You can configure thier sizes here." }
+        "SiteName" { "This is the display name of the site in configuration manager" }
+        "RemoteSQLVM" { "This is the name of the SQL VM that will host databases used by roles on this VM" }
+        "AlwaysOnGroupName" { "Display name for the SQL AO Availability Group" }
+        "AlwaysOnListenerName" { "DNS Name of the listener used by SQL AO. This would be the name you use to connect to SQL" }
+        "ClusterName" { "Intenal name used by Clustering to setup the SQL AO cluster. Must be unique" }
+        "fileServerVM" { "FileServer VM used by SQL AO for its quorum data" }
+        "OtherNode" { "This is a link to the other node of the SQL AO cluster. Not reccommended to change" }
+        "vmGeneration" {"Sets the Hyper-V VM generation. Only available on OSD clients, all other VMs are gen 2"}
+        "ParentSiteCode" {"Sets the parent site code for siteservers or sitesystems"}
+        "pullDPSourceDP" {"Sets the source Distribution point for this PullDP"}
         default { "Help Missing for $text" }
     }
     
@@ -1469,10 +1495,22 @@ function Select-DeploymentType {
 
     $customOptions = [ordered]@{"*F1" = "Show-NewDomainTip" }
     $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
-    $customOptions += [ordered]@{ "1" = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{ "2" = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-    $customOptions += [ordered]@{ "3" = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)" }
-    $customOptions += [ordered]@{ "4" = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" }
+    $customOptions += [ordered]@{ 
+        "1"  = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" 
+        "H1" = "Inital VM list will contain a CAS and Primary server for Configuration Manager"
+    }
+    $customOptions += [ordered]@{ 
+        "2"  = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"
+        "H2" = "Inital VM list will contain only a Primary server for Configuration Manager"
+    }
+    $customOptions += [ordered]@{
+        "3"  = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)"
+        "H3" = "Inital VM list will contain only Tech Preview Primary server for Configuration Manager"
+    }
+    $customOptions += [ordered]@{ 
+        "4"  = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" 
+        "H4" = "Inital VM list will not contain any ConfigMgr components"
+    }
 
 
     $response = $null
@@ -1517,7 +1555,7 @@ function Get-NewDomainConfigHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
-        "Done with changes" {"All the settings look good.  Move onto next menu"}
+        "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
     
@@ -2058,14 +2096,19 @@ function Select-RolesForExisting {
     )
     $existing = get-list -type vm -domain $global:config.vmOptions.domainName | Where-Object { $_.Role -eq "DC" }
     if ($existing) {
-        $existingRoles = Select-RolesForExistingList
+        $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DC" }
         $ha_Text = "Enable High Availability (HA) on an Existing Site Server"
     }
-    else {
+    else {        
         $existingRoles = Select-RolesForNewList
         $ha_Text = "Enable High Availability (HA) on a Site Server"
     }
 
+    $DC =  $global:config.VirtualMachines | Where-Object {$_.Role -eq "DC"} 
+    if ($DC)
+    {
+        $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DC" }
+    }
     $existingRoles2 = @()
     $CurrentValue = $null
     if ($enhance) {
@@ -2121,7 +2164,7 @@ function Select-Subnet {
     )
 
 
-    #Get-PSCallStack | out-host
+    Get-PSCallStack | out-host
     if (-not $configToCheck -or $configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
             if ($CurrentVM) {
@@ -2139,7 +2182,10 @@ function Select-Subnet {
                 $subnetlist = Get-ValidSubnets -ConfigToCheck $configToCheck -AllowExisting:$false
             }
         }
-        $customOptions = @{ "C" = "Custom Subnet" }
+        $customOptions = @{ 
+            "C" = "Custom Subnet"
+            "HC" = "You can select a custom network. Must be a /24 (eg 10.10.10.0)"
+         }
         $network = $null
         if (-not $CurrentValue) {
             if ($CurrentNetworkIsValid) {
@@ -2156,12 +2202,24 @@ function Select-Subnet {
         while (-not $network) {
             $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetlist -ConfigToCheck $configToCheck
 
-            $network = Get-Menu2 -MenuName "Select Subnet or use C for custom" -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $current -Split
+            $menuName = "Select Subnet use C for custom"
+            if ($CurrentVM) {
+                if ($CurrentVM.VmName) {
+                    $menuName = "Select Subnet for $($CurrentVM.VmName); use C for custom"
+                }else {
+                    if ($CurrentVM.Role) {
+                        $menuName = "Select Subnet for New VM with role $($CurrentVM.Role); use C for custom"
+                    }
+                }
+
+            }
+            $network = Get-Menu2 -MenuName $menuName -Prompt "Select Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $current -Split
             if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                 $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
             }
             if ($network -eq "ESCAPE") {
                 if ($current) {
+                    write-log -verbose "Returning Current network $current"
                     $network = $current
                 }
                 else {
@@ -2841,7 +2899,10 @@ Function Get-ParentSiteCodeMenu {
     if ($Role -eq "Primary") {
         $casSiteCodes = Get-ValidCASSiteCodes -config $global:config -domain $Domain
 
-        $additionalOptions = @{ "X" = "No Parent - Standalone Primary" }
+        $additionalOptions = @{ 
+            "X" = "No Parent - Standalone Primary" 
+            "HX" = "Configure this VM to be a standalone primary. Not part of a Heirarchy"
+        }
         do {
             #Write-Log -Activity -NoNewLine "Primary Server Parent Selection"
             $result = Get-Menu2 -MenuName "Primary Server Parent Selection" -Prompt "Select CAS sitecode to connect primary to" -OptionArray $casSiteCodes -CurrentValue $CurrentValue -additionalOptions $additionalOptions -Test:$false
@@ -3406,9 +3467,18 @@ Function Get-WsusDBName {
     )
     $valid = $false
     while ($valid -eq $false) {
-        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on this Server)" }
-        $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
-        $additionalOptions += [ordered] @{ "W" = "Use Local WID for SQL" }
+        $additionalOptions = [ordered]@{ 
+            "L"  = "Local SQL (Installed on this Server)" 
+            "HL" = "Add a SQL instance to this VM that WSUS will use"
+        }
+        $additionalOptions += [ordered] @{ 
+            "N"  = "Remote SQL (Create a new SQL VM)" 
+            "HN" = "Add a new VM with SQL installed that WSUS will use"
+        }
+        $additionalOptions += [ordered] @{ 
+            "W"  = "Use Local WID for SQL"
+            "HW" = "WSUS will use WID (Windows Internal Database) for its database"
+        }
 
 
 
@@ -3497,7 +3567,10 @@ Function Get-remoteSQLVM {
 
     $valid = $false
     while ($valid -eq $false) {
-        $additionalOptions = [ordered]@{ "L" = "Local SQL (Installed on this Server)" }
+        $additionalOptions = [ordered]@{ 
+            "L"  = "Local SQL (Installed on this Server)"
+            "HL" = "Add a SQL instance to this VM"
+        }
 
         $validVMs = $Global:Config.virtualMachines | Where-Object { ($_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion) -or ($_.Role -eq "SQLAO" -and $_.OtherNode ) } | Select-Object -ExpandProperty vmName
 
@@ -3519,13 +3592,25 @@ Function Get-remoteSQLVM {
         #if (($validVMs | Measure-Object).Count -eq 0) {
 
         if ($property.Role -eq "WSUS") {
-            $additionalOptions += [ordered] @{ "R" = "Remote SQL" }
-            $additionalOptions += [ordered] @{ "W" = "Use Local WID for SQL" }
+            $additionalOptions += [ordered] @{ 
+                "R"  = "Remote SQL"
+                "HR" = "Opens a menu to select a Remote SQL VM to use"
+            }
+            $additionalOptions += [ordered] @{ 
+                "W"  = "Use Local WID for SQL"
+                "HW" = "WSUS will use WID (Windows Internal Database) as its database"
+            }
             Write-Log -Activity -NoNewLine "WSUS SQL Server Options"
         }
         else {
-            $additionalOptions += [ordered] @{ "N" = "Remote SQL (Create a new SQL VM)" }
-            $additionalOptions += [ordered] @{ "A" = "Remote SQL Always On Cluster (Create a new SQL Cluster)" }
+            $additionalOptions += [ordered] @{ 
+                "N"  = "Remote SQL (Create a new SQL VM)"
+                "HN" = "A new VM with SQL installed will be added to the configuration"
+            }
+            $additionalOptions += [ordered] @{ 
+                "A"  = "Remote SQL Always On Cluster (Create a new SQL Cluster)" 
+                "HA" = "A pair of SQLAO VMs will be added to the configuration"
+            }
             Write-Log -Activity -NoNewLine "CM SQL Server Options"
         }
         #}
@@ -3546,6 +3631,9 @@ Function Get-remoteSQLVM {
             }
             "r" {
                 $sqlVMName = select-RemoteSQLMenu -ConfigToModify $global:config -currentValue $property.remoteSQLVM
+                if ($sqlVMName -eq "ESCAPE") {
+                    return
+                }
                 #$name = $($property.SiteCode) + "SQL"
                 #Add-NewVMForRole -Role "SqlServer" -Domain $global:config.vmOptions.domainName -ConfigToModify $global:config -Name $name -network:$property.network
                 Set-SiteServerRemoteSQL $property $sqlVMName
@@ -4674,6 +4762,9 @@ function Get-AdditionalInformationColor {
         "SqlInstanceDir" {
             $color = $Global:Common.Colors.GenConfigSQLProp
         }
+        "sqlPort" {
+            $color = $Global:Common.Colors.GenConfigSQLProp
+        }
         "SqlAgentAccount" {
             $color = $Global:Common.Colors.GenConfigSQLProp
         }
@@ -5787,14 +5878,15 @@ function Add-NewVMForRole {
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDCLient", "AADJoined", "DC", "BDC", "Linux")) {
+    if ($role -notin ("OSDCLient", "AADClient", "DC", "BDC", "Linux")) {
+        #Match Windows 10 or 11
+        if ($operatingSystem.Contains("Windows 1")) {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
+        }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $installSSMS -force
     }
 
-    #Match Windows 10 or 11
-    if ($operatingSystem.Contains("Windows 1")) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
-    }
+   
 
     $existingDPMP = $null
     $NewFSServer = $null
@@ -5888,6 +5980,9 @@ function Add-NewVMForRole {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
+                }
+                else {
+                    return
                 }
             }
         }
@@ -6262,11 +6357,17 @@ function select-RemoteSQLMenu {
 
     $additionalOptions = @{}
 
-    $additionalOptions += @{ "N" = "Create new SQL Server" }
+    $additionalOptions += @{ 
+        "N" = "Create new SQL Server" 
+        "HN" = "Adds a new SQL VM to configuration"
+    }
 
-    while ([string]::IsNullOrWhiteSpace($result) -or $result -eq "ESCAPE") {
+    while ([string]::IsNullOrWhiteSpace($result)) {
         Write-Log -Activity -NoNewLine "Remote SQL Server Selection"
         $result = Get-Menu2 -MenuName "Remote SQL Server Selection" -prompt "Select SQL VM" -optionArray $(Get-ListOfPossibleSQLServers -Config $ConfigToModify) -Test:$false -additionalOptions $additionalOptions -currentValue $CurrentValue
+    }
+    if ($result -eq "ESCAPE") {
+        return "ESCAPE"
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
@@ -6294,10 +6395,16 @@ function select-FileServerMenu {
 
     $additionalOptions = @{}
     if ($HA) {
-        $additionalOptions += @{ "N" = "Create new FileServer to host Content Library (Needed for HA)" }
+        $additionalOptions += @{ 
+            "N"  = "Create new FileServer to host Content Library (Needed for HA)"
+            "HN" = "ContentLib must be moved to a remote server to enable High Availability"
+        }
     }
     else {
-        $additionalOptions += @{ "N" = "Create a New FileServer VM" }
+        $additionalOptions += @{
+            "N"  = "Create a New FileServer VM"
+            "HN" = "SQL Always On needs a quorum share. This will be stored on a FileServer" 
+        }
     }
     while ([string]::IsNullOrWhiteSpace($result) ) {
         #Allow ESCAPE to pass thru.. handled by caller
@@ -6506,39 +6613,6 @@ function show-NewVMMenu {
 }
 
 
-function show-ModifiedVMMenu {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "VM to show options for")]
-        [object] $virtualMachine
-    )
-
-    $goodPropList = $Global:Common.Supported.UpdateablePropList
-
-
-    $i = 0
-
-    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
-
-
-    $clone = $virtualMachine | ConvertTo-Json | ConvertFrom-Json
-    foreach ($prop in $clone.PSObject.Properties) {
-        if ($($prop.Name) -in $goodPropList) {
-            if ($prop.value -eq $false) {
-                $customOptions += [ordered]@{$i = $prop.Name }
-            }
-
-        }
-    }
-    $customOptions = [ordered] @{}
-    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
-
-    Write-Output "VM Name: $($virtualMachine.vmName) Role: $($virtualMachine.Role)"
-
-
-
-}
-
 function Select-VirtualMachines {
     [CmdletBinding()]
     param (
@@ -6583,8 +6657,16 @@ function Select-VirtualMachines {
                     $response = $null
                     $existingVM = $true
                     $customOptions = [ordered] @{}
-                    $customOptions += [ordered]@{"D" = "Delete this VM from Hyper-V" }
-                    $customOptions += [ordered]@{"*N2" = ""; "*BN" = "Add new Disk%$($Global:Common.Colors.GenConfigHeader)"; "N" = "Add a new VHDX to this VM" }
+                    $customOptions += [ordered]@{
+                        "D"  = "Delete this VM from Hyper-V"
+                        "HD" = "Danger: This will permanently delete the VM from Hyper-V"
+                    }
+                    $customOptions += [ordered]@{
+                        "*N2" = ""
+                        "*BN" = "Add new Disk%$($Global:Common.Colors.GenConfigHeader)"
+                        "N"   = "Add a new VHDX to this VM" 
+                        "HN"  = "This will stop the VM, create a new drive, and add it to the vm, the start it."
+                    }
                     if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
 
@@ -6755,29 +6837,57 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                        $customOptions = [ordered]@{ "*B1" = ""; "*B" = "Disks%$($Global:Common.Colors.GenConfigHeader)"; "A" = "Add Additional Disk" }
+                        $customOptions = [ordered]@{ 
+                            "*B1" = ""
+                            "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
+                            "A"   = "Add Additional Disk"
+                            "HA"  = "Add an additional VHDX to this VMs configuration"
+                        }
                         if ($null -eq $virtualMachine.additionalDisks) {
                         }
                         else {
-                            $customOptions += [ordered]@{"R" = "Remove Last Additional Disk" }
+                            $customOptions += [ordered]@{
+                                "R"  = "Remove Last Additional Disk"
+                                "HR" = "The last disk added to this configuration will be removed"
+                            }
                         }
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
-                            $customOptions += [ordered]@{"*B2" = ""; "*BS" = "ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" }
+                            $customOptions += [ordered]@{
+                                "*B2" = ""
+                                "*BS" = "ConfigMgr%$($Global:Common.Colors.GenConfigHeader)"
+                                "S"   = "Configure SQL (Set local or remote [Standalone or Always-On] SQL)" 
+                                "HS"  = "Opens the SQL configuration menu for this VM"
+                            }
                             $PassiveNode = $global:config.virtualMachines | Where-Object { $_.role -eq "PassiveSite" -and $_.siteCode -eq $virtualMachine.siteCode }
                             if ($PassiveNode) {
-                                $customOptions += [ordered]@{"H" = "Remove High Availibility (HA) - Removes the Passive Site Server" }
+                                $customOptions += [ordered]@{
+                                    "H"  = "Remove High Availibility (HA) - Removes the Passive Site Server" 
+                                    "HH" = "Removes the PassiveSite VM from the configuration."
+                                }
                             }
                             else {
-                                $customOptions += [ordered]@{"H" = "Enable High Availibility (HA) - Adds a Passive Site Server" }
+                                $customOptions += [ordered]@{
+                                    "H"  = "Enable High Availibility (HA) - Adds a Passive Site Server"
+                                    "HH" = "Adds a PassiveSite VM to configuration, when deployed will be automatically configured for High Availability"
+                                }
                             }
                         }
                         else {
                             if ($virtualMachine.Role -eq "DomainMember") {
                                 if (-not $virtualMachine.domainUser) {
-                                    $customOptions += [ordered]@{"*U" = ""; "*BU2" = "Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Add domain user as admin on this machine" }
+                                    $customOptions += [ordered]@{
+                                        "*U"   = ""
+                                        "*BU2" = "Domain User (This account will be made a local admin)%$($Global:Common.Colors.GenConfigHeader)"
+                                        "U"    = "Add domain user as admin on this machine" 
+                                        "HU"   = "Create a new Active Directory user who will be configured as an admin on this VM"
+                                    }
                                 }
                                 else {
-                                    $customOptions += [ordered]@{"*U" = ""; "*BU2" = "Domain User%$($Global:Common.Colors.GenConfigHeader)"; "U" = "Remove domainUser from this machine" }
+                                    $customOptions += [ordered]@{"*U" = ""
+                                        "*BU2"                        = "Domain User%$($Global:Common.Colors.GenConfigHeader)"
+                                        "U"                           = "Remove domainUser from this machine"
+                                        "HU"                          = "Do not add a admin user to this machine.  Only the domain admin account will be a local admin"
+                                    }
                                 }
                             }
                             if ($virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
@@ -6787,13 +6897,28 @@ function Select-VirtualMachines {
                                     if ($null -eq $virtualMachine.sqlVersion) {
                                         switch ($virtualMachine.Role) {
                                             "Secondary" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Use Full SQL for Secondary Site" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "S"   = "Use Full SQL for Secondary Site" 
+                                                    "HS"  = "Adds a SQL instance on this VM and uses it for the CM Secondary Database"
+                                                }
                                             }
                                             "WSUS" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "S"   = "Configure WSUS SQL Server" 
+                                                    "HS"  = "Opens a menu to select the SQL instance WSUS will use"
+                                                }
                                             }
                                             Default {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Add SQL" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "S"   = "Add SQL" 
+                                                    "HS"  = "Adds a SQL instance to this machine"
+                                                }
                                             }
                                         }
                                     }
@@ -6801,13 +6926,28 @@ function Select-VirtualMachines {
 
                                         switch ($virtualMachine.Role) {
                                             "Secondary" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove Full SQL and use SQL Express for Secondary Site" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "X"   = "Remove Full SQL and use SQL Express for Secondary Site" 
+                                                    "HX"  = "Remove the SQL configuration from this VM, and instruct the secondary site to install SQL Express"
+                                                }
                                             }
                                             "WSUS" {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "S" = "Configure WSUS SQL Server" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "S"   = "Configure WSUS SQL Server"
+                                                    "HS"  = "Opens a menu to select the SQL instance WSUS will use" 
+                                                }
                                             }
                                             Default {
-                                                $customOptions += [ordered]@{"*B2" = ""; "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"; "X" = "Remove SQL" }
+                                                $customOptions += [ordered]@{
+                                                    "*B2" = ""
+                                                    "*BS" = "SQL%$($Global:Common.Colors.GenConfigHeader)"
+                                                    "X"   = "Remove SQL" 
+                                                    "HX"  = "Removes the SQL configuraion from this VM"
+                                                }
                                             }
                                         }
                                     }
@@ -6815,7 +6955,12 @@ function Select-VirtualMachines {
                             }
                         }
 
-                        $customOptions += [ordered]@{"*B3" = ""; "*BD" = "VM Management%$($Global:Common.Colors.GenConfigHeader)"; "Z" = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+                        $customOptions += [ordered]@{
+                            "*B3" = ""
+                            "*BD" = "VM Management%$($Global:Common.Colors.GenConfigHeader)"
+                            "Z"   = "Remove this VM from config%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
+                            "HZ"  = "Deletes this VM from the current configuration"
+                        }
                         #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
                         $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
                         if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
