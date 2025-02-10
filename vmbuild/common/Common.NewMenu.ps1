@@ -524,7 +524,7 @@ function Get-Menu2 {
     #foreach ($menuItem in $menuItems) {
     #    write-host "[Get-Menu2] Item: $menuItem"
     #}
-    $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$NoClear -MultiSelect:$MultiSelect
+    $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect
     if ($response -is [array] -or $response.MultiSelected) {
         $ReturnValue = @()
         foreach ($item in $response) {
@@ -649,7 +649,7 @@ function Show-Menu {
 
         if (-not $NoClear) {
             Write-Host "`e[2J`e[H"
-            $NoClear = $true
+            #$NoClear = $true
         }
         
         Write-Log -Activity $menuName

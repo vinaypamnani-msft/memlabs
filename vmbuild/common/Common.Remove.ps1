@@ -347,6 +347,8 @@ if ($DC) {
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         Write-Host
     }
+    Start-Sleep -seconds 3
+    clear-host
 }
 
 function Remove-All {

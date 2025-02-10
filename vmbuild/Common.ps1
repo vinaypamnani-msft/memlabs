@@ -3507,6 +3507,8 @@ function Install-Tools {
             Write-Progress2 "Injecting tools Completed. Success: $countWorked; Failures: $countFailed" -Status "Done" -Completed
         }
         $success = ($result.Failed -eq 0)
+        Start-Sleep -seconds 3
+        clear-host
     }
     else {
         $success = $InjectToolsScriptBlock.Invoke($allVMs[0], $ToolName, $force, $SkipAutoDeploy, $PSScriptRoot)

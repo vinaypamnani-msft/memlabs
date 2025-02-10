@@ -114,6 +114,8 @@ function Start-Maintenance {
 
     Write-Host
     Write-Log "Finished maintenance. Success: $countWorked; Failures: $countFailed; Skipped: $countSkipped; Already up-to-date: $countNotNeeded" -SubActivity
+    Start-Sleep -seconds 3
+    clear-host
 
     if ($global:MaintenanceActivity) {
         Write-Progress2 -Activity $global:MaintenanceActivity -Completed

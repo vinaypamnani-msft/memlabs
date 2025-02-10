@@ -238,6 +238,7 @@ function Check-OverallHealth {
 
 function Select-ConfigMenu {
     $Global:EnterKey = $true
+    clear-host
     while ($true) {
   
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
