@@ -904,7 +904,7 @@ function Select-MainMenu {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
                 $customOptions += [ordered]@{"$i" = "$name" }
-                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $existingVM. Only some properties can be adjusted." }
+                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $($existingVM.vmName). Only some properties can be adjusted." }
                 $VMNameToNumberMap[$i.ToString()] = $existingVM.vmName
             }
         }
@@ -1882,7 +1882,11 @@ function Select-Config {
             }
         }
     }
-
+    if ($vm.Role -eq "SiteSystem") {
+        if (-not $vm.InstallSMSProv) {
+            $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
+        }
+    }
     return $configSelected
 }
 
@@ -4640,7 +4644,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "installSUP") {
         $sorted += "InstallSUP"
     }
-
+    if ($members.Name -contains "installSMSProv") {
+        $sorted += "InstallSMSProv"
+    }
     if ($members.Name -contains "Version") {
         $sorted += "Version"
     }
@@ -4708,6 +4714,7 @@ function Get-SortedProperties {
         "installDP" {}
         "installMP" {}
         "installRP" {}
+        "installSMSProv" {}
         "version" {}
         "install" {}
         "EVALVersion" {}
@@ -5459,6 +5466,9 @@ function get-VMString {
         if ($virtualMachine.installRP) {
             $name += " [RP]"
         }
+        if ($virtualMachine.InstallSMSProv) {
+            $name += " [PROV]"
+        }
         $name = $name.PadRight(39, " ")
     }
 
@@ -5491,6 +5501,11 @@ function get-VMString {
                 $temp += " [RP]"
             }
         }
+        if ($virtualMachine.InstallSMSProv) {
+            if (-not ($name.Contains("[PROV]"))) {
+                $temp += " [PROV]"
+            }
+        }
         $name += $temp.PadRight(39, " ")
     }
 
@@ -5518,6 +5533,11 @@ function get-VMString {
         if ($virtualMachine.installRP) {
             if (-not ($name.Contains("[RP]"))) {
                 $name += " [RP]"
+            }
+        }
+        if ($virtualMachine.InstallSMSProv) {
+            if (-not ($name.Contains("[PROV]"))) {
+                $name += " [PROV]"
             }
         }
     }

@@ -4066,7 +4066,7 @@ function Set-SupportedOptions {
     )
 
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 

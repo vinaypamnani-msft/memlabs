@@ -1839,6 +1839,9 @@ function Update-VMFromHyperV {
             if ($null -eq $vmObject.InstallDP) {
                 $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
             }
+            if ($null -eq $vmObject.InstallSMSProv) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
+            }
         }
     }
 
@@ -1847,6 +1850,9 @@ function Update-VMFromHyperV {
             if ($listVM.RemoteSQLVM -eq $vmObject.VmName) {
                 if ($null -eq $vmObject.InstallRP) {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+                if ($null -eq $vmObject.InstallSMSProv) {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                 }
             }
         }
@@ -2697,6 +2703,7 @@ Function Show-Summary {
             if ($_.InstallSUP) { $roles += "SUP" }
             if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }
+            if ($_.InstallSMSProv) { $roles += "PROV" }
             if ($_.InstallDP) {
                 if ($_.pullDPSourceDP) { $roles += "Pull DP" }
                 else {

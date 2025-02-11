@@ -1154,12 +1154,12 @@ function Start-Navigation {
             
         }
         
-        if ($key.VirtualKeyCode -eq 38 -or $key.VirtualKeyCode -eq 0x23) {
+        if ($key.VirtualKeyCode -eq 38 -or $key.VirtualKeyCode -eq 0x23 -or $key.VirtualKeyCode -eq 34) {
             # 38 = Up arrow key
             # 0x23 = END key
 
             # If the selected index is greater than 0, move the selection up
-            if ($key.VirtualKeyCode -eq 0x23) {
+            if ($key.VirtualKeyCode -eq 0x23 -or $key.VirtualKeyCode -eq 34) {
                 $selectedIndex = -1
             }
             $buffer = $null
@@ -1183,14 +1183,14 @@ function Start-Navigation {
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
         }
-        
-        if ($key.VirtualKeyCode -eq 40 -or $key.VirtualKeyCode -eq 0x24) {
+     
+        if ($key.VirtualKeyCode -eq 40 -or $key.VirtualKeyCode -eq 0x24 -or $key.VirtualKeyCode -eq 33) {
             # 40 = Down arrow key
             # 0x24 = HOME key
             # If the selected index is less than the last item, move the selection down
             $buffer = $null
-            if ($key.VirtualKeyCode -eq 0x24) {
-                $selectedIndex = 0
+            if ($key.VirtualKeyCode -eq 0x24 -or $key.VirtualKeyCode -eq 33) {
+                $selectedIndex = -1
             }
             $i = 0
             while ($true) {
