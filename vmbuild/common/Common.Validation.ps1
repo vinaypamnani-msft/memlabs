@@ -689,7 +689,7 @@ function Test-ValidRoleSiteServer {
             # Local SQL
             $minMem = 6
             if ($vmRole -eq "Secondary") { $minMem = 3 }
-            if ($vmRole -eq "SiteSystem")  {$minMem = 4 }
+            if ($vmRole -eq "SiteSystem") { $minMem = 4 }
             # Minimum Memory
             if ($VM.memory / 1 -lt $minMem * 1GB) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has SQL; must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
@@ -729,7 +729,9 @@ function Test-ValidRoleSiteServer {
         $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $null -ne $_.siteCode } | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" }
         foreach ($vmWithSiteCode in $otherVMs) {
             if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+                if ($vmName -ne $($vmWithSiteCode.vmName)) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+                }
             }
         }
     }

@@ -39,13 +39,16 @@ if (-not $path) {
     $path = "E:\ConfigMgr"
 }
 
+$setupWPF = Join-Path $path "bin\X64\setupwpf.exe"
+
 if (-not (Test-Path $setupWPF)) {
     Write-DscStatus "[InstallProv] Could not find $setupWPF" -Failure
     return $false
 }
 
 foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true } ) {
-
+    $machine = "$($prov.VMname).$DomainFullName".ToLowerInvariant()
+    Write-DscStatus "[InstallProv] Installing provider on $machine"
     $Install = $true
     $thisSiteCode = $thisVM.SiteCode
     if ($prov.SiteCode -ne $thisSiteCode) {
@@ -57,8 +60,8 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
 
     $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
     foreach ($provider in $providers) {
-        $vmName = "$($prov.VmName).".ToLowerInvariant() #Add a dot to match FQDN Machines
-        if ($provider.Machine.ToLowerInvariant().StartsWith($vmName)) {
+         #Add a dot to match FQDN Machines
+        if ($provider.Machine.ToLowerInvariant() -eq $machine ) {
             Write-DscStatus "Found Provider: $($provider.Machine) with Namespace $($provider.NamespacePath). Skipping."
             $Install = $false
             break
@@ -73,10 +76,12 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         }
         $machine = "$($prov.VMname).$DomainFullName"
+        Write-DscStatus "[InstallProv] Running & $setupWPF /HIDDEN /SDKINST $machine"
         & $setupWPF /HIDDEN /SDKINST $machine
         $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
+
         while ($running) {
-            Write-DscStatus "[InstallProv] setupWPF is running to install the provider. Please Wait"
+            Write-DscStatus "[InstallProv] setupWPF is running to install the provider on $machine. Please Wait"
             start-sleep -seconds 60
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
         }

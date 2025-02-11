@@ -2168,7 +2168,7 @@ function Select-Subnet {
     )
 
 
-    Get-PSCallStack | out-host
+    #Get-PSCallStack | out-host
     if (-not $configToCheck -or $configToCheck.virtualMachines.role -contains "DC") {
         if ($CurrentNetworkIsValid) {
             if ($CurrentVM) {

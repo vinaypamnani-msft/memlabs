@@ -376,6 +376,7 @@ function Write-Log {
     If ($IsVerbose) {
         $info = $false
         $logLevel = 0
+        #$callstack = Get-PSCallStack
         $TextOutput = "  VERBOSE: $Text"
         # $Text = "VERBOSE: $Text"
     }

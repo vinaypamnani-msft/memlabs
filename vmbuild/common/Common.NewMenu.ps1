@@ -503,86 +503,92 @@ function Get-Menu2 {
     )
 
     $host.ui.RawUI.FlushInputBuffer()
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'Continue'
+    try {
+        if (!$NoNewLine) {
+            write-Host
+            Write-Verbose "[$menuName] 4 Get-Menu2"
+        }
 
-    if (!$NoNewLine) {
-        write-Host
-        Write-Verbose "[$menuName] 4 Get-Menu2"
-    }
-
-    if ($null -eq $menuItems) {
+        if ($null -eq $menuItems) {
         
-        $temp = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected -split:$split
-        write-log -verbose "Get-MenuItems returned $temp. type: $($temp.GetType())"
-        $menuItems = $temp
-        Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
-    }
+            $temp = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected -split:$split
+            write-log -verbose "Get-MenuItems returned $temp. type: $($temp.GetType())"
+            $menuItems = $temp
+            Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
+        }
    
-    if (-not $Global:MenuHistory) {
-        $Global:MenuHistory = @{}
-    }
-    Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
-    #foreach ($menuItem in $menuItems) {
-    #    write-host "[Get-Menu2] Item: $menuItem"
-    #}
-    $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect
-    if ($response -is [array] -or $response.MultiSelected) {
-        $ReturnValue = @()
-        foreach ($item in $response) {
-            $ReturnValue += $item.Text
+        if (-not $Global:MenuHistory) {
+            $Global:MenuHistory = @{}
         }
-        #$ReturnValue = @($response | Select-Object -ExpandProperty Text)
-        $Global:MenuHistory[$menuName] = $ReturnValue
-        write-log -verbose "[MenuHistory] [Array] Setting $menuName to $ReturnValue with $($ReturnValue.Count) items"
-        #$returnValue = @($ReturnValue | ForEach-Object { $_ })
-        return $ReturnValue
-    }
-    else {
-        if ($response.itemName) {
-            $response = $response.itemName
-            $Global:MenuHistory[$menuName] = $response   
-            write-log -verbose "[MenuHistory] Setting $menuName to $response"   
+        Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
+        #foreach ($menuItem in $menuItems) {
+        #    write-host "[Get-Menu2] Item: $menuItem"
+        #}
+        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect
+        if ($response -is [array] -or $response.MultiSelected) {
+            $ReturnValue = @()
+            foreach ($item in $response) {
+                $ReturnValue += $item.Text
+            }
+            #$ReturnValue = @($response | Select-Object -ExpandProperty Text)
+            $Global:MenuHistory[$menuName] = $ReturnValue
+            write-log -verbose "[MenuHistory] [Array] Setting $menuName to $ReturnValue with $($ReturnValue.Count) items"
+            #$returnValue = @($ReturnValue | ForEach-Object { $_ })
+            return $ReturnValue
         }
-    }
-    write-host
-    #else {
-    #     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
-    #     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
-    #         Write-Host " [" -NoNewline
-    #         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPromptCurrentItem $currentValue -NoNewline
-    #         Write-Host "] " -NoNewline
-    #     }
-    # }
-
-
-
-
-
-    #$response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
-
-    if (-not [String]::IsNullOrWhiteSpace($response)) {
-        $i = 0
-        foreach ($option in $OptionArray) {
-            $i = $i + 1
-            if ($i -eq $response) {
-                if ($split) {
-                    $option = $option -Split " " | Select-Object -First 1
-                }
-                Write-Log -LogOnly "[$menuName] [Get-Menu2] Returned (O) '$option'"
-                return $option
+        else {
+            if ($response.itemName) {
+                $response = $response.itemName
+                $Global:MenuHistory[$menuName] = $response   
+                write-log -verbose "[MenuHistory] Setting $menuName to $response"   
             }
         }
-        if ($split) {
-            $response = $response -Split " " | Select-Object -First 1
-        }
-        Write-Log -LogOnly "[$menuName] [Get-Menu2] Returned (R) '$response'"
+        write-host
+        #else {
+        #     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
+        #     if (-not [String]::IsNullOrWhiteSpace($currentValue)) {
+        #         Write-Host " [" -NoNewline
+        #         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPromptCurrentItem $currentValue -NoNewline
+        #         Write-Host "] " -NoNewline
+        #     }
+        # }
 
-        return $response
+
+
+
+
+        #$response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
+
+        if (-not [String]::IsNullOrWhiteSpace($response)) {
+            $i = 0
+            foreach ($option in $OptionArray) {
+                $i = $i + 1
+                if ($i -eq $response) {
+                    if ($split) {
+                        $option = $option -Split " " | Select-Object -First 1
+                    }
+                    Write-Log -LogOnly "[$menuName] [Get-Menu2] Returned (O) '$option'"
+                    return $option
+                }
+            }
+            if ($split) {
+                $response = $response -Split " " | Select-Object -First 1
+            }
+            Write-Log -LogOnly "[$menuName] [Get-Menu2] Returned (R) '$response'"
+
+            return $response
+        }
+        else {
+            Write-Log -LogOnly  "[$menuName] [Get-Menu2] Returned (CV) '$CurrentValue'"
+            return $CurrentValue
+        }
+        Write-Log -LogOnly  "[$menuName] [Get-Menu2] Didnt Return Anything"
     }
-    else {
-        Write-Log -LogOnly  "[$menuName] [Get-Menu2] Returned (CV) '$CurrentValue'"
-        return $CurrentValue
+    finally {
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
-    Write-Log -LogOnly  "[$menuName] [Get-Menu2] Didnt Return Anything"
 }
 
 
