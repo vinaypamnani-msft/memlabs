@@ -58,21 +58,24 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $cm_svc_file = "$LogPath\cm_svc.txt"
 if (Test-Path $cm_svc_file) {
     # Add cm_svc user as a CM Account
-    $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
-    Write-DscStatus "Adding cm_svc domain account as CM account"
-    Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-    # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+    $ExistingAccount = Get-CMAccount | Where-Object { $_.UserName -eq $cm_svc }
+    if (-not $ExistingAccount) {
+        $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
+        Write-DscStatus "Adding cm_svc domain account as CM account"
+        Start-Sleep -Seconds 5
+        New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+        # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
 
-    # Set client push account
-    Write-DscStatus "Setting the Client Push Account"
-    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
-    Start-Sleep -Seconds 5
+        # Set client push account
+        Write-DscStatus "Setting the Client Push Account"
+        Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
+        Start-Sleep -Seconds 5
 
-    # Restart services to make sure push account is acknowledged by CCM
-    Write-DscStatus "Restarting services"
-    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+        # Restart services to make sure push account is acknowledged by CCM
+        Write-DscStatus "Restarting services"
+        Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+    }
 }
 
 
@@ -220,31 +223,36 @@ if (-not $pushClients) {
 # Wait for collection to populate
 
 if ($ClientNames) {
-    $CollectionName = "All Systems"
-    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-    Invoke-CMSystemDiscovery
-    Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    if ($PackageSuccess -eq 0) {
+        $CollectionName = "All Systems"
+        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+        Invoke-CMSystemDiscovery
+        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
 
-    if ($false) {
-        #Let PushClients.ps1 handle this later.
-        $failCount = 0
-        $success = $false
-        while (-not $success) {
+        if ($false) {
+            #Let PushClients.ps1 handle this later.
+            $failCount = 0
+            $success = $false
+            while (-not $success) {
    
-            $failCount++
-            Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
-            $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-            Start-Sleep -Seconds 30
-            $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-            $success = $PackageSuccess -ge 1
+                $failCount++
+                Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
+                $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+                Start-Sleep -Seconds 30
+                $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+                $success = $PackageSuccess -ge 1
 
-            if ($failCount -ge 15) {
-                $success = $true   
-            }
+                if ($failCount -ge 15) {
+                    $success = $true   
+                }
     
+            }
+            Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
         }
-        Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
     }
 }
 else {

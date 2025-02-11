@@ -63,7 +63,7 @@ function Get-Menu {
                 }
 
                 if ($item.StartsWith("*B")) {
-                    $breakPrefix = " t───── "
+                    $breakPrefix = " $($common.BreakPrefix) "
                     Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix -NoNewline
                     write-host2 -ForeGroundColor $color1 $TextValue[0] -NoNewline
                     Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix

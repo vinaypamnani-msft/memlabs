@@ -844,7 +844,7 @@ function Get-VMFixes {
     # Disable IE Enhanced Security for all usres via Scheduled task
     $Fix_DisableIEESC = {
 
-        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
         if ($os) {
             if ($os.Producttype -eq 1) {
                 return $true # workstation OS, fix not applicable
@@ -906,7 +906,7 @@ function Get-VMFixes {
 
     $Fix_CleanupSQL = {
 
-        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
         if ($os) {
             if ($os.Producttype -eq 1) {
                 return $true # workstation OS, fix not applicable
@@ -1067,7 +1067,7 @@ function Get-VMFixes {
         $atkms = "azkms.core.windows.net:1688"
         $winp = "W269N-WFGWX-YVC9B-4J6C9-T83GX"
         $wine = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-        $cosname = (Get-WmiObject -Class Win32_OperatingSystem).Name
+        $cosname = (Get-CimInstance -Class Win32_OperatingSystem).Name
         
         if ($cosname -like "*Pro*") {
             $key = $winp

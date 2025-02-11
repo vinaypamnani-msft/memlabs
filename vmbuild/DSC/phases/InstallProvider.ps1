@@ -47,7 +47,7 @@ if (-not (Test-Path $setupWPF)) {
 }
 
 foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSProv -eq $true } ) {
-    $machine = "$($prov.VMname).$DomainFullName".ToLowerInvariant()
+    $machine = "$($prov.VMname).$DomainFullName"
     Write-DscStatus "[InstallProv] Installing provider on $machine"
     $Install = $true
     $thisSiteCode = $thisVM.SiteCode
@@ -58,10 +58,10 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
         }
     }    
 
-    $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
+    $providers = Get-CimInstance -class "SMS_ProviderLocation" -Namespace "root\SMS"
     foreach ($provider in $providers) {
          #Add a dot to match FQDN Machines
-        if ($provider.Machine.ToLowerInvariant() -eq $machine ) {
+        if ($provider.Machine.ToLowerInvariant() -eq $machine.ToLowerInvariant() ) {
             Write-DscStatus "Found Provider: $($provider.Machine) with Namespace $($provider.NamespacePath). Skipping."
             $Install = $false
             break
@@ -74,8 +74,7 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
             Write-DscStatus "[InstallProv] setupWPF is already running.. Waiting for it to stop"
             start-sleep -seconds 60
             $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue
-        }
-        $machine = "$($prov.VMname).$DomainFullName"
+        }        
         Write-DscStatus "[InstallProv] Running & $setupWPF /HIDDEN /SDKINST $machine"
         & $setupWPF /HIDDEN /SDKINST $machine
         $running = Get-Process "setupwpf" -ErrorAction SilentlyContinue

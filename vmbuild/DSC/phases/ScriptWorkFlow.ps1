@@ -306,12 +306,6 @@ if ($containsPassive) {
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
-    # Install Providers
-    Write-DscStatus "Running InstallProvider.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
-
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
@@ -344,6 +338,12 @@ if ($TopLevelSiteServer) {
 
 }
 
+  # Install Providers
+  Write-DscStatus "Running InstallProvider.ps1"
+  $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
+  Set-Location $LogPath
+  . $ScriptFile $ConfigFilePath $LogPath
+  
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 $Configuration.ScriptWorkflow.Status = "Completed"

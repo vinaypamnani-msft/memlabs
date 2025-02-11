@@ -387,13 +387,14 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 }
 
 # Add vmbuildadmin as Full Admin
-Write-DscStatus "Adding 'vmbuildadmin' account as Full Administrator in ConfigMgr"
+
 $userName = "vmbuildadmin"
 $userDomain = $env:USERDOMAIN
 $domainUserName = "$userDomain\$userName"
 $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" }
 
 if (-not $exists) {
+    Write-DscStatus "Adding '$userName' account as Full Administrator in ConfigMgr"
     $i = 0
     do {
         $i++

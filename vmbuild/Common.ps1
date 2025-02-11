@@ -339,11 +339,11 @@ function Write-Log {
         $info = $false
         Set-TitleBar $Text
         Write-Host
-        if ($NoNewLine.IsPresent) {
-            $Text = "╭── $Text"
+        if ($NoNewLine.IsPresent) {        
+            $Text = "$($common.ActivityHeader) $Text"          
         }
-        else {
-            $Text = "╭── $Text`r`n"
+        else {           
+            $Text = "$($common.ActivityHeader) $Text`r`n"            
         }
 
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
@@ -351,7 +351,8 @@ function Write-Log {
 
     If ($SubActivity.IsPresent -and -not $Activity.IsPresent) {
         $info = $false
-        $Text = "  ─── $Text"
+        $Text = "  $($common.SubActivityHeader) $Text"
+       
         $HashArguments.Add("ForegroundColor", "LightSkyBlue")
     }
 
@@ -376,7 +377,7 @@ function Write-Log {
     If ($IsVerbose) {
         $info = $false
         $logLevel = 0
-        #$callstack = Get-PSCallStack
+        #callstack = Get-PSCallStack
         $TextOutput = "  VERBOSE: $Text"
         # $Text = "VERBOSE: $Text"
     }
@@ -384,7 +385,12 @@ function Write-Log {
     If ($Highlight.IsPresent) {
         $info = $false
         Write-Host
-        $Text = "  ╱╱╱ $Text"
+        if ($Common.PS7) {
+            $Text = "  ╱╱╱ $Text"
+        }
+        else {
+            $Text = "  +++ $Text"
+        }
         $HashArguments.Add("ForegroundColor", "DeepSkyBlue")
     }
 
@@ -2765,13 +2771,14 @@ function Invoke-VmCommand {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
                     $job | Wait-Job -Timeout $TimeoutSeconds
                     if ($job.State -eq "Completed") {
-                        $return.ScriptBlockOutput = Receive-Job $job
+                        $return.ScriptBlockOutput = (Receive-Job $job)
                         if (-not $SuppressLog) {
-                            Write-Log "$VmName`: Job '$DisplayName' Succeeded"
+                            Write-Log "$VmName`: Job '$DisplayName' Succeeded" -LogOnly
                         }
                         $failed = $false
                     }
                     else {
+                        Write-Log "$VmName`: Job '$DisplayName' Failed State: $($job.State)" -LogOnly
                         $failed = $true
                         $return.ScriptBlockFailed = $true
                         if ($Err2.Count -ne 0) {
@@ -2803,8 +2810,10 @@ function Invoke-VmCommand {
                 }
             }
             if ($CommandReturnsBool) {
-                if ($($return.ScriptBlockOutput) -ne $true) {
-                    Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning
+
+                #if (([bool]$($return.ScriptBlockOutput) -ne $true -and [bool]$($return.ScriptBlockOutput) -ne $false) {
+                if ($return.ScriptBlockOutput -isnot [bool]) {                
+                    Write-Log "Output was: $($return.ScriptBlockOutput)" -Warning 
                     $failed = $true
                     $return.ScriptBlockFailed = $true
                     if ($Err2.Count -ne 0) {
@@ -4256,7 +4265,16 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.HyperV.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.menu.ps1
-. $PSScriptRoot\common\Common.NewMenu.ps1
+
+
+if ($PSVersionTable.PSVersion.Major -eq 7) {
+    $PS7 = $true
+    $PSStyle.Progress.Style = "`e[38;5;123m"
+    $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
+    $psstyle.Formatting.Warning = "`e[33m"
+    . $PSScriptRoot\common\Common.NewMenu.ps1
+    . $PSScriptRoot\common\Common.PS7.ps1
+}
 
 ############################
 ### Common Object        ###
@@ -4265,11 +4283,19 @@ Function Set-TitleBar {
 if (-not $Common.Initialized) {
 
 
-    try{
-    Write-Progress2 "MemLabs initializing" -Status "Please wait..." -PercentComplete 1
-    $handle = (Get-WmiObject win32_process -Filter "ProcessID=$PID").Handle
-    } catch {}
-    ([wmi]"win32_process.handle='$handle'").setPriority(128) | out-null
+    try {
+        Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
+        $Global:ProgressPreference = 'SilentlyContinue'        
+        if ($true) {
+            $handle = (Get-CimInstance win32_process -Filter "ProcessID=$PID").Handle            
+            ([wmi]"win32_process.handle='$handle'").setPriority(128) | out-null
+        }
+    } 
+    catch {}
+    finally {
+        $Global:ProgressPreference = 'Continue'
+    }    
+    Write-Progress2 "MemLabs initializing" -Status "Please Wait..." -PercentComplete 1
     $global:vm_remove_list = @()
     $global:init_failed = $false
     $global:AddHistoryLine = $null
@@ -4342,6 +4368,16 @@ if (-not $Common.Initialized) {
             $colors = Get-Colors
         }
 
+        if (-not $header1) {
+            $header1 = "==="
+        }
+        if (-not $header2) {
+            $header2 = "+++"
+        }
+        
+        if (-not $breakPrefix) {
+            $breakPrefix = "-----"
+        }
         $global:Common = [PSCustomObject]@{
             MemLabsVersion        = "250204.0"
             LatestHotfixVersion   = "250204.0"
@@ -4373,6 +4409,9 @@ if (-not $Common.Initialized) {
             AzureFileList         = $null
             LocalAdmin            = $null
             FatalError            = $null
+            ActivityHeader        = $header1
+            SubActivityHeader     = $header2
+            BreakPrefix           = $breakPrefix
             Colors                = $colors
         }
 
@@ -4466,6 +4505,7 @@ if (-not $Common.Initialized) {
     }
     catch {
         Write-Log "Failed to initialize MemLabs. $_" -Failure
+        Write-Progress2 "MemLabs initializing" -Completed
         $global:init_failed = $true
         return
     }

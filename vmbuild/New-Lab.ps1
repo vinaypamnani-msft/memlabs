@@ -708,13 +708,17 @@ finally {
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
-        #  $job | Stop-Job
-        Write-Host -NoNewline "."
+        if (-not $enableVerbose) {
+            $job | Stop-Job
+            Write-Host -NoNewline "."
+        }
     }
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
-            #   $job | Remove-Job
-            Write-Host -NoNewline "."
+            if (-not $enableVerbose) {
+                $job | Remove-Job
+                Write-Host -NoNewline "."
+            }
         }
     }
     Write-host "`r                                                                                                                              "

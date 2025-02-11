@@ -1710,6 +1710,8 @@ $global:VM_Config = {
                 foreach ($node in ($ConfigurationData.AllNodes.NodeName | Where-Object { $_ -ne "*" })) {
                     $nodeList.Add($node) | Out-Null
                 }
+
+                
                 $attempts = 0
                 $maxAttempts = 150
                 do {
@@ -1722,9 +1724,9 @@ $global:VM_Config = {
                         if (-not $node) {
                             continue
                         }
-                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
-                        if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
-                            Write-Log "[Phase $Phase]: Node $node is NOT ready."
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
+                        if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -eq $true)) {
+                            Write-Log "[Phase $Phase]: Node $node is NOT ready. File Exists: $($result.ScriptBlockOutput) Fail: $($result.ScriptBlockFailed)"
                             $allNodesReady = $false
                         }
                         else {

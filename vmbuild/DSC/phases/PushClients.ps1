@@ -92,33 +92,43 @@ else {
 
 
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
-Start-Sleep -Seconds 5
-if (-not $AnyClientFound) {
-    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-}
-$failCount = 0
-$success = $false
-while (-not $success) {
-   
-    $failCount++
-    if ($failCount -eq 2 -and $AnyClientFound) {
+
+$PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+$PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+if ($PackageSuccess -eq 0) {
+    Start-Sleep -Seconds 5
+    if (-not $AnyClientFound) {
         Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
     }
-    Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
-    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-    Start-Sleep -Seconds 20
-    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-    $success = $PackageSuccess -ge 1
+    $failCount = 0
+    $success = $false
+    while (-not $success) {
+   
+        $failCount++
+        if ($failCount -eq 2 -and $AnyClientFound) {
+            Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+        }
+        Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
+        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+        Start-Sleep -Seconds 20
+        $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+        $success = $PackageSuccess -ge 1
 
-    if ($failCount -ge 20) {
-        $success = $true   
-    }
+        if ($failCount -ge 20) {
+            $success = $true   
+        }
     
+    }
+    Start-Sleep -Seconds 30
+    Invoke-CMSystemDiscovery
+    Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 }
-Start-Sleep -Seconds 30
-Invoke-CMSystemDiscovery
-Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
+
+    if ($machinelist -contains $client) {
+        continue
+    }
     Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
 }
 
@@ -128,7 +138,10 @@ foreach ($client in $ClientNameList) {
     if ([string]::IsNullOrWhiteSpace($client)) {
         continue
     }
-
+    if ($machinelist -contains $client) {
+        continue
+    }
+    
     $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     if (-not $testClient.TcpTestSucceeded) {
         # Don't wait for client to appear in collection if it's not online

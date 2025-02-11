@@ -112,7 +112,7 @@ function Get-SMSProvider {
 
     while ($retry -lt 4) {
         # try local provider first
-        $localTest = Get-WmiObject -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
+        $localTest = Get-CimInstance -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
         if ($localTest -and $WmiErr.Count -eq 0) {
             $return.FQDN = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
             $return.NamespacePath = "root\SMS\Site_$SiteCode"
@@ -120,11 +120,11 @@ function Get-SMSProvider {
         }
 
         # loop through providers
-        $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
+        $providers = Get-CimInstance -class "SMS_ProviderLocation" -Namespace "root\SMS"
         foreach ($provider in $providers) {
 
             # Test provider Fix me \\server
-            Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
+            Get-CimInstance -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
             if ($WmiErr.Count -gt 0) {
                 continue
             }
