@@ -837,6 +837,7 @@ function Get-GenericHelp {
         "InstallMP" { "Install the Management Point role on this VM" }
         "InstallRP" { "Install SSRS and the Reporting point role on this VM" }
         "InstallSUP" { "Install WSUS and the Software Update Point role on this VM" }
+        "InstallSMSProv" {"Install an additonal SMS Provider on this machine (Along with the ADK)"}
         "wsusContentDir" { "Change the location where WSUS will store its content" }
         "wsusDataBaseServer" { "Change the database WSUS will use.  Can be WID, or a local or remote SQL Server" }
         "Add SQL" { "Adds a SQL Instance to this VM" }
@@ -861,9 +862,9 @@ function Get-GenericHelp {
         "ClusterName" { "Intenal name used by Clustering to setup the SQL AO cluster. Must be unique" }
         "fileServerVM" { "FileServer VM used by SQL AO for its quorum data" }
         "OtherNode" { "This is a link to the other node of the SQL AO cluster. Not reccommended to change" }
-        "vmGeneration" {"Sets the Hyper-V VM generation. Only available on OSD clients, all other VMs are gen 2"}
-        "ParentSiteCode" {"Sets the parent site code for siteservers or sitesystems"}
-        "pullDPSourceDP" {"Sets the source Distribution point for this PullDP"}
+        "vmGeneration" { "Sets the Hyper-V VM generation. Only available on OSD clients, all other VMs are gen 2" }
+        "ParentSiteCode" { "Sets the parent site code for siteservers or sitesystems" }
+        "pullDPSourceDP" { "Sets the source Distribution point for this PullDP" }
         default { "Help Missing for $text" }
     }
     
@@ -2105,9 +2106,8 @@ function Select-RolesForExisting {
         $ha_Text = "Enable High Availability (HA) on a Site Server"
     }
 
-    $DC =  $global:config.VirtualMachines | Where-Object {$_.Role -eq "DC"} 
-    if ($DC)
-    {
+    $DC = $global:config.VirtualMachines | Where-Object { $_.Role -eq "DC" } 
+    if ($DC) {
         $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DC" }
     }
     $existingRoles2 = @()
@@ -2184,9 +2184,9 @@ function Select-Subnet {
             }
         }
         $customOptions = @{ 
-            "C" = "Custom Subnet"
+            "C"  = "Custom Subnet"
             "HC" = "You can select a custom network. Must be a /24 (eg 10.10.10.0)"
-         }
+        }
         $network = $null
         if (-not $CurrentValue) {
             if ($CurrentNetworkIsValid) {
@@ -2207,7 +2207,8 @@ function Select-Subnet {
             if ($CurrentVM) {
                 if ($CurrentVM.VmName) {
                     $menuName = "Select Subnet for $($CurrentVM.VmName); use C for custom"
-                }else {
+                }
+                else {
                     if ($CurrentVM.Role) {
                         $menuName = "Select Subnet for New VM with role $($CurrentVM.Role); use C for custom"
                     }
@@ -2901,7 +2902,7 @@ Function Get-ParentSiteCodeMenu {
         $casSiteCodes = Get-ValidCASSiteCodes -config $global:config -domain $Domain
 
         $additionalOptions = @{ 
-            "X" = "No Parent - Standalone Primary" 
+            "X"  = "No Parent - Standalone Primary" 
             "HX" = "Configure this VM to be a standalone primary. Not part of a Heirarchy"
         }
         do {
@@ -3452,7 +3453,10 @@ Function Set-SiteServerRemoteSQL {
     $newSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $vmName }
     if ($newSQLVM) {
         if (-not $newSQLVM.InstallRP) {
-            $newSQLVM | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+            if ($newSQLVM.role -ne "SQLAO") {
+                $newSQLVM | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+                $newSQLVM | Add-Member -MemberType NoteProperty -Name 'InstallSMSProv' -Value $false -force
+            }
         }
     }
 }
@@ -6126,10 +6130,11 @@ function Add-NewVMForRole {
             $virtualMachine.memory = "3GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installDP' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installMP' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallDP' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallMP' -Value $true -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallSUP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallRP' -Value $false -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallSMSProv' -Value $false -force
             if (-not $SiteCode) {
                 $SiteCode = ($ConfigToModify.virtualMachines | Where-Object { $_.Role -eq "Primary" } | Select-Object -First 1).SiteCode
                 if ($test) {
@@ -6359,7 +6364,7 @@ function select-RemoteSQLMenu {
     $additionalOptions = @{}
 
     $additionalOptions += @{ 
-        "N" = "Create new SQL Server" 
+        "N"  = "Create new SQL Server" 
         "HN" = "Adds a new SQL VM to configuration"
     }
 

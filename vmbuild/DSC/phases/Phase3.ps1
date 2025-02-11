@@ -156,7 +156,7 @@ configuration Phase3
         }
         $nextDepend = "[GpUpdate]GpUpdate"
 
-        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite" -or $ThisVM.InstallSMSProv) {
 
             $prevDepend = $nextDepend
 
@@ -176,7 +176,8 @@ configuration Phase3
             
 
             $nextDepend = "[InstallADK]ADKInstall"
-            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {
+            #Find the toplevel site server that is newly being deployed
+            if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS","Primary")) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"

@@ -130,6 +130,9 @@ function Get-UserConfiguration {
                     if ($null -eq $vm.InstallDP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
                     }
+                    if ($null -eq $vm.InstallSMSProv) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
+                    }
                 }
             }
 
@@ -137,7 +140,10 @@ function Get-UserConfiguration {
                 foreach ($listVM in $config.VirtualMachines) {
                     if ($listVM.RemoteSQLVM -eq $vm.VmName) {
                         if ($null -eq $vm.InstallRP) {
-                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force                            
+                        }
+                        if ($null -eq $vm.InstallSMSProv) {
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                         }
                     }
                 }

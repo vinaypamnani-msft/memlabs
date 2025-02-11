@@ -40,7 +40,7 @@ function Get-SMSProvider {
 
     $retry = 0
 
-    while ($retry -lt 4) {
+    while ($retry -lt 3) {
         # try local provider first
         $localTest = Get-WmiObject -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
         if ($localTest -and $WmiErr.Count -eq 0) {
@@ -52,9 +52,21 @@ function Get-SMSProvider {
         # loop through providers
         $providers = Get-WmiObject -class "SMS_ProviderLocation" -Namespace "root\SMS"
         foreach ($provider in $providers) {
+            Write-Host "Found Provider: $($provider.Machine) with Namespace $($provider.NamespacePath)"
+        }
+        foreach ($provider in $providers) {
 
-            # Test provider Fix me \\server
-            Get-WmiObject -Namespace $provider.NamespacePath -Class SMS_Site -ErrorVariable WmiErr | Out-Null
+            # Split the path into components
+            $components = $provider.NamespacePath -split '\\'
+
+            # Extract the computer name and the WMI namespace
+            $computerName = $components[2]
+            $wmiNamespace = ($components[3..($components.Length - 1)] -join '\')
+
+            #Write-Host "Computer Name: $computerName"
+            #Write-Host "WMI Namespace: $wmiNamespace"
+
+            Get-WmiObject -Namespace $wmiNamespace -Computer $computerName -Class "SMS_Site" -ErrorVariable WmiErr | Out-Null
             if ($WmiErr.Count -gt 0) {
                 continue
             }
@@ -74,17 +86,19 @@ function Get-SMSProvider {
 
 
 # Read Site Code from registry
-Write-Host "Getting SiteCode from registry"
+Write-Host "Getting SiteCode from registry:" -NoNewline
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 if (-not $SiteCode) {
     return
 }
+Write-host " $SiteCode"
 Write-Host "Getting SMS Provider"
 # Provider
 $smsProvider = Get-SMSProvider -SiteCode $SiteCode
 if (-not $smsProvider.FQDN) {
     return $false
 }
+Write-Host "Using Provider: $($smsProvider.FQDN)"
 
 Write-Host "Setting CM Site Provider"
 # Set CMSite Provider

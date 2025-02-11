@@ -306,6 +306,11 @@ if ($containsPassive) {
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
+    # Install Providers
+    Write-DscStatus "Running InstallProvider.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
 
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
