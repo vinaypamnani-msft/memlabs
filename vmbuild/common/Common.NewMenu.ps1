@@ -906,7 +906,8 @@ function Update-Prompt {
         [System.Collections.ArrayList]$MenuItems = $null,
 
         [Parameter(Mandatory = $false)] # Mandatory parameter
-        [int]$SelectedIndex = -1
+        [int]$SelectedIndex = -1,
+        [switch] $wait
 
     )
     [System.Console]::CursorVisible = $false
@@ -944,7 +945,7 @@ function Update-Prompt {
         Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
         Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
         Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2)) -NoNewline    
-        if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText)) {       
+        if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {       
             $Y -= 1    
             Set-CursorPosition -X 0 -Y $PromptPosition.Y
             write-host
@@ -1101,6 +1102,7 @@ function Start-Navigation {
                     }
 
                     $buffer = $null
+                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
                     Write-Log -verbose -LogOnly "Entering return function - N selected"
                     continue
                 }
@@ -1108,6 +1110,7 @@ function Start-Navigation {
                 if ($($menuItems[$selectedIndex].ItemName) -eq "D") {
 
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect -Wait
+                    Update-Prompt -PromptPosition $PromptPosition -wait
                     $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
                     if (-not $return) {
                         return "NOITEMS"
@@ -1123,6 +1126,7 @@ function Start-Navigation {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
                             $selectedIndex = $i
                             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
+                            Update-Prompt -PromptPosition $PromptPosition -wait
                             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                             return $menuItems[$selectedIndex]
                         }
@@ -1135,7 +1139,9 @@ function Start-Navigation {
                
             }
             else {
+                
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
+                Update-Prompt -PromptPosition $PromptPosition -wait
                 Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                 return $menuItems[$selectedIndex]
             }
@@ -1245,6 +1251,7 @@ function Start-Navigation {
                 $Global:MenuHistory[$menuName] = $MenuItems[$selectedIndex].ItemName                
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+            Update-Prompt -PromptPosition $PromptPosition -wait
             # 27 = Escape key
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
             #Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
