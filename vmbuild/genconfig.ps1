@@ -143,6 +143,10 @@ function Get-PendingVMs {
 
 
 function Check-OverallHealth {
+
+    $OriginalProgressPreference = $Global:ProgressPreference
+    $Global:ProgressPreference = 'Continue'
+
     $Indent = 3
     $disk = Get-Volume -DriveLetter E
     $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
@@ -229,10 +233,9 @@ function Check-OverallHealth {
         }
 
     }
-  
 
     Write-Host
-    
+    $Global:ProgressPreference = $OriginalProgressPreference
 
 }
 
