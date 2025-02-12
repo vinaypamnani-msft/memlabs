@@ -487,17 +487,26 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -or $_.SqlVersion}
     #$systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
-        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($system.SiteCode) {
+            $siteCode = $System.SiteCode
+        }
+        else {
+            $siteCode = Get-SiteCodeForSQLServer -deployConfig $config -SqlServer $system.VmName -SmartUpdate:$false
+            if (-not $siteCode) {
+                continue
+            }
+        }
+        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
                 Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
             }            
         }
-        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
@@ -652,6 +661,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         "domain",
         "network",
         "prefix",
+        "domaindefaults"
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
@@ -1316,6 +1326,24 @@ function Get-VMFromList2 {
             if ($vm) {
                 return $vm
             }
+        }
+    }
+}
+
+function Get-SiteCodeForSQLServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SQLServer VMName")]
+        [object] $SqlServer,
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true
+    )
+    $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.RemoteSQLVM -eq $SqlServer }
+    if ($vm) {
+        if ($vm.siteCode) {
+        return $vm.siteCode
         }
     }
 }

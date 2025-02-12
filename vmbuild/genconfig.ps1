@@ -4440,6 +4440,10 @@ function Get-AdditionalValidations {
                 $sitecode = $siteVM.sitecode
             }
 
+            if (-not $sitecode) {
+                $SiteVM = @(get-list -type VM -domain $global:config.VmOptions.DomainName | Where-Object { $_.remoteSQLVM -eq $property.vmName -and $_.role -in ("CAS", "Primary") })
+                $sitecode = $siteVM.sitecode
+            }
             if ($sitecode -in $validSiteCodes) {
                 $newName = Rename-VirtualMachine -vm $property
             }
