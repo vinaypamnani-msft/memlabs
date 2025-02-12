@@ -92,7 +92,7 @@ $enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $fal
 $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
 
 # Dot source common
-. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -InJob:$false
 
 if ($global:init_failed) {
     Write-Log "Failed to initialize common. Exiting." -Failure

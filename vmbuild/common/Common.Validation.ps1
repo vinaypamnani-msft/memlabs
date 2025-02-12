@@ -29,7 +29,19 @@ function Write-ValidationMessages {
         Write-RedX $msg
     }
 }
+function Convert-ValidationMessages {
 
+    param (
+        [object]$TestObject
+    )
+
+    $messages = $($TestObject.Message) -split "\r\n"
+    foreach ($msg in $messages.Trim()) {
+        if (-not [string]::isnullorwhitespace($msg)) {
+            Add-ErrorMessage -message $msg
+        }
+    }
+}
 
 function Test-ValidVmOptions {
     param (
@@ -935,7 +947,11 @@ function Test-Configuration {
     )
     #Get-PSCallStack | out-host
 
-
+    $disableSmartUpdateValue = (Get-Variable -Name 'DisableSmartUpdate' -Scope Global -ErrorAction SilentlyContinue).Value
+    $OrigSmartUpdateValue = $disableSmartUpdateValue
+    if ($null -eq $OrigSmartUpdateValue ) {
+        $OrigSmartUpdateValue = $false
+    }
     try {
 
         $return = [PSCustomObject]@{
@@ -951,7 +967,7 @@ function Test-Configuration {
             try {
                 $configObject = Get-Content $FilePath -Force | ConvertFrom-Json
                 #update cache, and then disable re-loading it until we complete
-                get-list2 -deployConfig $configObject -SmartUpdate | out-null
+                get-list2 -deployConfig $configObject -SmartUpdate | out-null                                
                 $global:DisableSmartUpdate = $true
             }
             catch {
@@ -991,13 +1007,13 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
         $deployConfig = New-DeployConfig -configObject $configObject
 
-        if ($deployConfig.virtualMachines.Count -eq 0) {
-            $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
-            $return.Problems += 1
-            #$return.Failures += 1
-            Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
-            return $return
-        }
+        #if ($deployConfig.virtualMachines.Count -eq 0) {
+        #    $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
+        #    $return.Problems += 1
+        #$return.Failures += 1
+        #    Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+        #    return $return
+        #}
 
         $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
@@ -1033,6 +1049,7 @@ function Test-Configuration {
         # ==============
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
+            $vmName = $vm.VmName
             $i++
             if ($i -ge 35) {
                 $i = 35
@@ -1452,11 +1469,11 @@ function Test-Configuration {
         $return.Problems += 1
         #$return.Failures += 1
         Write-Exception -ExceptionInfo $_
-        Write-Progress2 -Activity "Validating Configuration"  -Completed
+        Write-Progress2 -Activity "Validating Configuration"  -Completed        
         return $return
     }
-    finally {
-        $global:DisableSmartUpdate = $false
+    finally {        
+        $global:DisableSmartUpdate = $OrigSmartUpdateValue
         Write-Progress2 -Activity "Validating Configuration"  -Completed
     }
 }

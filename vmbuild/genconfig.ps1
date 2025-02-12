@@ -152,9 +152,9 @@ function Check-OverallHealth {
     $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
     $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
 
-   
-    $vmsRunning = (Get-List -Type VM | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
-    $vmsTotal = (Get-List -Type VM | Measure-Object).Count
+    $vmList = Get-List -Type VM
+    $vmsRunning = ($vmList | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
+    $vmsTotal = ($vmList | Measure-Object).Count
     
     # Running VMs
     if ($vmsTotal -eq 0) {
@@ -191,7 +191,7 @@ function Check-OverallHealth {
     #Available Memory
 
     $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
-    $availableMemory = [math]::Round($(Get-AvailableMemoryGB), 0)
+    $availableMemory = $os.FreeGB
 
     if ($availableMemory -ge 40) {
         Write-GreenCheck -indent $Indent "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
@@ -215,18 +215,13 @@ function Check-OverallHealth {
         $rebootedInLast12Hours = $false
         $timeSinceLastReboot = (get-uptime).hours
 
-        if ($timeSinceLastReboot.TotalHours -le 12) {
+        if ($timeSinceLastReboot -le 12) {
             $rebootedInLast12Hours = $true
         }
    
         if ($rebootedInLast12Hours) {
-            $hotfixCount = (Get-HotFix | Where-Object { $_.InstalledOn -eq (Get-Date).Date }).Count
-            if ($hotfixCount -gt 0) {
-                Write-GreenCheck -indent $Indent "It's patch Tuesday, and $hotfixCount hotfixes were installed today"
-            }
-            else {
-                Write-OrangePoint2 -indent $Indent "It's patch Tuesday, Machine was rebooted, but 0 hotfixes were installed today"
-            }
+            #$hotfixCount = (Get-HotFix | Where-Object { $_.InstalledOn -eq (Get-Date).Date }).Count           
+            Write-GreenCheck -indent $Indent "It's patch Tuesday, Machine was rebooted $($timeSinceLastReboot) hours ago."           
         }
         else {
             Write-RedX -indent $Indent "It's patch Tuesday, your machine will likely reboot today at 2-3 PM EST."
@@ -297,9 +292,11 @@ function Select-ConfigMenu {
             #Do nothing as we are on server 2025
         }
         else {
-            $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
-            $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
+            if ($Global:Common.IsAzureVM) {
+                $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
+                $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+                $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
+            }
         }
         if ($common.DevBranch) {
             $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
@@ -389,6 +386,7 @@ function Select-ConfigMenu {
         }
         if ($SelectedConfig -and $SelectedConfig -ne "ESCAPE") {
             Write-Verbose "SelectedConfig : $SelectedConfig"
+            $global:existingMachines = $null
             if (-not $SelectedConfig.VirtualMachines) {
 
                 #Add-ErrorMessage -Warning "Config is invalid, as it does not contain any new or modified virtual machines."
@@ -727,6 +725,7 @@ function Get-ExistingVMs {
         [Parameter(Mandatory = $false, HelpMessage = "Config")]
         [object] $config = $global:Config
     )
+    write-Log -Verbose "Refreshing existing VMs"
     $existingMachines = get-list -type vm -domain $config.vmOptions.DomainName | Where-Object { $_.vmName }
 
     foreach ($vm in $config.virtualMachines) {
@@ -739,6 +738,22 @@ function Get-ExistingVMs {
     }
 
     foreach ($evm in $existingMachines) {
+        
+        if ($null -ne $evm.memLabsDeployVersion) {
+            $evm.PsObject.Members.Remove("memLabsDeployVersion")
+        }
+        if ($null -ne $evm.memLabsVersion) {
+            $evm.PsObject.Members.Remove("memLabsVersion")
+        }
+        if ($null -ne $evm.domainDefaults) {
+            $evm.PsObject.Members.Remove("domainDefaults")
+        }
+        if ($null -ne $evm.success) {
+            $evm.PsObject.Members.Remove("success")
+        }
+        if ($null -ne $evm.vmBuild) {
+            $evm.PsObject.Members.Remove("vmBuild")
+        }
         if ($null -ne $evm.deployedOS) {
             $evm.PsObject.Members.Remove("deployedOS")
         }
@@ -840,7 +855,7 @@ function Get-GenericHelp {
         "InstallMP" { "Install the Management Point role on this VM" }
         "InstallRP" { "Install SSRS and the Reporting point role on this VM" }
         "InstallSUP" { "Install WSUS and the Software Update Point role on this VM" }
-        "InstallSMSProv" {"Install an additonal SMS Provider on this machine (Along with the ADK)"}
+        "InstallSMSProv" { "Install an additonal SMS Provider on this machine (Along with the ADK)" }
         "wsusContentDir" { "Change the location where WSUS will store its content" }
         "wsusDataBaseServer" { "Change the database WSUS will use.  Can be WID, or a local or remote SQL Server" }
         "Add SQL" { "Adds a SQL Instance to this VM" }
@@ -874,13 +889,20 @@ function Get-GenericHelp {
 }
 
 function Select-MainMenu {
-    $global:existingMachines = Get-ExistingVMs -config $global:config
+    if (-not $global:existingMachines) {   
+        Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $false 
+        $global:existingMachines = Get-ExistingVMs -config $global:config        
+    }
+   
     $VMNameToNumberMap = @{}
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
-        Write-Log -Activity "VM Deployment Menu" -NoNewLine
+        Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
+        $tc = Test-Configuration -InputObject $Global:Config -fast
+        Convert-ValidationMessages -TestObject $tc
         $preOptions = [ordered]@{}
+        #$preOptions += [ordered]@{ "*F0" = "$null = Test-Configuration -InputObject $Global:Config" }
         $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
         $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
         $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
@@ -952,10 +974,10 @@ function Select-MainMenu {
         $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HS" = "Saves the current configuration to your config folder, but does not deploy. You can load it from the main menu" }
         if ($InternalUseOnly.IsPresent) {
-            $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
-            $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }
             $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
             $customOptions += [ordered]@{ "HQ" = "Exits the script. Warning: Does not save." }
+            $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+            $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }            
         }
         if ($enableDebug) {
             $customOptions += [ordered]@{ "R" = "Return deployConfig" }
@@ -964,8 +986,13 @@ function Select-MainMenu {
             $customOptions += [ordered]@{ "HZ" = "Debug option to regenerate DSC.ZIP" }
         }
 
-        #Write-Log -Activity "VM Deployment Menu" -NoNewLine
-        $response = Get-Menu2 -MenuName "VM Deployment Menu" -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false -
+
+        $MenuName = "VM Deployment Menu"
+        if ($Global:configfile) {
+            $ShortName = [io.path]::GetFileNameWithoutExtension($global:configfile)
+            $MenuName += " - $ShortName"
+        }
+        $response = Get-Menu2 -MenuName $MenuName -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false -
         write-Verbose "response $response"
         if ($response -eq "ESCAPE") {
             $response = "!"
@@ -978,6 +1005,7 @@ function Select-MainMenu {
         }
         switch ($response.ToLowerInvariant()) {
             "q" {
+                $global:DisableSmartUpdate = $false
                 exit(0)
             }
             "v" { 
@@ -994,9 +1022,13 @@ function Select-MainMenu {
                         Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
                     }
                 }
+                $global:DisableSmartUpdate = $false
                 return $true
             }
-            "s" { return $false }
+            "s" {
+                $global:DisableSmartUpdate = $false
+                return $false 
+            }
             "r" {
                 foreach ($virtualMachine in $global:existingMachines) {
                     if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
@@ -1006,12 +1038,29 @@ function Select-MainMenu {
                 $c = Test-Configuration -InputObject $Global:Config
                 $global:DebugConfig = $c.DeployConfig
                 write-Host 'Debug Config stored in $global:DebugConfig'
+                $global:DisableSmartUpdate = $false
                 return $global:DebugConfig
             }
             "!" {
-                $global:StartOver = $true
-                Get-List -FlushCache
-                return $false
+                $modified = $false
+                foreach ($virtualMachine in $global:existingMachines) {
+                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
+                        $modified = $true
+                    }
+                }
+                $response = "y"
+                if ($modified) {
+                    $response = Read-YesorNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
+                    if ($response -eq "y") {
+                        return
+                    }
+                }
+                if ($response -eq "y") {
+                    $global:StartOver = $true
+                    $global:DisableSmartUpdate = $false
+                    Get-List -FlushCache
+                    return $false
+                }                
             }
             "z" {
                 $i = 0
@@ -4945,6 +4994,7 @@ function Select-Options {
         }
         $fakeNetwork = $null
         $padding = 26
+        $itemMap = @{}
         foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and $item -eq "ExistingVM") {
@@ -4953,7 +5003,7 @@ function Select-Options {
             }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
-                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "$($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
 
@@ -4968,6 +5018,8 @@ function Select-Options {
                 #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
                 $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true -HelpFunction $HelpFunction
                 #Write-Option $i "$($("network").PadRight($padding," "")) = $network"
+                write-log -verbose "Adding $network as element $i in itemmap"
+                $itemMap[$i] = "network"
                 $i++
             }
             #$padding = 27 - ($i.ToString().Length)
@@ -4976,6 +5028,8 @@ function Select-Options {
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             $color = Get-AdditionalInformationColor -item $item -data $value
             $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction
+            write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
+            $itemMap[$i] = $item
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
         }
 
@@ -5023,7 +5077,28 @@ function Select-Options {
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
         $done = $false
-        foreach ($item in (Get-SortedProperties $property)) {
+        
+        write-log -verbose "Response is $response"
+        if (($response -as [int]) -is [int]) {
+            $response = $response -as [int]
+            write-log -verbose "Response is $response int"
+            $item = $itemMap[$response]
+            if ($null -ne $item) {
+                if ($isExisting) {
+                    if ($null -eq $property."$($item + "-Original")") {
+                        write-log -logonly "Adding $($item)-Original to $($property.vmName)"
+                        $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)" -force
+                    }
+                }
+            
+                $value = $property."$item"
+                $name = $item
+                write-log -verbose  "$name = $value"               
+            } 
+        }
+
+        <#
+        # { foreach ($item in (Get-SortedProperties $property)) {
             $value = $property."$($item)"
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 continue
@@ -5047,6 +5122,7 @@ function Select-Options {
                 }
                 if ($isExisting) {
                     if ($null -eq $property."$($item + "-Original")") {
+                        write-log -logonly "Adding $($item)-Original to $($property.vmName)"
                         $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)" -force
                     }
                 }
@@ -5054,277 +5130,291 @@ function Select-Options {
                 $name = $($item)
 
             }
-
-            switch ($name) {
-                "operatingSystem" {
-                    Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
-                    if ($property.role -eq "DomainMember") {
-                        #if (-not $property.SqlVersion) {
-                        $newName = Rename-VirtualMachine -vm $property
-                        #}
+:Enter a comment or description}
+       #>
+        switch ($name) {
+            "operatingSystem" {
+                Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
+                if ($property.role -eq "DomainMember") {
+                    #if (-not $property.SqlVersion) {
+                    $newName = Rename-VirtualMachine -vm $property
+                    #}
+                }
+                continue MainLoop
+            }
+            "DefaultClientOS" {
+                Get-OperatingSystemMenuClient -property $property -name $name -CurrentValue $value                    
+                continue MainLoop
+            }
+            "DefaultServerOS" {
+                Get-OperatingSystemMenuServer -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "remoteContentLibVM" {
+                $result = select-FileServerMenu -HA:$true -CurrentValue $value
+                if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                    $property.remoteContentLibVM = $result
+                }
+                continue MainLoop
+            }
+            "pullDPSourceDP" {
+                $property.pullDPSourceDP = select-PullDPMenu  -CurrentValue $value -CurrentVM $Property
+                continue MainLoop
+            }
+            "fileServerVM" {
+                $result = select-FileServerMenu -HA:$false -CurrentValue $value
+                if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                    $property.fileServerVM = $result
+                }
+                continue MainLoop
+            }
+            "domainName" {
+                $domain = select-NewDomainName
+                if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {    
+                    $property.domainName = $domain
+                    if ($property.prefix) {
+                        $property.prefix = get-PrefixForDomain -Domain $domain
                     }
-                    continue MainLoop
-                }
-                "DefaultClientOS" {
-                    Get-OperatingSystemMenuClient -property $property -name $name -CurrentValue $value                    
-                    continue MainLoop
-                }
-                "DefaultServerOS" {
-                    Get-OperatingSystemMenuServer -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "remoteContentLibVM" {
-                    $result = select-FileServerMenu -HA:$true -CurrentValue $value
-                    if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
-                        $property.remoteContentLibVM = $result
-                    }
-                    continue MainLoop
-                }
-                "pullDPSourceDP" {
-                    $property.pullDPSourceDP = select-PullDPMenu  -CurrentValue $value -CurrentVM $Property
-                    continue MainLoop
-                }
-                "fileServerVM" {
-                    $result = select-FileServerMenu -HA:$false -CurrentValue $value
-                    if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
-                        $property.fileServerVM = $result
-                    }
-                    continue MainLoop
-                }
-                "domainName" {
-                    $domain = select-NewDomainName
-                    if (-not [string]::IsNullOrEmpty($domain) -and $domain -ne "ESCAPE") {    
-                        $property.domainName = $domain
-                        if ($property.prefix) {
-                            $property.prefix = get-PrefixForDomain -Domain $domain
-                        }
-                        if ($property.domainNetBiosName) {
-                            $netbiosName = $domain.Split(".")[0]
-                            $property.domainNetBiosName = $netbiosName
+                    if ($property.domainNetBiosName) {
+                        $netbiosName = $domain.Split(".")[0]
+                        $property.domainNetBiosName = $netbiosName
                     
-                            Get-TestResult -SuccessOnError | out-null
-                        }
-                    }
-                    continue MainLoop
-                }
-                "timeZone" {
-                    $timezone = Select-TimeZone
-                    if (-not [string]::isnullorwhitespace($timezone) -and $timezone -ne "ESCAPE") {
-                        $property.timeZone = $timezone
                         Get-TestResult -SuccessOnError | out-null
                     }
-                    continue MainLoop
                 }
-                "locale" {
-                    $locale = Select-Locale
-                    $property.locale = $locale
+                continue MainLoop
+            }
+            "timeZone" {
+                $timezone = Select-TimeZone
+                if (-not [string]::isnullorwhitespace($timezone) -and $timezone -ne "ESCAPE") {
+                    $property.timeZone = $timezone
                     Get-TestResult -SuccessOnError | out-null
-                    continue MainLoop
                 }
-                "network" {
-                    if ($property.vmName) {
-                        $network = Get-NetworkForVM -vm $property
-                    }
-                    else {
-                        $network = Select-Subnet -CurrentValue $property.Network
-                    }
+                continue MainLoop
+            }
+            "locale" {
+                $locale = Select-Locale
+                $property.locale = $locale
+                Get-TestResult -SuccessOnError | out-null
+                continue MainLoop
+            }
+            "network" {
+                if ($property.vmName) {
+                    $network = Get-NetworkForVM -vm $property
+                }
+                else {
+                    $network = Select-Subnet -CurrentValue $property.Network
+                }
 
-                    if ($network -eq $global:config.vmOptions.network) {
-                        if ($property.Network -and $property.vmName) {
-                            $property.PsObject.Members.Remove("network")
-                        }
-                        #write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
-                        continue MainLoop
+                if ($network -eq $global:config.vmOptions.network) {
+                    if ($property.Network -and $property.vmName) {
+                        $property.PsObject.Members.Remove("network")
                     }
-                    if ($network) {
-                        if ($fakeNetwork) {
-                            $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
-                        }
-                        else {
-                            $property.network = $network
-                        }
-                    }
-                    Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
-                    Get-TestResult -SuccessOnError | out-null
+                    #write-host2 -ForegroundColor Khaki "Not changing network as this is the default network."
                     continue MainLoop
                 }
-                "parentSiteCode" {
-                    Set-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "ForestTrust" {
-                    Get-ForestTrustMenu -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "externalDomainJoinSiteCode" {
-                    Get-TargetSitesForDomain -property $property -domain $property.ForestTrust
-                    continue MainLoop
-                }
-                "sqlVersion" {
-                    Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "DeploymentType" {
-                    $dt = Select-DeploymentType
-                    if ($dt) {
-                        $property.DeploymentType = $dt
-                    }
-                    continue MainLoop
-                }
-                "DefaultsqlVersion" {
-                    Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "remoteSQLVM" {
-                    Get-remoteSQLVM -property $property -name $name -CurrentValue $value
-                    Continue MainLoop
-                    #return "REFRESH"
-                }
-                "domainUser" {
-                    Get-domainUser -property $property -name $name -CurrentValue $value
-                    Continue MainLoop
-                    #return "REFRESH"
-                }
-                "wsusDataBaseServer" {
-                    Get-WsusDBName -property $property -name $name -CurrentValue $value
-                    continue MainLoop
-                }
-                "siteCode" {
-                    if ($property.role -eq "PassiveSite") {
-                        Add-ErrorMessage -property $name "SiteCode can not be manually modified on a Passive server. Please modify this on the Active node"
-                        continue MainLoop
-                    }
-                    if ($property.role -in ("SiteSystem", "WSUS")) {
-                        Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
-                        if (-not $($property.SiteCode)) {
-                            Write-RedX "Could not determine sitecode for $($property.VmName)"
-                            continue MainLoop
-                        }
-                        $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
-                        if ($SiteType -eq "CAS") {
-                            if ($property.InstallMP) {
-                                Add-ErrorMessage -property $name "Can not install an MP on a CAS site. Automatically disabled"
-                                $property.InstallMP = $false
-                            }
-                            if ($property.InstallDP) {
-                                Add-ErrorMessage -property $name "Can not install a DP on a CAS site. Automatically disabled"
-                                $property.InstallDP = $false
-                                $property.PsObject.Members.Remove("enablePullDP")
-                                $property.PsObject.Members.Remove("pullDPSourceDP")
-                            }
-                        }
-                        $newName = Rename-VirtualMachine -vm $property
-                        write-host
-                        continue MainLoop
-                    }
-                }
-                "role" {
-                    if ($property.role -eq "PassiveSite") {
-                        Add-ErrorMessage -property $name "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
-                        continue MainLoop
-                    }
-                    if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
-                        Write-Host2 -ForegroundColor Khaki "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
-                        # VM was deleted.. Lets get outta here.
-                        return
+                if ($network) {
+                    if ($fakeNetwork) {
+                        $property | Add-Member -MemberType NoteProperty -Name "network" -Value $network -Force
                     }
                     else {
-                        #VM was not deleted.. We can still edit other properties.
-                        continue MainLoop
+                        $property.network = $network
                     }
                 }
-                "CMVersion" {
-                    Get-CMVersionMenu -property $property -name $name -CurrentValue $value
+                Get-AdditionalValidations -property $property -name $Name -CurrentValue $network
+                Get-TestResult -SuccessOnError | out-null
+                continue MainLoop
+            }
+            "parentSiteCode" {
+                Set-ParentSiteCodeMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "ForestTrust" {
+                Get-ForestTrustMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "externalDomainJoinSiteCode" {
+                Get-TargetSitesForDomain -property $property -domain $property.ForestTrust
+                continue MainLoop
+            }
+            "sqlVersion" {
+                Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "DeploymentType" {
+                $dt = Select-DeploymentType
+                if ($dt) {
+                    $property.DeploymentType = $dt
+                }
+                continue MainLoop
+            }
+            "DefaultsqlVersion" {
+                Get-SqlVersionMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "remoteSQLVM" {
+                Get-remoteSQLVM -property $property -name $name -CurrentValue $value
+                Continue MainLoop
+                #return "REFRESH"
+            }
+            "domainUser" {
+                Get-domainUser -property $property -name $name -CurrentValue $value
+                Continue MainLoop
+                #return "REFRESH"
+            }
+            "wsusDataBaseServer" {
+                Get-WsusDBName -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "siteCode" {
+                if ($property.role -eq "PassiveSite") {
+                    Add-ErrorMessage -property $name "SiteCode can not be manually modified on a Passive server. Please modify this on the Active node"
                     continue MainLoop
                 }
-                "version" {
-                    Get-CMVersionMenu -property $property -name $name -CurrentValue $value
+                if ($property.role -in ("SiteSystem", "WSUS")) {
+                    Get-SiteCodeMenu -property $property -name $name -CurrentValue $value
+                    if (-not $($property.SiteCode)) {
+                        Write-RedX "Could not determine sitecode for $($property.VmName)"
+                        continue MainLoop
+                    }
+                    $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
+                    if ($SiteType -eq "CAS") {
+                        if ($property.InstallMP) {
+                            Add-ErrorMessage -property $name "Can not install an MP on a CAS site. Automatically disabled"
+                            $property.InstallMP = $false
+                        }
+                        if ($property.InstallDP) {
+                            Add-ErrorMessage -property $name "Can not install a DP on a CAS site. Automatically disabled"
+                            $property.InstallDP = $false
+                            $property.PsObject.Members.Remove("enablePullDP")
+                            $property.PsObject.Members.Remove("pullDPSourceDP")
+                        }
+                    }
+                    $newName = Rename-VirtualMachine -vm $property
+                    write-host
                     continue MainLoop
                 }
             }
-            # If the property is another PSCustomObject, recurse, and call this function again with the inner object.
-            # This is currently only used for AdditionalDisks
-            if ($value -is [System.Management.Automation.PSCustomObject]) {
-                Select-Options -MenuName "$Name" -Rootproperty $property -PropertyName "$Name" -Prompt "Select data to modify" -HelpFunction "Get-GenericHelp" | out-null
+            "role" {
+                if ($property.role -eq "PassiveSite") {
+                    Add-ErrorMessage -property $name "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
+                    continue MainLoop
+                }
+                if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
+                    Write-Host2 -ForegroundColor Khaki "VirtualMachine object was re-created with new role. Taking you back to VM Menu."
+                    # VM was deleted.. Lets get outta here.
+                    return
+                }
+                else {
+                    #VM was not deleted.. We can still edit other properties.
+                    continue MainLoop
+                }
             }
-            else {
-                #The option was not a known name with its own menu, and it wasnt another PSCustomObject.. We can edit it directly.
-                $valid = $false
-                Write-Host
-                Write-Verbose "7 Select-Options"
-                while ($valid -eq $false) {
-                    if ($value -is [bool]) {
-                        if ($value -eq $true) {
-                            $response2 = "false"
-                        }
-                        else {
-                            $response2 = "true"
-                        }
-                        $test = $false
-                        #$response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
-                    }
-                    else {
-                        if ($property.VmName) {
-                            $outputName = "$($Name) for VM $($property.VmName)"
-                        }
-                        else {
-                            $outputName = "$Name"
-                        }
-                        Write-Log -Activity -NoNewLine "Modify Property $outputName - Current Value: $value"
-                        $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
-                    }
-                    if (-not [String]::IsNullOrWhiteSpace($response2)) {
-                        if ($property."$($Name)" -is [Int]) {
-                            try {
-                                $property."$($Name)" = [Int]$response2
-                            }
-                            catch {}
-                        }
-                        else {
-                            if ($value -is [bool]) {
-                                if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
-                                    if ($response2.ToLowerInvariant() -eq "true") {
-                                        $response2 = $true
-                                    }
-                                    elseif ($response2.ToLowerInvariant() -eq "false") {
-                                        $response2 = $false
-                                    }
-                                    else {
-                                        $response2 = $value
-                                    }
-                                }
-
-                            }
-
-                            Write-Verbose ("$_ name = $($_.Name) or $name = $response2 value = '$value'")
-                            $property."$($Name)" = $response2
-                        }
-                        Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
-                        if ($Test) {
-                            $valid = Get-TestResult -SuccessOnWarning
-                        }
-                        else {
-                            $valid = $true
-                        }
-                        if ($response2 -eq $value) {
-                            $valid = $true
-                        }
-
-                    }
-                    else {
-                        # Enter was pressed. Set the Default value, and test, but dont block.
-                        $property."$($Name)" = $value
-                        $valid = Get-TestResult -SuccessOnError
-                    }
-                }
-                if ($name -eq "VmName") {
-                    return "REFRESH"
-                }
-                if (-not [String]::IsNullOrWhiteSpace($newName)  ) {
-                    return "NEWNAME:$newName"
-                }
+            "CMVersion" {
+                Get-CMVersionMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
+            }
+            "version" {
+                Get-CMVersionMenu -property $property -name $name -CurrentValue $value
+                continue MainLoop
             }
         }
+        # If the property is another PSCustomObject, recurse, and call this function again with the inner object.
+        # This is currently only used for AdditionalDisks
+        if ($value -is [System.Management.Automation.PSCustomObject]) {
+            Select-Options -MenuName "$Name" -Rootproperty $property -PropertyName "$Name" -Prompt "Select data to modify" -HelpFunction "Get-GenericHelp" | out-null
+        }
+        else {
+            #The option was not a known name with its own menu, and it wasnt another PSCustomObject.. We can edit it directly.
+            $valid = $false
+            Write-Host
+            Write-Verbose "7 Select-Options"
+            while ($valid -eq $false) {
+                write-log -verbose "Read new Value5: $name = $($property."$Name")"
+                if ($value -is [bool]) {
+                    if ($value -eq $true) {
+                        $response2 = "false"
+                    }
+                    else {
+                        $response2 = "true"
+                    }
+                    $test = $false
+                    #$response2 = Get-Menu -Prompt "Select new Value for $($Name)" -CurrentValue $value -OptionArray @("True", "False") -NoNewLine -Test:$false
+                }
+                else {
+                    if ($property.VmName) {
+                        $outputName = "$($Name) for VM $($property.VmName)"
+                    }
+                    else {
+                        $outputName = "$Name"
+                    }
+                    Write-Log -Activity -NoNewLine "Modify Property $outputName - Current Value: $value"
+                    $response2 = Read-Host2 -Prompt "Select new Value for $($Name)" $value
+                    write-log -verbose "Got new value : $response2 for $Name"
+                }
+                if (-not [String]::IsNullOrWhiteSpace($response2)) {
+                    if ($property."$($Name)" -is [Int]) {
+                        try {
+                            $property."$($Name)" = [Int]$response2
+                            write-log -verbose "Got new value : $response2 for $Name Setting as INT"
+                        }
+                        catch {
+                            Add-ErrorMessage -property $name "$_"
+                            #Write-host "Explosion $_"
+                        }
+                    }
+                    else {
+                        if ($value -is [bool]) {
+                            if ($([string]$value).ToLowerInvariant() -eq "true" -or $([string]$value).ToLowerInvariant() -eq "false") {
+                                if ($response2.ToLowerInvariant() -eq "true") {
+                                    $response2 = $true
+                                }
+                                elseif ($response2.ToLowerInvariant() -eq "false") {
+                                    $response2 = $false
+                                }
+                                else {
+                                    $response2 = $value
+                                }
+                            }
+
+                        }
+
+                        Write-Verbose ("$_ name = $($_.Name) or $name = $response2 value = '$value'")
+                        write-log -verbose "Got new value : $response2 for $Name setting as String"
+                        $property."$Name" = $response2
+                        write-log -verbose "Read new Value: $name = $($property."$Name")"
+                    }
+                    Get-AdditionalValidations -property $property -name $Name -CurrentValue $value
+                    if ($Test) {
+                        write-log -verbose "Read new Value3: $name = $($property."$Name")"
+                        #$valid = Get-TestResult -SuccessOnWarning                        
+                        $valid = $true
+                        write-log -verbose "Read new Value4: $name = $($property."$Name")"
+                    }
+                    else {
+                        $valid = $true
+                    }
+                    if ($response2 -eq $value) {
+                        $valid = $true
+                    }
+
+                }
+                else {
+                    # Enter was pressed. Set the Default value, and test, but dont block.
+                    $property."$($Name)" = $value
+                    write-log -verbose "Revert : $response2 for $Name = $value setting as String"
+                    $valid = Get-TestResult -SuccessOnError
+                }
+            }
+            write-log -verbose "Read new Value2: $name = $($property."$Name")"
+            if ($name -eq "VmName") {
+                return "REFRESH"
+            }
+            if (-not [String]::IsNullOrWhiteSpace($newName)  ) {
+                return "NEWNAME:$newName"
+            }
+        }
+        
     }
 }
 
@@ -5412,8 +5502,9 @@ function get-VMString {
 
     )
 
-
-
+    $name = $null
+    $temp = $null
+    $SiteCode = $null
     $modified = get-IsExistingVMModified -virtualMachine $virtualMachine
 
 
@@ -5554,7 +5645,7 @@ function get-VMString {
         $name += "]"
     }
 
-    write-log "Name is $name" -verbose
+    write-log "Name is $name $virtualMachine" -verbose
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 8)
     if ($name.Length -ge $MaxWidth) {
         $name = $name.Substring(0, $MaxWidth - 3) + "..."
@@ -6762,6 +6853,7 @@ function Select-VirtualMachines {
                         continue VMLoop
                     }
 
+                    write-log -logonly "Modify properties returned $newValue"
                     if ($newValue -eq "D") {
                         $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($virtualMachine.vmName)? (Y/n)" -HideHelp -timeout 180 -Default "y"
 
@@ -7410,6 +7502,7 @@ do {
             return $return.DeployNow
         }
         $c = Test-Configuration -InputObject $Global:Config
+        Convert-ValidationMessages -TestObject $c
         Write-Host
         Write-Verbose "12"
 

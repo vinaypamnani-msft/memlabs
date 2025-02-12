@@ -198,7 +198,6 @@ do {
 
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
-Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
 

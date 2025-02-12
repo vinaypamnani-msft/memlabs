@@ -274,7 +274,7 @@ function Get-MenuItems {
             $value = $preOptions."$($item)"
             if ($item -eq "*HF") {
                 $HelpFunction = $value
-                write-log "Setting HelpFunction to $value"
+                write-log -verbose "Setting HelpFunction to $value"
                 continue
             }
             $menuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -selectable -text $value -itemname $item
@@ -319,7 +319,7 @@ function Get-MenuItems {
             $value = $additionalOptions."$($item)"
             if ($item -eq "*HF") {
                 $HelpFunction = $value
-                write-log "Setting HelpFunction to $value in Additional Options"
+                write-log -verbose "Setting HelpFunction to $value in Additional Options"
                 break
             }
         }

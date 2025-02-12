@@ -1147,7 +1147,9 @@ function Get-TopSiteServerForSiteCode {
             return $existingVMs | Select-Object -First 1
         }
     }
-    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
+    Add-ErrorMessage "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    
     return $null
 }
 
@@ -1762,6 +1764,7 @@ function Update-VMFromHyperV {
         [Parameter(Mandatory = $false)]
         [object] $vmNoteObject
     )
+
     if (-not $vmNoteObject) {
         try {
             if ($vm.Notes) {
@@ -1811,7 +1814,31 @@ function Update-VMFromHyperV {
                     }
                 }
                 default {
-                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                    
+                    switch ($value) {
+                        "True" {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $true -Force
+                            continue
+                        }
+                        "False" {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $false -Force
+                            continue
+                        }
+                        {$PSItem -like "*GB" -or $PSItem -like "*MB" -or $PSItem -like "*.*"} {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                            continue
+                        }
+                        {$PSItem -as [int] -is [int]} {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value ([int]$value) -Force
+                            continue
+                        }
+                        default {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                        }
+
+                        
+                    }
+                   
                 }
             }
         }
@@ -1824,6 +1851,9 @@ function Update-VMFromHyperV {
         $vmObject.Role = "SiteSystem"
     }
 
+    if (-not $vmObject.DynamicMinRam) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name "DynamicMinRam" -Value $vmObject.Memory -Force
+    }
     #add missing Properties
     if ($vmObject.Role -in "SiteSystem", "CAS", "Primary") {
         if ($null -eq $vmObject.InstallRP) {
@@ -1885,9 +1915,9 @@ function Get-List {
     $return = $null
     #Get-PSCallStack | out-host
     if ($global:DisableSmartUpdate -eq $true) {
-        $doSmartUpdate = $false
+        $doSmartUpdate = $false        
     }
-    else {
+    else {        
         $mutexName = "GetList" + $pid
         $mtx = New-Object System.Threading.Mutex($false, $mutexName)
         #write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose

@@ -3136,6 +3136,7 @@ function Get-StorageConfig {
             }
 
             if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+                Write-Log "Testing upgrade to 2025 cleanup" -LogOnly
                 if (test-path "C:\temp\Upgrade2025") {
                     write-host "Removing 2025 Upgrade Support files - C:\temp\Upgrade2025"
                     Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue
@@ -3168,6 +3169,7 @@ function Get-StorageConfig {
                 $response.Content.Trim() | Out-file $filePath -Force
             }
             else {
+                Write-Log "Trying to get $username.txt" -LogOnly
                 start-sleep -seconds 60
                 $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
                 if (-not $response) {
@@ -4065,8 +4067,7 @@ function Set-SupportedOptions {
         "BDC"
     )
 
-
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam","virtualProcs", "domainDefaults","DefaultServerOS","DefaultClientOS","DefaultSqlVersion","UseDynamicMemory","IncludeSSMSOnNONSQL")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 
@@ -4282,7 +4283,6 @@ if ($PSVersionTable.PSVersion.Major -eq 7) {
 
 if (-not $Common.Initialized) {
 
-
     try {
         Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
         $Global:ProgressPreference = 'SilentlyContinue'        
@@ -4301,6 +4301,9 @@ if (-not $Common.Initialized) {
     $global:AddHistoryLine = $null
     $Global:MenuHistory = $null
     $global:GenConfigErrorMessages = $null
+    $global:existingMachines = $null
+    $global:DisableSmartUpdate = $false
+    
 
     try {
         ###################
@@ -4364,8 +4367,10 @@ if (-not $Common.Initialized) {
         Write-Progress2 "MemLabs initializing" -Status "Loading Global Configuration" -PercentComplete 7
         # Common global props
 
+        $isAzureVM = $false
         if (-not $InJob) {
             $colors = Get-Colors
+            if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object {$_.IPAddress -eq "10.1.0.4"}) {$isAzureVM = $true}
         }
 
         if (-not $header1) {
@@ -4413,6 +4418,7 @@ if (-not $Common.Initialized) {
             SubActivityHeader     = $header2
             BreakPrefix           = $breakPrefix
             Colors                = $colors
+            IsAzureVM             = $isAzureVM
         }
 
         # Storage config
@@ -4504,7 +4510,8 @@ if (-not $Common.Initialized) {
         Write-Progress2 "MemLabs initializing" -Completed
     }
     catch {
-        Write-Log "Failed to initialize MemLabs. $_" -Failure
+        Write-Log "Failed to initialize MemLabs. $_ " -Failure
+        Get-PSCallStack | out-Host
         Write-Progress2 "MemLabs initializing" -Completed
         $global:init_failed = $true
         return
