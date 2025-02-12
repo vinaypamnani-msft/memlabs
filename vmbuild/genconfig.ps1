@@ -4128,6 +4128,12 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name -Warning "Setting generation to 1 will disable TPM support."
             }
         }
+        "virtualProcs" {            
+            if ($value -le "0" -or $value -gt 16) {
+                Add-ErrorMessage -property $name -Warning "Valid values for $name is 1-16"
+                $property.$name = 4
+            }
+        }
         "SqlServiceAccount" {
             if ($property.Role -eq "SQLAO") {
                 $SQLAO = @($property)
