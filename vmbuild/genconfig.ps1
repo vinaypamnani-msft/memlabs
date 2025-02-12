@@ -4082,6 +4082,9 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
                 $value = $CurrentValue
             }
+            if (($value / 1) -ge $property.memory /1 ) {
+                Add-ErrorMessage -property $name -Warning "If $name is larger than Memory, dynamic ram will not be enabled"
+            }
             $property.$name = $value.ToUpperInvariant()
         }
         "memory" {
@@ -4239,7 +4242,7 @@ function Get-AdditionalValidations {
 
         }
         "OtherNode" {
-            Add-ErrorMessage -property $name  "Sorry. OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+            Add-ErrorMessage -property $name  "OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
             $property.$name = $currentValue
         }
         "network" {
@@ -4378,7 +4381,7 @@ function Get-AdditionalValidations {
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -in "Secondary", "CAS") {
-                Add-ErrorMessage -property $name -Warning "Can not install an MP for a CAS or secondary site"
+                Add-ErrorMessage -property $name -Warning "Can not install an MP on a CAS or secondary site"
                 $property.installMP = $false
             }
             $newName = Rename-VirtualMachine -vm $property
@@ -4447,7 +4450,7 @@ function Get-AdditionalValidations {
         }
         "siteCode" {
             if ($property.siteCode.Length -ne 3) {
-                write-host2 -ForegroundColor OrangeRed "SiteCode must be exactly 3 characters long. Unable to change sitecode."
+                Add-ErrorMessage -property $name -Warning "SiteCode must be exactly 3 characters long. Unable to change sitecode."                
                 $property.siteCode = $CurrentValue
                 return
             }
@@ -4456,6 +4459,7 @@ function Get-AdditionalValidations {
                 #Check if the new name is already in use:
                 $NewSQLVM = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newSQLName }
                 if ($NewSQLVM) {
+                    Add-ErrorMessage -property $name -Warning "Changing Sitecode would rename SQL VM to $($NewSQLVM.vmName) which already exists. Unable to change sitecode."    
                     write-host
                     write-host2 -ForegroundColor OrangeRed "Changing Sitecode would rename SQL VM to " -NoNewline
                     write-host2 -ForegroundColor Gold $($NewSQLVM.vmName) -NoNewline
@@ -4469,6 +4473,7 @@ function Get-AdditionalValidations {
             $NewSSName = $Global:Config.virtualMachines | Where-Object { $_.vmName -eq $newName }
             if ($NewSSName) {
                 write-host
+                Add-ErrorMessage -property $name -Warning "Changing Sitecode would rename SQL VM to $($NewSSName.vmName) which already exists. Unable to change sitecode." 
                 write-host2 -ForegroundColor OrangeRed "Changing Sitecode would rename VM to " -NoNewline
                 write-host2 -ForegroundColor Gold $($NewSSName.vmName) -NoNewline
                 write-host2 -ForegroundColor OrangeRed " which already exists. Unable to change sitecode."
