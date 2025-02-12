@@ -4083,7 +4083,7 @@ function Get-AdditionalValidations {
                 $value = $CurrentValue
             }
             if (($value / 1) -ge $property.memory /1 ) {
-                Add-ErrorMessage -property $name -Warning "If $name is larger than Memory, dynamic ram will not be enabled"
+                Add-ErrorMessage -property $name -Warning "If $name is larger than Memory, dynamic ram will be disabled"
             }
             $property.$name = $value.ToUpperInvariant()
         }
