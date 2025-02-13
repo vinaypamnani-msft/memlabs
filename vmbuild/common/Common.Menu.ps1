@@ -382,7 +382,7 @@ function Get-GenConfigErrorMessagesLineCount {
     $count = ($global:GenConfigErrorMessages | Measure-Object).Count
 
     if ($count -gt 0) {
-        $count+=4 #Add 1 line for header, Add 3 for extra lines
+        $count += 4 #Add 1 line for header, Add 3 for extra lines
     }
     return $count
 }
@@ -482,6 +482,91 @@ function Read-Single {
     }
     Write-Host "------------------------------------------"
     return $response
+}
+
+#select-ChangeDynamicMemory -domain $domain -Enable
+
+function select-ChangeDynamicMemory {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain,
+        [switch] $enable,
+        [switch] $disable
+    )
+
+    while ($true) {
+        Write-Host
+
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        $CustomOptions = [ordered]@{}
+
+        $vmsname = $vms | Select-Object -ExpandProperty vmName
+
+        $enabled = $vms | Where-Object { ($_.Memory / 1 ) -gt ($_.DynamicMinRam / 1) } | Select-Object -ExpandProperty vmName
+        $disabled = $vms | Where-Object { ($_.Memory / 1 ) -le ($_.DynamicMinRam / 1) } | Select-Object -ExpandProperty vmName
+
+        $vmsname = $enabled
+        $ReturnVal = $null
+        $verb = "Disable"
+        if ($enable) {
+            $verb = "Enable"
+            $vmsname = $disabled
+        }
+        if ($vmsname -and ($vmsname | Measure-Object).count -gt 0) {
+            Write-OrangePoint "$(($vmsname | Measure-Object).count) VM's in '$domain' are in state: $verb"
+        }
+        else {
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' already have Dynamic Memory $($verb)d ***" }
+        }
+        $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
+        Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
+
+        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE" -or $ReturnVal -eq "NOITEMS") {
+            return
+        }
+
+        $vmRestartList = @()
+        foreach ($vmName in $ReturnVal) {    
+            $vmNotes = $vms | Where-Object { $_.VmName -eq $vmName }
+            $vm = Get-Vm2 -Name $vmName
+            if (-not $vm) {
+                continue
+            }
+            if ($vm.State -eq "Running") {
+                stop-vm2 -name $vm.VmName
+                $vmRestartList += @($vmName)
+            }
+            $Memory = $vmNotes.Memory
+            if ($enable) {
+                $dynamicMinRam = "1GB"
+                $dynamicRamInBytes = ($dynamicMinRam / 1)
+                $Memory = $vmNotes.Memory
+                $priority = 25
+                $buffer = 10
+                if ($vm.role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                    $priority = 50
+                    $buffer = 20
+                }
+                if ($dynamicRamInBytes -gt 40MB) {
+                    Write-log  "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop   
+                    Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $dynamicMinRam            
+                }
+                else {
+                    Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                }
+            }
+            else {
+                Write-log  "$VmName` Disable Dynamic Ram $Memory"
+                $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $Memory
+            }                
+        }
+        $crit = Get-CriticalVMs -domain $domain -vmNames $vmRestartList            
+            
+        $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+    }
 }
 
 function Select-StartDomain {
@@ -663,7 +748,7 @@ function Select-DeleteDomain {
         if (-not $vms) {
             return
         }
-       # $customOptions = [ordered]@{"D" = "Delete All VMs" }
+        # $customOptions = [ordered]@{"D" = "Delete All VMs" }
         $customOptions = $null
         $response = Get-Menu2 -MenuName "Delete VMs in $domain" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return -MultiSelect
 

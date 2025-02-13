@@ -487,7 +487,7 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -or $_.SqlVersion}
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -or $_.SqlVersion }
     #$systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
         if ($system.SiteCode) {
@@ -1343,7 +1343,7 @@ function Get-SiteCodeForSQLServer {
     $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.RemoteSQLVM -eq $SqlServer }
     if ($vm) {
         if ($vm.siteCode) {
-        return $vm.siteCode
+            return $vm.siteCode
         }
     }
 }
@@ -1852,11 +1852,11 @@ function Update-VMFromHyperV {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $false -Force
                             continue
                         }
-                        {$PSItem -like "*GB" -or $PSItem -like "*MB" -or $PSItem -like "*.*"} {
+                        { $PSItem -like "*GB" -or $PSItem -like "*MB" -or $PSItem -like "*.*" } {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
                             continue
                         }
-                        {$PSItem -as [int] -is [int]} {
+                        { $PSItem -as [int] -is [int] } {
                             $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value ([int]$value) -Force
                             continue
                         }
@@ -2545,6 +2545,7 @@ Function Show-Summary {
     )
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
+    $existingConfig = $deployConfig.virtualMachines | Where-Object { $_.hidden }
     $DC = $deployConfig.virtualMachines  | Where-Object { $_.role -eq "DC" }
 
     #$CHECKMARK = ([char]8730)
@@ -2789,6 +2790,22 @@ Function Show-Summary {
             }
         }
     } ` | Out-String
+
+    $list = Get-List -Type VM
+    Foreach ($evm in $existingConfig) {
+        $CurrentVM = $list | Where-Object { $_.vmName -eq $evm.vmName }
+        $propsToInclude = $common.supported.PropsToUpdate
+        if ($CurrentVM) {
+            foreach ($prop in $evm.PSObject.Properties) {
+                $name = $prop.Name
+                if ($name -in $propsToInclude) {
+                    if ($evm."$name" -ne $CurrentVM."$name") {
+                        Write-Host "$($evm.VmName) is modifying $name from $($CurrentVM."$name") to $($evm."$name")"
+                    }
+                }
+            }
+        }
+    }
     Write-Host
     $outIndented = $out.Trim() -split "\r\n"
     foreach ($line in $outIndented) {

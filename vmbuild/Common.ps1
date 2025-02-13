@@ -4067,7 +4067,7 @@ function Set-SupportedOptions {
         "BDC"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam","virtualProcs", "domainDefaults","DefaultServerOS","DefaultClientOS","DefaultSqlVersion","UseDynamicMemory","IncludeSSMSOnNONSQL")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam","virtualProcs")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 

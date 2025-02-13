@@ -424,7 +424,7 @@ function Show-VMS {
     }
 
     #Write-Log -Activity "Currently Deployed VMs"
-    ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName | Format-Table | Out-String).Trim() | out-host
+    ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName | Format-Table | Out-String).Trim() | out-host
 }
 function Select-VMMenu {
 
@@ -452,7 +452,7 @@ function List-VMsInDomain {
     if (-not $vmsInDomain) {
         return
     }
-    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, MemoryStartupGB, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
 }
 function Select-DomainMenu {
 
@@ -508,7 +508,7 @@ function Select-DomainMenu {
                 "H2"  = "Select any running VMs to stop.  List will be empty if nothing is running."
                 "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
                 "H3"  = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
-                "*S"  = "";
+                "*S"  = ""
                 "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
                 "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
                 "HS"  = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
@@ -521,6 +521,14 @@ function Select-DomainMenu {
                     "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" 
                     "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
                 }
+            }
+            $CustomOptions += [ordered]@{
+                "*E"  = ""
+                "*B4" = "Dynamic Memory%$($Global:Common.Colors.GenConfigHeader)"
+                "E"   = "Enable Dynamic Memory%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                "HE"  = "Select VMs to enable dynamic memory on"
+                "F"   = "Disable Dynamic Memory%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                "HF"  = "Select VMs to disable dynamic memory on"
             }
             $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
@@ -540,6 +548,8 @@ function Select-DomainMenu {
                 "s" { select-SnapshotDomain -domain $domain }
                 "r" { select-RestoreSnapshotDomain -domain $domain }
                 "x" { select-DeleteSnapshotDomain -domain $domain }
+                "e" {select-ChangeDynamicMemory -domain $domain -Enable}
+                "f" {select-ChangeDynamicMemory -domain $domain -Disable}
                 Default {}
             }
         }
@@ -614,7 +624,7 @@ function Select-DeletePending {
 
 
     Write-Log -Activity "These VMs are currently 'in progress', if there is no deployment running, you should delete them and redeploy"
-    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
+    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
     Write-WhiteI "Please confirm these VM's are not currently in process of being deployed."
     Write-OrangePoint "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
@@ -6526,7 +6536,7 @@ function select-FileServerMenu {
     )
     #Get-PSCallStack | Out-Host
     $result = $null
-    if ((Get-ListOfPossibleFileServers -Config $ConfigToModify).Count -eq 0) {
+    if (((Get-ListOfPossibleFileServers -Config $ConfigToModify).Count -eq 0) -and [string]::IsNullOrWhiteSpace($CurrentValue)) {
         $result = "n"
     }
 
