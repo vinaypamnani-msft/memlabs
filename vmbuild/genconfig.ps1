@@ -508,7 +508,12 @@ function Select-DomainMenu {
             }
         }
         else {
-            $domain = $DomainName
+            $domain = $DomainName            
+        }
+
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        if (-not $vms) {
+            return
         }
 
         Write-Verbose "2 Select-DomainMenu"
@@ -4080,7 +4085,7 @@ function Add-ErrorMessage {
     if ($global:GenConfigErrorMessages -is [PSCustomObject]) {
         $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages)
     }
-    
+
     $global:GenConfigErrorMessages += [PSCustomObject]@{
         property = $property
         Level    = $level
@@ -4343,6 +4348,11 @@ function Get-AdditionalValidations {
 
         }
         "vmName" {
+
+            if (($value.Length + $Global:Config.VmOptions.Prefix.Length) -gt 15) {
+                Add-ErrorMessage -property $name  "VMName + Prefix can not be longer than 15 chars"
+                $property.$name = $currentValue
+            }
 
             foreach ($existing in $Global:Config.virtualMachines) {
                 if ($existing.RemoteSQLVM -eq $CurrentValue) {
