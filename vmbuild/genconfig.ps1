@@ -268,7 +268,7 @@ function Select-ConfigMenu {
         }
 
         if ($null -ne $Global:SavedConfig) {
-            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration [$($Global:SavedConfig.VmOptions.DomainName)]%Yellow" }
             $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
@@ -4353,8 +4353,9 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name  "VMName + Prefix can not be longer than 15 chars"
                 $property.$name = $currentValue
             }
-
+            
             foreach ($existing in $Global:Config.virtualMachines) {
+    
                 if ($existing.RemoteSQLVM -eq $CurrentValue) {
                     $existing.RemoteSQLVM = $value
                 }
