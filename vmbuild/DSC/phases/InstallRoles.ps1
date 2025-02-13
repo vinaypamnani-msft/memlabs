@@ -202,7 +202,7 @@ foreach ($SUP in $SUPs) {
 #$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
 $productsToAdd = @("SQL Server 2005")
 #$productsToAdd = @("PowerShell - x64")
-#$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
+#$classificationsToAdd = @("Critical Updates","Definition updates","Security Updates","Upgrades","updates")
 $classificationsToAdd = @("Tools")
 if ($configureSUP) {
 
