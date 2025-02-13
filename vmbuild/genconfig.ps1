@@ -424,7 +424,7 @@ function Show-VMS {
     }
 
     #Write-Log -Activity "Currently Deployed VMs"
-    ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName | Format-Table | Out-String).Trim() | out-host
+    ($vms | Select-Object VmName, Domain, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion, LastKnownIP | Sort-Object -property VmName | Format-Table | Out-String).Trim() | out-host
 }
 function Select-VMMenu {
 
@@ -452,7 +452,7 @@ function List-VMsInDomain {
     if (-not $vmsInDomain) {
         return
     }
-    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
 }
 function Select-DomainMenu {
 
@@ -522,13 +522,24 @@ function Select-DomainMenu {
                     "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
                 }
             }
+            $enabled = ($vms | Where-Object { ($_.Memory / 1 ) -gt ($_.DynamicMinRam / 1) }).Count
+            $disabled = ($vms | Where-Object { ($_.Memory / 1 ) -le ($_.DynamicMinRam / 1) }).Count
+
             $CustomOptions += [ordered]@{
                 "*E"  = ""
                 "*B4" = "Dynamic Memory%$($Global:Common.Colors.GenConfigHeader)"
-                "E"   = "Enable Dynamic Memory%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                "HE"  = "Select VMs to enable dynamic memory on"
-                "F"   = "Disable Dynamic Memory%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                "HF"  = "Select VMs to disable dynamic memory on"
+            }
+            if ($disabled -ge 1) {
+                $CustomOptions += [ordered]@{   
+                    "E"  = "Enable Dynamic Memory  [$disabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                    "HE" = "Select VMs to enable dynamic memory on"
+                }
+            }
+            if ($enabled -ge 1) {
+                $CustomOptions += [ordered]@{
+                    "F"  = "Disable Dynamic Memory [$enabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                    "HF" = "Select VMs to disable dynamic memory on"
+                }
             }
             $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
@@ -548,8 +559,8 @@ function Select-DomainMenu {
                 "s" { select-SnapshotDomain -domain $domain }
                 "r" { select-RestoreSnapshotDomain -domain $domain }
                 "x" { select-DeleteSnapshotDomain -domain $domain }
-                "e" {select-ChangeDynamicMemory -domain $domain -Enable}
-                "f" {select-ChangeDynamicMemory -domain $domain -Disable}
+                "e" { select-ChangeDynamicMemory -domain $domain -Enable }
+                "f" { select-ChangeDynamicMemory -domain $domain -Disable }
                 Default {}
             }
         }
@@ -624,7 +635,7 @@ function Select-DeletePending {
 
 
     Write-Log -Activity "These VMs are currently 'in progress', if there is no deployment running, you should delete them and redeploy"
-    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, @{E={"$($_.DynamicMinRam)-$($_.Memory)"};L="Memory"}, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
+    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
     Write-WhiteI "Please confirm these VM's are not currently in process of being deployed."
     Write-OrangePoint "Selecting 'Yes' will permantently delete all VMs and scopes."
     $response = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
@@ -4092,7 +4103,7 @@ function Get-AdditionalValidations {
                 Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
                 $value = $CurrentValue
             }
-            if (($value / 1) -ge $property.memory /1 ) {
+            if (($value / 1) -ge $property.memory / 1 ) {
                 Add-ErrorMessage -property $name -Warning "If $name is larger than Memory, dynamic ram will be disabled"
             }
             $property.$name = $value.ToUpperInvariant()

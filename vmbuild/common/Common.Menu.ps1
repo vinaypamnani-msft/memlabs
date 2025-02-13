@@ -484,8 +484,6 @@ function Read-Single {
     return $response
 }
 
-#select-ChangeDynamicMemory -domain $domain -Enable
-
 function select-ChangeDynamicMemory {
     [CmdletBinding()]
     param (
