@@ -5511,7 +5511,7 @@ function Select-Options {
                 }
             }
             write-log -verbose "Read new Value2: $name = $($property."$Name")"
-            if ($name -eq "VmName") {
+            if ($name -eq "VmName" -and $($property."$Name") -ne $value ) {
                 return "REFRESH"
             }
             if (-not [String]::IsNullOrWhiteSpace($newName)  ) {
