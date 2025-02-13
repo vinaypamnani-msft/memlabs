@@ -245,15 +245,28 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
         $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
         $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
-        if ($domainCount -gt 0) {
-            $customOptions += [ordered]@{ "1" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            $customOptions += [ordered]@{ "H1" = "This option allows you to create a new domain, or edit one you previously created." }
+        #if ($domainCount -gt 0) {
+        #    $customOptions += [ordered]@{ "C" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        #    $customOptions += [ordered]@{ "HC" = "This option allows you to create a new domain, or edit one you previously created." }
   
+        #}
+        #else {
+            $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
+        #}
+
+        $domainMap = @{}
+        $i = 0
+        foreach ($item in (Get-DomainList)) {
+            $i++
+            $stats = Get-DomainStatsLine -DomainName $item
+
+            $domainList += "$($item.PadRight(22," ")) $stats"
+            $customOptions += [ordered]@{"$i" = "$($item.PadRight(22," ")) $stats%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{ "H$($i)" = "Manage or edit $item" }
+            $domainMap[$i] = $item
         }
-        else {
-            $customOptions += [ordered]@{ "1" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            $customOptions += [ordered]@{ "H1" = "You don't have any existing domains. Use this option to create a new one!" }
-        }
+
         if ($null -ne $Global:SavedConfig) {
             $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
             $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
@@ -270,8 +283,8 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*B3" = ""; }
        
         $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"D" = "Manage Domains%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HD" = "This allows you to manage virtual machines in a domain [Start/Stop/Snapshot/Delete/...]" }
+        #$customOptions += [ordered]@{"D" = "Manage Domains%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        #$customOptions += [ordered]@{ "HD" = "This allows you to manage virtual machines in a domain [Start/Stop/Snapshot/Delete/...]" }
         $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
         
@@ -288,6 +301,23 @@ function Select-ConfigMenu {
         $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
         $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
+        if ($common.DevBranch) {
+            #$customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $customOptions += [ordered]@{ "H#" = "You are currently on the develop branch. This will exit the script and change back to the official branch" }
+        }
+        else {
+            #$customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Main Branch $breakPrefix%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{"#" = "[Experimental] Switch to develop branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new featues in the development branch" }
+        }
+        $pendingCount = (Get-PendingVMs | Measure-Object).Count
+
+        if ($pendingCount -gt 0 ) {
+            $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
+            $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
+        }
+
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             #Do nothing as we are on server 2025
         }
@@ -298,24 +328,9 @@ function Select-ConfigMenu {
                 $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
             }
         }
-        if ($common.DevBranch) {
-            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
-            $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-            $customOptions += [ordered]@{ "H#" = "Are you having an issue in the developer branch, switch back to the official branch" }
-        }
-        else {
-            $customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Main Branch $breakPrefix%$($Global:Common.Colors.GenConfigHeader)" }
-            $customOptions += [ordered]@{"#" = "Switch to development branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-            $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new featues in the development branch" }
-        }
+       
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
-        $pendingCount = (Get-PendingVMs | Measure-Object).Count
-
-        if ($pendingCount -gt 0 ) {
-            $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
-            $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
-        }
-
+        
         $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
 
         write-Verbose "1 response $response"
@@ -333,14 +348,11 @@ function Select-ConfigMenu {
         switch ($response.ToLowerInvariant()) {
             #"1" { $SelectedConfig = Select-NewDomainConfig }
             #"2" { $SelectedConfig = Show-ExistingNetwork }
-            "1" { $SelectedConfig = Show-ExistingNetwork2 }
+            #"C" { $SelectedConfig = Show-ExistingNetwork2 }
+            "C" {$SelectedConfig = Select-NewDomainConfig}
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
-            "3" { $SelectedConfig = Select-Config $configDir -NoMore }
-            "l" { $SelectedConfig = Select-Config $configDir -NoMore }
-            "4" {
-                $testPath = Join-Path $configDir "tests"
-                $SelectedConfig = Select-Config $testPath -NoMore
-            }
+           
+            "l" { $SelectedConfig = Select-Config $configDir -NoMore }           
             "x" {
                 $testPath = Join-Path $configDir "tests"
                 $SelectedConfig = Select-Config $testPath -NoMore
@@ -365,7 +377,9 @@ function Select-ConfigMenu {
             "v" { Select-VMMenu }
             "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
             "f" { Select-DeletePending }
-            "d" { Select-DomainMenu }
+            "d" { 
+                $SelectedConfig = Select-DomainMenu
+            }
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
             "P" { Select-PasswordMenu }
@@ -382,7 +396,14 @@ function Select-ConfigMenu {
                     exit 0
                 }
             }
-            Default {}
+            Default {
+                if ($response -as [int] -is [int]) {
+                    if ($domainMap[([int]$response)]) {
+                        $SelectedConfig = Select-DomainMenu -DomainName $domainMap[([int]$response)]
+                    }
+                }
+                
+            }
         }
         if ($SelectedConfig -and $SelectedConfig -ne "ESCAPE") {
             Write-Verbose "SelectedConfig : $SelectedConfig"
@@ -455,29 +476,39 @@ function List-VMsInDomain {
     ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
 }
 function Select-DomainMenu {
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
+        [string] $DomainName
+    )
 
+   
     while ($true) {
-        # Write-Log -Activity "Domain Management Menu" -NoNewLine
-        $domainList = @()
-        foreach ($item in (Get-DomainList)) {
-            $stats = Get-DomainStatsLine -DomainName $item
+        if ([string]::IsNullOrWhiteSpace($DomainName)) {
+            # Write-Log -Activity "Domain Management Menu" -NoNewLine
+            $domainList = @()
+            foreach ($item in (Get-DomainList)) {
+                $stats = Get-DomainStatsLine -DomainName $item
 
-            $domainList += "$($item.PadRight(22," ")) $stats"
+                $domainList += "$($item.PadRight(22," ")) $stats"
+            }
+
+            if ($domainList.Count -eq 0) {
+                Write-Host
+                Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
+
+                return
+            }
+
+            $domain = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
+            if ($domain -eq "ESCAPE") {
+                return
+            }
+            if ([string]::isnullorwhitespace($domain)) {
+                continue
+            }
         }
-
-        if ($domainList.Count -eq 0) {
-            Write-Host
-            Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
-
-            return
-        }
-
-        $domain = Get-Menu2 -MenuName "Domain Management Menu" -Prompt "Select existing domain" -OptionArray $domainList -split -test:$false -return
-        if ($domain -eq "ESCAPE") {
-            return
-        }
-        if ([string]::isnullorwhitespace($domain)) {
-            continue
+        else {
+            $domain = $DomainName
         }
 
         Write-Verbose "2 Select-DomainMenu"
@@ -502,6 +533,8 @@ function Select-DomainMenu {
             $customOptions = [ordered]@{
                 "*F1" = "List-VMsInDomain -DomainName $domain" 
                 "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
+                "M"   = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
+                "HM"  = "Use this option to modify the domain, adding new roles, or new VMs"
                 "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
                 "H1"  = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
                 "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
@@ -546,7 +579,7 @@ function Select-DomainMenu {
 
             write-Verbose "1 response $response"
             if (-not $response -or $response -eq "ESCAPE") {
-                break
+                return
             }
 
             switch ($response.ToLowerInvariant()) {
@@ -561,6 +594,7 @@ function Select-DomainMenu {
                 "x" { select-DeleteSnapshotDomain -domain $domain }
                 "e" { select-ChangeDynamicMemory -domain $domain -Enable }
                 "f" { select-ChangeDynamicMemory -domain $domain -Disable }
+                "m" { return Show-ExistingNetwork2 -domainName $domain }
                 Default {}
             }
         }
@@ -1008,7 +1042,7 @@ function Select-MainMenu {
         }
 
 
-        $MenuName = "VM Deployment Menu"
+        $MenuName = "VM Deployment Menu - $($Global:Config.vmOptions.DomainName)"
         if ($Global:configfile) {
             $ShortName = [io.path]::GetFileNameWithoutExtension($global:configfile)
             $MenuName += " - $ShortName"
@@ -1904,14 +1938,21 @@ function Select-Config {
             $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
 
         }
+        $preOptionsArray = [ordered]@{"*F5" = "Show-ConfigLegend" }
+
         if ($SortByName) {
-            $customOptions = [ordered]@{"S" = "Sort by Date%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $preOptionsArray += [ordered]@{"S" = "Sort by Date%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
         else {
-            $customOptions = [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+            $preOptionsArray += [ordered]@{"S" = "Sort by Name%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         }
-        $preOptionsArray = [ordered]@{"*F5" = "Show-ConfigLegend" }
-        $response = Get-Menu2 -MenuName "Select Config File to load" -prompt "Which config do you want to load" -preOptions $preOptionsArray -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
+        $customOptions = [ordered]@{}        
+        $menuName = "Select Config File to load"
+
+        if ($ConfigPath -like "*tests*") {
+            $menuName = "Select TEST Config File to load"
+        }
+        $response = Get-Menu2 -MenuName $menuName -prompt "Which config do you want to load" -preOptions $preOptionsArray -OptionArray $optionArray -additionalOptions $customOptions -split -test:$false -return
 
         if ($response.ToLowerInvariant() -eq "s") {
             $SortByName = !$SortByName
@@ -1978,9 +2019,9 @@ Function Get-DomainStatsLine {
         $ExistingSubnetCount = ($ListCache | Select-Object -Property Network -unique | measure-object).Count
         $TotalVMs = ($ListCache | Measure-Object).Count
         $TotalRunningVMs = ($ListCache | Where-Object { $_.State -ne "Off" } | Measure-Object).Count
-        $TotalMem = ($ListCache | Measure-Object -Sum MemoryGB).Sum
-        $TotalMaxMem = ($ListCache | Measure-Object -Sum MemoryStartupGB).Sum
-        $TotalDiskUsed = ($ListCache | Measure-Object -Sum DiskUsedGB).Sum
+        $TotalMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryGB).Sum)
+        $TotalMaxMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryStartupGB).Sum)
+        $TotalDiskUsed = [math]::Round(($ListCache | Measure-Object -Sum DiskUsedGB).Sum)
 
         $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
         if ($ExistingCasCount -gt 0) {
@@ -2012,85 +2053,96 @@ Function Get-DomainStatsLine {
 }
 
 function Show-ExistingNetwork2 {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
+        [string]$DomainName = $null,
+        [switch]$NewDomain
+    )
 
-    $domainList = @()
+    if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
-    foreach ($item in (Get-DomainList)) {
-        $stats = Get-DomainStatsLine -DomainName $item
+        $domainList = @()
 
-        $domainList += "$($item.PadRight(22," ")) $stats"
-    }
+        foreach ($item in (Get-DomainList)) {
+            $stats = Get-DomainStatsLine -DomainName $item
 
-    if ($domainList.Count -eq 0) {
-        return Select-NewDomainConfig
-    }
-
-    while ($true) {
-
-        Write-log -Activity "Create new domain -or- modify existing domain"
-        $customOptions = [ordered]@{ "*HF" = "Get-DomainHelpLine" }
-        $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-        $customOptions += [ordered]@{ "HN" = "Use this option to configure and deploy a new domain.  You can have as many domains as you want!" }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
-        $i = 0
-        foreach ($domain in $domainList) {
-            $i++
-            $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-            $domainshort = $domain -Split " " | Select-Object -First 1
-            $customOptions += [ordered]@{ "H$i" = "Add additional VM's or change some settings in $domainshort" }
-
+            $domainList += "$($item.PadRight(22," ")) $stats"
         }
 
-        $response = Get-Menu2 -MenuName "Create new domain -or- modify existing domain" -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
-        if ($response.ToLowerInvariant() -eq "!" -or $response.ToLowerInvariant() -eq "escape") {
-            return
+        if ($domainList.Count -eq 0) {
+            return Select-NewDomainConfig
         }
-        if ([string]::isnullorwhitespace($response) -or $response.ToLowerInvariant() -eq "n") {
-            $result = Select-NewDomainConfig
-            if ($result -eq "ESCAPE") {
-                continue
+
+        while ($true) {
+
+            Write-log -Activity "Create new domain -or- modify existing domain"
+            $customOptions = [ordered]@{ "*HF" = "Get-DomainHelpLine" }
+            $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "New Domain Wizard%$($Global:Common.Colors.GenConfigHeader)" }
+            $customOptions += [ordered]@{ "N" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "HN" = "Use this option to configure and deploy a new domain.  You can have as many domains as you want!" }
+            $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Modify Existing Domains%$($Global:Common.Colors.GenConfigHeader)" }
+            $i = 0
+            foreach ($domain in $domainList) {
+                $i++
+                $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+                $domainshort = $domain -Split " " | Select-Object -First 1
+                $customOptions += [ordered]@{ "H$i" = "Add additional VM's or change some settings in $domainshort" }
+
+            }
+
+            $response = Get-Menu2 -MenuName "Create new domain -or- modify existing domain" -Prompt "Select Existing Domain or select 'N' to create a new domain" -additionalOptions $customOptions -Split -test:$false -CurrentValue "N" -NoNewLine
+            if ($response.ToLowerInvariant() -eq "!" -or $response.ToLowerInvariant() -eq "escape") {
+                return
+            }
+            if ([string]::isnullorwhitespace($response) -or $response.ToLowerInvariant() -eq "n") {
+                $result = Select-NewDomainConfig
+                if ($result -eq "ESCAPE") {
+                    continue
+                }
+                else {
+                    return $result
+                }
+            }       
+
+            $i = 0
+            foreach ($domain in $domainList) {
+                $i++
+                if ($i -eq $response) {    
+                    $domain = $domain -Split " " | Select-Object -First 1     
+                    Write-Verbose "Setting Response to $domain"     
+                    $response = $domain
+                }
+            }
+            $list = get-list -Type VM -DomainName $response
+            if ($list) {
+                Write-Log -Activity "Modify $response"
+                #get-list -Type VM -DomainName $response | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
             }
             else {
-                return $result
+                Write-RedX "Could not find domain $response"
+                start-sleep -seconds 5
+                continue
             }
-        }       
+            $domain = $response
 
-        $i = 0
-        foreach ($domain in $domainList) {
-            $i++
-            if ($i -eq $response) {    
-                $domain = $domain -Split " " | Select-Object -First 1     
-                Write-Verbose "Setting Response to $domain"     
-                $response = $domain
-            }
-        }
-        $list = get-list -Type VM -DomainName $response
-        if ($list) {
-            Write-Log -Activity "Modify $response"
-            #get-list -Type VM -DomainName $response | Format-Table -Property vmname, Role, SiteCode, DeployedOS, MemoryStartupGB, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
-        }
-        else {
-            Write-RedX "Could not find domain $response"
-            start-sleep -seconds 5
-            continue
-        }
-        $domain = $response
+            break
+            #Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
+            #$response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
+            #if (-not [String]::IsNullOrWhiteSpace($response)) {
+            #    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
+            #        continue
+            #    }
+            #    else {
+            #        break
+            #    }
+            #}
+            #else { break }
 
-        break
-        #Write-Log -Activity -NoNewLine "Confirm selection of domain $response"
-        #$response = Read-YesorNoWithTimeout -Prompt "Modify existing VMs, or Add new VMs to this domain? (Y/n)" -HideHelp -Default "y"
-        #if (-not [String]::IsNullOrWhiteSpace($response)) {
-        #    if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {
-        #        continue
-        #    }
-        #    else {
-        #        break
-        #    }
-        #}
-        #else { break }
-
+        }
+    }
+    else {
+        $domain = $DomainName
     }
 
     $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count

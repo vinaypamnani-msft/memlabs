@@ -694,7 +694,7 @@ function Show-Menu {
                 }
             }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
-            if ($RoomLeft -le 2) {
+            if ($RoomLeft -le 3) {
                 $menuItem.Displayed = $false                
                 $Operation = "PgDnNeeded"
                 continue
@@ -1017,13 +1017,14 @@ function Start-Navigation {
     [System.Console]::CursorVisible = $false # Hide the cursor
     $startSize = $Host.UI.RawUI.WindowSize
     # Loop until the user presses the Escape key
+    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
     while ($true) {
         $currentsize = $Host.UI.RawUI.WindowSize
         if ($currentsize -ne $startSize) {
             return
         }
 
-        Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+        #Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         
         $key = Get-KeyStroke # Get the key stroke from the user
         $currentsize = $Host.UI.RawUI.WindowSize
@@ -1033,6 +1034,7 @@ function Start-Navigation {
         # Handle the key stroke
 
         if ($key.VirtualKeyCode -eq 34 -or $key.VirtualKeyCode -eq 33) {
+            # PGDN = 34, PGUP = 33
             $MoreItems = $false
             foreach ($item in $menuItems) {
                 if ($item.Selectable -and -not $item.Displayed ) {
@@ -1056,11 +1058,13 @@ function Start-Navigation {
                     return $return
                 }
             }
+            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
        
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
             Write-Log -verbose -LogOnly "Entering return function"
+            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             if ($NumSelectable -eq 0) {
                 Write-Log -verbose -LogOnly "Entering return function - Return ESCAPE"
                 return "ESCAPE"
@@ -1079,6 +1083,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                     Write-Log -verbose -LogOnly "Entering return function - Int selected"
                     continue
                 }
@@ -1094,6 +1099,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                     Write-Log -verbose -LogOnly "Entering return function - A selected"
                     continue
                 }
@@ -1109,6 +1115,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex                    
                     Write-Log -verbose -LogOnly "Entering return function - N selected"
                     continue
                 }
@@ -1157,7 +1164,7 @@ function Start-Navigation {
         if ($key.VirtualKeyCode -eq 38 -or $key.VirtualKeyCode -eq 0x23 -or $key.VirtualKeyCode -eq 34) {
             # 38 = Up arrow key
             # 0x23 = END key
-
+            
             # If the selected index is greater than 0, move the selection up
             if ($key.VirtualKeyCode -eq 0x23 -or $key.VirtualKeyCode -eq 34) {
                 $selectedIndex = -1
@@ -1181,13 +1188,16 @@ function Start-Navigation {
                 }
                 $i++
             }
+            
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
+            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
      
         if ($key.VirtualKeyCode -eq 40 -or $key.VirtualKeyCode -eq 0x24 -or $key.VirtualKeyCode -eq 33) {
             # 40 = Down arrow key
             # 0x24 = HOME key
             # If the selected index is less than the last item, move the selection down
+            
             $buffer = $null
             if ($key.VirtualKeyCode -eq 0x24 -or $key.VirtualKeyCode -eq 33) {
                 $selectedIndex = -1
@@ -1209,8 +1219,9 @@ function Start-Navigation {
                     break
                 }
                 $i++
-            }
+            }            
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
+            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
 
         if ($key.VirtualKeyCode -eq 8) {

@@ -2328,11 +2328,13 @@ Function Write-WhiteI {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2        
     )
     $text = $text.Replace("Info: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor White "i" -NoNewline
@@ -2792,6 +2794,7 @@ Function Show-Summary {
     } ` | Out-String
 
     $list = Get-List -Type VM
+    $existingPrinted = $false
     Foreach ($evm in $existingConfig) {
         $CurrentVM = $list | Where-Object { $_.vmName -eq $evm.vmName }
         $propsToInclude = $common.supported.PropsToUpdate
@@ -2800,7 +2803,12 @@ Function Show-Summary {
                 $name = $prop.Name
                 if ($name -in $propsToInclude) {
                     if ($evm."$name" -ne $CurrentVM."$name") {
-                        Write-Host "$($evm.VmName) is modifying $name from $($CurrentVM."$name") to $($evm."$name")"
+                        if (-not $existingPrinted) {
+                            Write-GreenCheck "Changes to the following existing VMs will be performed"
+                            $existingPrinted = $true
+                        }
+                        
+                        Write-WhiteI -indent 6 "$($evm.VmName) $name = [$($CurrentVM."$name")] -> [$($evm."$name")]"
                     }
                 }
             }
