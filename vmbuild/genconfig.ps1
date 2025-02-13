@@ -2023,22 +2023,22 @@ Function Get-DomainStatsLine {
         $TotalMaxMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryStartupGB).Sum)
         $TotalDiskUsed = [math]::Round(($ListCache | Measure-Object -Sum DiskUsedGB).Sum)
 
-        $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        $stats += "[$($TotalRunningVMs.ToString().PadLeft(2," "))/$($TotalVMs.ToString().PadLeft(2," ")) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
         if ($ExistingCasCount -gt 0) {
             $stats += "[CAS VMs: $ExistingCasCount] "
         }
         if ($ExistingPriCount -gt 0) {
-            $stats += "[Primary VMs: $ExistingPriCount] "
+            $stats += "[PRI VMs: $ExistingPriCount] "
         }
         if ($ExistingSecCount -gt 0) {
-            $stats += "[Secondary VMs: $ExistingSecCount] "
+            $stats += "[SEC VMs: $ExistingSecCount] "
         }
         if ($ExistingSQLCount -gt 0) {
             $stats += "[SQL VMs: $ExistingSQLCount] "
         }
-        if ($ExistingDPMPCount -gt 0) {
-            $stats += "[DPMP VMs: $ExistingDPMPCount] "
-        }
+        #if ($ExistingDPMPCount -gt 0) {
+        #    $stats += "[DP VMs: $ExistingDPMPCount] "
+        #}
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
             $stats = "[No ConfigMgr Roles installed] "
@@ -4077,6 +4077,10 @@ function Add-ErrorMessage {
         $global:GenConfigErrorMessages = @()
     }
 
+    if ($global:GenConfigErrorMessages -is [PSCustomObject]) {
+        $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages)
+    }
+    
     $global:GenConfigErrorMessages += [PSCustomObject]@{
         property = $property
         Level    = $level
@@ -5000,7 +5004,7 @@ function Get-AdditionalInformation {
     foreach ($err in $global:GenConfigErrorMessages) {
         if ($err.property -eq $item) {
             $data = $origData.PadRight(21) + "[x] " + $err.message
-            $global:GenConfigErrorMessages = $global:GenConfigErrorMessages | where-object { $_.message -ne $err.message }
+            $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | where-object { $_.message -ne $err.message })
             break
         }
     }

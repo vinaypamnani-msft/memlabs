@@ -389,13 +389,14 @@ function Get-GenConfigErrorMessagesLineCount {
 
 function Show-GenConfigErrorMessages {
 
-    $count = ($global:GenConfigErrorMessages | Measure-Object).Count
+    $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
+    $count = ($Errors | Measure-Object).Count
     if ($count -gt 0) {
         #Write-host2 "┃" -NoNewline -ForegroundColor Crimson
         Write-Verbose "Showing Show-GenConfigErrorMessages"
         Write-Host2 "┍━━━━━━━━━━━━━━━━━━━  ERROR: Validation Failures were encountered:" -ForegroundColor Crimson
         Write-host2 "│" -ForegroundColor Crimson
-        foreach ($err in $global:GenConfigErrorMessages) {
+        foreach ($err in $Errors) {
             Write-host2 "│" -NoNewline -ForegroundColor Crimson
             write-redx $err.message -ForegroundColor White
         }
