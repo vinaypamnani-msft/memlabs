@@ -68,14 +68,18 @@ if (Test-Path $cm_svc_file) {
     }
     $found = $false
     try {
-        $found = (Get-CMClientPushInstallation).PropLists.Values -contains $cm_svc
+        $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values
+        if ($cm_svc -in $accounts) {
+            $found = $true
+        }
+        #$found = (Get-CMClientPushInstallation).PropLists.Values -contains $cm_svc
     }
     catch {}
 
     if (-not $found) {
         # Set client push account
         Write-DscStatus "Setting the Client Push Account"
-        Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
+        Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc
         Start-Sleep -Seconds 5
 
         # Restart services to make sure push account is acknowledged by CCM
