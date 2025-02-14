@@ -171,13 +171,17 @@ foreach ($client in $ClientNameList) {
             }
         }
         $failCount++
+        
     }
+   
+}
+
+foreach ($client in $ClientNameList) {
     if ($success) {
         Write-DscStatus "Pushing client to $client."
         Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep -Seconds 5
     }
-
 }
 
 # Update actions file
