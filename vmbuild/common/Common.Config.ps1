@@ -1084,6 +1084,82 @@ function Get-ExistingForNetwork {
     }
 }
 
+function Get-ParentSiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+    )
+
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            $first = $vmList | Select-Object -First 1
+   
+            $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) })
+
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+    if ($configVMs) {
+        $first = $configVMs | Select-Object -First 1
+
+        $configVMs = @()
+        $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+        $first = $configVMs | Select-Object -First 1
+        
+        if ($type -eq "Name") {
+            return ($configVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $configVMs | Select-Object -First 1
+        }
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        $first = $existingVMs | Select-Object -First 1
+      
+        $existingVMs = @()
+        $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) }
+        $first = $existingVMs | Select-Object -First 1
+        
+        if ($type -eq "Name") {
+            return ($existingVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $existingVMs | Select-Object -First 1
+        }
+    }
+    Add-ErrorMessage "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    
+    return $null
+}
 
 function Get-TopSiteServerForSiteCode {
     [CmdletBinding()]
@@ -1099,8 +1175,8 @@ function Get-TopSiteServerForSiteCode {
         [bool] $SmartUpdate = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
         [string] $DomainName
-
     )
+
     if (-not $SiteCode) {
         throw "SiteCode is NULL"
         return $null

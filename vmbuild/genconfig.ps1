@@ -251,8 +251,8 @@ function Select-ConfigMenu {
   
         #}
         #else {
-            $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
+        $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
         #}
 
         $domainMap = @{}
@@ -349,7 +349,7 @@ function Select-ConfigMenu {
             #"1" { $SelectedConfig = Select-NewDomainConfig }
             #"2" { $SelectedConfig = Show-ExistingNetwork }
             #"C" { $SelectedConfig = Show-ExistingNetwork2 }
-            "C" {$SelectedConfig = Select-NewDomainConfig}
+            "C" { $SelectedConfig = Select-NewDomainConfig }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
            
             "l" { $SelectedConfig = Select-Config $configDir -NoMore }           
@@ -1719,6 +1719,7 @@ function Select-NewDomainConfig {
 
         $test = $false
         $version = $null
+        write-log -verbose "Deploying type: $($newconfig.domainDefaults.DeploymentType)"
         switch ($newconfig.domainDefaults.DeploymentType) {
             "CAS and Primary" {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
@@ -4383,20 +4384,20 @@ function Get-AdditionalValidations {
                 }
 
                 if ($property.ParentSiteCode -or $property.SiteCode) {
-                    $sitecode = $property.ParentSiteCode
-                    if (-not $sitecode) {
-                        $sitecode = $property.SiteCode
-                    }
+                    
+                    $sitecode = $property.SiteCode
+                 
                     if ($sitecode) {
-                        $Parent = Get-TopSiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
-
-                        $list2 = Get-List2 -deployConfig $Global:Config
-                        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
-                        if (-not $existingSUP) {
-                            $property.installSUP = $false
-                            $property.PsObject.Members.Remove("wsusContentDir")
-                            $property.PsObject.Members.Remove("wsusDataBaseServer")
-                            Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        $Parent = Get-ParentSiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
+                        if ($Parent.SiteCode) {
+                            $list2 = Get-List2 -deployConfig $Global:Config
+                            $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                            if (-not $existingSUP) {
+                                $property.installSUP = $false
+                                $property.PsObject.Members.Remove("wsusContentDir")
+                                $property.PsObject.Members.Remove("wsusDataBaseServer")
+                                Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
+                            }
                         }
                     }
 
@@ -6204,10 +6205,7 @@ function Add-NewVMForRole {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
-                }
-                else {
-                    return
-                }
+                }                
             }
         }
         "Primary" {
