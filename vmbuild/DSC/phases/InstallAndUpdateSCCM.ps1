@@ -351,10 +351,12 @@ CurrentBranch=1
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
     start-sleep -seconds 60
+    $firstRun = $true
 
 }
 else {
     Write-DscStatus "ConfigMgr is already installed"
+    $firstRun = $false
     Write-DscStatusSetup
 }
 

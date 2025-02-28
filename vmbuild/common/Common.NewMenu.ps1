@@ -1053,6 +1053,9 @@ function Start-Navigation {
     Write-log -Verbose "Start-Navigation NumSelectable: $NumSelectable $ValidChars"
 
     $CPosition = Get-CursorPosition # Get the current cursor position
+    if (-not $HelpPosition) {
+        $HelpPosition = $CPosition
+    }
     [System.Console]::CursorVisible = $false # Hide the cursor
     $startSize = $Host.UI.RawUI.WindowSize
     # Loop until the user presses the Escape key
