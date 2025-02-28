@@ -619,6 +619,7 @@ function Show-Menu {
     While ($true) {
         $found = $false
         $HelpFound = $false
+        $HelpNeeded = $false
         foreach ($menuitem in $menuItems) {
             if ($operation -eq "PGUP") {
                 $menuitem.Displayed = $false
@@ -637,6 +638,9 @@ function Show-Menu {
             }
             if ($menuitem.itemname -eq "*HELP") {
                 $HelpFound = $true
+            }
+            if (-not [string]::IsNullOrWhiteSpace($menuitem.HelpText)) {
+                $HelpNeeded = $true
             }
         }
         if ($operation -eq "PGDN" -and -not $found) {
@@ -669,7 +673,7 @@ function Show-Menu {
         if ($RoomLeft -lt $menuItems.Count) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
         }
-        if (-not $HelpFound) {
+        if (-not $HelpFound -and $HelpNeeded) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
