@@ -173,7 +173,7 @@ function New-MenuItem {
             }
         }
         $text = $TextValue[0]
-        $linecount = 1
+        $linecount = 1        
     }
     else {
         $TextValue = $null
@@ -640,8 +640,12 @@ function Show-Menu {
                     $found = $true
                 }
             }
-            if ($menuitem.itemName.StartsWith("*B")) {
-                $len = $menuitem.Text.Length
+            $len = $menuitem.Text.Length
+            if ($len -gt $host.UI.RawUI.WindowSize.Width - 9) {
+                #$menuitem.Text = $menuitem.Text.SubString(0, $host.UI.RawUI.WindowSize.Width - 9)
+                $TotalLineCount += 1
+            }
+            if ($menuitem.itemName.StartsWith("*B")) {                
                 if ($len -gt $LongestBreakLine) {
                     $LongestBreakLine = $len
                 }
