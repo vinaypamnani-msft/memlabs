@@ -1175,7 +1175,7 @@ function Start-Navigation {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
                             $selectedIndex = $i
                             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
-                            Update-Prompt -HelpPosition $HelpPosition -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                             return $menuItems[$selectedIndex]
                         }
