@@ -593,7 +593,7 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Get the height of the console window, subtract 1 since its 0 based
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 6) # Get the height of the console window, subtract 1 since its 0 based, subtract 4 for the help
     $CurrentPosition = Get-CursorPosition
     $MenuStart = $CurrentPosition.Y
     $RoomLeft = ([int]$WindowSizeY - [int]$MenuStart)
@@ -618,6 +618,7 @@ function Show-Menu {
     $Operation = ""
     While ($true) {
         $found = $false
+        $HelpFound = $false
         foreach ($menuitem in $menuItems) {
             if ($operation -eq "PGUP") {
                 $menuitem.Displayed = $false
@@ -633,6 +634,9 @@ function Show-Menu {
                 if ($len -gt $LongestBreakLine) {
                     $LongestBreakLine = $len
                 }
+            }
+            if ($menuitem.itemname -eq "*HELP") {
+                $HelpFound = $true
             }
         }
         if ($operation -eq "PGDN" -and -not $found) {
@@ -664,6 +668,10 @@ function Show-Menu {
 
         if ($RoomLeft -lt $menuItems.Count) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
+        }
+        if (-not $HelpFound) {
+            $HelpPosition = Get-CursorPosition
+            Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
@@ -745,6 +753,13 @@ function Show-Menu {
                 $center = $true
                 $SpacesAroundWords = 4
                 $StartDashes = 3
+
+                if ($menuItem.itemName -eq "*HELP") {
+                    $HelpPosition = Get-CursorPosition
+                    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
+                    continue
+                }
+
                 if ($menuItem.itemName.StartsWith("*B") -and -not [string]::isnullorwhitespace($menuitem.Text)) {
                     if ($center) {
 
@@ -791,15 +806,17 @@ function Show-Menu {
         }
         if ($Operation -eq "PGDNDone") {
             $Operation = ""
+            Write-Host2
             Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
         }
         if ($Operation -eq "PGDNNeeded") {
             $Operation = ""
+            Write-Host2
             Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition               
-        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -MultiSelect:$MultiSelect
+        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
         if ($return) {
@@ -899,11 +916,41 @@ function Set-CursorPositionToTopOfMenu {
 }
 
 
+Function Update-HelpText {
+    param (
+        [Parameter(Mandatory = $true)] # Mandatory parameter
+        [object]$HelpPosition, # The cursor position
+
+        [Parameter(Mandatory = $false)]
+        [string]$CurrentHelpText, # The buffer to display
+        [Parameter(Mandatory = $false)] 
+        [string]$Color, 
+        [switch] $wait # HourGlass is showing
+    )
+
+    Set-CursorPosition -X $HelpPosition.X -Y $HelpPosition.Y 
+
+    #Write-Host           
+    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
+    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
+    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))  
+    if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {         
+        Set-CursorPosition -X 0 -Y $HelpPosition.Y
+        write-host2 " ╭───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
+        write-host2 " │" -nonewline -ForegroundColor MediumOrchid
+        write-host2 "🕮  " -ForegroundColor BlanchedAlmond -noNewLine
+        write-host2 "$CurrentHelpText" -foregroundColor $Color
+        write-host2 " ╰───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
+    
+    }
+}
+
 function Update-Prompt {
     param (
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [object]$PromptPosition, # The cursor position
-
+        [Parameter(Mandatory = $true)] # Mandatory parameter
+        [object]$HelpPosition, # The cursor position
         [Parameter(Mandatory = $false)] # Mandatory parameter
         [string]$buffer, # The buffer to display
 
@@ -913,7 +960,7 @@ function Update-Prompt {
 
         [Parameter(Mandatory = $false)] # Mandatory parameter
         [int]$SelectedIndex = -1,
-        [switch] $wait
+        [switch] $wait # HourGlass is showing
 
     )
     [System.Console]::CursorVisible = $false
@@ -926,6 +973,7 @@ function Update-Prompt {
         if ($MenuItems[$selectedIndex].Selectable) {
             $CurrentValue = $MenuItems[$selectedIndex].ItemName
             $CurrentHelpText = $MenuItems[$selectedIndex].HelpText
+            $CurrentColor = $MenuItems[$selectedIndex].Color1            
         }
     }
     if (-not [String]::IsNullOrWhiteSpace($CurrentValue)) {
@@ -945,25 +993,11 @@ function Update-Prompt {
     }
     $BlinkLocation = Get-CursorPosition
 
-    $roomleft = Get-RoomLeftFromCurrentPosition
-    if ($roomleft -ge 3) {
-        Write-Host                
-        Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
-        Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
-        Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2)) -NoNewline    
-        if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {       
-            $Y -= 1    
-            Set-CursorPosition -X 0 -Y $PromptPosition.Y
-            write-host
-            write-host2 " ╭───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
-            write-host2 " │" -nonewline -ForegroundColor MediumOrchid
-            write-host2 "🕮  " -ForegroundColor BlanchedAlmond -noNewLine
-            write-host2 "$CurrentHelpText" -foregroundColor $MenuItems[$selectedIndex].Color1
-            if (Get-RoomLeftFromCurrentPosition -ge 1) {
-                write-host2 " ╰───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
-            }
-        }
-    }    
+    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $CurrentHelpText -Color $CurrentColor -wait:$wait
+    #$roomleft = Get-RoomLeftFromCurrentPosition
+    #if ($roomleft -ge 3) {
+    #  Update-HelpText -HelpPosition $BlinkLocation -CurrentHelpText $CurrentHelpText -Color $MenuItems[$selectedIndex].Color1 -wait:$wait
+    #}    
     Set-CursorPosition -X $BlinkLocation.X -Y $BlinkLocation.Y
     [System.Console]::CursorVisible = $true 
 }
@@ -979,7 +1013,8 @@ function Start-Navigation {
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [int]$startOfmenu, # The selected index
         [Parameter(Mandatory = $true)] # Mandatory parameter
-        [object]$PromptPosition, # The selected index
+        [object]$PromptPosition, 
+        [object]$HelpPosition, 
         [switch]$MultiSelect = $false
     )
 
@@ -1017,7 +1052,8 @@ function Start-Navigation {
     [System.Console]::CursorVisible = $false # Hide the cursor
     $startSize = $Host.UI.RawUI.WindowSize
     # Loop until the user presses the Escape key
-    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+    #Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $menuItems[$selectedIndex].HelpText -Color $menuItems[$selectedIndex].Color1 -wait:$false
     while ($true) {
         $currentsize = $Host.UI.RawUI.WindowSize
         if ($currentsize -ne $startSize) {
@@ -1058,13 +1094,13 @@ function Start-Navigation {
                     return $return
                 }
             }
-            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
        
         if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
             # 13 = Enter key, 39 = Right arrow key
             Write-Log -verbose -LogOnly "Entering return function"
-            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             if ($NumSelectable -eq 0) {
                 Write-Log -verbose -LogOnly "Entering return function - Return ESCAPE"
                 return "ESCAPE"
@@ -1083,7 +1119,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                     Write-Log -verbose -LogOnly "Entering return function - Int selected"
                     continue
                 }
@@ -1099,7 +1135,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                     Write-Log -verbose -LogOnly "Entering return function - A selected"
                     continue
                 }
@@ -1115,7 +1151,7 @@ function Start-Navigation {
 
                     $buffer = $null
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex                    
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex                    
                     Write-Log -verbose -LogOnly "Entering return function - N selected"
                     continue
                 }
@@ -1123,7 +1159,7 @@ function Start-Navigation {
                 if ($($menuItems[$selectedIndex].ItemName) -eq "D") {
 
                     Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect -Wait
-                    Update-Prompt -PromptPosition $PromptPosition -wait
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                     $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
                     if (-not $return) {
                         return "NOITEMS"
@@ -1139,14 +1175,14 @@ function Start-Navigation {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
                             $selectedIndex = $i
                             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
-                            Update-Prompt -PromptPosition $PromptPosition -wait
+                            Update-Prompt -HelpPosition $HelpPosition -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                             return $menuItems[$selectedIndex]
                         }
                     }
                 }
                 $selectedIndex = -1
-                Update-Prompt -PromptPosition $PromptPosition -buffer $buffer
+                Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer
 
                 continue
                
@@ -1154,7 +1190,7 @@ function Start-Navigation {
             else {
                 
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
-                Update-Prompt -PromptPosition $PromptPosition -wait
+                Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                 Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                 return $menuItems[$selectedIndex]
             }
@@ -1190,7 +1226,7 @@ function Start-Navigation {
             }
             
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
-            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
      
         if ($key.VirtualKeyCode -eq 40 -or $key.VirtualKeyCode -eq 0x24 -or $key.VirtualKeyCode -eq 33) {
@@ -1221,7 +1257,7 @@ function Start-Navigation {
                 $i++
             }            
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect # Display the menu with the new selected index
-            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
 
         if ($key.VirtualKeyCode -eq 8) {
@@ -1251,12 +1287,12 @@ function Start-Navigation {
                         }
                         $i++       
                     }
-                    Update-Prompt -PromptPosition $PromptPosition -buffer $buffer
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer
                 }
             }
             if (-not $buffer) {
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             }
         }
         
@@ -1268,7 +1304,7 @@ function Start-Navigation {
                 $Global:MenuHistory[$menuName] = $MenuItems[$selectedIndex].ItemName                
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
-            Update-Prompt -PromptPosition $PromptPosition -wait
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
             # 27 = Escape key
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
             #Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
@@ -1293,7 +1329,7 @@ function Start-Navigation {
                     $i++       
                 }
             }
-            Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
     }
 

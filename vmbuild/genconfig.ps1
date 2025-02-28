@@ -244,6 +244,8 @@ function Select-ConfigMenu {
 
         $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
         $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
+        $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
+        $customOptions += [ordered]@{ "*BT" = "" }
         $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
         #if ($domainCount -gt 0) {
         #    $customOptions += [ordered]@{ "C" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
@@ -272,10 +274,10 @@ function Select-ConfigMenu {
             $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"L" = "Load saved config from file %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HL" = "You can find all your previously saved configuration files here" }
         if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"X" = "Load TEST config from File (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+            $customOptions += [ordered]@{"X" = "Load TEST config from file (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
             $customOptions += [ordered]@{ "HX" = "Here you can find some preconfigured test configuration files." }
         }
 
@@ -375,7 +377,12 @@ function Select-ConfigMenu {
                 }
             }
             "v" { Select-VMMenu }
-            "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
+            "r" { 
+                $response = Read-YesorNoWithTimeout -Prompt "This will delete your current memlabs.rdg and re-create it. Are you Sure? (y/N)" -HideHelp -Default "n" -timeout 15
+                if ($response -eq "y") {
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
+                }               
+            }
             "f" { Select-DeletePending }
             "d" { 
                 $SelectedConfig = Select-DomainMenu
@@ -484,7 +491,7 @@ function Select-DomainMenu {
    
     while ($true) {
         if ([string]::IsNullOrWhiteSpace($DomainName)) {
-            # Write-Log -Activity "Domain Management Menu" -NoNewLine
+
             $domainList = @()
             foreach ($item in (Get-DomainList)) {
                 $stats = Get-DomainStatsLine -DomainName $item
@@ -533,10 +540,13 @@ function Select-DomainMenu {
             if ($DC) {
                 $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
             }
-        
+       
 
             $customOptions = [ordered]@{
-                "*F1" = "List-VMsInDomain -DomainName $domain" 
+                "*F1" = "List-VMsInDomain -DomainName $domain"     
+                "*BZ" = "";       
+                "*HELP" = "Update-HelpText"
+                "*B0" = "";
                 "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
                 "M"   = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
                 "HM"  = "Use this option to modify the domain, adding new roles, or new VMs"
@@ -579,7 +589,12 @@ function Select-DomainMenu {
                     "HF" = "Select VMs to disable dynamic memory on"
                 }
             }
-            $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+            $customOptions += [ordered]@{
+                "*Z" = ""
+                "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
+                "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
+                "HD" = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs" 
+            }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
             write-Verbose "1 response $response"
