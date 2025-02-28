@@ -110,7 +110,7 @@ if ($PackageSuccess -eq 0) {
         }
         Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
         $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-        Start-Sleep -Seconds 20
+        Start-Sleep -Seconds 40
         $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
         $success = $PackageSuccess -ge 1
 
@@ -123,7 +123,7 @@ if ($PackageSuccess -eq 0) {
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 }
-$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+$machinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
 foreach ($client in $ClientNameList) {
 
     if ($machinelist -contains $client) {
@@ -132,13 +132,14 @@ foreach ($client in $ClientNameList) {
     Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
 }
 
+$installedmachinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
 
     if ([string]::IsNullOrWhiteSpace($client)) {
         continue
     }
-    if ($machinelist -contains $client) {
+    if ($installedmachinelist -contains $client) {
         continue
     }
     
@@ -171,14 +172,15 @@ foreach ($client in $ClientNameList) {
             }
         }
         $failCount++
+        
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
         Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
         Start-Sleep -Seconds 5
     }
-
 }
+
 
 # Update actions file
 $Configuration.InstallClient.Status = 'Completed'

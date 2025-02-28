@@ -15,7 +15,7 @@ function Start-Maintenance {
         $applyNewOnly = $true
     }
     else {
-        Write-log "Start-Maintenance called without DeployConfig"
+        Write-log -verbose "Start-Maintenance called without DeployConfig"
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
         $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
     }

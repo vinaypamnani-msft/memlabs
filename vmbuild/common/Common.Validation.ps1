@@ -5,9 +5,10 @@ function Add-ValidationMessage {
         [switch]$Failure,
         [switch]$Warning
     )
-
+    Write-Log -Verbose $Message
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
+
 
     if ($Failure.IsPresent) {
         $ReturnObject.Failures += 1
@@ -1126,6 +1127,36 @@ function Test-Configuration {
                 }
             }
 
+            # WSUS Validations
+            # ================
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing WSUS" -PercentComplete 37
+            if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
+                if (-not $vm.wsusContentDir) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
+                }
+                if ($vm.InstallSup -and -not $vm.SiteCode) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
+                }
+
+                if ($vm.InstallSUP) {                  
+                    $property = $vm
+                    if ($property.ParentSiteCode -or $property.SiteCode) {
+                        $sitecode = $property.SiteCode                    
+                        if ($sitecode) {
+                            $Parent = Get-ParentSiteServerForSiteCode -deployConfig $deployConfig -siteCode $sitecode -type VM -SmartUpdate:$false
+                         
+                            if ($Parent.SiteCode) {
+                                $list2 = Get-List2 -deployConfig $deployConfig
+                                $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                                if (-not $existingSUP) {                                                       
+                                    Add-ValidationMessage -Message "$vmName SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Test-ValidUserName -name $vm.domainUser -vmname $vm.vmName
 
         }
@@ -1135,17 +1166,7 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
         Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
 
-        # WSUS Validations
-        # ================
-
-        if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
-            if (-not $vm.wsusContentDir) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
-            }
-            if ($vm.InstallSup -and -not $vm.SiteCode) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
-            }
-        }
+       
 
         # CAS Validations
         # ==============

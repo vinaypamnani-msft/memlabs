@@ -244,6 +244,8 @@ function Select-ConfigMenu {
 
         $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
         $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
+        $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
+        $customOptions += [ordered]@{ "*BT" = "" }
         $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
         #if ($domainCount -gt 0) {
         #    $customOptions += [ordered]@{ "C" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
@@ -251,8 +253,8 @@ function Select-ConfigMenu {
   
         #}
         #else {
-            $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-            $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
+        $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+        $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
         #}
 
         $domainMap = @{}
@@ -268,14 +270,14 @@ function Select-ConfigMenu {
         }
 
         if ($null -ne $Global:SavedConfig) {
-            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration [$($Global:SavedConfig.VmOptions.DomainName)]%Yellow" }
             $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
         }
         $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"L" = "Load saved config from File %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{"L" = "Load saved config from file %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
         $customOptions += [ordered]@{ "HL" = "You can find all your previously saved configuration files here" }
         if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"X" = "Load TEST config from File (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+            $customOptions += [ordered]@{"X" = "Load TEST config from file (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
             $customOptions += [ordered]@{ "HX" = "Here you can find some preconfigured test configuration files." }
         }
 
@@ -349,7 +351,7 @@ function Select-ConfigMenu {
             #"1" { $SelectedConfig = Select-NewDomainConfig }
             #"2" { $SelectedConfig = Show-ExistingNetwork }
             #"C" { $SelectedConfig = Show-ExistingNetwork2 }
-            "C" {$SelectedConfig = Select-NewDomainConfig}
+            "C" { $SelectedConfig = Select-NewDomainConfig }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
            
             "l" { $SelectedConfig = Select-Config $configDir -NoMore }           
@@ -375,7 +377,12 @@ function Select-ConfigMenu {
                 }
             }
             "v" { Select-VMMenu }
-            "r" { New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true }
+            "r" { 
+                $response = Read-YesorNoWithTimeout -Prompt "This will delete your current memlabs.rdg and re-create it. Are you Sure? (y/N)" -HideHelp -Default "n" -timeout 15
+                if ($response -eq "y") {
+                    New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
+                }               
+            }
             "f" { Select-DeletePending }
             "d" { 
                 $SelectedConfig = Select-DomainMenu
@@ -484,7 +491,7 @@ function Select-DomainMenu {
    
     while ($true) {
         if ([string]::IsNullOrWhiteSpace($DomainName)) {
-            # Write-Log -Activity "Domain Management Menu" -NoNewLine
+
             $domainList = @()
             foreach ($item in (Get-DomainList)) {
                 $stats = Get-DomainStatsLine -DomainName $item
@@ -508,7 +515,12 @@ function Select-DomainMenu {
             }
         }
         else {
-            $domain = $DomainName
+            $domain = $DomainName            
+        }
+
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        if (-not $vms) {
+            return
         }
 
         Write-Verbose "2 Select-DomainMenu"
@@ -528,10 +540,13 @@ function Select-DomainMenu {
             if ($DC) {
                 $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
             }
-        
+       
 
             $customOptions = [ordered]@{
-                "*F1" = "List-VMsInDomain -DomainName $domain" 
+                "*F1" = "List-VMsInDomain -DomainName $domain"     
+                "*BZ" = "";       
+                "*HELP" = "Update-HelpText"
+                "*B0" = "";
                 "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
                 "M"   = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
                 "HM"  = "Use this option to modify the domain, adding new roles, or new VMs"
@@ -574,7 +589,12 @@ function Select-DomainMenu {
                     "HF" = "Select VMs to disable dynamic memory on"
                 }
             }
-            $customOptions += [ordered]@{"*Z" = ""; "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"; "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+            $customOptions += [ordered]@{
+                "*Z" = ""
+                "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
+                "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
+                "HD" = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs" 
+            }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
             write-Verbose "1 response $response"
@@ -1714,6 +1734,7 @@ function Select-NewDomainConfig {
 
         $test = $false
         $version = $null
+        write-log -verbose "Deploying type: $($newconfig.domainDefaults.DeploymentType)"
         switch ($newconfig.domainDefaults.DeploymentType) {
             "CAS and Primary" {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
@@ -2023,22 +2044,22 @@ Function Get-DomainStatsLine {
         $TotalMaxMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryStartupGB).Sum)
         $TotalDiskUsed = [math]::Round(($ListCache | Measure-Object -Sum DiskUsedGB).Sum)
 
-        $stats += "[$TotalRunningVMs/$TotalVMs Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        $stats += "[$($TotalRunningVMs.ToString().PadLeft(2," "))/$($TotalVMs.ToString().PadLeft(2," ")) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
         if ($ExistingCasCount -gt 0) {
             $stats += "[CAS VMs: $ExistingCasCount] "
         }
         if ($ExistingPriCount -gt 0) {
-            $stats += "[Primary VMs: $ExistingPriCount] "
+            $stats += "[PRI VMs: $ExistingPriCount] "
         }
         if ($ExistingSecCount -gt 0) {
-            $stats += "[Secondary VMs: $ExistingSecCount] "
+            $stats += "[SEC VMs: $ExistingSecCount] "
         }
         if ($ExistingSQLCount -gt 0) {
             $stats += "[SQL VMs: $ExistingSQLCount] "
         }
-        if ($ExistingDPMPCount -gt 0) {
-            $stats += "[DPMP VMs: $ExistingDPMPCount] "
-        }
+        #if ($ExistingDPMPCount -gt 0) {
+        #    $stats += "[DP VMs: $ExistingDPMPCount] "
+        #}
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
             $stats = "[No ConfigMgr Roles installed] "
@@ -4077,6 +4098,10 @@ function Add-ErrorMessage {
         $global:GenConfigErrorMessages = @()
     }
 
+    if ($global:GenConfigErrorMessages -is [PSCustomObject]) {
+        $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages)
+    }
+
     $global:GenConfigErrorMessages += [PSCustomObject]@{
         property = $property
         Level    = $level
@@ -4340,7 +4365,13 @@ function Get-AdditionalValidations {
         }
         "vmName" {
 
+            if (($value.Length + $Global:Config.VmOptions.Prefix.Length) -gt 15) {
+                Add-ErrorMessage -property $name  "VMName + Prefix can not be longer than 15 chars"
+                $property.$name = $currentValue
+            }
+            
             foreach ($existing in $Global:Config.virtualMachines) {
+    
                 if ($existing.RemoteSQLVM -eq $CurrentValue) {
                     $existing.RemoteSQLVM = $value
                 }
@@ -4368,20 +4399,20 @@ function Get-AdditionalValidations {
                 }
 
                 if ($property.ParentSiteCode -or $property.SiteCode) {
-                    $sitecode = $property.ParentSiteCode
-                    if (-not $sitecode) {
-                        $sitecode = $property.SiteCode
-                    }
+                    
+                    $sitecode = $property.SiteCode
+                 
                     if ($sitecode) {
-                        $Parent = Get-TopSiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
-
-                        $list2 = Get-List2 -deployConfig $Global:Config
-                        $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
-                        if (-not $existingSUP) {
-                            $property.installSUP = $false
-                            $property.PsObject.Members.Remove("wsusContentDir")
-                            $property.PsObject.Members.Remove("wsusDataBaseServer")
-                            Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the top level site ($($Parent.SiteCode)) has a SUP"
+                        $Parent = Get-ParentSiteServerForSiteCode -deployConfig $Global:Config -siteCode $sitecode -type VM -SmartUpdate:$false
+                        if ($Parent.SiteCode) {
+                            $list2 = Get-List2 -deployConfig $Global:Config
+                            $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                            if (-not $existingSUP) {
+                                $property.installSUP = $false
+                                $property.PsObject.Members.Remove("wsusContentDir")
+                                $property.PsObject.Members.Remove("wsusDataBaseServer")
+                                Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
+                            }
                         }
                     }
 
@@ -5000,7 +5031,7 @@ function Get-AdditionalInformation {
     foreach ($err in $global:GenConfigErrorMessages) {
         if ($err.property -eq $item) {
             $data = $origData.PadRight(21) + "[x] " + $err.message
-            $global:GenConfigErrorMessages = $global:GenConfigErrorMessages | where-object { $_.message -ne $err.message }
+            $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | where-object { $_.message -ne $err.message })
             break
         }
     }
@@ -5497,7 +5528,7 @@ function Select-Options {
                 }
             }
             write-log -verbose "Read new Value2: $name = $($property."$Name")"
-            if ($name -eq "VmName") {
+            if ($name -eq "VmName" -and $($property."$Name") -ne $value ) {
                 return "REFRESH"
             }
             if (-not [String]::IsNullOrWhiteSpace($newName)  ) {
@@ -6189,10 +6220,7 @@ function Add-NewVMForRole {
                 $network = Get-NetworkForVM -vm $virtualMachine -ConfigToModify $oldConfig -ReturnIfNotNeeded:$true
                 if ($network) {
                     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
-                }
-                else {
-                    return
-                }
+                }                
             }
         }
         "Primary" {

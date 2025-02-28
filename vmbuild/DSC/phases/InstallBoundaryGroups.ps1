@@ -65,16 +65,27 @@ if (Test-Path $cm_svc_file) {
         Start-Sleep -Seconds 5
         New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
         # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+    }
+    $found = $false
+    try {
+        $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values
+        if ($cm_svc -in $accounts) {
+            $found = $true
+        }
+        #$found = (Get-CMClientPushInstallation).PropLists.Values -contains $cm_svc
+    }
+    catch {}
 
+    if (-not $found) {
         # Set client push account
         Write-DscStatus "Setting the Client Push Account"
-        Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
+        Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc
         Start-Sleep -Seconds 5
 
         # Restart services to make sure push account is acknowledged by CCM
         Write-DscStatus "Restarting services"
         Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
+        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue    
     }
 }
 
