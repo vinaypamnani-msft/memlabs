@@ -36,10 +36,20 @@ Write-Host2 -ForegroundColor Snow " on the left side of the options menu to navi
 
 
 Function Show-Passwords {
+
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount
+    )
+
+    $DCs = get-list -type vm | Where-Object { $_.Role -eq "DC" }
+    if ($LineCount) {
+        return $DCs.Count +3
+    }
     Write-WhiteI "Default Password for all accounts is: " -NoNewline
     Write-Host2 -foregroundColor $Global:Common.Colors.GenConfigNotice "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
     Write-Host
-    get-list -type vm | Where-Object { $_.Role -eq "DC" } | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
+    $DCs| Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
 }
 
 Function Select-PasswordMenu {
@@ -144,6 +154,15 @@ function Get-PendingVMs {
 
 function Check-OverallHealth {
 
+    param (
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount
+    )
+
+    if ($LineCount) 
+    {
+        return 5
+    }
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'Continue'
 
@@ -429,7 +448,15 @@ function Select-ConfigMenu {
 }
 
 function Show-Networks {
+    param(
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount
+    )
+    
     $networks = Get-EnhancedNetworkList
+    if ($LineCount){
+        return $networks.Count
+    }
     ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
 }
 function  Select-NetworkMenu {
@@ -445,7 +472,14 @@ function  Select-NetworkMenu {
 
 function Show-VMS {
 
+    param(
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount
+    )
     $vms = get-list -type vm
+    if ($LineCount) {
+        return $vms.Count
+    }
     if (-not $vms) {
         Write-RedX "No VMs currently deployed"
         return
@@ -473,10 +507,15 @@ function Select-VMMenu {
 function List-VMsInDomain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
-        [string] $DomainName
+        [string] $DomainName,
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount
     )
     #Write-Log -Activity "$domain Resources"
     $vmsInDomain = get-list -type vm  -DomainName $domain
+    if ($LineCount) {
+        return $vmsInDomain.Count
+    }
     if (-not $vmsInDomain) {
         return
     }
@@ -977,7 +1016,6 @@ function Select-MainMenu {
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
         $preOptions = [ordered]@{}
-        #$preOptions += [ordered]@{ "*F0" = "$null = Test-Configuration -InputObject $Global:Config" }
         $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
         $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
         $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
@@ -1616,6 +1654,12 @@ function select-NewDomainName {
 }
 
 function Show-NewDomainTip {
+    param(
+        [switch] $LineCount
+    )
+    if ($LineCount){
+        return 2
+    }
     Write-Host
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigTip "  Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
 }
@@ -1852,6 +1896,12 @@ Function Get-ConfigFiles {
 }
 
 function Show-ConfigLegend {
+    param (
+        [switch] $LineCount
+    )
+    if ($LineCount) {
+        return 5
+    }
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonGood "  == Green  - Fully Deployed"
     Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigJsonBad  "  == Red    - Partially Deployed"
     Write-Host2 -ForegroundColor  $Global:Common.Colors.GenConfigNoCM    "  == Brown  - Not Deployed - New Domain"

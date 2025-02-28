@@ -388,9 +388,15 @@ function Get-GenConfigErrorMessagesLineCount {
 }
 
 function Show-GenConfigErrorMessages {
+    param(
+        [switch] $LineCount
+    )
 
     $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
     $count = ($Errors | Measure-Object).Count
+    if ($LineCount) {
+        return $count + 4
+    }
     if ($count -gt 0) {
         #Write-host2 "┃" -NoNewline -ForegroundColor Crimson
         Write-Verbose "Showing Show-GenConfigErrorMessages"

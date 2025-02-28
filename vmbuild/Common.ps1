@@ -337,12 +337,12 @@ function Write-Log {
 
     If ($Activity.IsPresent) {
         $info = $false
-        Set-TitleBar $Text
-        Write-Host
+        Set-TitleBar $Text        
         if ($NoNewLine.IsPresent) {        
             $Text = "$($common.ActivityHeader) $Text"          
         }
-        else {           
+        else {    
+            Write-Host       
             $Text = "$($common.ActivityHeader) $Text`r`n"            
         }
 

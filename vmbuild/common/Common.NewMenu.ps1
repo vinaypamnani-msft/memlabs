@@ -159,6 +159,7 @@ function New-MenuItem {
         [string]$helpFunction = $null
     )
     write-log -Verbose "Adding $itemName to menu.. Current Count $($menuItems.Count)"
+    $linecount = 0
     if ($text) {
         $TextValue = $text -split "%"
 
@@ -172,9 +173,11 @@ function New-MenuItem {
             }
         }
         $text = $TextValue[0]
+        $linecount = 1
     }
     else {
         $TextValue = $null
+        $linecount = 0
     }
 
     if ($itemName) {
@@ -189,9 +192,12 @@ function New-MenuItem {
             if ($itemName.StartsWith("*F")) {
                 $function = $text
                 $text = $null
+                #write-host "Running Function $function -LineCount" 
+                $linecount =  Invoke-Expression -Command "$function -LineCount"                             
             }
             else {                    
-                $function = $null                
+                $function = $null   
+                $linecount = 1             
             }   
             #$itemName = $null        
         }
@@ -205,6 +211,7 @@ function New-MenuItem {
         Selectable    = $selectable
         Selected      = $selected
         Function      = $function
+        LineCount     = $linecount
         MultiSelected = $multiSelected
         Displayed     = $displayed
         HelpText      = $helptext
@@ -593,7 +600,7 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 6) # Get the height of the console window, subtract 1 since its 0 based, subtract 4 for the help
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Get the height of the console window, subtract 1 since its 0 based
     $CurrentPosition = Get-CursorPosition
     $MenuStart = $CurrentPosition.Y
     $RoomLeft = ([int]$WindowSizeY - [int]$MenuStart)
@@ -620,7 +627,10 @@ function Show-Menu {
         $found = $false
         $HelpFound = $false
         $HelpNeeded = $false
+        $TotalLineCount = 0
         foreach ($menuitem in $menuItems) {
+            $TotalLineCount+= $menuitem.LineCount
+            #Write-Host "Adding LineCount for $($menuitem.itemName) $($menuitem.Text) $($menuitem.LineCount)"
             if ($operation -eq "PGUP") {
                 $menuitem.Displayed = $false
             }
@@ -650,14 +660,18 @@ function Show-Menu {
             $operation = ""
         }
 
-        
+        if ($HelpNeeded)   {
+            $TotalLineCount += 5
+        }
+
+        $TotalLineCount += 2 #For Prompt
        
         $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $RoomLeft = Get-RoomLeftFromCurrentPosition
         $RoomLeft -= $ErrorCount
-        if ($NoClear -and $RoomLeft -lt $menuItems.Count) {
+        if ($NoClear -and $RoomLeft -lt $TotalLineCount) {
             $NoClear = $false
         }
 
@@ -666,11 +680,15 @@ function Show-Menu {
             #$NoClear = $true
         }
         
-        Write-Log -Activity $menuName
+        Write-Log -Activity $menuName -NoNewLine
+        Write-Host
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
+        if ($HelpNeeded) {
+            $RoomLeft = $RoomLeft - 5
+        }
 
-        if ($RoomLeft -lt $menuItems.Count) {
+        if ($RoomLeft -lt $TotalLineCount) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
         }
         if (-not $HelpFound -and $HelpNeeded) {
@@ -679,7 +697,7 @@ function Show-Menu {
         }
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
-        if ($RoomLeft -lt $menuItems.Count) {        
+        if ($RoomLeft -lt $TotalLineCount) {        
             $shrink = $true    
             $roomsaved = 0
             foreach ($menuItem in $menuItems) {
@@ -706,7 +724,7 @@ function Show-Menu {
                 }
             }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
-            if ($RoomLeft -le 3) {
+            if ($RoomLeft -le 2) {
                 $menuItem.Displayed = $false                
                 $Operation = "PgDnNeeded"
                 continue
@@ -938,7 +956,8 @@ Function Update-HelpText {
     Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
     Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
     Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))  
-    if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {         
+    if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {      
+           
         Set-CursorPosition -X 0 -Y $HelpPosition.Y
         write-host2 " ╭───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
         write-host2 " │" -nonewline -ForegroundColor MediumOrchid
@@ -967,6 +986,7 @@ function Update-Prompt {
         [switch] $wait # HourGlass is showing
 
     )
+    $AnyHelpText = $false
     [System.Console]::CursorVisible = $false
     $CurrentValue = $null
     $cursorPosition = Get-CursorPosition # Get the current cursor position
@@ -977,7 +997,10 @@ function Update-Prompt {
         if ($MenuItems[$selectedIndex].Selectable) {
             $CurrentValue = $MenuItems[$selectedIndex].ItemName
             $CurrentHelpText = $MenuItems[$selectedIndex].HelpText
-            $CurrentColor = $MenuItems[$selectedIndex].Color1            
+            $CurrentColor = $MenuItems[$selectedIndex].Color1   
+            if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText)) {
+                $AnyHelpText = $true
+            }
         }
     }
     if (-not [String]::IsNullOrWhiteSpace($CurrentValue)) {
@@ -997,7 +1020,9 @@ function Update-Prompt {
     }
     $BlinkLocation = Get-CursorPosition
 
-    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $CurrentHelpText -Color $CurrentColor -wait:$wait
+    if ($AnyHelpText) {
+        Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $CurrentHelpText -Color $CurrentColor -wait:$wait
+    }
     #$roomleft = Get-RoomLeftFromCurrentPosition
     #if ($roomleft -ge 3) {
     #  Update-HelpText -HelpPosition $BlinkLocation -CurrentHelpText $CurrentHelpText -Color $MenuItems[$selectedIndex].Color1 -wait:$wait
