@@ -903,6 +903,15 @@ from sms_r_system where Client = 0 or Client is null
             Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
+
+            New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+
+            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
+
+            Move-CMObject -FolderPath "$SiteCode:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
+
+            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
+
         }
     }
 
@@ -968,11 +977,12 @@ from sms_r_system where Client = 0 or Client is null
     }
     else {
 
+        
         ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
         #Sync-CMSoftwareUpdate
 
         #Write-DscStatus "$Tag sleep 20 minutes to complete the intial sync for $products"
-        wait 10 minutes to complete the intial sync to pull all the classifications and products
+        Write-DscStatus "$Tag wait 10 minutes to complete the intial sync to pull all the classifications and products"
         Start-Sleep -Seconds 1200
 
         Write-DscStatus "$Tag Found missing $products, enabling them now"
