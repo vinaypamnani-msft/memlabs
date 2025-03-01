@@ -15,7 +15,7 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 $isCas = $ThisVM.Role -eq "CAS"
 $DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
 # Read Site Code from registry
-Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
+
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
@@ -30,9 +30,9 @@ $initParams = @{}
 if ($null -eq (Get-Module ConfigurationManager)) {
     Import-Module $modulePath
 }
-
+Write-DscStatus "Setting PS Drive for ConfigMgr Site: $Sitecode on Provider $ProviderMachineName" -NoStatus
 # Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+#New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 $psDriveFailcount = 0
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     $psDriveFailcount++

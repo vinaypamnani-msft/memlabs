@@ -68,9 +68,12 @@ if (Test-Path $cm_svc_file) {
     }
     $found = $false
     try {
-        $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values
+        $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
         if ($cm_svc -in $accounts) {
             $found = $true
+        }
+        else {
+            write-DscStatus "$cm_svc not found in $accounts for Sitecode $SiteCode"
         }
         #$found = (Get-CMClientPushInstallation).PropLists.Values -contains $cm_svc
     }

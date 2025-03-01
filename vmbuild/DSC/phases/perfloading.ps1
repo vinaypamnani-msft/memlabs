@@ -908,7 +908,7 @@ from sms_r_system where Client = 0 or Client is null
 
             Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
 
-            Move-CMObject -FolderPath "$SiteCode:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
+            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
 
             Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
 
