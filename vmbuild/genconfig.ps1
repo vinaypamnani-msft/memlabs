@@ -492,9 +492,7 @@ function Select-VMMenu {
 
     Write-Verbose "2 Select-VMMenu"
     while ($true) {
-       
-       
-        $customOptions = [ordered]@{"*F" = "Show-VMS" }
+        $customOptions = [ordered]@{"*F" = "Get-LabVMs" }
         $response = Get-Menu2 -MenuName "Currently Deployed VMs" -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true -test:$false
 
         write-Verbose "1 response $response"
@@ -519,7 +517,8 @@ function List-VMsInDomain {
     if (-not $vmsInDomain) {
         return
     }
-    ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+    # ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
+    Get-LabVMs -domain $DomainName
 }
 function Select-DomainMenu {
     param (
