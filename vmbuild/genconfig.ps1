@@ -502,24 +502,6 @@ function Select-VMMenu {
       
     }
 }
-function List-VMsInDomain {
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
-        [string] $DomainName,
-        [Parameter(Mandatory = $false)]
-        [switch] $LineCount
-    )
-    #Write-Log -Activity "$domain Resources"
-    $vmsInDomain = get-list -type vm  -DomainName $domain
-    if ($LineCount) {
-        return $vmsInDomain.Count
-    }
-    if (-not $vmsInDomain) {
-        return
-    }
-    # ($vmsInDomain | Select-Object VmName, State, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, DiskUsedGB, SqlVersion | Format-Table | Out-String).Trim() | out-host
-    Get-LabVMs -domain $DomainName
-}
 function Select-DomainMenu {
     param (
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
@@ -581,7 +563,7 @@ function Select-DomainMenu {
        
 
             $customOptions = [ordered]@{
-                "*F1" = "List-VMsInDomain -DomainName $domain"     
+                "*F1" = "Get-LabVMs -DomainName $domain"     
                 "*BZ" = "";       
                 "*HELP" = "Update-HelpText"
                 "*B0" = "";
