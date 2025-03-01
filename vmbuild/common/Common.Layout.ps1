@@ -1,5 +1,7 @@
 Function Get-LabVMs{
     param (
+        [Parameter(Mandatory = $false)]
+        [switch] $LineCount,
         [Parameter(Mandatory = $false, HelpMessage = "Domain Name")]
         [string] $DomainName
     )
