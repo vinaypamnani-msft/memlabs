@@ -7,6 +7,10 @@ Function Get-LabVMs{
     )
 
     $vms = Get-List -Type VM -domain $DomainName
+    if ($LineCount) {
+        return $vms.count + 2
+    }
+
     if ($vms) {
         
         # Define colors for state and role
