@@ -913,11 +913,7 @@ from sms_r_system where Client = 0 or Client is null
                 Write-DscStatus "$Tag collection Folder MEMLABS already exists"
             }            
 
-<<<<<<< Updated upstream
-            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
-=======
             $memlabsfolder = "$SiteCode" + ":" + "\Devicecollection\MEMLABS"
->>>>>>> Stashed changes
 
             Write-DscStatus "$Tag $memlabsfolder"
 
