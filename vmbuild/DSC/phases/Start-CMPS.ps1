@@ -1,3 +1,4 @@
+#Start-CMPS.ps1
 function Set-CMSiteProvider {
     param($SiteCode, $ProviderFQDN)
 
@@ -5,6 +6,7 @@ function Set-CMSiteProvider {
     $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
     $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
     $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+
     $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
     $initParams = @{}
 
@@ -37,20 +39,34 @@ function Get-SMSProvider {
         FQDN          = $null
         NamespacePath = $null
     }
+    $SiteServerName = "localhost"
 
     $retry = 0
 
     while ($retry -lt 3) {
         # try local provider first
-        $localTest = Get-CimInstance -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr
+        try {
+            $localTest = Get-CimInstance -Computername $SiteServerName -Namespace "root\SMS\Site_$SiteCode" -Class "SMS_Site" -ErrorVariable WmiErr -ErrorAction SilentlyContinue | out-null
+        }
+        catch {
+            $localTest = $false
+        }
+
         if ($localTest -and $WmiErr.Count -eq 0) {
             $return.FQDN = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
             $return.NamespacePath = "root\SMS\Site_$SiteCode"
             return $return
         }
+        else {
+            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+            $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\AdminUI\Connection")
+            $SiteServerName = $subKey.GetValue("Server")
+            Write-Host "Setting SiteServerName to $SiteServerName"
+        }
+
 
         # loop through providers
-        $providers = Get-CimInstance -class "SMS_ProviderLocation" -Namespace "root\SMS"
+        $providers = Get-CimInstance -Computername $SiteServerName -class "SMS_ProviderLocation" -Namespace "root\SMS"
         foreach ($provider in $providers) {
             Write-Host "Found Provider: $($provider.Machine) with Namespace $($provider.NamespacePath)"
         }
