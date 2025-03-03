@@ -692,7 +692,7 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-        }
+        },
         @{
             Name  = "MEMLABS-Devices Missing Critical Updates"
             Query = @"
@@ -904,13 +904,26 @@ from sms_r_system where Client = 0 or Client is null
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+            if (!(Get-CMFolder -FolderPath "Devicecollection\MEMLABS" )) {
+                New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+                Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
+            }
+            else {
 
-            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
+                Write-DscStatus "$Tag collection Folder MEMLABS already exists"
+            }            
+
+<<<<<<< Updated upstream
+            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
+=======
+            $memlabsfolder = "$SiteCode" + ":" + "\Devicecollection\MEMLABS"
+>>>>>>> Stashed changes
+
+            Write-DscStatus "$Tag $memlabsfolder"
 
             Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
 
-            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
+            Write-DscStatus "$Tag Moved collection $CollectionName under the folder MEMLABS"
 
         }
     }
@@ -937,6 +950,59 @@ from sms_r_system where Client = 0 or Client is null
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
     
+    function Check-SyncSucceeded {
+        param (
+            [string]$SiteCode
+        )
+    
+        $syncFinished = $syncTimeout = $false
+        $i = 0
+    
+        do {                    
+            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+    
+            if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
+                Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                Sync-CMSoftwareUpdate
+                Start-Sleep -Seconds 120
+            } 
+            else {
+                $syncStateString = "Unknown"
+                switch ($($syncState.LastSyncState)) {
+                    "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                    "6701" { $syncStateString = "WSUS Synchronization Started" }
+                    "6702" { $syncStateString = "WSUS Synchronization Done" }
+                    "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                    "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                    "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                    "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                    "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                    "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                    "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                    "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                }
+                Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
+    
+                if ($syncState.LastSyncState -eq 6702) {
+                    Write-DscStatus "SUM Sync finished successfully."
+                    return $true
+                }
+    
+                if (-not $syncFinished) {
+                    $i++
+                    Start-Sleep -Seconds 60
+                }
+    
+                if ($i -gt 30) {
+                    $syncTimeout = $true
+                    Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                    return $false
+                }
+            }
+        }  until ($syncFinished -or $syncTimeout)
+    
+        return $false
+    }
     
     # Get the Software Update Point Component
     $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
@@ -969,72 +1035,77 @@ from sms_r_system where Client = 0 or Client is null
     
     $missingproducts = $products -notmatch { $_ -notin $productclassifications }
 
-    Write-DscStatus "$Tag Are there any products not checked on SUP product? $missingproducts - if yes, please continue"
+    Write-DscStatus "$Tag Are there any products not checked on SUP product? - if yes, please continue"
     
     # Check if product classifications are already enabled for Critical updates or definition updates
     if (!$missingproducts) {
         Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
     }
     else {
-
-        
         ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-        #Sync-CMSoftwareUpdate
+        $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
 
-        #Write-DscStatus "$Tag sleep 20 minutes to complete the intial sync for $products"
-        Write-DscStatus "$Tag wait 10 minutes to complete the intial sync to pull all the classifications and products"
-        Start-Sleep -Seconds 1200
+        if ($syncSuccess) {
+            
+            #Write-DscStatus "$Tag sleep 20 minutes to complete the intial sync for $products"
+            Write-DscStatus "$Tag wait 10 minutes to complete the intial sync to pull all the classifications and products"
+            #Start-Sleep -Seconds 1200
 
-        Write-DscStatus "$Tag Found missing $products, enabling them now"
-        $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-        $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
-    
-        # Get the language setting
-        $lang = $deployConfig.vmOptions.locale
-    
-        # Define language mappings
-        switch ($lang) {
-            "en-us" { $addLang = "English" }
-            "ja-jp" { $addLang = "Japanese" }
-            "es-es" { $addLang = "Spanish" }
-            "de-de" { $addLang = "German" }
-            "fr-fr" { $addLang = "French" }
-            default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
+            Write-DscStatus "$Tag Found missing $products, enabling them now"
+            $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+            $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+
+            # Get the language setting
+            $lang = $deployConfig.vmOptions.locale
+
+            # Define language mappings
+            switch ($lang) {
+                "en-us" { $addLang = "English" }
+                "ja-jp" { $addLang = "Japanese" }
+                "es-es" { $addLang = "Spanish" }
+                "de-de" { $addLang = "German" }
+                "fr-fr" { $addLang = "French" }
+                default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
+            }
+
+            # Output the result
+            Write-DscStatus "$Tag the locale language is $addLang"
+
+            $parameters = @{
+                InputObject                   = $supComp
+                #DefaultWsusServer            = 'sup.contoso.com'
+                SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
+                #ReportingEvent               = 'CreateAllWsusReportingEvents'
+                #RemoveUpdateClassification   = "Update Rollups"
+                AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+                Schedule                      = $schedule
+                EnableSyncFailureAlert        = $true
+                ImmediatelyExpireSupersedence = $false
+                AddLanguageUpdateFile         = $addLang
+                AddLanguageSummaryDetails     = $addLang
+                #RemoveLanguageUpdateFile     = $removeLang
+                #RemoveLanguageSummaryDetails = $removeLang
+                EnableCallWsusCleanupWizard   = $true
+                WaitMonth                     = 3
+                EnableThirdPartyUpdates       = $true
+                EnableManualCertManagement    = $false
+                AddProduct                    = $products
+            }
+
+            Set-CMSoftwareUpdatePointComponent @parameters
+
+
+            #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
+            Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+
+            ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
+            #Sync-CMSoftwareUpdate
+                
         }
-    
-        # Output the result
-        Write-DscStatus "$Tag the locale language is $addLang"
-    
-        $parameters = @{
-            InputObject                   = $supComp
-            #DefaultWsusServer            = 'sup.contoso.com'
-            SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-            #ReportingEvent               = 'CreateAllWsusReportingEvents'
-            #RemoveUpdateClassification   = "Update Rollups"
-            AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-            Schedule                      = $schedule
-            EnableSyncFailureAlert        = $true
-            ImmediatelyExpireSupersedence = $false
-            AddLanguageUpdateFile         = $addLang
-            AddLanguageSummaryDetails     = $addLang
-            #RemoveLanguageUpdateFile     = $removeLang
-            #RemoveLanguageSummaryDetails = $removeLang
-            EnableCallWsusCleanupWizard   = $true
-            WaitMonth                     = 3
-            EnableThirdPartyUpdates       = $true
-            EnableManualCertManagement    = $false
-            AddProduct                    = $products
+        else {
+            Write-DscStatus "$Tag Sync failed or timed out."
         }
-    
-        Set-CMSoftwareUpdatePointComponent @parameters
-    
-    
-        #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-        Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-    
-        ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-        #Sync-CMSoftwareUpdate
-               
+
     }
        
     # Define the collection where the updates will be deployed
@@ -1152,7 +1223,4 @@ from sms_r_system where Client = 0 or Client is null
     Write-DscStatus "$Tag Completed the perf loading the environment"
     Write-DscStatus "$Tag ******************************************" -NoStatus
     Write-DscStatus "$Tag ******************************************" -NoStatus
-
-
-
 }
