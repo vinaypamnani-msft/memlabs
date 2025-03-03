@@ -70,7 +70,7 @@ function Invoke-SnapshotDomain {
                 Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
                 $complete = $true
                 if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
+                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
                 }
             }
             catch {
@@ -134,7 +134,7 @@ function select-DeleteSnapshotDomain {
                             if (Test-Path $notesFile) {
                                 Remove-Item $notesFile -Force
                             }
-                            Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete"
+                            Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete                            "
                         }
                     }
                 }
@@ -289,7 +289,7 @@ function select-RestoreSnapshotDomain {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
                     }
-                    Write-GreenCheck "Restore Completed for $($vm.VmName)"
+                    Write-GreenCheck "Restore Completed for $($vm.VmName)                      "
                 }
                 $complete = $true
             }

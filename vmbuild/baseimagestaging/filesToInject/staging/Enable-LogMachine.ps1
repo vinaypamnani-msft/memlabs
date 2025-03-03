@@ -27,6 +27,13 @@ if ($UIInstallDir) {
     $CMExe = (Join-Path $UIInstallDir "bin")
     $CMexe = (Join-Path $CMexe "Microsoft.ConfigurationManagement.exe")
 }
+else {
+    $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
+    if ($UIInstallDir) {
+        $CMExe = (Join-Path $UIInstallDir "bin")
+        $CMexe = (Join-Path $CMexe "Microsoft.ConfigurationManagement.exe")
+    }
+}
 
 $ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "SMSCFGRC"  -ErrorAction SilentlyContinue
 
@@ -68,7 +75,7 @@ $fixFlag = "ServerShortcuts.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
-    if (Test-Path $CMlogs) {
+    if ($CMLogs -and (Test-Path $CMlogs)) {
         # Create the new shortcut if the path exists
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
         $shortcut.TargetPath = $CMlogs
@@ -80,7 +87,7 @@ $fixFlag = "ServerShortcuts3.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
-    if (Test-Path $CMexe) {
+    if ($CMexe -and (Test-Path $CMexe)) {
         # Create the new shortcut if the path exists
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Console.lnk")
         $shortcut.TargetPath = $CMexe
