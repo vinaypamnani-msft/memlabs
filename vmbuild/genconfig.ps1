@@ -44,12 +44,12 @@ Function Show-Passwords {
 
     $DCs = get-list -type vm | Where-Object { $_.Role -eq "DC" }
     if ($LineCount) {
-        return $DCs.Count +3
+        return $DCs.Count + 3
     }
     Write-WhiteI "Default Password for all accounts is: " -NoNewline
     Write-Host2 -foregroundColor $Global:Common.Colors.GenConfigNotice "$($Global:Common.LocalAdmin.GetNetworkCredential().Password)"
     Write-Host
-    $DCs| Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
+    $DCs | Format-Table domain, adminName , @{Name = "Password"; Expression = { $($Common.LocalAdmin.GetNetworkCredential().Password) } } | out-host
 }
 
 Function Select-PasswordMenu {
@@ -159,8 +159,7 @@ function Check-OverallHealth {
         [switch] $LineCount
     )
 
-    if ($LineCount) 
-    {
+    if ($LineCount) {
         return 5
     }
     $OriginalProgressPreference = $Global:ProgressPreference
@@ -454,7 +453,7 @@ function Show-Networks {
     )
     
     $networks = Get-EnhancedNetworkList
-    if ($LineCount){
+    if ($LineCount) {
         return $networks.Count
     }
     ($networks | Select-Object Network, Domain, SiteCodes, "Virtual Machines" | Format-Table | Out-String).Trim() | out-host
@@ -563,23 +562,23 @@ function Select-DomainMenu {
        
 
             $customOptions = [ordered]@{
-                "*F1" = "Get-LabVMs -DomainName $domain"     
-                "*BZ" = "";       
+                "*F1"   = "Get-LabVMs -DomainName $domain"     
+                "*BZ"   = "";       
                 "*HELP" = "Update-HelpText"
-                "*B0" = "";
-                "*B1" = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
-                "M"   = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
-                "HM"  = "Use this option to modify the domain, adding new roles, or new VMs"
-                "1"   = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H1"  = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
-                "2"   = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H2"  = "Select any running VMs to stop.  List will be empty if nothing is running."
-                "3"   = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H3"  = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
-                "*S"  = ""
-                "*B2" = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-                "S"   = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                "HS"  = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
+                "*B0"   = "";
+                "*B1"   = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
+                "M"     = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
+                "HM"    = "Use this option to modify the domain, adding new roles, or new VMs"
+                "1"     = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H1"    = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
+                "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
+                "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
+                "H3"    = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
+                "*S"    = ""
+                "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
+                "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+                "HS"    = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
             }
               
             if ($checkPoint) {
@@ -610,10 +609,10 @@ function Select-DomainMenu {
                 }
             }
             $customOptions += [ordered]@{
-                "*Z" = ""
+                "*Z"  = ""
                 "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
-                "D" = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
-                "HD" = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs" 
+                "D"   = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
+                "HD"  = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs" 
             }
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
@@ -1638,7 +1637,7 @@ function Show-NewDomainTip {
     param(
         [switch] $LineCount
     )
-    if ($LineCount){
+    if ($LineCount) {
         return 2
     }
     Write-Host
@@ -4071,6 +4070,9 @@ function Rename-VirtualMachine {
             if ($existing.remoteContentLibVM -eq $vm.vmName) {
                 $existing.remoteContentLibVM = $newName
             }
+            if ($existing.patchMyPCFileServer -eq $vm.vmName) {
+                $existing.patchMyPCFileServer = $newName
+            }
             if ($existing.FileServerVM -eq $vm.vmName) {
                 $existing.FileServerVM = $newName
             }
@@ -4418,6 +4420,29 @@ function Get-AdditionalValidations {
             }
         }
        
+        "InstallPatchMyPC" {
+            if ($value -eq $true) {
+                if ($property.Role -notin ("CAS", "Primary")) {
+                    if (-not $Global:Config.cmOptions.UsePKI) {
+                        Add-ErrorMessage -property $name "PatchMyPC must be installed on the site server if not using PKI for SCCM"
+                        $property.$name = $false
+                        $property.PsObject.Members.Remove("PatchMyPCFileServer")
+                        return
+                    }
+                }
+                $result = select-FileServerMenu
+                if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                    $property | Add-Member -MemberType NoteProperty -Name "PatchMyPCFileServer" -Value $result -Force
+                }
+                else {
+                    $property.PsObject.Members.Remove("PatchMyPCFileServer")
+                }
+
+            }
+            else {
+                $property.PsObject.Members.Remove("PatchMyPCFileServer")
+            }
+        }
         "installSUP" {
             if ($value -eq $true) {
                 if (-not $property.siteCode) {
@@ -4427,6 +4452,8 @@ function Get-AdditionalValidations {
                     $property.installSUP = $false
                     $property.PsObject.Members.Remove("wsusContentDir")
                     $property.PsObject.Members.Remove("wsusDataBaseServer")
+                    $property.PsObject.Members.Remove("InstallPatchMyPC")
+                    $property.PsObject.Members.Remove("PatchMyPCFileServer")
                 }
 
                 if ($property.ParentSiteCode -or $property.SiteCode) {
@@ -4442,8 +4469,13 @@ function Get-AdditionalValidations {
                                 $property.installSUP = $false
                                 $property.PsObject.Members.Remove("wsusContentDir")
                                 $property.PsObject.Members.Remove("wsusDataBaseServer")
+                                $property.PsObject.Members.Remove("InstallPatchMyPC")
+                                $property.PsObject.Members.Remove("PatchMyPCFileServer")
                                 Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
                             }
+                        }
+                        else {
+                            $property | Add-Member -MemberType NoteProperty -Name "InstallPatchMyPC" -Value $false -Force
                         }
                     }
 
@@ -4486,6 +4518,8 @@ function Get-AdditionalValidations {
                 if ($property.Role -ne "WSUS") {
                     $property.PsObject.Members.Remove("wsusContentDir")
                     $property.PsObject.Members.Remove("wsusDataBaseServer")
+                    $property.PsObject.Members.Remove("InstallPatchMyPC")
+                    $property.PsObject.Members.Remove("PatchMyPCFileServer")
 
                 }
             }
@@ -5249,41 +5283,7 @@ function Select-Options {
             } 
         }
 
-        <#
-        # { foreach ($item in (Get-SortedProperties $property)) {
-            $value = $property."$($item)"
-            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
-                continue
-            }
 
-            if ($done) {
-                break
-            }
-            $i = $i + 1
-
-            if ($fakeNetwork -and $response -eq $fakeNetwork) {
-                $name = "network"
-                $done = $true
-            }
-            else {
-                if ($fakeNetwork -and ($i -eq $fakeNetwork)) {
-                    $i++
-                }
-                if (-not ($response -eq $i)) {
-                    continue
-                }
-                if ($isExisting) {
-                    if ($null -eq $property."$($item + "-Original")") {
-                        write-log -logonly "Adding $($item)-Original to $($property.vmName)"
-                        $property |  Add-Member -MemberType NoteProperty -Name $("$item" + "-Original") -Value $property."$($item)" -force
-                    }
-                }
-                $value = $property."$($item)"
-                $name = $($item)
-
-            }
-:Enter a comment or description}
-       #>
         switch ($name) {
             "operatingSystem" {
                 Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
@@ -5306,6 +5306,13 @@ function Select-Options {
                 $result = select-FileServerMenu -HA:$true -CurrentValue $value
                 if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
                     $property.remoteContentLibVM = $result
+                }
+                continue MainLoop
+            }
+            "patchMyPCFileServer" {
+                $result = select-FileServerMenu -HA:$true -CurrentValue $value
+                if (-not [string]::IsNullOrWhiteSpace($result) -and $result -ne "ESCAPE") {
+                    $property.patchMyPCFileServer = $result
                 }
                 continue MainLoop
             }

@@ -195,6 +195,14 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
+    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())"
+    Write-DscStatus "Installing SUP on $SUPFQDN"
+    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
+
+    if (-not $exists) {
+        New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+            -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+    }
     Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
 }
 
@@ -219,7 +227,7 @@ if ($configureSUP) {
             if ($topSite) {
                 
                 Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
-                Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
+                Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
                 Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
                 Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
                 Sync-CMSoftwareUpdate

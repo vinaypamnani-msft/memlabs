@@ -498,6 +498,7 @@ function Get-CriticalVMs {
     $fileServerNames = @()
     $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
     $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
+    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
     $fileServerNames = $fileServerNames | Select-Object -Unique
 
     foreach ($fsName in $fileServerNames) {

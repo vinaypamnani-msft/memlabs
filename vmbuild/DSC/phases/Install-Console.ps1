@@ -1,6 +1,7 @@
 #Install-Console.ps1
 param(
-    [string]$SiteServer
+    [string]$SiteServer,
+    [string]$CMInstallDir
 )
 #"E:\ConfigMgr\bin\I386\ConsoleSetup.exe" LangPackDir="E:\ConfigMgr\bin\i386\LanguagePack" TargetDir="E:\ConfigMgr\AdminConsole" DEFAULTSITESERVERNAME="ADA-PS1SITE.adatum.com"
 #SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup
@@ -33,8 +34,13 @@ function Install-Console {
     Write-DscStatus -NoStatus "Install-Console: Install Complete"
 }
 
-$ConsoleUIExe = "\\$($SiteServer)\e$\ConfigMgr\tools\consoleSetup\consoleSetup.exe"
+if (-not $CMInstallDir) {
+    $CMInstallDir = "E:\ConfigMgr"
+}
 
+$convertedPath = $CMInstallDir -replace ":", "$"
+$ConsoleUIExe = "\\$($SiteServer)\$($convertedPath)\tools\consoleSetup\consoleSetup.exe"
+Write-Output $ConsoleUIExe
 
 #$ConsoleUIExe = (Join-Path $CMInstallDir "\bin\I386\Consolesetup.exe") 
 

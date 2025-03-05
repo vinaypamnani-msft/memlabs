@@ -850,6 +850,143 @@ class InstallAndConfigWSUS {
 }
 
 [DscResource()]
+class InstallPMPC {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(Mandatory)]
+    [string] $URL
+
+    [DscProperty(Mandatory)]
+    [string] $SiteCode
+
+    [DscProperty(Mandatory)]
+    [string] $SqlServer
+
+    [DscProperty(Mandatory)]
+    [string] $SiteServer
+
+    [DscProperty(Mandatory)]
+    [string] $FileServer
+   
+    [void] Set() {
+        $_path = $this.Path
+        $_URL = $this.URL
+
+        $Name = "Patch my PC"
+        Invoke-DownloadFile $_URL $_path
+       
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_Path
+        $arg3 = "/qn"
+        $arg4 = "/l*v"
+        $arg5 = "c:\temp\pmpc.log"
+       
+        try {
+            Write-Status "Installing $Name  $_path..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
+            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
+            Write-Status "$Name  $_path was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install $Name  with error: $ErrorMessage"
+            throw "Failed to install $Name  with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+
+        $SettingsXML = Get-Content "C:\Staging\DSC\Phases\PMPC.Settings.Template" -Raw
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESITECODE", $this.SiteCode)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESQLSERVER", $this.SqlServer)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESITESERVER", $this.SiteServer)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATEFILESERVER", $this.FileServer)
+        stop-service -name PatchMyPCService
+ 
+        $SettingsXML | out-file "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml" -Force -Encoding utf8
+        $SupportedProduct = Get-Content "C:\Staging\DSC\Phases\PMPC.SupportedProducts.Template" -Raw
+        $SupportedProduct | out-file "C:\Program Files\Patch My PC\Patch My PC Publishing Service\SupportedProducts.xml" -Force -Encoding utf8
+        start-service -name PatchMyPCService 
+    }
+
+    [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
+        if ((Test-Path -Path "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml")) {
+            return $true
+        }        
+        return $false
+    }
+
+    [InstallPMPC] Get() {
+        
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class InstallConsole {
+    [DscProperty(Key)]
+    [string] $SiteServerFQDN
+    [DscProperty(Mandatory)]
+    [string] $CMInstallDir
+   
+    [void] Set() {
+        $_SiteServer = $this.SiteServerFQDN
+        $_CMInstallDir = $this.CMInstallDir
+
+        if ($null -eq $_SiteServer) {
+            Write-Status "SiteServerFQDN is null, cannot install SCCM Console"
+            throw "SiteServerFQDN is null, cannot install SCCM Console"
+        }
+        if ($null -eq $_CMInstallDir) {
+            Write-Status "CMInstallDir is null, cannot install SCCM Console"
+            throw "CMInstallDir is null, cannot install SCCM Console"
+        }
+
+        Write-Status "Installing SCCM Console..."
+        & C:\staging\DSC\phases\Install-Console.ps1 -SiteServer $_SiteServer -CMInstallDir $_CMInstallDir
+        Write-Status "Finished installing SCCM Console... Rebooting"  
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1      
+    }
+
+    [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
+        try {
+            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        }
+        catch {
+            return $false
+        }
+        if (-not $key) {
+            return $false
+        }
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        if ($subKey) {
+            $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+        }
+        else {
+            return $false
+        }
+        if ($uiInstallPath) {
+            return $true
+        }
+        return $false
+    }
+
+    [InstallConsole] Get() {
+        
+        return $this
+    }
+
+}
+
+[DscResource()]
 class WriteEvent {
 
     [DscProperty(Mandatory)]

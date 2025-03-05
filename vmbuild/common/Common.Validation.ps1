@@ -227,7 +227,8 @@ function Test-MachineNameExists {
 
     write-log "Testing $name" -Verbose
 
-    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name }
+    $nameWithPrefix = $config.vmOptions.prefix + $name
+    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name -or $_.vmName -eq $nameWithPrefix }
 
     if (-not $vm) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
@@ -335,6 +336,10 @@ function Test-ValidVmSupported {
     if ($VM.remoteContentLibVM) {
         Test-ValidMachineName $VM.remoteContentLibVM -ReturnObject $ReturnObject
         Test-MachineNameExists $VM.remoteContentLibVM -ReturnObject $ReturnObject -config $ConfigObject
+    }
+    if ($VM.PatchMyPCFileServer) {
+        Test-ValidMachineName $VM.PatchMyPCFileServer -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.PatchMyPCFileServer -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.ClusterName) {

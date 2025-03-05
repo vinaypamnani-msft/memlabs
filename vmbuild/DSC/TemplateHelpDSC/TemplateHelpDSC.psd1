@@ -4,6 +4,8 @@
 RootModule = 'TemplateHelpDSC.psm1'
 
 DscResourcesToExport = @(
+    'InstallPMPC',
+    'InstallConsole',
     'InstallADK',
     'InstallSSMS',
     'InstallDotNet4',

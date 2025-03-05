@@ -371,6 +371,14 @@ function New-DeployConfig {
             }
         }
 
+        $pmpcVMs = $virtualMachines | Where-Object { $_.InstallPatchMyPC -and -not $_.Hidden } 
+        if ($pmpcVMs) {
+            foreach ($pmpcVM in $pmpcVMs) {
+                if ($pmpcVM.PatchMyPCFileServer -and -not $pmpcVM.PatchMyPCFileServer.StartsWith($configObject.vmOptions.prefix)) {
+                    $pmpcVM.PatchMyPCFileServer = $configObject.vmOptions.prefix + $pmpcVM.PatchMyPCFileServer
+                }
+            }
+        }
         # create params object
 
         $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
