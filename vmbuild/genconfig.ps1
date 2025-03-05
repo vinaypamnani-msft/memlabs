@@ -977,6 +977,9 @@ function Get-GenericHelp {
         "vmGeneration" { "Sets the Hyper-V VM generation. Only available on OSD clients, all other VMs are gen 2" }
         "ParentSiteCode" { "Sets the parent site code for siteservers or sitesystems" }
         "pullDPSourceDP" { "Sets the source Distribution point for this PullDP" }
+        "InstallPatchMyPC" { "Installs the PatchMyPC service on this VM. Must be installed on the Top-Level SUP" }
+        "PatchMyPCFileServer" { "Sets the FileServer that PatchMyPC will use to store its updates" }
+
         default { "Help Missing for $text" }
     }
     
