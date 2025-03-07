@@ -910,6 +910,8 @@ class InstallPMPC {
         $SupportedProduct = Get-Content "C:\Staging\DSC\Phases\PMPC.SupportedProducts.Template" -Raw
         $SupportedProduct | out-file "C:\Program Files\Patch My PC\Patch My PC Publishing Service\SupportedProducts.xml" -Force -Encoding utf8
         start-service -name PatchMyPCService 
+        start-sleep -seconds 120
+        & "C:\Program Files\Patch My PC\Patch My PC Publishing Service\PatchMyPC-Settings.exe" /SyncNow
     }
 
     [bool] Test() {
