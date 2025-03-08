@@ -239,6 +239,7 @@ try {
 
     # Automatically update DSC.Zip
     if ($Common.DevBranch) {
+        Set-Location $PSScriptRoot  | Out-Null
         $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
         $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
         if (Test-Path ".\DSC\DSC.zip") {

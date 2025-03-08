@@ -337,7 +337,8 @@ function Select-ConfigMenu {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
             $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
         }
-
+        $customOptions += [ordered]@{"^" = "Exit script" }
+        $customOptions += [ordered]@{ "H^" = "Same as Ctrl-C, Exits the script without saving." }
         if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
             #Do nothing as we are on server 2025
         }
@@ -369,6 +370,7 @@ function Select-ConfigMenu {
             #"1" { $SelectedConfig = Select-NewDomainConfig }
             #"2" { $SelectedConfig = Show-ExistingNetwork }
             #"C" { $SelectedConfig = Show-ExistingNetwork2 }
+            "^" { exit 0 }
             "C" { $SelectedConfig = Select-NewDomainConfig }
             #"3" { $SelectedConfig = Select-Config $sampleDir -NoMore }
            
