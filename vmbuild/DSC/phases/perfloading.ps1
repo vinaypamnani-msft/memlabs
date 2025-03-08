@@ -33,7 +33,7 @@ else {
 
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
-    $DN = 'DC=' + $DomainFullName.Replace('.',',DC=')   
+    $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
@@ -544,16 +544,17 @@ else {
     #we have to make powershell bypass for the baselines to work as expected
     $customclientsetting = "MEMLABS-powershellbypass"
  
-    New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
-    Write-DscStatus "$Tag $customclientsetting client setting created"
+    if (!(Get-CMClientSetting -Name $customclientsetting)) {
+        New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
+        Write-DscStatus "$Tag $customclientsetting client setting created"
 
-    # Enable the PowerShell Execution Policy setting
-    Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-    Write-DscStatus "$Tag Powershell policy succesfully changed for $customclientsetting client setting "
+        # Enable the PowerShell Execution Policy setting
+        Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
+        Write-DscStatus "$Tag Powershell policy succesfully changed for $customclientsetting client setting "
 
-    New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
-    Write-DscStatus "$Tag Deployed the client setting to all systems collection"
-
+        New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
+        Write-DscStatus "$Tag Deployed the client setting to all systems collection"
+    }
     # Define additional device collection information
     $Collections += @(
         @{
@@ -693,7 +694,7 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-        },
+        }
         @{
             Name  = "MEMLABS-Devices Missing Critical Updates"
             Query = @"
@@ -905,22 +906,13 @@ from sms_r_system where Client = 0 or Client is null
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            if (!(Get-CMFolder -FolderPath "Devicecollection\MEMLABS" )) {
-                New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
-                Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
-            }
-            else {
+            New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
 
-                Write-DscStatus "$Tag collection Folder MEMLABS already exists"
-            }            
-
-            $memlabsfolder = "$SiteCode" + ":" + "\Devicecollection\MEMLABS"
-
-            Write-DscStatus "$Tag $memlabsfolder"
+            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
 
             Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
 
-            Write-DscStatus "$Tag Moved collection $CollectionName under the folder MEMLABS"
+            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
 
         }
     }
@@ -947,272 +939,314 @@ from sms_r_system where Client = 0 or Client is null
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
     
-    function Check-SyncSucceeded {
-        param (
-            [string]$SiteCode
+    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
+
+    if ($Sups) {
+
+        # Get the Software Update Point Component
+        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
+    
+        # Get unique operating systems
+        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
+
+        Write-DscStatus "$Tag the OS for this SCCM site are $products"
+    
+        # Rename products based on conditions
+        $products = $products -replace "^Server 2016$", "Windows Server 2016"
+        $products = $products -replace "^Server 2019$", "Windows Server 2019"
+        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
+        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
+        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
+        $products = $products -replace "^Windows 11.*$", "Windows 11"
+        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
+        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
+        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
+        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
+    
+        # Add additional products for defender and Office 365
+        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
+        $products += "Microsoft Defender for Endpoint"
+    
+        # Add double quotes around each product name as few products have commans in their name
+        $products = @($products | ForEach-Object { "$_" })
+
+        Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
+    
+        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
+
+        Write-DscStatus "$Tag Are there any products not checked on SUP product? $missingproducts - if yes, please continue"
+        function Check-SyncSucceeded {
+            param (
+                [string]$SiteCode
+            )
+     
+            $syncFinished = $syncTimeout = $false
+            $i = 0
+     
+            do {                    
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+    
+                if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
+                    Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                    Sync-CMSoftwareUpdate
+                    Start-Sleep -Seconds 120
+                } 
+                else {
+                    $syncStateString = "Unknown"
+                    switch ($($syncState.LastSyncState)) {
+                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                        "6701" { $syncStateString = "WSUS Synchronization Started" }
+                        "6702" { $syncStateString = "WSUS Synchronization Done" }
+                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                    }
+                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
+     
+                    if ($syncState.LastSyncState -eq 6702) {
+                        Write-DscStatus "SUM Sync finished successfully."
+                        return $true
+                    }
+     
+                    if (-not $syncFinished) {
+                        $i++
+                        Start-Sleep -Seconds 60
+                    }
+     
+                    if ($i -gt 60) {
+                        $syncTimeout = $true
+                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                        return $false
+                    }
+                }
+            }  until ($syncFinished -or $syncTimeout)
+     
+            return $false
+        }
+
+        function finalfullsync {
+            $folderPath = "$DriveLetter':\ConfigMgr\inboxes\wsyncmgr.box"
+            $filePath = Join-Path $folderPath "full.syn"
+    
+            # Ensure the folder exists; create it if it doesn't
+            if (Test-Path $folderPath) {
+           
+                try {
+                    # Create the "full.syn" file (overwrites if it exists)
+                    New-Item -Path $filePath -ItemType File -Force | Out-Null
+                    Write-DscStatus "$Tag File 'full.syn' created successfully at $folderPath"
+                }
+                catch {
+                    Write-DscStatus "$Tag Error creating 'full.syn': $_"
+                }
+            }
+
+        }
+
+    
+        # Check if product classifications are already enabled for Critical updates or definition updates
+        if (!$missingproducts) {
+            Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
+        }
+        else {
+            Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
+            Sync-CMSoftwareUpdate
+            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
+
+            if ($syncSuccess) {
+
+                Write-DscStatus "$Tag Found missing $products, enabling them now"
+                $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+                $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+    
+                # Get the language setting
+                $lang = $deployConfig.vmOptions.locale
+    
+                # Define language mappings
+                switch ($lang) {
+                    "en-us" { $addLang = "English" }
+                    "ja-jp" { $addLang = "Japanese" }
+                    "es-es" { $addLang = "Spanish" }
+                    "de-de" { $addLang = "German" }
+                    "fr-fr" { $addLang = "French" }
+                    default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
+                }
+    
+                # Output the result
+                Write-DscStatus "$Tag the locale language is $addLang"
+    
+                $parameters = @{
+                    InputObject                   = $supComp
+                    #DefaultWsusServer            = 'sup.contoso.com'
+                    SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
+                    #ReportingEvent               = 'CreateAllWsusReportingEvents'
+                    #RemoveUpdateClassification   = "Update Rollups"
+                    AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+                    Schedule                      = $schedule
+                    EnableSyncFailureAlert        = $true
+                    ImmediatelyExpireSupersedence = $false
+                    AddLanguageUpdateFile         = $addLang
+                    AddLanguageSummaryDetails     = $addLang
+                    #RemoveLanguageUpdateFile     = $removeLang
+                    #RemoveLanguageSummaryDetails = $removeLang
+                    EnableCallWsusCleanupWizard   = $true
+                    WaitMonth                     = 3
+                    EnableThirdPartyUpdates       = $true
+                    EnableManualCertManagement    = $false
+                    AddProduct                    = $products
+                }
+    
+                Set-CMSoftwareUpdatePointComponent @parameters
+    
+    
+                #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
+                Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+        
+                Write-DscStatus "$Tag !!Final !! sync after enabling products and classfications" 
+                finalfullsync
+
+            }
+            else {
+
+                Write-DscStatus "$Tag we were not able to sync the products and classifications so ADRs will not be created"
+                finalfullsync
+            }
+        }
+       
+        # Define the collection where the updates will be deployed
+        $TargetCollection = Get-CMDeviceCollection -Name "All systems"
+    
+        # Define ADR Names
+        $ADRNames = @{
+            "Client"   = "MEMLABS-ADR-Windows-10/11"
+            "Server"   = "MEMLABS-ADR-Windows-Servers"
+            "Defender" = "MEMLABS-ADR-Windows-defender"
+            "office"   = "MEMLABS-ADR-O365patching"
+        }
+
+        # Define the folder path and share name
+        $folderPath1 = "$DriveLetter\updatePkgs"
+        $shareName1 = "updatePkgs"
+
+        Write-DscStatus "$Tag sharing the updatePkgs folder as - $folderPath1"
+
+        # Create the folder if it doesn't exist
+        if (-not (Test-Path -Path $folderPath1)) {
+            New-Item -ItemType Directory -Path $folderPath1
+            Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
+        }
+
+        # Create the share with read access for "Everyone"
+        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess "Administrators" -ReadAccess "Everyone"
+
+        Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
+
+        # Define Deployment Packages
+        $Packages = @(
+            @{ Name = "MEMLABS-W10-11-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows10-11"; Description = "Windows 10 and 11 Security Updates" },
+            @{ Name = "MEMLABS-Win-Server-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windowsserver"; Description = "Windows Server Security Updates" },
+            @{ Name = "MEMLABS-Defender-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows_defender"; Description = "Windows Defender Updates" },
+            @{ Name = "MEMLABS-ADR-O365patching-pkg"; Path = "\\$ThisMachineName\updatePkgs\O365"; Description = "O365 Updates" }
         )
     
-        $syncFinished = $syncTimeout = $false
-        $i = 0
+        # Function to Create Software Update Deployment Package
+        function New-SCCMUpdatePackage {
+            param (
+                [string]$PackageName,
+                [string]$PackagePath,
+                [string]$PackageDescription
+            )
     
-        do {                    
-            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-    
-            if (-not $syncState) {
-                return # Must not be any SUPs to wait on.
+            if (!(Get-CMSoftwareUpdateDeploymentPackage -Name $PackageName)) {
+                Write-DscStatus "$Tag Creating package: $PackageName"
+                try {
+                    New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
+                    Write-DscStatus "$Tag Successfully created package: $PackageName"
+                    Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                    Write-DscStatus "$Tag Successfully distributed MEMLB  $PackageName to all DPs"
+                    New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
+                    Write-DscStatus "$Tag Successfully created SUG $PackageName"
+                
+                }
+                catch {
+                    Write-DscStatus "$Tag Failed to create package: $PackageName. Error: $_"
+                }
             }
-            if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
-                Sync-CMSoftwareUpdate
-                Start-Sleep -Seconds 120
-            } 
             else {
-                $syncStateString = "Unknown"
-                switch ($($syncState.LastSyncState)) {
-                    "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                    "6701" { $syncStateString = "WSUS Synchronization Started" }
-                    "6702" { $syncStateString = "WSUS Synchronization Done" }
-                    "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                    "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                    "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                    "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                    "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                    "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                    "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                    "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                }
-                Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
+                Write-DscStatus "$Tag Package already exists: $PackageName"
+            }
+        }
     
-                if ($syncState.LastSyncState -eq 6702) {
-                    Write-DscStatus "SUM Sync finished successfully."
-                    return $true
-                }
+        # Loop through each package and create it if it doesn't exist
+        foreach ($pkg in $Packages) {
+            New-SCCMUpdatePackage -PackageName $pkg.Name -PackagePath $pkg.Path -PackageDescription $pkg.Description
+        }
     
-                if (-not $syncFinished) {
-                    $i++
-                    Start-Sleep -Seconds 60
-                }
+        # Create the ADR schedules
+        $patchTueSchedule = New-CMSchedule -Start (Get-Date) -DayOfWeek Tuesday -WeekOrder Second -RecurCount 1 -OffsetDay 2
+        $dailySchedule = New-CMSchedule -DurationInterval Days -DurationCount 0 -RecurInterval Days -RecurCount 1
     
-                if ($i -gt 30) {
-                    $syncTimeout = $true
-                    Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                    return $false
+        if (!(Get-CMSoftwareUpdateAutoDeploymentRule -Fast | Select-Object Name)) {
+    
+            $maxAttempts = 3
+            $attempt = 0
+            $success = $false
+        
+            while (-not $success -and $attempt -lt $maxAttempts) {
+                try {
+                    New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Client `
+                        -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false `
+                        -Product "windows 11", "Windows 10, version 1903 and later" -Architecture X64 `
+                        -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                        -DeploymentPackageName $Packages[0].Name -Description "MEMLABS autocreated ADR for win 10/11 patching" `
+                        -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        
+                    Write-DscStatus "$Tag ADR created successfully for Windows 10 and 11 Security Updates"
+                    $success = $true
+                }
+                catch {
+                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates"
+                    Check-SyncSucceeded -SiteCode $SiteCode
+                    $attempt++
+                    Write-DscStatus "$Tag Retrying ADR creation, attempt $attempt of $maxAttempts"
+                    Start-Sleep -Seconds 10  # Pause before retrying
                 }
             }
-        }  until ($syncFinished -or $syncTimeout)
-    
-        return $false
-    }
-    
-    # Get the Software Update Point Component
-    $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
-    
-    # Get unique operating systems
-    $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
-
-    Write-DscStatus "$Tag the OS for this SCCM site are $products"
-    
-    # Rename products based on conditions
-    $products = $products -replace "^Server 2016$", "Windows Server 2016"
-    $products = $products -replace "^Server 2019$", "Windows Server 2019"
-    $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
-    $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
-    $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
-    $products = $products -replace "^Windows 11.*$", "Windows 11"
-    $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
-    $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
-    $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
-    $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
-    
-    # Add additional products for defender and Office 365
-    $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
-    $products += "Microsoft Defender for Endpoint"
-    
-    # Add double quotes around each product name as few products have commans in their name
-    $products = @($products | ForEach-Object { "$_" })
-
-    Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
-    
-    $missingproducts = $products -notmatch { $_ -notin $productclassifications }
-
-    Write-DscStatus "$Tag Are there any products not checked on SUP product? - if yes, please continue"
-    
-    # Check if product classifications are already enabled for Critical updates or definition updates
-    if (!$missingproducts) {
-        Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
-    }
-    else {
-        ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-        $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
-
-        if ($syncSuccess) {
-            
-            #Write-DscStatus "$Tag sleep 20 minutes to complete the intial sync for $products"
-            Write-DscStatus "$Tag wait 10 minutes to complete the intial sync to pull all the classifications and products"
-            #Start-Sleep -Seconds 1200
-
-            Write-DscStatus "$Tag Found missing $products, enabling them now"
-            $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-            $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
-
-            # Get the language setting
-            $lang = $deployConfig.vmOptions.locale
-
-            # Define language mappings
-            switch ($lang) {
-                "en-us" { $addLang = "English" }
-                "ja-jp" { $addLang = "Japanese" }
-                "es-es" { $addLang = "Spanish" }
-                "de-de" { $addLang = "German" }
-                "fr-fr" { $addLang = "French" }
-                default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
+        
+            if (-not $success) {
+                Write-DscStatus "$Tag ADR creation failed after $maxAttempts attempts."
             }
-
-            # Output the result
-            Write-DscStatus "$Tag the locale language is $addLang"
-
-            $parameters = @{
-                InputObject                   = $supComp
-                #DefaultWsusServer            = 'sup.contoso.com'
-                SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-                #ReportingEvent               = 'CreateAllWsusReportingEvents'
-                #RemoveUpdateClassification   = "Update Rollups"
-                AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-                Schedule                      = $schedule
-                EnableSyncFailureAlert        = $true
-                ImmediatelyExpireSupersedence = $false
-                AddLanguageUpdateFile         = $addLang
-                AddLanguageSummaryDetails     = $addLang
-                #RemoveLanguageUpdateFile     = $removeLang
-                #RemoveLanguageSummaryDetails = $removeLang
-                EnableCallWsusCleanupWizard   = $true
-                WaitMonth                     = 3
-                EnableThirdPartyUpdates       = $true
-                EnableManualCertManagement    = $false
-                AddProduct                    = $products
-            }
-
-            Set-CMSoftwareUpdatePointComponent @parameters
-
-
-            #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-            Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+        
+            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Server `
+                -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
+                -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+    
+            Write-DscStatus "$Tag ADR created successfully for Windows server Updates"
+    
+            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Defender `
+                -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false -Product $products -Architecture X64 `
+                -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
+                -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        
+            Write-DscStatus "$Tag ADR created successfully for Defender Security Updates"
+    
+            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.office `
+                -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
+                -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        
+            Write-DscStatus "$Tag ADR created successfully for O365 Updates"
 
             ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-            #Sync-CMSoftwareUpdate
-                
-        }
-        else {
-            Write-DscStatus "$Tag Sync failed or timed out."
+            finalfullsync
         }
 
-    }
-       
-    # Define the collection where the updates will be deployed
-    $TargetCollection = Get-CMDeviceCollection -Name "All systems"
-    
-    # Define ADR Names
-    $ADRNames = @{
-        "Client"   = "MEMLABS-ADR-Windows-10/11"
-        "Server"   = "MEMLABS-ADR-Windows-Servers"
-        "Defender" = "MEMLABS-ADR-Windows-defender"
-        "office"   = "MEMLABS-ADR-O365patching"
-    }
-
-    # Define the folder path and share name
-    $folderPath1 = "$DriveLetter\updatePkgs"
-    $shareName1 = "updatePkgs"
-
-    Write-DscStatus "$Tag sharing the updatePkgs folder as - $folderPath1"
-
-    # Create the folder if it doesn't exist
-    if (-not (Test-Path -Path $folderPath1)) {
-        New-Item -ItemType Directory -Path $folderPath1
-        Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
-    }
-
-    # Create the share with read access for "Everyone"
-    New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess "Administrators" -ReadAccess "Everyone"
-
-    Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
-
-    # Define Deployment Packages
-    $Packages = @(
-        @{ Name = "MEMLABS-W10-11-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows10-11"; Description = "Windows 10 and 11 Security Updates" },
-        @{ Name = "MEMLABS-Win-Server-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windowsserver"; Description = "Windows Server Security Updates" },
-        @{ Name = "MEMLABS-Defender-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows_defender"; Description = "Windows Defender Updates" },
-        @{ Name = "MEMLABS-ADR-O365patching-pkg"; Path = "\\$ThisMachineName\updatePkgs\O365"; Description = "O365 Updates" }
-    )
-    
-    # Function to Create Software Update Deployment Package
-    function New-SCCMUpdatePackage {
-        param (
-            [string]$PackageName,
-            [string]$PackagePath,
-            [string]$PackageDescription
-        )
-    
-        if (!(Get-CMSoftwareUpdateDeploymentPackage -Name $PackageName)) {
-            Write-DscStatus "$Tag Creating package: $PackageName"
-            try {
-                New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
-                Write-DscStatus "$Tag Successfully created package: $PackageName"
-                Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-                Write-DscStatus "$Tag Successfully distributed MEMLB  $PackageName to all DPs"
-                New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
-                Write-DscStatus "$Tag Successfully created SUG $PackageName"
-                
-            }
-            catch {
-                Write-DscStatus "$Tag Failed to create package: $PackageName. Error: $_"
-            }
-        }
-        else {
-            Write-DscStatus "$Tag Package already exists: $PackageName"
-        }
-    }
-    
-    # Loop through each package and create it if it doesn't exist
-    foreach ($pkg in $Packages) {
-        New-SCCMUpdatePackage -PackageName $pkg.Name -PackagePath $pkg.Path -PackageDescription $pkg.Description
-    }
-    
-    # Create the ADR schedules
-    $patchTueSchedule = New-CMSchedule -Start (Get-Date) -DayOfWeek Tuesday -WeekOrder Second -RecurCount 1 -OffsetDay 2
-    $dailySchedule = New-CMSchedule -DurationInterval Days -DurationCount 0 -RecurInterval Days -RecurCount 1
-    
-    if (!(Get-CMSoftwareUpdateAutoDeploymentRule -Fast | Select-Object Name)) {
-    
-        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Client `
-            -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "windows 11", "Windows 10, version 1903 and later" -Architecture X64 `
-            -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-            -DeploymentPackageName $Packages[0].Name -Description "MEMLABS autocreated ADR for win 10/11 patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-    
-        Write-DscStatus "$Tag ADR created successfully for Windows 10 and 11 Security Updates"
-    
-        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Server `
-            -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
-            -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-            -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-    
-        Write-DscStatus "$Tag ADR created successfully for Windows server Updates"
-    
-        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Defender `
-            -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false -Product $products -Architecture X64 `
-            -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
-            -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-        Write-DscStatus "$Tag ADR created successfully for Defender Security Updates"
-    
-        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.office `
-            -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
-            -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-            -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-        Write-DscStatus "$Tag ADR created successfully for O365 Updates"
-
-        ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-        Sync-CMSoftwareUpdate
     }
     
 
@@ -1223,4 +1257,7 @@ from sms_r_system where Client = 0 or Client is null
     Write-DscStatus "$Tag Completed the perf loading the environment"
     Write-DscStatus "$Tag ******************************************" -NoStatus
     Write-DscStatus "$Tag ******************************************" -NoStatus
+
+
+
 }
