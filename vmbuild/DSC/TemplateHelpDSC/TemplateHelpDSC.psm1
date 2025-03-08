@@ -4197,7 +4197,7 @@ class AddToAdminGroup {
                 start-sleep -seconds 5
                 continue
             }
-            Write-Status "Done."
+            Write-Status "Done $DisplayAccountName."
             return
         }
 

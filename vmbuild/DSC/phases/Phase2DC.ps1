@@ -53,8 +53,11 @@
     # Wait on machines to join domain
     [System.Collections.ArrayList]$waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
 
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
+    $Domain = $deployConfig.vmOptions.domainName
+    $DNName = 'DC=' + $Domain.Replace('.',',DC=')    
+    #$domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+    #$DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
     $OtherDC = $false
 

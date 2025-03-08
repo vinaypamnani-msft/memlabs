@@ -848,9 +848,10 @@ function Get-SQLAOConfig {
     $ServiceAccount = $PrimaryAO.SqlServiceAccount
     $AgentAccount = $PrimaryAO.SqlAgentAccount
 
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-    $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+    $Domain = $deployConfig.vmOptions.domainName
+    $DN = 'DC=' + $Domain.Replace('.',',DC=')    
+    $cnUsersName = "CN=Users,$DN"
+    $cnComputersName = "CN=Computers,$DN"
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {

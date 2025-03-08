@@ -120,9 +120,9 @@ if (Test-Path $cm_svc_file) {
     "Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $sitecode -Enabled $true -Verbose" | Out-File $global:StatusLog -Append
     Set-CMDiscoveryMethod -ActiveDirectoryForestDiscovery -SiteCode $sitecode -Enabled $true -Verbose | Out-File $global:StatusLog -Append
 
-    $DomainA = $DomainFullName.Split(".")[0]
-    $DomainB = $DomainFullName.Split(".")[1]
-    $LDAPPath = "LDAP://DC=$DomainA,DC=$DomainB"
+    $Domain = $DomainFullName
+    $DN = 'DC=' + $Domain.Replace('.',',DC=')   
+    $LDAPPath = "LDAP://$DN"
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery $LDAPPath"
     Write-DscStatus "Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -Verbose -EnableIncludeGroup $$true -EnableRecursive $$true"
     Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $sitecode -Enabled $true -addActiveDirectoryContainer @($LDAPPath) -UserName $ForestDiscoveryAccount -EnableIncludeGroup $true -EnableRecursive $true -Verbose *>&1 | Out-File $global:StatusLog -Append

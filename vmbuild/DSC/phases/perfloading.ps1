@@ -33,6 +33,7 @@ else {
 
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
+    $DN = 'DC=' + $DomainFullName.Replace('.',',DC=')   
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
     $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
@@ -434,7 +435,7 @@ else {
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://CN=Computers,DC=$domainshortname,DC=com"
+            DomainOrganizationUnit          = "LDAP://CN=Computers,$DN"
             DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
@@ -467,7 +468,7 @@ else {
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://CN=Computers,DC=$domainshortname,DC=com"
+            DomainOrganizationUnit          = "LDAP://CN=Computers,$DN"
             DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
@@ -757,7 +758,7 @@ WHERE SMS_R_SYSTEM.Name LIKE '%DC%'
             Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
-WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,DC=Domain,DC=com%'
+WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,$DN%'
 "@
         },
         @{
@@ -957,8 +958,11 @@ from sms_r_system where Client = 0 or Client is null
         do {                    
             $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
     
+            if (-not $syncState) {
+                return # Must not be any SUPs to wait on.
+            }
             if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                 Sync-CMSoftwareUpdate
                 Start-Sleep -Seconds 120
             } 
