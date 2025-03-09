@@ -55,6 +55,13 @@ function Test-ValidVmOptions {
         Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $ReturnObject -Failure
     }
 
+    $ExistingPrefixes = Get-list -type Prefix | where-object { $_.Domain -ne $ConfigObject.vmOptions.DomainName } | Select-Object -ExpandProperty Prefix
+
+    if ($ConfigObject.vmOptions.prefix -in $ExistingPrefixes) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix value [$($ConfigObject.vmOptions.prefix)] is already in use by another domain. You must specify a different prefix." -ReturnObject $ReturnObject -Failure
+    }
+
+
     # basePath
     if (-not $ConfigObject.vmOptions.basePath) {
         Add-ValidationMessage -Message "VM Options Validation: vmOptions.basePath not present in vmOptions. You must specify the base path where the Virtual Machines will be created." -ReturnObject $ReturnObject -Failure
