@@ -1106,7 +1106,9 @@ from sms_r_system where Client = 0 or Client is null
     
                 #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
                 Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-        
+                Write-DscStatus "$Tag $productclassifications before enabling"
+                $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
+                Write-DscStatus "$Tag $productclassifications after enabling"
                 Write-DscStatus "$Tag !!Final !! sync after enabling products and classfications" 
                 finalfullsync
 
