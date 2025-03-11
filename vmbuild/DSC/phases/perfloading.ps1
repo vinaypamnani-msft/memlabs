@@ -1030,8 +1030,9 @@ from sms_r_system where Client = 0 or Client is null
         }
 
         function finalfullsync {
-            $folderPath = "$DriveLetter':\ConfigMgr\inboxes\wsyncmgr.box"
+            $folderPath = "$DriveLetter\ConfigMgr\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
+            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
     
             # Ensure the folder exists; create it if it doesn't
             if (Test-Path $folderPath) {
@@ -1055,7 +1056,7 @@ from sms_r_system where Client = 0 or Client is null
         }
         else {
             Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
-            Sync-CMSoftwareUpdate
+            finalfullsync
             $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
 
             if ($syncSuccess) {
@@ -1107,8 +1108,8 @@ from sms_r_system where Client = 0 or Client is null
                 #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
                 Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
                 Write-DscStatus "$Tag $productclassifications before enabling"
-                $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
-                Write-DscStatus "$Tag $productclassifications after enabling"
+                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
+                Write-DscStatus "$Tag $productclassifications1 after enabling"
                 Write-DscStatus "$Tag !!Final !! sync after enabling products and classfications" 
                 finalfullsync
 
@@ -1201,7 +1202,7 @@ from sms_r_system where Client = 0 or Client is null
         
             while (-not $success -and $attempt -lt $maxAttempts) {
                 try {
-                    New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Client `
+                    New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Client `
                         -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false `
                         -Product "windows 11", "Windows 10, version 1903 and later" -Architecture X64 `
                         -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
@@ -1224,27 +1225,40 @@ from sms_r_system where Client = 0 or Client is null
                 Write-DscStatus "$Tag ADR creation failed after $maxAttempts attempts."
             }
         
-            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Server `
-                -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
-                -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-                -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+            try {
+                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Server `
+                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
+                    -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                    -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
     
-            Write-DscStatus "$Tag ADR created successfully for Windows server Updates"
-    
-            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.Defender `
-                -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false -Product $products -Architecture X64 `
-                -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
-                -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+                Write-DscStatus "$Tag ADR created successfully for Windows server Updates"
+            }
+            catch {
+                Write-DscStatus "$Tag An error occurred while creating the ADR for win server patching"
+            }
+            try {
+                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Defender `
+                    -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false -Product $products -Architecture X64 `
+                    -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
+                    -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
         
-            Write-DscStatus "$Tag ADR created successfully for Defender Security Updates"
-    
-            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId $TargetCollection.CollectionID -Name $ADRNames.office `
-                -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
-                -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-                -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-            Write-DscStatus "$Tag ADR created successfully for O365 Updates"
+                Write-DscStatus "$Tag ADR created successfully for Defender Security Updates"
+            }
+            catch {
+                Write-DscStatus "$Tag An error occurred while creating the ADR for Defender Security Updates"
+            }
 
+            try {
+                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.office `
+                    -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
+                    -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                    -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        
+                Write-DscStatus "$Tag ADR created successfully for O365 Updates"
+            }
+            catch {
+                Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
+            }
             ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
             finalfullsync
         }
