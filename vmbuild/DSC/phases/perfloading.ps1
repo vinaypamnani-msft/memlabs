@@ -944,7 +944,7 @@ from sms_r_system where Client = 0 or Client is null
     if ($Sups) {
 
         # Get the Software Update Point Component
-        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
+        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
     
         # Get unique operating systems
         $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
@@ -1029,8 +1029,8 @@ from sms_r_system where Client = 0 or Client is null
             return $false
         }
 
-        function finalfullsync {
-            $folderPath = "$DriveLetter\ConfigMgr\inboxes\wsyncmgr.box"
+        function Invoke-Invoke-finalfullsync {
+            $folderPath = "$ThisVM.CMInstallDir\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
             Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
     
@@ -1056,7 +1056,7 @@ from sms_r_system where Client = 0 or Client is null
         }
         else {
             Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
-            finalfullsync
+            Invoke-finalfullsync
             $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
 
             if ($syncSuccess) {
@@ -1108,16 +1108,16 @@ from sms_r_system where Client = 0 or Client is null
                 #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
                 Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
                 Write-DscStatus "$Tag $productclassifications before enabling"
-                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object LocalizedCategoryInstanceName
+                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
                 Write-DscStatus "$Tag $productclassifications1 after enabling"
                 Write-DscStatus "$Tag !!Final !! sync after enabling products and classfications" 
-                finalfullsync
+                Invoke-finalfullsync
 
             }
             else {
 
                 Write-DscStatus "$Tag we were not able to sync the products and classifications so ADRs will not be created"
-                finalfullsync
+                Invoke-finalfullsync
             }
         }
        
@@ -1260,7 +1260,7 @@ from sms_r_system where Client = 0 or Client is null
                 Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
             }
             ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
-            finalfullsync
+            Invoke-finalfullsync
         }
 
     }
