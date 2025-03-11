@@ -1029,7 +1029,7 @@ from sms_r_system where Client = 0 or Client is null
             return $false
         }
 
-        function Invoke-Invoke-finalfullsync {
+        function Invoke-finalfullsync {
             $folderPath = "$ThisVM.CMInstallDir\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
             Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
