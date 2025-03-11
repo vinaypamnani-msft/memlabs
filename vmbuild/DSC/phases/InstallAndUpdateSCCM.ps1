@@ -412,6 +412,44 @@ if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
 }
 
+$cm_svc_file = "$LogPath\cm_svc.txt"
+if (Test-Path $cm_svc_file) {
+    # Add cm_svc user as a CM Account
+    $ExistingAccount = Get-CMAccount | Where-Object { $_.UserName -eq $cm_svc }
+    if (-not $ExistingAccount) {
+        $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
+        Write-DscStatus "Adding cm_svc domain account as CM account"
+        Start-Sleep -Seconds 5
+        New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+        # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
+    }
+    $found = $false
+    try {
+        $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
+        if ($cm_svc -in $accounts) {
+            $found = $true
+        }
+        else {
+            write-DscStatus "$cm_svc not found in $accounts for Sitecode $SiteCode"
+        }
+        #$found = (Get-CMClientPushInstallation).PropLists.Values -contains $cm_svc
+    }
+    catch {}
+
+    if (-not $found) {
+        # Set client push account
+        Write-DscStatus "Setting the Client Push Account"
+        Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc
+        Start-Sleep -Seconds 5
+
+        # Restart services to make sure push account is acknowledged by CCM
+        Write-DscStatus "Restarting services"
+        Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue    
+        Start-Sleep -seconds 30
+    }
+}
+
 # Check if we should update
 $UpdateRequired = $false
 if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {

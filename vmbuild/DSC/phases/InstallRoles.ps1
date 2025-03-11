@@ -208,10 +208,10 @@ foreach ($SUP in $SUPs) {
 
 # Configure SUP
 #$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
-$productsToAdd = @("SQL Server 2005")
+#$productsToAdd = @("SQL Server 2005")
 #$productsToAdd = @("PowerShell - x64")
 #$classificationsToAdd = @("Critical Updates","Definition updates","Security Updates","Upgrades","updates")
-$classificationsToAdd = @("Tools")
+$classificationsToAdd = @("Updates")
 if ($configureSUP) {
 
     if ($offlineSUP) {
@@ -225,11 +225,17 @@ if ($configureSUP) {
 
         try {
             if ($topSite) {
-                
-                Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
-                Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
-                Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
-                Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
+                                            
+                $productclassifications = Get-CMSoftwareUpdateCategory -Fast | Where-Object { $_.IsSubscribed } | Select-Object -Expand LocalizedCategoryInstanceName
+                $match = $($productclassifications -contains $classificationsToAdd)
+                if (-not $match) {
+                    Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
+                    #Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
+                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
+                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
+                    Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
+                }
+ 
                 Sync-CMSoftwareUpdate
                 Write-DscStatus "SUM Component Sync started."
 

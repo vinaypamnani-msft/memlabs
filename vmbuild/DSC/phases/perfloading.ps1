@@ -1171,7 +1171,7 @@ from sms_r_system where Client = 0 or Client is null
                     New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created package: $PackageName"
                     Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Successfully distributed MEMLB  $PackageName to all DPs"
+                    Write-DscStatus "$Tag Successfully distributed MEMLAB $PackageName to all DPs"
                     New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created SUG $PackageName"
                 
