@@ -4527,6 +4527,7 @@ function Get-AdditionalValidations {
                     $property.PsObject.Members.Remove("PatchMyPCFileServer")
 
                 }
+                $newName = Rename-VirtualMachine -vm $property
             }
 
             #$validSiteCodes = Get-ValidSiteCodesForWSUS -config $Global:Config -CurrentVM $property
