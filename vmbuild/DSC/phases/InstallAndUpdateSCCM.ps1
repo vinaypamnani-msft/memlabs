@@ -411,7 +411,7 @@ if (-not $exists) {
 if (-not $exists) {
     Write-DscStatus "Failed to add 'vmbuildadmin' account as Full Administrator in ConfigMgr"
 }
-
+$cm_svc = "$DomainFullName\cm_svc"
 $cm_svc_file = "$LogPath\cm_svc.txt"
 if (Test-Path $cm_svc_file) {
     # Add cm_svc user as a CM Account
