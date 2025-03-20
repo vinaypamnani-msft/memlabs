@@ -1254,6 +1254,10 @@ $global:VM_Config = {
                         Import-Module $folder.Name -Force
                     }
                 }
+                #Create the zip flag
+                $zipflag = "C:\staging\DSC\DSC.zip.Installed"
+                New-Item -Path $zipflag -ItemType File -Force -ErrorAction SilentlyContinue                
+
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -1269,8 +1273,18 @@ $global:VM_Config = {
         }
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
-
-        if ($dscZipHash -ne $guestZipHash) {
+        $flagFound = $false
+        $zipflag = "C:\staging\DSC\DSC.zip.Installed"
+        
+        if (Test-Path $zipflag) {
+            $flagFound = $true
+        }
+        if ($dscZipHash -ne $guestZipHash -or -not $flagFound) {
+            #Remove the zip flag
+            if ($flagFound) {
+                Remove-Item -Path $zipflag -Force -ErrorAction SilentlyContinue
+            }
+            
             Write-Progress2 $Activity -Status "Expanding Modules" -percentcomplete 40 -force
             # Extract DSC modules
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
@@ -1346,6 +1360,10 @@ $global:VM_Config = {
                     $newName = $dscLog -replace "Log.log", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".log")
                     "Renaming $dscLog to $newName" | Out-File $log -Append
                     Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+                }
+                $dscLogOld = "C:\staging\DSC\DSC_Log.txt"
+                if (Test-Path $dscLogOld) {
+                    Remove-Item $dscLog -Force -Confirm:$false -ErrorAction SilentlyContinue                    
                 }
 
                 # Rename previous MOF path
