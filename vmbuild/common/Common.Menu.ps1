@@ -686,8 +686,7 @@ function Select-StopDomain {
         }
         else {
             Write-host "All VM's in '$domain' are already turned off."
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }
-            
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }            
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
@@ -701,8 +700,11 @@ function Select-StopDomain {
             $preResponse = $null
         }
         write-log -Verbose "StopVMs returned '$results' $($results.Count) $($results.GetType())"
-        if ($results -eq "ESCAPE" -or [string]::IsNullOrWhiteSpace($results) -or $results -eq "NOITEMS") {
+        if ($results -eq "ESCAPE") {
             return "ESCAPE"
+        }
+        if ($results -eq "NOITEMS" -or [string]::IsNullOrWhiteSpace($results)) {
+            return "NOITEMS"
         }
         if ([string]::IsNullOrWhiteSpace($results) -or $results -eq "None" -or $results -eq "ESCAPE") {
             write-log -Verbose "StopVMs Escape"
@@ -735,6 +737,7 @@ function Select-StopDomain {
             If ($results -and $results.Count -ge 1) {
                 Invoke-StopVMs -domain $domain -vmList $results
                 get-list -type VM -SmartUpdate | out-null
+                return
             }
         }
 

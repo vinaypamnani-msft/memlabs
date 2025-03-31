@@ -1139,7 +1139,7 @@ function Start-Navigation {
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             if ($NumSelectable -eq 0) {
                 Write-Log -verbose -LogOnly "Entering return function - Return ESCAPE"
-                return "ESCAPE"
+                return "NOITEMS"
             }
 
             if ($MultiSelect) {
