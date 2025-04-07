@@ -601,11 +601,6 @@ function Add-ExistingVMsToDeployConfig {
         }
     }
 
-
-
-
-
-
     $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden }
     foreach ($sup in $wsus) {
         if ($sup.InstallSUP) {

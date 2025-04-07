@@ -1018,17 +1018,17 @@ function Get-Phase8ConfigurationData {
                     }
                 }
 
-                if ($vm.PatchMyPCFileServer) {
-                    if ($fsVMsAdded -notcontains $vm.PatchMyPCFileServer) {
-                        $newItem = @{
-                            NodeName = $vm.PatchMyPCFileServer
-                            Role     = "FileServer"
-                        }
-                        $fsVMsAdded += $vm.PatchMyPCFileServer
-                        $cd.AllNodes += $newItem
-                        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
-                    }
-                }
+                #if ($vm.PatchMyPCFileServer) {
+                #    if ($fsVMsAdded -notcontains $vm.PatchMyPCFileServer) {
+                #        $newItem = @{
+                #            NodeName = $vm.PatchMyPCFileServer
+                #            Role     = "FileServer"
+                #        }
+                #        $fsVMsAdded += $vm.PatchMyPCFileServer
+                #        $cd.AllNodes += $newItem
+                #        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                #    }
+                #}
 
                 if ($vm.RemoteSQLVM) {
                     $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.RemoteSQLVM }
