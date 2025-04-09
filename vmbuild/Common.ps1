@@ -2138,9 +2138,11 @@ function New-VirtualMachine {
             }
         }
 
-        Write-Progress2 $Activity -Status "Setting VM to shutdown on stop" -percentcomplete 60 -force
-        Write-Log "$VmName`: Setting VM to shutdown on stop"
-        Set-VM -Name $vmName -AutomaticStopAction ShutDown | out-null
+        Write-Progress2 $Activity -Status "Setting VM to save on stop" -percentcomplete 60 -force
+        Write-Log "$VmName`: Setting VM to Save on stop"
+        Set-VMSecurity -VmName $vmName -EncryptStateAndVmMigrationTraffic $false
+        Set-VMSecurity -VmName $vmName -VirtualizationBasedSecurityOptOut $true
+        Set-VM -Name $vmName -AutomaticStopAction Save | out-null
 
         Write-Progress2 $Activity -Status "Setting Processors" -percentcomplete 62 -force
         Write-Log "$VmName`: Setting Processor count to $Processors"
