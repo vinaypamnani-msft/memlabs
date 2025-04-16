@@ -653,15 +653,55 @@ function Optimize-VHDX {
     )
 
     foreach ($vm in $VMs) {
-        stop-vm2 -name $vm.vmName 
+        $restart = $false
+        if ($vm.State -ne "Off") {
+            stop-vm2 -name $vm.VmName
+            $restart = $true
+        }
+
         foreach ($hd in Get-VHD -VMId $vm.VmId) {
             #    Mount-VHD -Path $hd.Path
+            $mounted = $false
+            Write-WhiteI -indent 0 "Starting optimization of $($vm.vmName) $($hd.Path)"
             try {
-                Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction Stop
+                $drive = Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction SilentlyContinue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                if ($drive) {
+                    $mounted = $true
+                }
+                else {
+                    stop-vm2 -name $vm.VmName -TurnOff
+                    start-sleep -seconds 30
+                    $drive = Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction continue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                    if ($drive) {
+                        $mounted = $true
+                    }
+                    else {
+                        Write-RedX "Failed to mount $($hd.Path) again"
+                        $mounted = $false
+                        continue
+                    }                   
+                }
+                $driveLetter = ($drive | Where-Object {$null -ne $_.driveLetter} | Select-Object -First 1).DriveLetter + ":"
+                Write-GreenCheck "Mounted $($hd.Path) to $driveLetter"
+                defrag $driveLetter /x
+                defrag $driveLetter /k /l
+                defrag $driveLetter /x
+                defrag $driveLetter /k               
+                Write-GreenCheck "Defragmented $driveLetter"
                 Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+                Write-GreenCheck "Optimized $($hd.Path)"
             }
             finally {
+                if ($mounted) {
                 Dismount-VHD -Path $hd.Path
+                }
+                if ($restart) {
+                    Start-VM -Name $vm.VmName
+                    Write-GreenCheck "Restarted $($vm.VmName)"
+                }
+                else {
+                    Write-GreenCheck "Dismounted $($hd.Path)"
+                }
             }
         }
     }

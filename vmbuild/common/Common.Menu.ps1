@@ -600,6 +600,7 @@ function Select-StartDomain {
         }
         else {
             $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***" }
+            return
             #Write-GreenCheck "All VM's in '$domain' are already Running"
             #return
         }
@@ -686,7 +687,8 @@ function Select-StopDomain {
         }
         else {
             Write-host "All VM's in '$domain' are already turned off."
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }            
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }  
+            return "NOITEMS"
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
