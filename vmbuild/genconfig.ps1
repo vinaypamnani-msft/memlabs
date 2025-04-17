@@ -696,7 +696,7 @@ function Optimize-VHDX {
                 Dismount-VHD -Path $hd.Path
                 }
                 if ($restart) {
-                    Start-VM -Name $vm.VmName
+                    Start-VM2 -retryseconds 30 -Name $vm.VmName
                     Write-GreenCheck "Restarted $($vm.VmName)"
                 }
                 else {
