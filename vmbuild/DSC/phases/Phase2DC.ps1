@@ -234,10 +234,15 @@
             Status    = "Setting Primary DNS, and DNS Forwarders"
         }
 
+        $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+        if ($deployConfig.DNSForwarders) {
+            $IPAddresses = $deployConfig.DNSForwarders
+        }
+                
         DnsServerForwarder DnsServerForwarder {
             DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
             IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+            IPAddresses      = $IPAddresses
             UseRootHint      = $true
             EnableReordering = $true
         }

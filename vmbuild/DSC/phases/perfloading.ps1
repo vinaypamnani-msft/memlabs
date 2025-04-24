@@ -404,7 +404,7 @@ else {
             IgnoreInvalidApplication           = $true
             SoftwareUpdateStyle                = "All"
             OperatingSystemFilePath            = $win10UpgradeOperatingSystemWim
-            ImageDescription                   = "image description"
+            ImageDescription                   = "MEMLABS autocreated"
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 

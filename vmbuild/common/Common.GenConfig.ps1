@@ -466,8 +466,8 @@ function Get-CriticalVMs {
     $vms = @()
     if ($vmNames) {
         #foreach ($vm in $vmNames) {
-            $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
-            write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
+        $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
+        write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
         #}
     }
     else {
@@ -966,8 +966,8 @@ function ConvertTo-DeployConfigEx {
                         }
                     }
                 }
-                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID")  {                    
-                    $sqlVM = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer  }
+                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID") {                    
+                    $sqlVM = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer }
                     
                     Add-VMToAccountLists -thisVM $thisVM -VM $sqlVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -SQLSysAdminAccounts -WaitOnDomainJoin
                 }
@@ -1277,11 +1277,19 @@ function ConvertTo-DeployConfigEx {
     }
 
 
-    # Add Apps
-    $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
-    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+    $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+    $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" }
+    if ($dnsClient) {
+        $IPAddresses = (Get-DnsClientServerAddress -AddressFamily IPv4  -InterfaceIndex $dnsClient.InterfaceIndex).ServerAddresses
+    }    
+        
+}
+$deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
+# Add Apps
+$deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
+$deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
 
-    return $deployConfigEx
+return $deployConfigEx
 }
 
 
