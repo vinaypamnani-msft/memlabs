@@ -1265,6 +1265,10 @@ from sms_r_system where Client = 0 or Client is null
 
     }
     
+    $collection = Get-CMCollection -Name "All Unknown Computers"
+    if ($Collection -and $Collection.CollectionID) {
+        Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID
+    }    
 
     # Create the flag file
     New-Item -ItemType File -Path $flagFile -Force | Out-Null

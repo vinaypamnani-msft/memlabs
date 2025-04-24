@@ -274,6 +274,9 @@ function Start-PhaseJobs {
 
         # Skip everything for OSDClient, nothing for us to do
         if ($Phase -gt 1 -and $currentItem.role -in ("OSDClient", "Linux")) {
+            if ($currentItem.role -in ("OSDClient")) {
+                stop-vm2 -Name $currentItem.vmName -TurnOff
+            }
             continue
         }
 
