@@ -448,7 +448,7 @@ function New-RDCManFileFromHyperV {
                         $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary","CAS" }
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary", "CAS" }
                 if ($SiteServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)" -force
                 }
@@ -542,6 +542,25 @@ function New-RDCManFileFromHyperV {
             $clonedSG.properties.name = "OSD Clients"
             $clonedSG.ruleGroup.rule.value = "OSDClient"
             [void]$findgroup.AppendChild($clonedSG)
+            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
+            $subKeys = @(
+                "AllowDefaultCredentialsDomain",
+                "AllowSavedCredentialsDomain",
+                "AllowDefaultCredentials",
+                "AllowFreshCredentialsDomain",
+                "AllowFreshCredentials",
+                "AllowFreshCredentialsWhenNTLMOnly",
+                "AllowFreshCredentialsWhenNTLMOnlyDomain",
+                "AllowSavedCredentials",
+                "AllowSavedCredentialsWhenNTLMOnly"
+            )
+            foreach ($subKey in $subKeys) {
+                $fullPath = Join-Path $policyDefaultsPath $subKey
+
+                if (-not (Test-Path $fullPath)) {
+                    New-Item -Path $fullPath -Force | Out-Null
+                }
+            }
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
@@ -558,6 +577,25 @@ function New-RDCManFileFromHyperV {
             $clonedSG.properties.name = "Linux"
             $clonedSG.ruleGroup.rule.value = "Linux"
             [void]$findgroup.AppendChild($clonedSG)
+            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
+            $subKeys = @(
+                "AllowDefaultCredentialsDomain",
+                "AllowSavedCredentialsDomain",
+                "AllowDefaultCredentials",
+                "AllowFreshCredentialsDomain",
+                "AllowFreshCredentials",
+                "AllowFreshCredentialsWhenNTLMOnly",
+                "AllowFreshCredentialsWhenNTLMOnlyDomain",
+                "AllowSavedCredentials",
+                "AllowSavedCredentialsWhenNTLMOnly"
+            )
+            foreach ($subKey in $subKeys) {
+                $fullPath = Join-Path $policyDefaultsPath $subKey
+
+                if (-not (Test-Path $fullPath)) {
+                    New-Item -Path $fullPath -Force | Out-Null
+                }
+            }
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
