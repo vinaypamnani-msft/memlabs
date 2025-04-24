@@ -406,6 +406,9 @@ function Select-ConfigMenu {
             "f" { Select-DeletePending }
             "d" { 
                 $SelectedConfig = Select-DomainMenu
+                if (-not $SelectedConfig) {
+                    continue
+                }
             }
             "n" { Select-NetworkMenu }
             "t" { Select-ToolsMenu }
@@ -435,11 +438,11 @@ function Select-ConfigMenu {
         if ($SelectedConfig -and $SelectedConfig -ne "ESCAPE") {
             Write-Verbose "SelectedConfig : $SelectedConfig"
             $global:existingMachines = $null
-            if (-not $SelectedConfig.VirtualMachines) {
+            if (-not $SelectedConfig.vmOptions) {
 
-                #Add-ErrorMessage -Warning "Config is invalid, as it does not contain any new or modified virtual machines."
+                Add-ErrorMessage -Warning "Config is invalid, as it does not contains vmOptions"
 
-                return $SelectedConfig
+                continue
             }
             else {
                 return $SelectedConfig
