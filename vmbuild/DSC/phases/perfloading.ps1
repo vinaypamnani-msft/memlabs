@@ -362,7 +362,8 @@ else {
             OperatingSystemImagePackageId      = $win11OSimagepackageID
             OperatingSystemImageIndex          = 3
             ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
-            GeneratePassword                   = $true
+            GeneratePassword                   = $false
+            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "Workgroup"
@@ -376,7 +377,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
         }
 
         New-CMTaskSequence @buildandcapturewin11
@@ -392,7 +393,8 @@ else {
             OperatingSystemImagePackageId      = $win10OSimagepackageID
             OperatingSystemImageIndex          = 3
             ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
-            GeneratePassword                   = $true
+            GeneratePassword                   = $false
+            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "workgroup"
@@ -406,7 +408,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
         }
         New-CMTaskSequence @buildandcapturewin10
         Write-DscStatus "$Tag Successfully created MEMLABS-w10-Build and capture TS"
@@ -430,12 +432,13 @@ else {
             OperatingSystemImagePackageId   = $win11OSimagepackageID
             OperatingSystemImageIndex       = 3
             ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
-            GeneratePassword                = $true
+            GeneratePassword                = $false
+            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://CN=Computers,$DN"
+            DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
             DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
@@ -463,12 +466,13 @@ else {
             OperatingSystemImagePackageId   = $win10OSimagepackageID
             OperatingSystemImageIndex       = 3
             ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
-            GeneratePassword                = $true
+            GeneratePassword                = $false
+            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://CN=Computers,$DN"
+            DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
             DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
@@ -1264,7 +1268,7 @@ from sms_r_system where Client = 0 or Client is null
         }
 
     }
-    
+
     $collection = Get-CMCollection -Name "All Unknown Computers"
     if ($Collection -and $Collection.CollectionID) {
         Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID

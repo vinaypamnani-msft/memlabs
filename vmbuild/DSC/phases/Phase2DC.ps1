@@ -385,6 +385,27 @@
         }
 
         if ($prePopulate) {
+            ADOrganizationalUnit 'MEMLABS-OSDComputers'
+            {
+                Name                            = "MEMLABS-OSDComputers"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS OSD Computers"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+
+            ADOrganizationalUnit 'MEMLABS-SecurityGroups'
+            {
+                Name                            = "MEMLABS-SecurityGroups"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS auto created security groups"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+            $nextDepend2 = "[ADOrganizationalUnit]MEMLABS-SecurityGroups"
+
             ADOrganizationalUnit 'MEMLABS-Users'
             {
                 Name                            = "MEMLABS-Users"
@@ -456,8 +477,8 @@
                     GroupScope  = "Global"
                     Category    = "Security"
                     Description = $GroupName
-                    DependsOn   = $nextDepend
-                    Path        = "OU=MEMLABS-Users,$DNName"
+                    DependsOn   = $nextDepend2
+                    Path        = "OU=MEMLABS-SecurityGroups,$DNName"
                 }
                 $waitOnDependency += "[ADGroup]$Department"
             }
