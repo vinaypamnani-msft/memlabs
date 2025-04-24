@@ -71,7 +71,7 @@ function Start-VM2 {
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
     try {
-        $vm = Get-VM2 -Name $Name
+        $vm = Get-VM2 -Name $Name -Fallback
 
         if ($vm.State -eq "Running") {
             Write-Log "${Name}: VM is already running." -LogOnly
@@ -94,7 +94,7 @@ function Start-VM2 {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-                $vm = Get-VM2 -Name $Name
+                $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     $running = $true
                 }
@@ -116,7 +116,7 @@ function Start-VM2 {
                 }
             }
             else {
-                $vm = Get-VM2 -Name $Name
+                $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     Write-Log "${Name}: VM was started." -LogOnly
                     if ($Passthru.IsPresent) {
@@ -163,7 +163,7 @@ function Stop-VM2 {
 
     try {
         $force = $true
-        $vm = Get-VM2 -Name $Name
+        $vm = Get-VM2 -Name $Name -Fallback
 
         if ($vm.State -eq "Off") {
             Write-Log "${Name}: VM is already stopped." -LogOnly
@@ -194,7 +194,7 @@ function Stop-VM2 {
                 
                     Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
                     Start-Sleep -Seconds $RetrySeconds
-                    $vm = Get-VM2 -Name $Name
+                    $vm = Get-VM2 -Name $Name -Fallback
                     if ($vm.State -eq "Off") {
                         return $true
                     }
@@ -239,7 +239,7 @@ function Get-VMCheckpoint2 {
         [string]$Name
     )
 
-    $vm = Get-VM2 -Name $VMName
+    $vm = Get-VM2 -Name $VMName -Fallback
 
     if ($vm) {
         if ($name) {
@@ -261,7 +261,7 @@ function Remove-VMCheckpoint2 {
         [string]$Name
     )
 
-    $vm = Get-VM2 -Name $VMName
+    $vm = Get-VM2 -Name $VMName -Fallback
 
     if ($vm) {
         return Remove-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
@@ -278,7 +278,7 @@ function Checkpoint-VM2 {
         [string]$SnapshotName
     )
 
-    $vm = Get-VM2 -Name $Name
+    $vm = Get-VM2 -Name $Name -Fallback
 
     if ($vm) {
         $json = $SnapshotName + ".json"

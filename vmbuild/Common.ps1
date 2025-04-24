@@ -1613,7 +1613,7 @@ function Get-VMNote {
         [string]$VMName
     )
 
-    $vm = Get-VM2 -Name $VMName
+    $vm = Get-VM2 -Name $VMName -Fallback
 
     if (-not $vm) {
         Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
@@ -1690,7 +1690,7 @@ function Set-VMNote {
    
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
-    $vm = Get-VM2 $VmName
+    $vm = Get-VM2 $VmName -Fallback
     if ($vm) {
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
@@ -2158,7 +2158,7 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Changing Boot Order" -percentcomplete 75 -force
         Write-Log "$VmName`: Changing boot order"
-        $f = Get-VM2 -Name $VmName | Get-VMFirmware
+        $f = Get-VM2 -Fallback -Name $VmName | Get-VMFirmware
         $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
         $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
         $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
@@ -2607,7 +2607,7 @@ function Wait-ForVm {
             $msg = "Waiting for $PathToVerify to exist"
         }
 
-        $vmTest = Get-VM2 -Name $VmName
+        $vmTest = Get-VM2 -Fallback -Name $VmName
         if ($vmTest.State -ne "Running") {
             start-vm2 -name $vmName
             start-sleep -seconds 30
@@ -2627,7 +2627,7 @@ function Wait-ForVm {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
-            $vmTest = Get-VM2 -Name $VmName
+            $vmTest = Get-VM2 -Fallback -Name $VmName
             if ($vmTest.State -ne "Running") {
                 stop-vm2 -name $vmName
                 start-sleep -seconds 30
@@ -2923,7 +2923,7 @@ function Get-VmSession {
         }
     }
 
-    $vm = get-vm2 -Name $VmName
+    $vm = get-vm2 -Fallback -Name $VmName
     if (-not $vm) {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
         return $null

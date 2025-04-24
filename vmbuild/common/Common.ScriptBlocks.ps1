@@ -229,7 +229,7 @@ $global:VM_Create = {
         if ($createVM) {
 
             # Check if VM already exists
-            $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
+            $exists = Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue
             if ($exists) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
                 return
