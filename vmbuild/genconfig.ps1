@@ -500,7 +500,7 @@ function Select-VMMenu {
         $response = Get-Menu2 -MenuName "Currently Deployed VMs" -Prompt "Press Enter" -AdditionalOptions $customOptions -HideHelp:$true -test:$false
 
         write-Verbose "1 response $response"
-        if (-not $response -or $response -eq "ESCAPE") {
+        if (-not $response -or $response -eq "ESCAPE" -or $response -eq "NOITEMS") {
             return
         }
       
