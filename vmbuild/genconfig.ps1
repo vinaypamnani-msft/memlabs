@@ -1283,7 +1283,6 @@ function Get-NewMachineName {
                     $RoleName = "Server"
                 }
             }
-
         }
         else {
             if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
@@ -1292,10 +1291,7 @@ function Get-NewMachineName {
             else {
                 $RoleName = "Client"
             }
-
-
         }
-
 
         if ($Role -eq "WorkgroupMember") {
             $RoleName = "WG"

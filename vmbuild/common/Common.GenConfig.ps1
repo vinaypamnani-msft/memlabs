@@ -1277,19 +1277,22 @@ function ConvertTo-DeployConfigEx {
     }
 
 
-    $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+   
+    $dnsClient = $null
     $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" }
     if ($dnsClient) {
-        $IPAddresses = (Get-DnsClientServerAddress -AddressFamily IPv4  -InterfaceIndex $dnsClient.InterfaceIndex).ServerAddresses
-    }    
-        
-}
-$deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
-# Add Apps
-$deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
-$deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+        $IPAddresses = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $dnsClient.InterfaceIndex).ServerAddresses
+    } 
+    else {
+        $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+    }   
 
-return $deployConfigEx
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
+    # Add Apps
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force
+
+    return $deployConfigEx
 }
 
 
