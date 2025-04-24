@@ -216,6 +216,13 @@ function Install-DP {
         Start-Sleep -Seconds 10
 
     } until ($dpinstalled -or $installFailure)
+
+    if ($dpinstalled -and $usePKI) {        
+        Invoke-Command -ComputerName $DPFQDN -ScriptBlock {
+            Set-ItemProperty -Path "HKLM:\Software\Microsoft\SMS\DP" -Name "SSLState" -Value 63 -Force
+        }    
+    }
+    
 }
 
 function Install-PullDP {
@@ -418,7 +425,7 @@ function Add-ReportingUser {
     $class_User = [wmiclass]""
     $class_User.psbase.Path = "ROOT\SMS\Site_$($SiteCode):$($SMSSCIReserved)"
     $user = $class_User.createInstance()
-    $user.ItemName = "$($UserName)|0"
+    $user.ItemName = "$($UserName)| 0"
     $user.ItemType = "User"
     $user.UserName = $UserName
     $user.Availability = "0"
