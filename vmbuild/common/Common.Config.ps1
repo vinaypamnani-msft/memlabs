@@ -844,7 +844,7 @@ function Get-SQLAOConfig {
     $AgentAccount = $PrimaryAO.SqlAgentAccount
 
     $Domain = $deployConfig.vmOptions.domainName
-    $DN = 'DC=' + $Domain.Replace('.',',DC=')    
+    $DN = 'DC=' + $Domain.Replace('.', ',DC=')    
     $cnUsersName = "CN=Users,$DN"
     $cnComputersName = "CN=Computers,$DN"
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
@@ -1859,7 +1859,11 @@ function Get-VMFromHyperV {
     }
 
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
-    return $vmObject
+    if ($vmObject.Domain) {
+        #If we dont have a domain, its not one of ours.
+        return $vmObject
+    }
+    return $null
 }
 
 function Update-VMFromHyperV {
@@ -2085,7 +2089,9 @@ function Get-List {
                             #    if (-not $global:vm_List.vmID -contains $vmID){
                             #write-host "adding missing vm $($vm.vmName)"
                             $vmObject = Get-VMFromHyperV -vm $vm
-                            $global:vm_List += $vmObject
+                            if ($vmObject) {
+                                $global:vm_List += $vmObject
+                            }
                         }
                         else {
                             if ($DomainName) {
@@ -2114,8 +2120,9 @@ function Get-List {
                     foreach ($vm in $virtualMachines) {
 
                         $vmObject = Get-VMFromHyperV -vm $vm
-
-                        $return += $vmObject
+                        if ($vmObject) {
+                            $return += $vmObject
+                        }
                     }
 
                     $global:vm_List = $return
