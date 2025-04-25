@@ -584,9 +584,12 @@ function select-ChangeDynamicMemory {
                 Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $Memory
             }                
         }
-        $crit = Get-CriticalVMs -domain $domain -vmNames $vmRestartList            
+        if ($vmRestartList -and ($vmRestartList | Measure-Object).count -gt 0) {
+            $crit = Get-CriticalVMs -domain $domain -vmNames $vmRestartList            
             
-        $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$false
+            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$false 
+        }
+        
     }
 }
 
