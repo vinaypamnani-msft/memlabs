@@ -759,6 +759,8 @@ function select-OptimizeDomain {
     get-list -type VM -SmartUpdate -ResetCache | out-null
     $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
+    write-Host "Total Savings: $([math]::Round($sizeBefore - $sizeAfter,2))GB"
+    Start-Sleep -seconds 10
     write-host
     Write-Host "$domain has been stopped and optimized. Make sure to restart the domain if neccessary."
 
