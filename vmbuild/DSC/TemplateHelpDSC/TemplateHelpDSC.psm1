@@ -3566,40 +3566,40 @@ class InstallPBIRS {
                 Write-Status "Calling Set-RsDatabase"
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
             }
             catch {
                 Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
-                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
                 else {
-                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
 
 
-            Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
 
 
             if ($this.TemplateName) {
@@ -3643,8 +3643,8 @@ class InstallPBIRS {
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10
-            Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
-            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
+            Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
+            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer } catch {}
             Write-Status ("Restart PowerBIReportServer Service")
             Restart-Service -Name "PowerBIReportServer" -Force
             try {
@@ -3654,6 +3654,7 @@ class InstallPBIRS {
         }
         catch {
             Write-Status "Failed to Configure PBIRS"
+            Write
             Write-Verbose "$_"
         }
     }

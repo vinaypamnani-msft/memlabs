@@ -80,7 +80,7 @@ $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 # Reporting Install
-
+Write-DscStatus "Installing Reporting Point"
 foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
 
     $thisSiteCode = $thisVM.SiteCode
@@ -90,7 +90,7 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
             continue
         }
     }
-
+    Write-DscStatus "Installing Reporting Point on $($rp.vmName) for site $($thisSiteCode)."
     $netbiosName = $deployConfig.vmOptions.DomainNetBiosName
     $username = $netbiosName + "\cm_svc"
     $databaseName = "CM_" + $thisSiteCode
