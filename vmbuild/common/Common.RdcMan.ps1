@@ -283,6 +283,7 @@ function New-RDCManFileFromHyperV {
         [string]$rdcmanfile,
         [bool]$OverWrite = $false,
         [switch]$NoActivity,
+        [switch]$UseIP,
         [switch]$WhatIf
     )
 
@@ -460,8 +461,12 @@ function New-RDCManFileFromHyperV {
             }
 
             $comment = $c | ConvertTo-Json
-
-            $name = $($vm.VmName)
+            if ($useIP) {
+                $name = $($vm.LastKnownIP)
+            }
+            else {
+                $name = $($vm.VmName)
+            }            
             $rolename = ""
             $ForceOverwrite = $false
             switch ($vm.Role) {
