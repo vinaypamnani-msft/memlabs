@@ -62,7 +62,7 @@ function Get-ValidSubnets {
 
     $subnetlist = @()
     if ($vmToCheck) {
-        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck       
+        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
     }
 
     $usedSubnets += $subnetList
@@ -702,7 +702,7 @@ function Invoke-StopVMs {
         [Parameter(Mandatory = $false, HelpMessage = "Quiet Moden")]
         [bool] $quiet = $false
     )
-    
+
 
     if (-not $vmList) {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
@@ -966,9 +966,9 @@ function ConvertTo-DeployConfigEx {
                         }
                     }
                 }
-                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID") {                    
+                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID") {
                     $sqlVM = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer }
-                    
+
                     Add-VMToAccountLists -thisVM $thisVM -VM $sqlVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -SQLSysAdminAccounts -WaitOnDomainJoin
                 }
             }
@@ -1277,15 +1277,11 @@ function ConvertTo-DeployConfigEx {
     }
 
 
-   
-    $dnsClient = $null
-    $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" }
-    if ($dnsClient) {
-        $IPAddresses = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $dnsClient.InterfaceIndex).ServerAddresses
-    } 
-    else {
-        $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
-    }   
+    $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+    if ($Common.CorpNetInterfaceIndex) {
+        $hostDnsServers = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $Common.CorpNetInterfaceIndex).ServerAddresses
+        $IPAddresses = $hostDnsServers #+ $IPAddresses
+    }
 
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
     # Add Apps
