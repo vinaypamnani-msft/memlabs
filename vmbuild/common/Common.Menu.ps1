@@ -524,7 +524,7 @@ function select-ChangeDynamicMemory {
         else {
             $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' already have Dynamic Memory $($verb)d ***" }
         }
-        $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
+        $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VMs" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
         Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
 
         if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE" -or $ReturnVal -eq "NOITEMS") {
@@ -586,7 +586,7 @@ function select-ChangeDynamicMemory {
         }
         $crit = Get-CriticalVMs -domain $domain -vmNames $vmRestartList            
             
-        $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+        $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$false
     }
 }
 

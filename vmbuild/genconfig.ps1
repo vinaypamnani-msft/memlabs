@@ -667,14 +667,14 @@ function Optimize-VHDX {
             $mounted = $false
             Write-WhiteI -indent 0 "Starting optimization of $($vm.vmName) $($hd.Path)"
             try {
-                $drive = Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction SilentlyContinue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                $drive = Mount-VHD -Path $hd.Path -ErrorAction SilentlyContinue -PassThru | Get-Disk | Get-Partition | Get-Volume
                 if ($drive) {
                     $mounted = $true
                 }
                 else {
                     stop-vm2 -name $vm.VmName -TurnOff
                     start-sleep -seconds 30
-                    $drive = Mount-VHD -Path $hd.Path -ReadOnly -ErrorAction continue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                    $drive = Mount-VHD -Path $hd.Path -ErrorAction continue -PassThru | Get-Disk | Get-Partition | Get-Volume
                     if ($drive) {
                         $mounted = $true
                     }
@@ -684,19 +684,39 @@ function Optimize-VHDX {
                         continue
                     }                   
                 }
-                $driveLetter = ($drive | Where-Object {$null -ne $_.driveLetter} | Select-Object -First 1).DriveLetter + ":"
+                $driveLetterOnly = ($drive | Where-Object { $null -ne $_.driveLetter } | Select-Object -First 1).DriveLetter
+                $driveLetter = $driveLetterOnly + ":"
                 Write-GreenCheck "Mounted $($hd.Path) to $driveLetter"
-                defrag $driveLetter /x
-                defrag $driveLetter /k /l
-                defrag $driveLetter /x
-                defrag $driveLetter /k               
+                Start-Sleep -seconds 5
+                defrag $driveLetter /h /x
+                defrag $driveLetter /h /k /l
+                defrag $driveLetter /h /x
+                defrag $driveLetter /h /k 
+                $global:progressPreference = "SilentlyContinue"                
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -Defrag -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -SlabConsolidate -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -ReTrim -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                $global:progressPreference = "Continue"
                 Write-GreenCheck "Defragmented $driveLetter"
-                Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+                try {
+                Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Stop
+                } catch {}
                 Write-GreenCheck "Optimized $($hd.Path)"
             }
             finally {
                 if ($mounted) {
-                Dismount-VHD -Path $hd.Path
+                    Dismount-VHD -Path $hd.Path
+                    Start-Sleep -seconds 5
+                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
                 }
                 if ($restart) {
                     Start-VM2 -retryseconds 30 -Name $vm.VmName

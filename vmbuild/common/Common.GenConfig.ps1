@@ -456,7 +456,7 @@ function Get-CriticalVMs {
 
     $allvms = @()
     if ($vmNames) {
-        write-log -verbose "[Get-CriticalVMs] Found $vmNames"
+        write-log -LogOnly "[Get-CriticalVMs] Found $vmNames"
         $allvms += get-list -type vm -SmartUpdate
     }
     else {
