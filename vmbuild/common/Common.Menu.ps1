@@ -547,6 +547,10 @@ function select-ChangeDynamicMemory {
                 $dynamicMinRam = "1GB"
                 $dynamicRamInBytes = ($dynamicMinRam / 1)
                 $Memory = $vmNotes.Memory
+                if ($dynamicRamInBytes -gt ($Memory / 1)) {
+                    $dynamicMinRam = $Memory
+                    $dynamicRamInBytes = ($Memory / 1)
+                }
                 $priority = 25
                 $buffer = 10
                 if ($vm.role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
@@ -555,7 +559,13 @@ function select-ChangeDynamicMemory {
                 }
                 if ($dynamicRamInBytes -gt 40MB) {
                     Write-log  "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                    try {
                     $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop   
+                    }
+                    catch {
+                        Write-Log "Failed to set Dynamic Memory on $vmName $_"
+                        continue
+                    }
                     Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $dynamicMinRam            
                 }
                 else {
@@ -564,7 +574,13 @@ function select-ChangeDynamicMemory {
             }
             else {
                 Write-log  "$VmName` Disable Dynamic Ram $Memory"
+                try {
                 $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+                catch {
+                    Write-Log "Failed to set Dynamic Memory on $vmName $_"
+                    continue
+                }
                 Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $Memory
             }                
         }
