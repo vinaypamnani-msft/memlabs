@@ -3616,7 +3616,7 @@ class InstallPBIRS {
                 $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
                 $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
 
-                Write-Status ("Removing ReportServerWebApp ReportServerWebService URLS")
+                Write-Status ("Removing HTTP ReportServerWebApp ReportServerWebService URLS")
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
                 $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
@@ -3629,7 +3629,7 @@ class InstallPBIRS {
                     throw "Could not find cert with friendly Name $_FriendlyName"
                 }
 
-                Write-Status ("Adding ReportServerWebApp ReportServerWebService URLS")
+                Write-Status ("Adding HTTPS ReportServerWebApp ReportServerWebService URLS")
                 $thumbprint = $cert.ThumbPrint.ToLower()
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
@@ -3894,17 +3894,24 @@ class AddCertificateTemplate {
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
-                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -SkipPublisherCheck
             }
             Write-Status "Adding Certificate Template $_TemplateName .." 
             start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
-            Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
+            #Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
             $retries = 0
             $success = $false
             while ($retries -lt 10 -and $success -eq $false) {
-                Write-Status "Adding Certificate Template $_TemplateName ..." 
+                Write-Status "Adding Certificate Template $_TemplateName ..."                 
+                try {
+                    if ($retries -eq 0) {
+                        Get-CertificationAuthority | Get-CRLValidityPeriod | Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" -DeltaCRL "0 days" -ErrorAction SilentlyContinue
+                        #Get-CertificationAuthority | Get-CRLValidityPeriod | Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "2 weeks" -DeltaCRL "1 hours" -DeltaCRLOverlap "1 weeks" -ErrorAction SilentlyContinue
+                    }
+                }
+                catch {}
                 $retries++
                 try {
                     Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
