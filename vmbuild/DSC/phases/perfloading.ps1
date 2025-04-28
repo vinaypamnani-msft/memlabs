@@ -261,6 +261,8 @@ else {
     # Loop through each boot image and distribute it
     foreach ($BootImage in $BootImages) {
         try {
+            # Enable Command Support for the boot image
+            $BootImage | Set-CMBootImage -EnableCommandSupport $true
             $packageId = $BootImage.PackageID
             # Distribute the boot image
             Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
