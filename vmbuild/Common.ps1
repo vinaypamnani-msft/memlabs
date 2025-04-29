@@ -841,7 +841,7 @@ function Test-URL {
     }
 
     try {
-        $output = & $curlPath -s -L --head -f $url
+        $output = & $curlPath --retry 5 --retry-delay 2 --retry-max-time 30 -s -L --head -f $url
         if ($LASTEXITCODE -eq 0) {
             if ($output -match 'Location: https://www.bing.com') {
                 Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
@@ -855,9 +855,9 @@ function Test-URL {
         else {
             #ipconfig /flushdns
             Clear-DnsClientCache
-            start-sleep -seconds 10
+            start-sleep -seconds 20
             write-log "Curl retrying.. Last failure $output" -LogOnly
-            $output = & $curlPath -s -L --head -f $url
+            $output = & $curlPath --retry 5 --retry-delay 2 --retry-max-time 30 -s -L --head -f $url
 
             if ($LASTEXITCODE -ne 0) {
                 Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE"
