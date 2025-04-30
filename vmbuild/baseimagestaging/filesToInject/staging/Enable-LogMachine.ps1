@@ -1,8 +1,24 @@
 #Enable-LogMachine.ps1
+
+
+function Add-Permissions {
+    param(
+        [string]$folderPath
+    )
+    $acl = Get-Acl $folderPath
+    $permission = "Read"
+    $inheritance = "ContainerInherit, ObjectInherit"
+    $propagation = "None"
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:UserName, $permission, $inheritance, $propagation, "Allow")
+    $acl.SetAccessRule($accessRule)
+    Set-Acl $folderPath $acl
+}
 $fixFlag = "EnableLogMachine.done"
 $flagPath = Join-Path $env:USERPROFILE $fixFlag
 
 if (-not (Test-Path $flagPath)) {
+    Add-Permissions -folderPath "C:\Windows\System32\Configuration"
+    Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
     $prg = "C:\tools\LogMachine\LogMachine.exe"
     $ext = '.log'
     & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
@@ -63,10 +79,13 @@ if (-not (Test-Path $flagPath)) {
     }
     if (($ClientLogsPath -and (Test-Path $ClientlogsPath))) {
         # Create the Logs shortcut
+        Add-Permissions -folderPath $ClientlogsPath
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\Client Logs.lnk")
         $shortcut.TargetPath = $ClientlogsPath
         $shortcut.Save()
+        
         "Shortcuts Enabled" | Out-File $flagPath -Force
+
 
     }
 }
@@ -77,6 +96,7 @@ if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
     if ($CMLogs -and (Test-Path $CMlogs)) {
         # Create the new shortcut if the path exists
+        Add-Permissions -folderPath $CMlogs
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
         $shortcut.TargetPath = $CMlogs
         $shortcut.Save()
@@ -94,7 +114,7 @@ if (-not (Test-Path $flagPath)) {
             # Check if the new path exists
             if (Test-Path $MPLogs) {
                 # Create the new shortcut if the path exists
-
+                Add-Permissions -folderPath $MPLogs
                 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
                 $shortcut.TargetPath = $MPLogs
                 $shortcut.Save()
@@ -137,7 +157,7 @@ if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
     if (Test-Path $IISLogs) {
         # Create the new shortcut if the path exists
-
+        Add-Permissions -folderPath $IISLogs    
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\IIS Logs.lnk")
         $shortcut.TargetPath = $IISLogs
         $shortcut.Save()
@@ -179,7 +199,7 @@ if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
     if (Test-Path $WSUSLogs) {
         # Create the new shortcut if the path exists
-
+        Add-Permissions -folderPath $WSUSLogs
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\WSUS Logs.lnk")
         $shortcut.TargetPath = $WSUSLogs
         $shortcut.Save()
@@ -198,7 +218,7 @@ if (-not (Test-Path $flagPath)) {
     # Check if the new path exists
     if (Test-Path $DPLogs) {
         # Create the new shortcut if the path exists
-
+        Add-Permissions -folderPath $DPLogs 
         $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\DP Logs.lnk")
         $shortcut.TargetPath = $DPLogs
         $shortcut.Save()
