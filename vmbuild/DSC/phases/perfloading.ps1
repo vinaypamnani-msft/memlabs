@@ -103,6 +103,11 @@ else {
         }
     }
 
+
+    #Enable Site features:
+    Write-DscStatus "$Tag Enabling Site features"
+    Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+
     #Applications and packages
 
 
