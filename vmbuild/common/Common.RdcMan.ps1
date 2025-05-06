@@ -884,21 +884,23 @@ function Get-RDCManPassword {
     param(
         [string]$rdcmanpath
     )
-
-    if (-not(test-path "$($env:temp)\rdcman.dll")) {
-        # Write-Log "Get-RDCManPassword: Rdcman.dll not found in $($env:temp). Copying."
-        copy-item "$($rdcmanpath)\rdcman.exe" "$($env:temp)\rdcman.dll" -Force
-        unblock-file "$($env:temp)\rdcman.dll"
+ 
+    $rdcmandllpath = "$($common.AzureFilesPath)\support\rdcman.dll"
+ 
+    $rdcManFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "RdcManDLL" }
+    $worked = Get-FileFromStorage -File $rdcManFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$false
+    if (-not $worked) {
+        Write-Log -Verbose "$rdcManFile Failed to download via Get-FileFromStorage"
     }
-
-
-    if (-not(test-path "$($env:temp)\rdcman.dll")) {
+    unblock-file $rdcmandllpath
+ 
+    if (-not(test-path $rdcmandllpath)) {
         Write-Log "Rdcman.dll was not copied." -Failure
         return $null
     }
-
+ 
     #Write-Host "Get-RDCManPassword: Importing rdcman.dll"
-    Import-Module "$($env:temp)\rdcman.dll"
+    Import-Module $rdcmandllpath
     $EncryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings
     return [RdcMan.Encryption]::EncryptString($Common.LocalAdmin.GetNetworkCredential().Password , $EncryptionSettings)
 }
