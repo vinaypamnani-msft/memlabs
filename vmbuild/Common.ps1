@@ -3895,7 +3895,8 @@ function Get-FileWithHash {
         # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
         if ($ExpectedHash -ne "NONE") {
             if ($localFileHash -eq $ExpectedHash) {
-                Write-GreenCheck "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                #Write-GreenCheck "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
+                Write-Log -logonly "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
                 if ($ForceDownload.IsPresent) {
                     Write-WhiteI "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
                     Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
