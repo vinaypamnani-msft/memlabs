@@ -256,6 +256,26 @@ Configuration Phase8
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
 
+        $CustomJobSet = "C:\staging\DSC\SQLScripts\MemLabsCustomization-Set.sql"
+        $CustomJobTest = "C:\staging\DSC\SQLScripts\MemLabsCustomization-Test.sql"
+        $CustomJobGet = "C:\staging\DSC\SQLScripts\MemLabsCustomization-Get.sql"
+
+        SqlScript 'MemLabsCustomization' {
+            Id                   = 'MemLabsCustomization'
+            ServerName           = $thisvm.VmName
+            InstanceName         = $thisVM.sqlInstanceName
+            #Credential       = $Admincreds
+            SetFilePath          = $CustomJobSet
+            TestFilePath         = $CustomJobTest
+            GetFilePath          = $CustomJobGet
+            DisableVariables     = $true
+            DependsOn            = $nextDepend
+            Variable             = @('FilePath=C:\temp\')
+            PsDscRunAsCredential = $Admincreds
+            Encrypt              = "Optional"
+        }
+        $nextDepend = '[SqlScript]MemLabsCustomization'
+
         WriteStatus Complete {
             DependsOn = $nextDepend
             Status    = "Complete!"
