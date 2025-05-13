@@ -284,16 +284,18 @@ function Remove-Domain {
         [switch] $WhatIf
     )
 
+    $all = $false
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
     if ($VMList) {
         $vmsToDelete = Get-List -Type VM -DomainName $DomainName | Where-Object { $_.vmName -in $VMList }
     }
     else {
         $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+        $all = $true
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster"} # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" } # Internet subnet could be shared between multiple domains
 
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName
@@ -328,25 +330,33 @@ function Remove-Domain {
     }
 
 
-if ($DC) {
-    if ($scopesToDelete) {
-        Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
-        foreach ($scope in $scopesToDelete) {
-            Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
-        }
+    if ($DC) {
+        if ($scopesToDelete) {
+            Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
+            }
 
-        Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
-        foreach ($scope in $scopesToDelete) {
-            Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+            Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+            }
         }
     }
-}
 
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         Write-Host
     }
+    
+    if ($all) {
+        if (Test-Path "E:\virtualMachines\$DomainName") {
+            Write-Log "Removing $DomainName folder" -SubActivity
+            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf
+        }
+    }
+
     Start-Sleep -seconds 3
     clear-host
 }
@@ -382,6 +392,13 @@ function Remove-All {
 
     Remove-Orphaned -WhatIf:$WhatIf
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue | Out-Null
+
+    # Get all the folders in E:\VirtualMachines and delete them
+    $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory
+    foreach ($folder in $folders) {
+        Write-Log "Removing $($folder.Name) folder" -SubActivity
+        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf
+    }
 
     Write-Host
 

@@ -3284,7 +3284,7 @@ function Get-Tools {
             $worked = Get-File -Source $url -Destination $downloadPath -DisplayName "Downloading '$filename' to $downloadPath..." -Action "Downloading" -UseBITS -UseCDN:$UseCDN -WhatIf:$WhatIf
         }
         else {
-            Write-Log "Downloading/Verifying '$name' with hash" -SubActivity
+            Write-Log "Downloading/Verifying '$name'" -SubActivity
             $tempworked = Get-FileWithHash -FileName $fileNameForDownload -FileDisplayName $name -FileUrl $url -ExpectedHash $tool.md5 -UseBITS -ForceDownload:$ForceDownloadFiles -IgnoreHashFailure:$IgnoreHashFailure -hashAlg "MD5" -UseCDN:$UseCDN -WhatIf:$WhatIf
             $worked = $tempworked.success
         }

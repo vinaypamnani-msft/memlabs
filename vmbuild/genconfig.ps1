@@ -231,7 +231,7 @@ function Check-OverallHealth {
     if ($today.Date -eq $secondTuesday.Date) {
 
         $rebootedInLast12Hours = $false
-        $timeSinceLastReboot = (get-uptime).hours
+        $timeSinceLastReboot = (get-uptime).TotalHours
 
         if ($timeSinceLastReboot -le 12) {
             $rebootedInLast12Hours = $true
