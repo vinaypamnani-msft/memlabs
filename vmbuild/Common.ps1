@@ -841,7 +841,7 @@ function Test-URL {
     }
 
     try {
-        $output = & $curlPath --retry 5 --retry-delay 2 --retry-max-time 30 -s -L --head -f $url
+        $output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 30 -s -L --head -f $url
         if ($LASTEXITCODE -eq 0) {
             if ($output -match 'Location: https://www.bing.com') {
                 Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
@@ -855,9 +855,9 @@ function Test-URL {
         else {
             #ipconfig /flushdns
             Clear-DnsClientCache
-            start-sleep -seconds 20
+            start-sleep -seconds 10
             write-log "Curl retrying.. Last failure $output" -LogOnly
-            $output = & $curlPath --retry 5 --retry-delay 2 --retry-max-time 30 -s -L --head -f $url
+            $output = & $curlPath --retry 8 --retry-delay 8 --retry-max-time 90 -s -L --head -f $url
 
             if ($LASTEXITCODE -ne 0) {
                 Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE"
@@ -1118,6 +1118,13 @@ function Test-NetworkSwitch {
         [string]$DomainName
     )
 
+    $mutexName = "networkswitch"
+
+    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
+    write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly
+    [void]$mtx.WaitOne()
+    write-log "acquired '$mutexName' Mutex" -LogOnly
+
     $notes = $DomainName
     $doNotRecreate = $false
     if (-not $notes) {
@@ -1132,84 +1139,81 @@ function Test-NetworkSwitch {
         }
     }
 
-    $retries = 10
-    $count = 0
+    try {
+        $retries = 10
+        $count = 0
 
-    while ($count -lt $retries) {
-        $count++
-        $exists = Get-VMSwitch2 -NetworkName $NetworkName
-        if ($exists) {
-            if ($exists.Notes -eq $notes -or $doNotRecreate) {
-                Write-Log "HyperV Network switch for '$NetworkName' already exists."
+        while ($count -lt $retries) {
+            $count++
+            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+            if ($exists) {
+                if ($exists.Notes -eq $notes -or $doNotRecreate) {
+                    Write-Log "HyperV Network switch for '$NetworkName' already exists."
+                    break
+                }
+                else {
+                    Write-Log "HyperV Network switch for '$NetworkName' already exists. Please verify this network is not in use by another domain."
+                    Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  
+                    return $false                              
+                }
+            }
+            Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
+            try {
+                New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
+                start-sleep -seconds 30
+                New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
+            }
+            Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
+            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+            if ($exists) {
                 break
             }
-            else {
-                Write-Log "HyperV Network switch for '$NetworkName' already exists, but with different notes. Updating note"
-                Write-Log "Current switch has $($exists.Notes) but we expected $notes"
-                try {
-                    set-vmswitch -name $NetworkName -Notes $notes
-                    #Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
-                }
-                catch {
-                    Write-Log "Failed to set HyperV Network switch for $NetworkName. Trying again in 30 seconds"
-                    start-sleep -seconds 30
-                    Remove-VMSwitch2 -NetworkName $NetworkName | Out-Null
-                }
-                continue
+        }
+
+        try {
+            $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
+            if ($null -ne $Commmon.CorpNetInterfaceIndex) {
+                Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
             }
         }
-        Write-Log "HyperV Network switch for '$NetworkName' not found. Creating a new one."
-        try {
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Stop | Out-Null
-        }
         catch {
-            Write-Log "Failed to create HyperV Network switch for $NetworkName. Trying again in 30 seconds"
-            start-sleep -seconds 30
-            New-VMSwitch -Name $NetworkName -SwitchType Internal -Notes $notes -ErrorAction Continue | Out-Null
+            Write-log "Get-NetAdapter $_" -LogOnly
+            if ($_ -Match "the module could not be loaded" ) {
+                Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+            }
         }
-        Start-Sleep -Seconds 5 # Sleep to make sure network adapter is present
-        $exists = Get-VMSwitch2 -NetworkName $NetworkName
-        if ($exists) {
-            break
+
+        if (-not $adapter) {
+            Write-Log "Network adapter for '$NetworkName' switch was not found."
+            return $false
         }
-    }
 
-    try {
-        $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
-        if ($null -ne $Commmon.CorpNetInterfaceIndex) {
-            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+        $interfaceAlias = $adapter.InterfaceAlias
+        $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
+
+        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
+        if ($currentIp.IPAddress -ne $desiredIp) {
+            Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
+            New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
+            Start-Sleep -Seconds 5 # Sleep to make sure IP changed
         }
-    }
-    catch {
-        Write-log "Get-NetAdapter $_" -LogOnly
-        if ($_ -Match "the module could not be loaded" ) {
-            Write-Log -Failure "Could not invoke Get-NetAdapter due to load failure.  Please close all powershell windows and retry."
+
+        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
+        if ($currentIp.IPAddress -ne $desiredIp) {
+            Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
+            return $false
         }
+
+        $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet
+        return $valid
     }
-
-    if (-not $adapter) {
-        Write-Log "Network adapter for '$NetworkName' switch was not found."
-        return $false
+    finally {
+        [void]$mtx.ReleaseMutex()
+        [void]$mtx.Dispose()
     }
-
-    $interfaceAlias = $adapter.InterfaceAlias
-    $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
-
-    $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-    if ($currentIp.IPAddress -ne $desiredIp) {
-        Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
-        New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
-        Start-Sleep -Seconds 5 # Sleep to make sure IP changed
-    }
-
-    $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-    if ($currentIp.IPAddress -ne $desiredIp) {
-        Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
-        return $false
-    }
-
-    $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet
-    return $valid
 }
 
 function Test-NoRRAS {
@@ -4073,7 +4077,7 @@ function Set-SupportedOptions {
         "BDC"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam","virtualProcs")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 
@@ -4384,7 +4388,7 @@ if (-not $Common.Initialized) {
         $isAzureVM = $false
         if (-not $InJob) {
             $colors = Get-Colors
-            if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object {$_.IPAddress -eq "10.1.0.4"}) {$isAzureVM = $true}
+            if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
         }
 
         if (-not $header1) {
