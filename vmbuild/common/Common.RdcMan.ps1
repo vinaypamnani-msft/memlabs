@@ -344,6 +344,7 @@ function New-RDCManFileFromHyperV {
         $group = $file.group
         if ($null -eq $group) {
             Write-Log "Could not load group section from $rdcmanfile" -Failure
+            Get-Content -Path $rdcmanfile | Out-Host
             if ($OverWrite -eq $false) {
                 return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
             }

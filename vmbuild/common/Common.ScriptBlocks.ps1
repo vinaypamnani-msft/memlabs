@@ -949,32 +949,49 @@ $global:VM_Config = {
                         if ($ip.StartsWith("169.254")) {
                             $success = $false
                             #$currentItem.network
-
+                            $currentNetwork = $currentItem.network
+                            if (-not $currentNetwork) {
+                                $currentNetwork = $deployConfig.vmOptions.Network
+                            }
                             if ($retryCount -eq 1) {
-                                Write-Progress2 $Activity -Status "Attempting to repair network $($currentItem.network) " -percentcomplete 10 -force
+                                try {
+                                Write-Progress2 $Activity -Status "Attempting to repair network $($currentNetwork) " -percentcomplete 10 -force
                                 stop-vm2 -Name $currentItem.vmname
-                                Remove-VMSwitch2 -NetworkName $($currentItem.network)
-                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network) -ErrorAction SilentlyContinue
+                                Remove-VMSwitch2 -NetworkName $($currentNetwork)
+                                Remove-DhcpServerv4Scope -scopeID $($currentNetwork) -ErrorAction SilentlyContinue
                                 stop-service "DHCPServer" | Out-Null
                                 $dhcp = Start-DHCP
                                 start-sleep -seconds 10
                                 $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-                                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
+                                $DCNetwork = $DC.Network
+                                if (-not $DCNetwork) {
+                                    $DCNetwork = $deployConfig.vmOptions.Network
+                                }
+                                $DNSServer = ($DCNetwork.Substring(0, $DCNetwork.LastIndexOf(".")) + ".1")
+                                $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
 
                                 start-vm2 -Name $currentItem.vmname
                                 $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
                                 $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                                }
+                                catch {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to repair network $($currentNetwork). $($_.Exception.Message)" -Warning -OutputStream
+                                    return
+                                }
                             }
                             if ($retryCount -eq 0) {
+                                try{
                                 stop-service "DHCPServer" | Out-Null
                                 start-sleep -seconds 5
                                 $dhcp = Start-DHCP
                                 $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                                }
+                                catch {                                   
+                                }
                             }
                             if ($retryCount -eq 2) {
                                 $count = (Get-VMSwitch).Count
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentItem.network) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentNetwork) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
                                 return
                             }
                             $retryCount++

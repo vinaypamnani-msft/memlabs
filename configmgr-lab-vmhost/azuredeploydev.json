@@ -329,38 +329,6 @@
     },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
-      "name": "[concat( parameters('virtualMachineName'), '/' , 'AdminCenter' )]",
-      "apiVersion": "2018-10-01",
-      "location": "[variables('location')]",
-      "properties": {
-        "publisher": "Microsoft.AdminCenter",
-        "type": "AdminCenter",
-        "typeHandlerVersion": "0.0",
-        "autoUpgradeMinorVersion": true,
-        "settings": {
-          "port": "[variables('windowsAdminCenterPort')]",
-          "salt": "[parameters('virtualMachineName')]",
-          "cspFrameAncestors": [
-            "https://*.hosting.portal.azure.net",
-            "https://localhost:1340",
-            "https://ms.portal.azure.com",
-            "https://portal.azure.com",
-            "https://preview.portal.azure.com"
-          ],
-          "corsOrigins": [
-            "https://ms.portal.azure.com",
-            "https://portal.azure.com",
-            "https://preview.portal.azure.com",
-            "https://waconazure.com"
-          ]
-        }
-      },
-      "dependsOn": [
-        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
-      ]
-    },
-    {
-      "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2020-12-01",
       "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
       "location": "[variables('location')]",
