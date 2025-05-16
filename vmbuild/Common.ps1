@@ -1139,7 +1139,7 @@ function Test-NetworkSwitch {
         }
     }
 
-    if (String::IsNullOrEmpty($DomainName)) {
+    if ([String]::IsNullOrWhiteSpace($DomainName)) {
         $notes = "Unknown network"        
     }
     if ($NetworkName -eq "External") {
@@ -1158,7 +1158,7 @@ function Test-NetworkSwitch {
             $count++
             $exists = Get-VMSwitch2 -NetworkName $NetworkName
             if ($exists) {
-                if (String::IsNullOrEmpty($exists.Notes)) {
+                if ([String]::IsNullOrWhiteSpace($exists.Notes)) {
                     Write-Log "HyperV Network switch for '$NetworkName' already exists but has no notes. Please verify this network is not in use by another domain." -LogOnly
                     Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
                     $doNotRecreate = $true
@@ -1169,7 +1169,7 @@ function Test-NetworkSwitch {
                     Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
                     $doNotRecreate = $true
                 }
-                
+
                 if ($exists.Notes -eq $notes -or $doNotRecreate) {
                     Write-Log "HyperV Network switch for '$NetworkName' already exists."
                     break
