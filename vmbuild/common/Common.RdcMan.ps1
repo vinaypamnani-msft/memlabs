@@ -423,11 +423,14 @@ function New-RDCManFileFromHyperV {
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
 
             if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
-                if ( $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
+                $deployedOS = $vm.deployedOS
+                $isServer = $deployedOS -match "Server"
+
+                if ( $null -eq $vm.SqlVersion -and $isServer) {
                     $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                 }
                 else {
-                    if (-not ($vm.deployedOS.Contains("Server"))) {
+                    if (-not $isServer) {
                         $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient" -force
                     }
                 }
