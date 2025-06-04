@@ -368,9 +368,9 @@ else {
             ApplyAll                           = $false
             OperatingSystemImagePackageId      = $win11OSimagepackageID
             OperatingSystemImageIndex          = 3
-            ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "Workgroup"
@@ -384,7 +384,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
         }
 
         New-CMTaskSequence @buildandcapturewin11
@@ -399,9 +399,9 @@ else {
             ApplyAll                           = $false
             OperatingSystemImagePackageId      = $win10OSimagepackageID
             OperatingSystemImageIndex          = 3
-            ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "workgroup"
@@ -415,7 +415,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
         }
         New-CMTaskSequence @buildandcapturewin10
         Write-DscStatus "$Tag Successfully created MEMLABS-w10-Build and capture TS"
@@ -438,15 +438,15 @@ else {
             ApplyAll                        = $false
             OperatingSystemImagePackageId   = $win11OSimagepackageID
             OperatingSystemImageIndex       = 3
-            ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
             DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
             SoftwareUpdateStyle             = "All"
@@ -472,15 +472,15 @@ else {
             ApplyAll                        = $false
             OperatingSystemImagePackageId   = $win10OSimagepackageID
             OperatingSystemImageIndex       = 3
-            ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
             DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
             SoftwareUpdateStyle             = "All"
@@ -896,6 +896,18 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
             Query = @"
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
 from sms_r_system where Client = 0 or Client is null
+"@
+        },
+        @{
+            Name  = "MEMLABS-All Servers"
+            Query = @"
+select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.OperatingSystemNameandVersion like "%Server%" order by SMS_R_System.Name
+"@
+        },
+        @{
+            Name  = "MEMLABS-All Workstations"
+            Query = @"
+select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by SMS_R_System.Name
 "@
         }
     )
