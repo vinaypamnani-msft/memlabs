@@ -500,6 +500,33 @@ else {
         New-CMTaskSequence @customTS
         Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
 
+        # Get all task sequences with names starting with "MEMLABS"
+        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
+
+        # Get the "All Unknown Computers" collection
+        $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
+
+        foreach ($ts in $taskSequences) {
+            # Check if a deployment already exists for this task sequence to this collection
+            $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name |
+            Where-Object { $_.PackageID -eq $ts.PackageID }
+
+            if ($existingDeployment) {
+                Write-Host "Skipping $($ts.Name) — already deployed to $($unknownCollection.Name)"
+            }
+            else {
+                Write-Host "Deploying Task Sequence: $($ts.Name)"
+
+                New-CMTaskSequenceDeployment `
+                    -TaskSequencePackageId $ts.PackageID `
+                    -CollectionId $unknownCollection.CollectionID `
+                    -DeployPurpose Available `
+                    -MakeAvailableTo ClientsMediaAndPxe
+            }
+
+        }
+
+
     }
     else {
 
@@ -1172,7 +1199,7 @@ select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R
         }
 
         # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators","Everyone")
+        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
 
