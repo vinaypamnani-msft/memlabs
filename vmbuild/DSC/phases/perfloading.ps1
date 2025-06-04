@@ -1164,11 +1164,15 @@ select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R
         # Create the folder if it doesn't exist
         if (-not (Test-Path -Path $folderPath1)) {
             New-Item -ItemType Directory -Path $folderPath1
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "windows10-11")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windowsserver")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windows_defender")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "O365") 
             Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
         }
 
         # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess "Administrators" -ReadAccess "Everyone"
+        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators","Everyone")
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
 
