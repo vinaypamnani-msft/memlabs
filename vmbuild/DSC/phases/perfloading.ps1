@@ -509,14 +509,13 @@ else {
 
         foreach ($ts in $taskSequences) {
             # Check if a deployment already exists for this task sequence to this collection
-            $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name |
-            Where-Object { $_.PackageID -eq $ts.PackageID }
+            $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name | Where-Object { $_.PackageID -eq $ts.PackageID }
 
             if ($existingDeployment) {
-                Write-Host "Skipping $($ts.Name) — already deployed to $($unknownCollection.Name)"
+                Write-DscStatus "Skipping $($ts.Name) — already deployed to $($unknownCollection.Name)"
             }
             else {
-                Write-Host "Deploying Task Sequence: $($ts.Name)"
+                Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
 
                 New-CMTaskSequenceDeployment `
                     -TaskSequencePackageId $ts.PackageID `
@@ -596,7 +595,7 @@ else {
     }
 
   # Define additional device collection information
-$Collections += @(
+    $Collections += @(
     @{
         Name  = "MEMLABS-Windows 7 Devices"
         Query = @"
