@@ -38,6 +38,7 @@ else {
     $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
+    $CMInstallDir = $ThisVM.CMInstallDir
     # Read Site Code from registry
     #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
     $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -945,6 +946,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 )
 
 
+New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+
 
     # Loop through each collection and create it in SCCM
     foreach ($Collection in $Collections) {
@@ -962,7 +965,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+            
 
             Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
 
@@ -1086,7 +1089,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
 
         function Invoke-finalfullsync {
-            $folderPath = "$ThisVM.CMInstallDir\inboxes\wsyncmgr.box"
+            $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
             Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
     
