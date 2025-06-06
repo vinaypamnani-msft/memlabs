@@ -38,6 +38,7 @@ else {
     $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
+    $CMInstallDir = $ThisVM.CMInstallDir
     # Read Site Code from registry
     #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
     $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -260,6 +261,9 @@ else {
 
     ## Task sequences 
 
+    #custom domain name in winPE
+    Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+
     # Get all boot images
     $BootImages = Get-CMBootImage
 
@@ -368,9 +372,9 @@ else {
             ApplyAll                           = $false
             OperatingSystemImagePackageId      = $win11OSimagepackageID
             OperatingSystemImageIndex          = 3
-            ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "Workgroup"
@@ -384,7 +388,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
         }
 
         New-CMTaskSequence @buildandcapturewin11
@@ -399,9 +403,9 @@ else {
             ApplyAll                           = $false
             OperatingSystemImagePackageId      = $win10OSimagepackageID
             OperatingSystemImageIndex          = 3
-            ProductKey                         = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                           = $tstimezone
             JoinDomain                         = "WorkgroupType"
             WorkgroupName                      = "workgroup"
@@ -415,7 +419,7 @@ else {
             ImageVersion                       = "image version 1"
             CreatedBy                          = "MEMLABS"
             OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
         }
         New-CMTaskSequence @buildandcapturewin10
         Write-DscStatus "$Tag Successfully created MEMLABS-w10-Build and capture TS"
@@ -438,15 +442,15 @@ else {
             ApplyAll                        = $false
             OperatingSystemImagePackageId   = $win11OSimagepackageID
             OperatingSystemImageIndex       = 3
-            ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
             DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
             SoftwareUpdateStyle             = "All"
@@ -472,15 +476,15 @@ else {
             ApplyAll                        = $false
             OperatingSystemImagePackageId   = $win10OSimagepackageID
             OperatingSystemImageIndex       = 3
-            ProductKey                      = "6NMRW-2C8FM-D24W7-TQWMY-CWH2D"
+            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
             GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             TimeZone                        = $tstimezone
             JoinDomain                      = "DomainType"
             DomainAccount                   = "$DomainFullName\$AdminName"
             DomainName                      = "$DomainFullName"
             DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String $unencrypted -AsPlainText -Force
+            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
             ClientPackagePackageId          = $ClientPackagePackageId
             InstallationProperty            = $clientProps
             SoftwareUpdateStyle             = "All"
@@ -499,6 +503,32 @@ else {
 
         New-CMTaskSequence @customTS
         Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
+
+        # Get all task sequences with names starting with "MEMLABS"
+        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
+
+        # Get the "All Unknown Computers" collection
+        $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
+
+        foreach ($ts in $taskSequences) {
+            # Check if a deployment already exists for this task sequence to this collection
+            $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name | Where-Object { $_.PackageID -eq $ts.PackageID }
+
+            if ($existingDeployment) {
+                Write-DscStatus "Skipping $($ts.Name) already deployed to $($unknownCollection.Name)"
+            }
+            else {
+                Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
+
+                New-CMTaskSequenceDeployment `
+                    -TaskSequencePackageId $ts.PackageID `
+                    -CollectionId $unknownCollection.CollectionID `
+                    -DeployPurpose Available `
+                    -MakeAvailableTo ClientsMediaAndPxe
+            }
+
+        }
+
 
     }
     else {
@@ -566,6 +596,7 @@ else {
         New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
     }
+
     # Define additional device collection information
     $Collections += @(
         @{
@@ -770,7 +801,7 @@ WHERE SMS_R_SYSTEM.Name LIKE '%DC%'
             Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
-WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,$DN%'
+WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,DC=Domain,DC=com%'
 "@
         },
         @{
@@ -897,8 +928,27 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
 from sms_r_system where Client = 0 or Client is null
 "@
+        },
+        @{
+            Name  = "MEMLABS-All Servers"
+            Query = @"
+select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
+from SMS_R_System 
+where SMS_R_System.OperatingSystemNameandVersion like "%Server%" order by SMS_R_System.Name          
+"@
+        },
+        @{
+            Name  = "MEMLABS-All Workstations"
+            Query = @"
+select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
+from SMS_R_System 
+where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by SMS_R_System.Name      
+"@
         }
     )
+
+
+    New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
 
 
     # Loop through each collection and create it in SCCM
@@ -917,7 +967,7 @@ from sms_r_system where Client = 0 or Client is null
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+            
 
             Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
 
@@ -1041,7 +1091,7 @@ from sms_r_system where Client = 0 or Client is null
         }
 
         function Invoke-finalfullsync {
-            $folderPath = "$ThisVM.CMInstallDir\inboxes\wsyncmgr.box"
+            $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
             Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
     
@@ -1152,11 +1202,15 @@ from sms_r_system where Client = 0 or Client is null
         # Create the folder if it doesn't exist
         if (-not (Test-Path -Path $folderPath1)) {
             New-Item -ItemType Directory -Path $folderPath1
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "windows10-11")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windowsserver")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windows_defender")
+            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "O365") 
             Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
         }
 
         # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess "Administrators" -ReadAccess "Everyone"
+        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
 
