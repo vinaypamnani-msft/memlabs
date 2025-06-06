@@ -261,6 +261,9 @@ else {
 
     ## Task sequences 
 
+    #custom domain name in winPE
+    Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+
     # Get all boot images
     $BootImages = Get-CMBootImage
 
