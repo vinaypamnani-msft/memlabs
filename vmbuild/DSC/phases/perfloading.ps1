@@ -261,6 +261,9 @@ else {
 
     ## Task sequences 
 
+    #custom domain name in winPE
+    Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+
     # Get all boot images
     $BootImages = Get-CMBootImage
 
@@ -512,7 +515,7 @@ else {
             $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name | Where-Object { $_.PackageID -eq $ts.PackageID }
 
             if ($existingDeployment) {
-                Write-DscStatus "Skipping $($ts.Name) — already deployed to $($unknownCollection.Name)"
+                Write-DscStatus "Skipping $($ts.Name) already deployed to $($unknownCollection.Name)"
             }
             else {
                 Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
@@ -594,358 +597,358 @@ else {
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
     }
 
-  # Define additional device collection information
+    # Define additional device collection information
     $Collections += @(
-    @{
-        Name  = "MEMLABS-Windows 7 Devices"
-        Query = @"
+        @{
+            Name  = "MEMLABS-Windows 7 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '6.1%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 8.1 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 8.1 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '6.3%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices Without Antivirus"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices Without Antivirus"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_Installed_Software ON SMS_G_System_Installed_Software.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_Installed_Software.ProductName NOT LIKE '%Antivirus%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Laptops Only"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Laptops Only"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes IN ('8', '9', '10', '14', '18', '21')
 "@
-    },
-    @{
-        Name  = "MEMLABS-Desktop Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Desktop Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes IN ('3', '4', '6', '7', '15')
 "@
-    },
-    @{
-        Name  = "MEMLABS-Virtual Machines"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Virtual Machines"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_SYSTEM_ENCLOSURE ON SMS_G_System_SYSTEM_ENCLOSURE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_SYSTEM_ENCLOSURE.ChassisTypes = '12'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices Without SCCM Client"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices Without SCCM Client"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_SYSTEM.Client IS NULL OR SMS_R_SYSTEM.Client = 0
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices With Less Than 4GB RAM"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices With Less Than 4GB RAM"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_PHYSICAL_MEMORY ON SMS_G_System_PHYSICAL_MEMORY.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_PHYSICAL_MEMORY.Capacity < 4294967296
 "@
-    },
-    @{
-        Name  = "MEMLABS-All MacOS Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All MacOS Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_System.OperatingSystemNameAndVersion LIKE '%MacOS%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Linux Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Linux Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_System.OperatingSystemNameAndVersion LIKE '%Linux%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices with Office- Microsoft 365 Apps"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices with Office- Microsoft 365 Apps"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%Microsoft 365 Apps%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices with Disk Space < 20GB"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices with Disk Space < 20GB"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_LOGICAL_DISK ON SMS_G_System_LOGICAL_DISK.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_LOGICAL_DISK.FreeSpace < 20000000000
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices in Domain XYZ"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices in Domain XYZ"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_System.ResourceDomainORWorkgroup = 'XYZ'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices with BitLocker Disabled"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices with BitLocker Disabled"
+            Query = @"
 select SMS_R_System.Name, SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter, SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus 
 from SMS_R_System inner join SMS_G_System_ENCRYPTABLE_VOLUME on SMS_G_System_ENCRYPTABLE_VOLUME.ResourceId = SMS_R_System.ResourceId
 where SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter = "C:" and SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus = 1 order by SMS_R_System.Name
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices with Google Chrome Installed"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices with Google Chrome Installed"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%Google Chrome%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices with Last Logon Older Than 90 Days"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices with Last Logon Older Than 90 Days"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-    }
-    @{
-        Name  = "MEMLABS-Devices Missing Critical Updates"
-        Query = @"
+        }
+        @{
+            Name  = "MEMLABS-Devices Missing Critical Updates"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_UPDATE_STATUS ON SMS_G_System_UPDATE_STATUS.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_UPDATE_STATUS.Status = 2 AND SMS_G_System_UPDATE_STATUS.UpdateType = 'Critical'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices Online Now"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices Online Now"
+            Query = @"
 select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,
 SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.ResourceId in
 (select resourceid from SMS_CollectionMemberClientBaselineStatus where SMS_CollectionMemberClientBaselineStatus.CNIsOnline = 1)
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices Offline for Over 30 Days"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices Offline for Over 30 Days"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 30
 "@
-    },
-    @{
-        Name  = "MEMLABS-High CPU Usage Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-High CPU Usage Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_PROCESSOR ON SMS_G_System_PROCESSOR.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_PROCESSOR.LoadPercentage > 90
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Workgroup Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Workgroup Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_SYSTEM.ResourceDomainORWorkgroup NOT LIKE '%DOMAIN%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Devices Running SQL Server"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Devices Running SQL Server"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_INSTALLED_SOFTWARE ON SMS_G_System_INSTALLED_SOFTWARE.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_INSTALLED_SOFTWARE.ProductName LIKE '%SQL Server%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Domain Controllers"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Domain Controllers"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_SYSTEM.Name LIKE '%DC%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices in Specific OU"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices in Specific OU"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 WHERE SMS_R_SYSTEM.DistinguishedName LIKE '%OU=MEMLABS,DC=Domain,DC=com%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Devices Missing a Default Gateway"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Devices Missing a Default Gateway"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_NETWORK_ADAPTER_CONFIGURATION ON SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.DefaultIPGateway IS NULL
 "@
-    }
+        }
 
-    @{
-        Name  = "MEMLABS-Windows 10 Devices"
-        Query = @"
+        @{
+            Name  = "MEMLABS-Windows 10 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '10.0.1%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 11 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 11 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version LIKE '10.0.22%'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows Server 2016 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows Server 2016 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.14393'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows Server 2019 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows Server 2019 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.17763'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows Server 2022 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows Server 2022 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.20348'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows Server 2025 Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows Server 2025 Devices"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 10 21H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 10 21H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19044'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 10 22H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 10 22H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.19045'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 11 23H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 11 23H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22631'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 11 24H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 11 24H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.26100'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 11 21H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 11 21H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22000'
 "@
-    },
-    @{
-        Name  = "MEMLABS-Windows 11 22H2"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-Windows 11 22H2"
+            Query = @"
 SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
 FROM SMS_R_System
 INNER JOIN SMS_G_System_OPERATING_SYSTEM ON SMS_G_System_OPERATING_SYSTEM.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Non client Devices"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Non client Devices"
+            Query = @"
 select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
 from sms_r_system where Client = 0 or Client is null
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Servers"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Servers"
+            Query = @"
 select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
 from SMS_R_System 
 where SMS_R_System.OperatingSystemNameandVersion like "%Server%" order by SMS_R_System.Name          
 "@
-    },
-    @{
-        Name  = "MEMLABS-All Workstations"
-        Query = @"
+        },
+        @{
+            Name  = "MEMLABS-All Workstations"
+            Query = @"
 select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
 from SMS_R_System 
 where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by SMS_R_System.Name      
 "@
-    }
-)
+        }
+    )
 
 
-New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+    New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
 
 
     # Loop through each collection and create it in SCCM
