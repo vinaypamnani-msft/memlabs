@@ -5797,10 +5797,11 @@ function get-VMString {
             $SiteCode += "->$($virtualMachine.parentSiteCode)"
         }
         $temp = "  CM  [SiteCode $SiteCode]"
-        if ($virtualMachine.installDP -or $virtualMachine.enablePullDP) {
-            if ($virtualMachine.installMP) {
+        if ($virtualMachine.installMP) {
                 $temp += " [MP]"
             }
+        if ($virtualMachine.installDP -or $virtualMachine.enablePullDP) {
+            
             if ($virtualMachine.installDP) {
                 if ($virtualMachine.pullDPSourceDP) {
                     $temp += " [Pull DP]"
