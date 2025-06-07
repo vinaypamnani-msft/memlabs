@@ -61,7 +61,9 @@ $cm_svc_file = "$LogPath\cm_svc.txt"
 
 # Only set client push account if not CAS
 if ($CurrentRole -ne "CAS") {
-    if (Test-Path $cm_svc_file -PathType Leaf -and (Get-Content $cm_svc_file | Where-Object { $_.Trim() -ne '' })) {
+    Write-DscStatus "[ClientPush] Starting client push account configuration."
+    if ((Test-Path $cm_svc_file -PathType Leaf) -and ((Get-Content $cm_svc_file | Where-Object { $_.Trim() -ne '' }))) {
+        Write-DscStatus "[ClientPush] Found non-empty cm_svc.txt at $cm_svc_file. Proceeding with account configuration."
         #Run this in a loop, until the $cm_svc account is found in the Client Push Installation settings    
         $maxRetries = 10
         $retries = 0
@@ -70,6 +72,7 @@ if ($CurrentRole -ne "CAS") {
             # Add cm_svc domain account as CM account
             $ExistingAccount = $null
             try {
+                Write-DscStatus "[ClientPush][Retry $retries] Running: Get-CMAccount | Where-Object { \\_.UserName -eq $cm_svc }"
                 $ExistingAccount = Get-CMAccount | Where-Object { $_.UserName -eq $cm_svc }
             } catch {
                 Write-DscStatus "[ClientPush][Retry $retries] Exception while checking for existing CM account: $_. Exception: $($_.Exception.Message)"
@@ -77,6 +80,7 @@ if ($CurrentRole -ne "CAS") {
             if (-not $ExistingAccount) {
                 try {
                     $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
+                    Write-DscStatus "[ClientPush][Retry $retries] Running: New-CMAccount -Name $cm_svc -Password <secure> -SiteCode $SiteCode"
                     Write-DscStatus "[ClientPush] Adding cm_svc domain account as CM account"
                     Start-Sleep -Seconds 5
                     New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
@@ -86,6 +90,7 @@ if ($CurrentRole -ne "CAS") {
             }
             $accounts = $null
             try {
+                Write-DscStatus "[ClientPush][Retry $retries] Running: get-CMClientPushInstallation -SiteCode $SiteCode"
                 $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
                 if ($cm_svc -in $accounts) {
                     $found = $true
@@ -97,13 +102,18 @@ if ($CurrentRole -ne "CAS") {
             }
             if (-not $found) {
                 try {
+                    Write-DscStatus "[ClientPush][Retry $retries] Running: Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc"
                     Write-DscStatus "[ClientPush][Retry $retries] Setting the Client Push Account"
                     Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
                     Start-Sleep -Seconds 5
-                    Write-DscStatus "[ClientPush][Retry $retries] Restarting services to acknowledge push account"
-                    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue    
-                    Start-Sleep -seconds 30
+                    if ($retries -gt 5) {
+                        Write-DscStatus "[ClientPush][Retry $retries] Running: Restart-Service -DisplayName 'SMS_Executive'"
+                        Write-DscStatus "[ClientPush][Retry $retries] Restarting services to acknowledge push account"
+                        Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                        Write-DscStatus "[ClientPush][Retry $retries] Running: Restart-Service -DisplayName 'SMS_Site_Component_Manager'"
+                        Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue    
+                        Start-Sleep -seconds 30
+                    }
                 } catch {
                     Write-DscStatus "[ClientPush][Retry $retries] Exception while setting Client Push Account or restarting services: $_. Exception: $($_.Exception.Message)"
                 }
@@ -111,6 +121,7 @@ if ($CurrentRole -ne "CAS") {
             if (-not $found) {
                 # Query again to see if it was added after the last attempt
                 try {
+                    Write-DscStatus "[ClientPush][Retry $retries] Running: get-CMClientPushInstallation -SiteCode $SiteCode (post-add re-check)"
                     $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
                     if ($cm_svc -in $accounts) {
                         $found = $true
@@ -130,10 +141,16 @@ if ($CurrentRole -ne "CAS") {
         }
     }
     else {
-        Write-DscStatus "[ClientPush] cm_svc.txt file not found or is empty in $LogPath. Skipping cm_svc account creation." -Failure
+        if (-not (Test-Path $cm_svc_file -PathType Leaf)) {
+            Write-DscStatus "[ClientPush] cm_svc.txt file was not found at $cm_svc_file. Skipping cm_svc account creation."
+        } elseif (-not (Get-Content $cm_svc_file | Where-Object { $_.Trim() -ne '' })) {
+            Write-DscStatus "[ClientPush] cm_svc.txt file at $cm_svc_file is empty. Skipping cm_svc account creation."
+        } else {
+            Write-DscStatus "[ClientPush] Unknown reason for skipping cm_svc account creation. Check $cm_svc_file."
+        }
     }
 } else {
-    Write-DscStatus "[ClientPush] Current site is CAS. Skipping client push account configuration."
+    Write-DscStatus "[ClientPush] Skipping client push account configuration because current site is CAS."
 }
 
 Write-DscStatus "Client push candidates are '$ClientNames'"
