@@ -6555,6 +6555,16 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
     }
 
+    # Before adding, check if a VM with this name already exists
+    $existingVM = $ConfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $virtualMachine.vmName }
+    if ($existingVM) {
+        Write-Log -verbose "A VM with the name '$($virtualMachine.vmName)' already exists. Skipping add."
+        if ($ReturnMachineName) {
+            return $virtualMachine.vmName
+        } else {
+            return
+        }
+    }
     $ConfigToModify.virtualMachines += $virtualMachine
 
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
