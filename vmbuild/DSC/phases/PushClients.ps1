@@ -15,6 +15,7 @@ $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 
+$CurrentRole = $ThisVM.role
 # bug fix to not deploy to other sites clients (also multi-network bug if we allow multi networks)
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
@@ -53,6 +54,86 @@ Set-Location "$($SiteCode):\"
 if ((Get-Location).Drive.Name -ne $SiteCode) {
     Write-DscStatus "Failed to Set-Location to $SiteCode`:"
     return $false
+}
+
+$cm_svc = "$DomainFullName\cm_svc"
+$cm_svc_file = "$LogPath\cm_svc.txt"
+
+# Only set client push account if not CAS
+if ($CurrentRole -ne "CAS") {
+    if (Test-Path $cm_svc_file -PathType Leaf -and (Get-Content $cm_svc_file | Where-Object { $_.Trim() -ne '' })) {
+        #Run this in a loop, until the $cm_svc account is found in the Client Push Installation settings    
+        $maxRetries = 10
+        $retries = 0
+        $found = $false
+        do {
+            # Add cm_svc domain account as CM account
+            $ExistingAccount = $null
+            try {
+                $ExistingAccount = Get-CMAccount | Where-Object { $_.UserName -eq $cm_svc }
+            } catch {
+                Write-DscStatus "[ClientPush][Retry $retries] Exception while checking for existing CM account: $_. Exception: $($_.Exception.Message)"
+            }
+            if (-not $ExistingAccount) {
+                try {
+                    $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
+                    Write-DscStatus "[ClientPush] Adding cm_svc domain account as CM account"
+                    Start-Sleep -Seconds 5
+                    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+                } catch {
+                    Write-DscStatus "[ClientPush][Retry $retries] Failed to add cm_svc as CM account: $_. Exception: $($_.Exception.Message)"
+                }
+            }
+            $accounts = $null
+            try {
+                $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
+                if ($cm_svc -in $accounts) {
+                    $found = $true
+                } else {
+                    Write-DscStatus "[ClientPush][Retry $retries] $cm_svc not found in $accounts for Sitecode $SiteCode. Will retry."
+                }
+            } catch {
+                Write-DscStatus "[ClientPush][Retry $retries] Exception while checking Client Push Installation accounts: $_. Exception: $($_.Exception.Message)"
+            }
+            if (-not $found) {
+                try {
+                    Write-DscStatus "[ClientPush][Retry $retries] Setting the Client Push Account"
+                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+                    Start-Sleep -Seconds 5
+                    Write-DscStatus "[ClientPush][Retry $retries] Restarting services to acknowledge push account"
+                    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue    
+                    Start-Sleep -seconds 30
+                } catch {
+                    Write-DscStatus "[ClientPush][Retry $retries] Exception while setting Client Push Account or restarting services: $_. Exception: $($_.Exception.Message)"
+                }
+            }
+            if (-not $found) {
+                # Query again to see if it was added after the last attempt
+                try {
+                    $accounts = (get-CMClientPushInstallation -SiteCode $SiteCode).EmbeddedPropertyLists.Reserved2.values
+                    if ($cm_svc -in $accounts) {
+                        $found = $true
+                        Write-DscStatus "[ClientPush][Retry $retries] cm_svc found in Client Push Installation settings after re-check."
+                    }
+                    else {
+                        Write-DscStatus "[ClientPush][Retry $retries] cm_svc still not found in Client Push Installation settings. Retrying..."
+                    }
+                } catch {
+                    Write-DscStatus "[ClientPush][Retry $retries] Exception during post-add re-check: $_. Exception: $($_.Exception.Message)"
+                }
+            }
+            $retries++
+        } until ($found -or $retries -ge $maxRetries)
+        if (-not $found) {
+            Write-DscStatus "[ClientPush] Failed to add cm_svc to Client Push Installation settings after $maxRetries retries."
+        }
+    }
+    else {
+        Write-DscStatus "[ClientPush] cm_svc.txt file not found or is empty in $LogPath. Skipping cm_svc account creation." -Failure
+    }
+} else {
+    Write-DscStatus "[ClientPush] Current site is CAS. Skipping client push account configuration."
 }
 
 Write-DscStatus "Client push candidates are '$ClientNames'"
