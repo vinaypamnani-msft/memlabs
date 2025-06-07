@@ -3609,6 +3609,7 @@ Function Set-SiteServerLocalSql {
         [Object] $virtualMachine
     )
 
+    $CongfigToModify = $global:config
     if ($null -eq $virtualMachine.sqlVersion) {
 
         $SqlVersion = "SQL Server 2022"
@@ -3647,12 +3648,13 @@ Function Set-SiteServerLocalSql {
     }
 
     if ($null -ne $virtualMachine.remoteSQLVM) {
-        $SQLVM = $virtualMachine.remoteSQLVM
+        $SQLVM = $CongfigToModify.VirtualMachines | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
+        #$SQLVM = $virtualMachine.remoteSQLVM
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
         if ($SQLVM.OtherNode) {
             Remove-VMFromConfig -vmName $SQLVM.OtherNode -Config $global:config
         }
-        Remove-VMFromConfig -vmName $SQLVM -Config $global:config
+        Remove-VMFromConfig -vmName $SQLVM.vmName -Config $global:config
 
     }
 
@@ -5970,7 +5972,7 @@ function get-VMString {
                 $siteVM = $allVMs | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName }
                 if ($siteVM) {
                     $color = $ColorMap[$($siteVM.SiteCode)]
-                }
+                }         
 
             }
             "DomainMember" {
@@ -5988,6 +5990,9 @@ function get-VMString {
             default {
                 $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             }
+        }
+        if (-not $color) {
+            $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         }
         Write-log "Setting $name to $color for $($virtualMachine.Role)" -verbose
         $name = $name.TrimEnd() + $color

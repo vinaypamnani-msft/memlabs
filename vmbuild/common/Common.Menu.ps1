@@ -345,6 +345,7 @@ function Write-Option {
         [switch] $MultiSelected = $false
     )
 
+    Write-Log -verbose "Write-Option called with option: $option, text: $text, color: $color, color2: $color2, MultiSelect: $MultiSelect, MultiSelected: $MultiSelected"
     if ($null -eq $color) {
         $color = $Global:Common.Colors.GenConfigNormal
         $color2 = $Global:Common.Colors.GenConfigNormalNumber
@@ -352,6 +353,10 @@ function Write-Option {
     if ($null -eq $color2) {
         $color2 = $color
     }
+    #trim the colors to remove spaces
+    $color = $color.Trim()
+    $color2 = $color2.Trim()
+    
     if ($MultiSelect) {
         $optionInt = $option -as [int]
         if ($optionInt) {                    
