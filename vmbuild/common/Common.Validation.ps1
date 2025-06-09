@@ -1164,6 +1164,13 @@ function Test-Configuration {
                                     Add-ValidationMessage -Message "$vmName SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
                                 }
                             }
+                            else {
+                                # This is the Top Level Site, Child sites should have a SUP role. Validate that.
+                                $childSites = $deployConfig.virtualMachines | Where-Object { $_.ParentSiteCode -eq $sitecode -and $_.InstallSUP }
+                                if ($childSites.Count -eq 0) {
+                                    Add-ValidationMessage -Message "$vmName SUP role can not be installed on the top level site ($($sitecode)) without a Primary site having a SUP role." -ReturnObject $return -Failure
+                                }
+                            }
                         }
                     }
                 }
