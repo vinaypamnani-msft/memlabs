@@ -4576,6 +4576,11 @@ function Get-AdditionalValidations {
                             $property.additionalDisks | Add-Member -MemberType NoteProperty -Name "E" -Value "600GB" -force
                         }
                     }
+
+                    $value = $property.Memory
+                    if (($value / 1) -lt 5GB) {
+                        $property.Memory = "5GB"
+                    }
                 }
 
                 $newName = Rename-VirtualMachine -vm $property
@@ -6470,7 +6475,7 @@ function Add-NewVMForRole {
             $virtualMachine.PsObject.Members.Remove('operatingSystem')
         }
         "SiteSystem" {
-            $virtualMachine.memory = "3GB"
+            $virtualMachine.memory = "4GB"
             $disk = [PSCustomObject]@{"E" = "250GB" }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallDP' -Value $true -force
