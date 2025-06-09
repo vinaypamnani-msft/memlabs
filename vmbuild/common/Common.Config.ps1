@@ -283,6 +283,42 @@ function Get-FilesForConfiguration {
                 $allSuccess = $false
             }
         }
+
+        #Get a list of all OSISO files, and delete any .ISO files in the OS folder that are not in the list
+        $osISOFiles = $Common.AzureFileList.OSISO
+        #Get Just the filenames without iso\os in front, eg iso\os\Windows11_24h2.iso becomes Windows11_24h2.iso
+        $osISOFileNames = $Common.AzureFileList.OSISO | ForEach-Object { [System.IO.Path]::GetFileName($_.filename) }
+        #Join AzureFilesPath + ISO\OS
+        $ISOPath = Join-Path $Common.AzureFilesPath "ISO\OS"
+        $osFiles = Get-ChildItem -Path $ISOPath -Filter "*.iso" -Recurse 
+        if ($osFiles) {
+            Write-Log "Deleting old OS ISO files that are not in the filelist.json: $($osFiles | ForEach-Object { $_.FullName })" -LogOnly
+            foreach ($file in $osFiles) {
+                #Check if the file is not in the list of osISOFileNames
+                if ($osISOFileNames -contains $file.Name) {
+                    Write-Log "Keeping $($file.FullName) as it is in the filelist.json." -LogOnly
+                    #Write-GreenCheck "Keeping $($file.FullName) as it is in the current config."
+                    continue
+                }
+                try {
+                    #Log to screen using Write-GreenCheck that the file is being deleted
+                    Write-GreenCheck "Deleting old OS ISO file: $($file.FullName)"
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop                    
+                    #Remove the .MD5 file if it exists
+                    $md5File = "$($file.FullName).md5"  
+                    if (Test-Path $md5File) {
+                        Write-GreenCheck "Deleting old OS ISO MD5 file: $md5File"
+                        Remove-Item -Path $md5File -Force -ErrorAction Stop
+                    }
+                    
+                }
+                catch {
+                    Write-Log "Failed to delete file $($file.FullName): $_" -Failure
+                    $allSuccess = $false
+                }
+            }
+        }
+
     }
     
 
@@ -1815,8 +1851,6 @@ function Update-VMInformation {
     }
 }
 
-
-
 function Get-VMFromHyperV {
     [CmdletBinding()]
     param (
@@ -2906,5 +2940,3 @@ Function Show-Summary {
     foreach ($line in $outIndented) {
         Write-Host "  $line"
     }
-
-}
