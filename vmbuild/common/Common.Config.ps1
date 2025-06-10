@@ -2940,3 +2940,4 @@ Function Show-Summary {
     foreach ($line in $outIndented) {
         Write-Host "  $line"
     }
+}
