@@ -267,7 +267,11 @@ function Get-FilesForConfiguration {
         }
     }
 
-    if ($config.cmOptions.PrePopulateObjects) {
+    #Check if any siteservers are in the config
+    $siteServers = $null
+    $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary")}
+
+    if ($DownloadAll -or ($config.cmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
         $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
