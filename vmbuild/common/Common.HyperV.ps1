@@ -93,7 +93,23 @@ function Start-VM2 {
                 else {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
+                $StopError = $null
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                if (($StopError -ne $null) -and ($StopError.Exception.Message.contains("authentication tag"))) {
+                    write-progress2 "Start VM" -Status "Removing saved state for $Name"  -force
+                    try {
+                        Remove-VMSavedState -vm $vm -ErrorAction Stop
+                    }
+                    catch {
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+
+                        stop-vm -vm $vm -TurnOff -force:$true -WarningAction SilentlyContinue   
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+                    }                                        
+                    Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     $running = $true
@@ -192,12 +208,12 @@ function Stop-VM2 {
 
             if ($StopError.Count -ne 0) {
                 
-                    Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
-                    Start-Sleep -Seconds $RetrySeconds
-                    $vm = Get-VM2 -Name $Name -Fallback
-                    if ($vm.State -eq "Off") {
-                        return $true
-                    }
+                Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+                Start-Sleep -Seconds $RetrySeconds
+                $vm = Get-VM2 -Name $Name -Fallback
+                if ($vm.State -eq "Off") {
+                    return $true
+                }
                 
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
                 
