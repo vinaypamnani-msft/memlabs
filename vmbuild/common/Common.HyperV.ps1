@@ -1,3 +1,29 @@
+function Install-HyperV {
+    if ((get-windowsFeature -name Hyper-V).InstallState -ne 'Installed') {  
+
+        Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+        Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+        if ((get-windowsFeature -name Hyper-V).InstallState -eq 'Installed') {
+            Write-Log "Hyper-V and management tools installed successfully." -Success
+        }
+        else {
+            Write-Log "Failed to install Hyper-V and management tools." -Failure
+        }
+    }
+
+    if ((get-service -name vmms).Status -ne "Running") {
+        Start-Service vmms
+        if ((get-service -name vmms).Status -eq "Running") {
+            Write-Log "Hyper-V Virtual Machine Management Service started successfully." -Success
+        }
+        else {
+            Write-Log "Failed to start Hyper-V Virtual Machine Management Service." -Failure
+        }
+    }
+}
+
 function Get-VM2 {
     param (
         [Parameter(Mandatory = $true)]
