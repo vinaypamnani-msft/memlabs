@@ -307,12 +307,12 @@ function Get-FilesForConfiguration {
                 try {
                     #Log to screen using Write-GreenCheck that the file is being deleted
                     Write-GreenCheck "Deleting old OS ISO file: $($file.FullName)"
-                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop                    
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop -ProgressAction SilentlyContinue                   
                     #Remove the .MD5 file if it exists
                     $md5File = "$($file.FullName).md5"  
                     if (Test-Path $md5File) {
                         Write-GreenCheck "Deleting old OS ISO MD5 file: $md5File"
-                        Remove-Item -Path $md5File -Force -ErrorAction Stop
+                        Remove-Item -Path $md5File -Force -ErrorAction Stop -ProgressAction SilentlyContinue
                     }
                     
                 }
@@ -2649,12 +2649,12 @@ Function Download-LinuxImage {
 
     # If we downloaded a new file, delete the old one
     if (test-path $fullfileVHDX -PathType Leaf) {
-        Remove-Item $fullfileVHDX -force
+        Remove-Item $fullfileVHDX -force -ProgressAction SilentlyContinue
     }
 
     # If the intermediate file exists, delete it so we can extract a new one.
     if (test-path $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -PathType Leaf) {
-        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force
+        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force -ProgressAction SilentlyContinue
     }
 
     #Expand the downloaded file

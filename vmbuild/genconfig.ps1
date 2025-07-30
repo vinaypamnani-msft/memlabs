@@ -256,7 +256,7 @@ function Select-ConfigMenu {
     $Global:EnterKey = $true
     clear-host
     while ($true) {
-  
+        
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions = [ordered]@{}
 
@@ -756,7 +756,7 @@ function select-OptimizeDomain {
     $VmList = $vms | Where-Object { $_.VmName -in $response }
     Optimize-VHDX -VMs $VmList
     
-    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse    
+    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse -ProgressAction SilentlyContinue
     get-list -type VM -SmartUpdate -ResetCache | out-null
     $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"

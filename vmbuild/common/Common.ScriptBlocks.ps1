@@ -432,7 +432,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ProgressAction SilentlyContinue}
                     }
                 }
             }

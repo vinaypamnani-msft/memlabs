@@ -511,7 +511,7 @@ function Get-Menu2 {
 
     $host.ui.RawUI.FlushInputBuffer()
     $OriginalProgressPreference = $Global:ProgressPreference
-    $Global:ProgressPreference = 'Continue'
+    $Global:ProgressPreference = 'SilentlyContinue' # Suppress progress bar output
     try {
         if (!$NoNewLine) {
             write-Host

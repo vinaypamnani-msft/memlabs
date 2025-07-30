@@ -48,20 +48,20 @@ function Remove-VirtualMachine {
         }
 
         $cachediskFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".disk.json")
-        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf | Out-Null }
+        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
 
         $cachenetFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".network.json")
-        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
+        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
 
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf
         if (-not $Migrate) {
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
 
 
             $count = (Get-ChildItem $parent | Measure-Object).Count
             if ($count -eq 0) {
-                Remove-Item -Path $parent
+                Remove-Item -Path $parent -ProgressAction SilentlyContinue
             }
         }
     }
@@ -353,7 +353,7 @@ function Remove-Domain {
     if ($all) {
         if (Test-Path "E:\virtualMachines\$DomainName") {
             Write-Log "Removing $DomainName folder" -SubActivity
-            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf
+            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
         }
     }
 
@@ -391,13 +391,13 @@ function Remove-All {
     }
 
     Remove-Orphaned -WhatIf:$WhatIf
-    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue | Out-Null
+    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 
     # Get all the folders in E:\VirtualMachines and delete them
     $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory
     foreach ($folder in $folders) {
         Write-Log "Removing $($folder.Name) folder" -SubActivity
-        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf
+        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
     }
 
     Write-Host

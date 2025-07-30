@@ -649,7 +649,7 @@ function Get-File {
     }
 
     if ($RemoveIfPresent.IsPresent -and (Test-Path $Destination)) {
-        Remove-Item -Path $Destination -Force -Confirm:$false -WhatIf:$WhatIf
+        Remove-Item -Path $Destination -Force -Confirm:$false -WhatIf:$WhatIf -ProgressAction SilentlyContinue
     }
 
     # Create destination directory if it doesn't exist
@@ -2028,7 +2028,7 @@ function New-VirtualMachine {
             }
             $vmTest | Remove-VM -Force
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse -ProgressAction SilentlyContinue| out-null
             Write-Log "$VmName`: Purge complete."
             Get-List -FlushCache | Out-Null # flush cache
         }
@@ -2043,7 +2043,7 @@ function New-VirtualMachine {
             $VmSubPath = Join-Path $VmPath $VmName
             if (Test-Path -Path $VmSubPath) {
                 Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
-                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue| out-null
                 Write-Log "$VmName`: Purge complete."
             }
 
@@ -2051,7 +2051,7 @@ function New-VirtualMachine {
             if (Test-Path -Path $VmSubPath) {
                 Start-Sleep -Seconds 30
                 Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
-                Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue| out-null
                 Write-Log "$VmName`: Purge complete."
             }
 
@@ -3171,12 +3171,12 @@ function Get-StorageConfig {
                 Write-Log "Testing upgrade to 2025 cleanup" -LogOnly
                 if (test-path "C:\temp\Upgrade2025") {
                     write-host "Removing 2025 Upgrade Support files - C:\temp\Upgrade2025"
-                    Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
                 }
                 $sourceLocation = Join-Path $Common.AzureFilesPath "support\WindowsServer2025.zip"
                 if (test-path $sourceLocation) {
                     write-host "Removing 2025 Upgrade Support files - $sourceLocation"
-                    remove-item -Path $sourceLocation -Force -ErrorAction SilentlyContinue
+                    remove-item -Path $sourceLocation -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
                 }
             }
 
@@ -3926,7 +3926,7 @@ function Get-FileWithHash {
                 Write-Log -logonly "Found $FileName in $($Common.AzureFilesPath) with expected hash $ExpectedHash."
                 if ($ForceDownload.IsPresent) {
                     Write-WhiteI "ForceDownload switch present. Removing pre-existing $fileNameLeaf file..." -Warning
-                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf | Out-Null
+                    Remove-Item -Path $localImagePath -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                     $return.download = $true
                 }
                 else {
@@ -3937,8 +3937,8 @@ function Get-FileWithHash {
             }
             else {
                 Write-OrangePoint "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
-                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
+                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
                 $return.download = $true
             }
         }
@@ -4511,7 +4511,7 @@ if (-not $Common.Initialized) {
             try {
                 if ($global:common.CachePath) {
                     $threshold = 2
-                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force | out-null
+                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force -ProgressAction SilentlyContinue| out-null
                 }
             }
             catch {}

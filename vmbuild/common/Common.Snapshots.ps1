@@ -132,7 +132,7 @@ function select-DeleteSnapshotDomain {
                             }
 
                             if (Test-Path $notesFile) {
-                                Remove-Item $notesFile -Force
+                                Remove-Item $notesFile -Force -ProgressAction SilentlyContinue
                             }
                             Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete                            "
                         }

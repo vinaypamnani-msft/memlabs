@@ -304,7 +304,7 @@ function New-RDCManFileFromHyperV {
                 $killedAlready = $true
             }
             Start-Sleep 1
-            Remove-Item $rdcmanfile | out-null
+            Remove-Item $rdcmanfile -ProgressAction SilentlyContinue| out-null
         }
         $shouldSave = $true
     }
