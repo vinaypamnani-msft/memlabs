@@ -84,7 +84,7 @@ else {
     }
     else { 
         $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag DP group: $DPGroup created successfully"
+        Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
 
         # Get all Distribution Points
         $DistributionPoints = Get-CMDistributionPoint -AllSite
@@ -303,7 +303,7 @@ else {
     }
 
     # Create the share with read access for "Everyone"
-    New-SmbShare -Name $shareName -Path $folderPath -FullAccess "Administrators" -ReadAccess "Everyone"
+    New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
@@ -948,7 +948,17 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     )
 
 
-    New-CMFolder -Name "MEMLABS" -ParentFolderPath "Devicecollection"
+        # Check if MEMLABS folder exists under Device Collections
+    $folder = Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS"
+
+    if (-not $folder) {
+        # Create MEMLABS folder if it does not exist
+        New-CMFolder -Name "MEMLABS" -ParentFolderPath "\DeviceCollection"
+        Write-DscStatus "$Tag MEMLABS folder created under Device Collections."
+    }
+    else {
+        Write-DscStatus "$Tag MEMLABS folder already exists under Device Collections."
+    }
 
 
     # Loop through each collection and create it in SCCM
