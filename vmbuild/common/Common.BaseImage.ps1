@@ -12,7 +12,7 @@ function Get-ToolsForBaseImage {
     $toolsPath = Join-Path $Common.StagingInjectPath "tools"
     if ((Test-Path $toolsPath) -and $ForceTools.IsPresent) {
         Write-Log "ForceTools switch is present, and '$toolsPath' exists. Purging items inside the folder." -Warning
-        Remove-Item -Path $toolsPath\* -Force -Recurse -WhatIf:$WhatIf | Out-Null
+        Remove-Item -Path $toolsPath\* -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
     }
 
     foreach ($item in $Common.AzureFileList.Tools) {
@@ -35,7 +35,7 @@ function Get-ToolsForBaseImage {
             Write-Log "Found $fileName in $($Common.TempPath)."
             if ($ForceTools.IsPresent) {
                 Write-Log "ForceTools switch present. Removing pre-existing $fileName file..." -Warning -Verbose
-                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null 
+                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null 
             }
             else {
                 # Write-Log "ForceTools switch not present. Skip downloading/recopying '$fileName'." -Warning
@@ -122,7 +122,7 @@ function Import-WimFromIso {
     # Copy out the WIM file from the selected ISO
     try {
         Write-Log "Purging temp folder at $($Common.TempPath)..."
-        Remove-Item -Path "$($Common.TempPath)\$WimName" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$($Common.TempPath)\$WimName" -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue | Out-Null
         Write-Log "Purge complete."
         if ($installWimFound) {
             Write-Log "Copying WIM file to the temp folder..."
@@ -288,7 +288,7 @@ function New-VhdxFile {
     }
     finally {
         if (Test-Path $unattendPathToInject) {
-            Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
         }
     }
 }

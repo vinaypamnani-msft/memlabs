@@ -254,6 +254,8 @@ try {
     }
 
 
+    # Verify Hyper-V is installed
+    Install-HyperV
 
     ### Run maintenance
     if (-not $Configuration) {

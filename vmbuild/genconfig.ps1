@@ -256,7 +256,7 @@ function Select-ConfigMenu {
     $Global:EnterKey = $true
     clear-host
     while ($true) {
-  
+        
         $domainCount = (get-list -Type UniqueDomain | Measure-Object).Count
         $customOptions = [ordered]@{}
 
@@ -708,8 +708,9 @@ function Optimize-VHDX {
                 $global:progressPreference = "Continue"
                 Write-GreenCheck "Defragmented $driveLetter"
                 try {
-                Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Stop
-                } catch {}
+                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Stop
+                }
+                catch {}
                 Write-GreenCheck "Optimized $($hd.Path)"
             }
             finally {
@@ -755,7 +756,7 @@ function select-OptimizeDomain {
     $VmList = $vms | Where-Object { $_.VmName -in $response }
     Optimize-VHDX -VMs $VmList
     
-    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse    
+    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse -ProgressAction SilentlyContinue
     get-list -type VM -SmartUpdate -ResetCache | out-null
     $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
     write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
@@ -1063,6 +1064,7 @@ function Select-MainMenu {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
+        $global:GenConfigErrorMessages = @()
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
         $preOptions = [ordered]@{}
@@ -1244,7 +1246,9 @@ function Select-MainMenu {
                 & ".\dsc\createGuestDscZip.ps1" @params | Out-Host
                 Set-Location $PSScriptRoot | Out-Null
             }
-            "n" { Select-VirtualMachines $response }
+            "n" {
+                Select-VirtualMachines $response
+            }
             default { 
                 # This will be a VM number, or 'N' for new VM
 
@@ -5803,8 +5807,8 @@ function get-VMString {
         }
         $temp = "  CM  [SiteCode $SiteCode]"
         if ($virtualMachine.installMP) {
-                $temp += " [MP]"
-            }
+            $temp += " [MP]"
+        }
         if ($virtualMachine.installDP -or $virtualMachine.enablePullDP) {
             
             if ($virtualMachine.installDP) {
@@ -6566,7 +6570,8 @@ function Add-NewVMForRole {
         Write-Log -verbose "A VM with the name '$($virtualMachine.vmName)' already exists. Skipping add."
         if ($ReturnMachineName) {
             return $virtualMachine.vmName
-        } else {
+        }
+        else {
             return
         }
     }

@@ -1,3 +1,29 @@
+function Install-HyperV {
+    if ((get-windowsFeature -name Hyper-V).InstallState -ne 'Installed') {  
+
+        Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+        Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+        if ((get-windowsFeature -name Hyper-V).InstallState -eq 'Installed') {
+            Write-Log "Hyper-V and management tools installed successfully." -Success
+        }
+        else {
+            Write-Log "Failed to install Hyper-V and management tools." -Failure
+        }
+    }
+
+    if ((get-service -name vmms).Status -ne "Running") {
+        Start-Service vmms
+        if ((get-service -name vmms).Status -eq "Running") {
+            Write-Log "Hyper-V Virtual Machine Management Service started successfully." -Success
+        }
+        else {
+            Write-Log "Failed to start Hyper-V Virtual Machine Management Service." -Failure
+        }
+    }
+}
+
 function Get-VM2 {
     param (
         [Parameter(Mandatory = $true)]
@@ -93,7 +119,23 @@ function Start-VM2 {
                 else {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
+                $StopError = $null
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                if (($StopError -ne $null) -and ($StopError.Exception.Message.contains("authentication tag"))) {
+                    write-progress2 "Start VM" -Status "Removing saved state for $Name"  -force
+                    try {
+                        Remove-VMSavedState -vm $vm -ErrorAction Stop
+                    }
+                    catch {
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+
+                        stop-vm -vm $vm -TurnOff -force:$true -WarningAction SilentlyContinue   
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+                    }                                        
+                    Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     $running = $true
@@ -192,12 +234,12 @@ function Stop-VM2 {
 
             if ($StopError.Count -ne 0) {
                 
-                    Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
-                    Start-Sleep -Seconds $RetrySeconds
-                    $vm = Get-VM2 -Name $Name -Fallback
-                    if ($vm.State -eq "Off") {
-                        return $true
-                    }
+                Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+                Start-Sleep -Seconds $RetrySeconds
+                $vm = Get-VM2 -Name $Name -Fallback
+                if ($vm.State -eq "Off") {
+                    return $true
+                }
                 
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
                 

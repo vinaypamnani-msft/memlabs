@@ -1165,11 +1165,15 @@ function Test-Configuration {
                                 }
                             }
                             else {
-                                if ($vm.role -eq "CAS") {                                
+                                if ($vm.role -eq "CAS") {                     
+                                    #Get a list of child site codes
+                                    $childSiteCodes = @($deployConfig.virtualMachines | Where-Object { $_.ParentSiteCode -eq $vm.sitecode } | Select-Object -ExpandProperty SiteCode -Unique)
+
                                     # This is the Top Level Site, Child sites should have a SUP role. Validate that.
-                                    $childSites = $deployConfig.virtualMachines | Where-Object { $_.ParentSiteCode -eq $sitecode -and $_.InstallSUP }
+                                    $childSites = @($deployConfig.virtualMachines | Where-Object { ($_.SiteCode -in $childSiteCodes) -and $_.InstallSUP })
+
                                     if ($childSites.Count -eq 0) {
-                                        Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary site having a SUP role." -ReturnObject $return -Failure
+                                        Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary ($($childSiteCodes -join ',')) site having a SUP role." -ReturnObject $return -Failure
                                     }
                                 }
                             }

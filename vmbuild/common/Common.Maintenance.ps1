@@ -667,9 +667,9 @@ function Get-VMFixes {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
         $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
-        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
-        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
-        if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
+        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse -ProgressAction SilentlyContinue| Out-Null }
+        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse -ProgressAction SilentlyContinue| Out-Null }
+        if (Test-Path $path3) { Remove-Item -Path $path3 -Force -ProgressAction SilentlyContinue| Out-Null }
         return $true
     }
 
