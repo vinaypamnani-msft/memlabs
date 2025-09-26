@@ -56,3 +56,4 @@ GOTO END
 
 :END
 popd
+timeout 2
