@@ -321,6 +321,11 @@ function Test-ValidVmSupported {
         Test-MachineNameExists $VM.remoteSQLVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
+    if ($VM.wsusDataBaseServer) {
+        Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
+    }
+
     if ($VM.fileServerVM) {
         Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
         Test-MachineNameExists $VM.fileServerVM -ReturnObject $ReturnObject -config $ConfigObject

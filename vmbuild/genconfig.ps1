@@ -4151,6 +4151,10 @@ function Rename-VirtualMachine {
             if ($existing.pullDPSourceDP -eq $vm.vmName) {
                 $existing.pullDPSourceDP = $newName
             }
+            if ($existing.wsusDataBaseServer -eq $vm.vmName) {
+                $existing.wsusDataBaseServer = $newName
+            }
+
 
         }
         $vm.vmName = $newName
