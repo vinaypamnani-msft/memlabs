@@ -344,6 +344,10 @@ try {
                             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
                             Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
                             write-host
+                            Write-Log "If you want to retry with validation, run the following command" 
+                            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`""
+                            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`""
+                            write-host
                             exit 1
                         }
                     }
@@ -365,6 +369,10 @@ try {
             Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
             Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+            write-host
+            Write-Log "If you want to retry with validation, run the following command" 
+            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`""
+            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`""
             write-host
             exit 1
         }
