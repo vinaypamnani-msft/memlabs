@@ -3701,6 +3701,7 @@ Function Set-SiteServerRemoteSQL {
         }
         $virtualMachine.PsObject.Members.Remove('remoteSQLVM')
     }
+   
     $virtualMachine | Add-Member -MemberType NoteProperty -Name 'remoteSQLVM' -Value $vmName -force
     $newSQLVM = $global:Config.VirtualMachines | Where-Object { $_.vmName -eq $vmName }
     if ($newSQLVM) {
@@ -3708,6 +3709,20 @@ Function Set-SiteServerRemoteSQL {
             if ($newSQLVM.role -ne "SQLAO") {
                 $newSQLVM | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
                 $newSQLVM | Add-Member -MemberType NoteProperty -Name 'InstallSMSProv' -Value $false -force
+            }
+        }
+        $oldSQLVMName = $virtualMachine.VmName
+        if ($oldSQLVM) {
+            $oldSQLVMName = $oldSQLVM.VmName
+        }
+        if ($virtualMachine.wsusDataBaseServer) {
+            if ($oldSQLVMName -eq $virtualMachine.wsusDataBaseServer) {
+                if ($newSQLVM.role -ne "SQLAO") {
+                    $virtualMachine.wsusDataBaseServer = $newSQLVM.vmName
+                }
+                else {
+                    $virtualMachine.wsusDataBaseServer = "WID"
+                }
             }
         }
     }
@@ -7686,7 +7701,7 @@ function Save-Config {
         #$filename = Join-Path $configDir $filename
         $fullFilename = $Global:configfile
         $contentEqual = (Get-Content $fullFileName | ConvertFrom-Json | ConvertTo-Json -Depth 5 -Compress) -eq
-                ($config | ConvertTo-Json -Depth 5 -Compress)
+        ($config | ConvertTo-Json -Depth 5 -Compress)
         if ($contentEqual) {
             #return Split-Path -Path $fileName -Leaf
             Write-Log -HostOnly -Verbose "(2)Returning File: $fileName"

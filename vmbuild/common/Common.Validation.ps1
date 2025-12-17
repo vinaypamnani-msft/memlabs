@@ -322,8 +322,15 @@ function Test-ValidVmSupported {
     }
 
     if ($VM.wsusDataBaseServer) {
+        if ($VM.wsusDataBaseServer -ne "WID") {
         Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
         Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
+
+        $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) }
+         if (-not $SQLVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$($VM.wsusDataBaseServer)] does not contain sql; When deploying WSUS Role with remote SQL, you must specify the SQL VM." -ReturnObject $ReturnObject -Warning
+            }
+        }
     }
 
     if ($VM.fileServerVM) {
@@ -1178,7 +1185,8 @@ function Test-Configuration {
                                     $childSites = @($deployConfig.virtualMachines | Where-Object { ($_.SiteCode -in $childSiteCodes) -and $_.InstallSUP })
 
                                     if ($childSites.Count -eq 0) {
-                                        Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary ($($childSiteCodes -join ',')) site having a SUP role." -ReturnObject $return -Failure
+                                        #Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary ($($childSiteCodes -join ',')) site having a SUP role." -ReturnObject $return -Failure
+                                        Add-ValidationMessage -Message "$vmName SUP role installed on the CAS ($($sitecode)) must also have a SUP on a Primary ($($childSiteCodes -join ',')) site." -ReturnObject $return -Failure
                                     }
                                 }
                             }
@@ -1187,7 +1195,7 @@ function Test-Configuration {
                 }
             }
 
-            Test-ValidUserName -name $vm.domainUser -vmname $vm.vmName
+            Test-ValidUserName -name $vm.domainUser -vmName $vm.vmName
 
         }
 

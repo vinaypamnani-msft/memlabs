@@ -3352,6 +3352,28 @@ class ConfigureWSUS {
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
+
+
+
+        $ServiceName = 'WSUSService'
+
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            write-verbose "Service $ServiceName not found."
+            throw
+        }
+
+        # If disabled, set to Automatic
+        if ($svc.StartType -eq 'Disabled') {
+            Set-Service -Name $ServiceName -StartupType Automatic
+            $svc = Get-Service -Name $ServiceName
+        }
+
+        # Start if not running
+        if ($svc.Status -ne 'Running') {
+            Start-Service -Name $ServiceName
+        }
+
         try {
             #write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
@@ -3380,7 +3402,7 @@ class ConfigureWSUS {
             $wsus = get-WsusServer
         }
         catch {
-            Write-Status "Failed to Configure WSUS"
+            Write-Status "Failed to Configure WSUS. Could not locate WSUS Server after postinstall"
             Write-Verbose "$_"
             throw
         }
