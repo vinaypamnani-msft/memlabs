@@ -1156,8 +1156,10 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
         $guestZipHash = $result.ScriptBlockOutput.Hash
 
+        $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
-        if (-not $alreadyCopiedDSC -or -not $guestZipHash) {
+
+        if (-not $alreadyCopiedDSC -or ($guestZipHash -ne $dscZipHash)) {
             # Copy DSC files
             Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."

@@ -151,7 +151,7 @@ configuration Phase3
         }
 
         GpUpdate GpUpdate {
-            Run = "True"
+            Run       = "True"
             DependsOn = $nextDepend
         }
         $nextDepend = "[GpUpdate]GpUpdate"
@@ -166,18 +166,18 @@ configuration Phase3
             }
 
             InstallADK ADKInstall {
-                ADKPath      = "C:\temp\adksetup.exe"
-                ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-                ADKDownloadPath = $deployConfig.URLS.ADK
+                ADKPath              = "C:\temp\adksetup.exe"
+                ADKWinPEPath         = "c:\temp\adksetupwinpe.exe"
+                ADKDownloadPath      = $deployConfig.URLS.ADK
                 ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE              
-                Ensure       = "Present"
-                DependsOn    = "[WriteStatus]ADKInstall"
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]ADKInstall"
             }
             
 
             $nextDepend = "[InstallADK]ADKInstall"
             #Find the toplevel site server that is newly being deployed
-            if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS","Primary")) {
+            if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS", "Primary")) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
@@ -260,12 +260,35 @@ configuration Phase3
         InstallOleDbDriver InstallOleDbDriver {
             DependsOn = "[WriteStatus]OleDbDriverInstall"
             URL       = $deployConfig.URLS.OleDB
-            Path  = "C:\temp\msoledbsql.msi"
+            Path      = "C:\temp\msoledbsql.msi"
             Ensure    = "Present"
         }
 
 
-        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+        $nextDepend = "[InstallOleDbDriver]InstallOleDbDriver"
+
+
+        if ($ThisVM.installDP) {
+            Registry RAMDiskTFTPWIndowSize {
+                DependsOn = $nextDepend
+                Ensure    = "Present"
+                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                ValueName = "RamDiskTFTPWindowSize"
+                ValueData = "16"
+                ValueType = "DWord"
+            }
+
+            Registry RAMDiskTFTPBlockSize {
+                DependsOn = $nextDepend
+                Ensure    = "Present"
+                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                ValueName = "RamDiskTFTPBlockSize"
+                ValueData = "4096"
+                ValueType = "DWord"
+            }
+
+            $nextDepend = "[Registry]RAMDiskTFTPBlockSize"
+        }
 
         if ($AddIISCert) {
 
