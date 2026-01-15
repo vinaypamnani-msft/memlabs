@@ -264,7 +264,6 @@ Configuration Phase8
             Id                   = 'MemLabsCustomization'
             ServerName           = $thisvm.VmName
             InstanceName         = $thisVM.sqlInstanceName
-            #Credential       = $Admincreds
             SetFilePath          = $CustomJobSet
             TestFilePath         = $CustomJobTest
             GetFilePath          = $CustomJobGet
@@ -275,6 +274,25 @@ Configuration Phase8
             Encrypt              = "Optional"
         }
         $nextDepend = '[SqlScript]MemLabsCustomization'
+
+        $CustomJobSet = "C:\staging\DSC\SQLScripts\MemLabsCustomization2-Set.sql"
+        $CustomJobTest = "C:\staging\DSC\SQLScripts\MemLabsCustomization2-Test.sql"
+        $CustomJobGet = "C:\staging\DSC\SQLScripts\MemLabsCustomization2-Get.sql"
+
+        SqlScript 'MemLabsCustomization2' {
+            Id                   = 'MemLabsCustomization2'
+            ServerName           = $thisvm.VmName
+            InstanceName         = $thisVM.sqlInstanceName
+            SetFilePath          = $CustomJobSet
+            TestFilePath         = $CustomJobTest
+            GetFilePath          = $CustomJobGet
+            DisableVariables     = $true
+            DependsOn            = $nextDepend
+            Variable             = @('FilePath=C:\temp\')
+            PsDscRunAsCredential = $Admincreds
+            Encrypt              = "Optional"
+        }
+        $nextDepend = '[SqlScript]MemLabsCustomization2'
 
         WriteStatus Complete {
             DependsOn = $nextDepend
