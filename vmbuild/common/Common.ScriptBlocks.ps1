@@ -1,12 +1,22 @@
 
 
 $global:Phase10Job = {
-    
+        param (
+            [object] $vm,
+            [array] $Dummy,
+            [boolean] $NewVMS,
+            [boolean] $Dummy2,
+            [string] $ScriptRoot
+        ) 
+       
     try {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
+        if ($NewVMS) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
+        }
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLastestHotfixVersion
      
@@ -19,7 +29,7 @@ $global:Phase10Job = {
         if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
-        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
+        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"

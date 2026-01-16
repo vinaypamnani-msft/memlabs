@@ -94,7 +94,7 @@ function Start-Maintenance {
         }
     }
 
-    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance"
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 @() -argument2 $false
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
 
@@ -208,10 +208,10 @@ function Start-VMMaintenance {
     }
 
     if ($ApplyNewOnly.IsPresent) {
-        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+        $vmFixes = Get-VMFixes -newVM $true-VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
     }
     else {
-        $vmFixes = Get-VMFixes -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
+        $vmFixes = Get-VMFixes -newVM $false -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
     }
 
     $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
@@ -274,7 +274,7 @@ function Start-VMFixes {
         VmName       = $vmName
         VMDomainName = $vmDomain
         DisplayName  = "Testing for Memlabs files"
-        ScriptBlock  = {Test-Path "C:\Staging"}
+        ScriptBlock  = { Test-Path "C:\Staging" }
     }
 
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
@@ -328,14 +328,16 @@ function Start-VMFix {
         VMsToStop = @()
     }
 
+
     # Get current VM note to ensure we don't have outdated version
     $vmNote = Get-VMNote -VMName $vmName
     $vmDomain = $vmNote.domain
 
+
     # Check applicability
     $fixName = $vmFix.FixName
     $fixVersion = $vmFix.FixVersion
-
+    write-log -LogOnly "Applying Fix $fixName $fixVersion to $vmName"
     if ($vmNote.memLabsVersion -ge $fixVersion -and -not $ApplyNewOnly.IsPresent) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) has been applied already."
         $return.Success = $true
@@ -419,6 +421,8 @@ function Start-VMFix {
     $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
     if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
+        Write-log "ScriptBlockFailed: $($result.ScriptBlockFailed) Output: $($result.ScriptBlockOutput)"
+        write-log -LogOnly "ScriptBlock: $($vmFix.ScriptBlock)"
         $return.Success = $false
         # if ($Common.VerboseEnabled) {
         #     $pull_Transcript = {
@@ -509,7 +513,8 @@ function Get-VMFixes {
         [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName = "Real")]
         [object] $VMName,
         [Parameter(Mandatory = $true, HelpMessage = "VMName", ParameterSetName = "Dummy")]
-        [switch] $ReturnDummyList
+        [switch] $ReturnDummyList,
+        [bool] $NewVM = $true
     )
 
     if ($ReturnDummyList.IsPresent) {
@@ -582,8 +587,7 @@ function Get-VMFixes {
             return $false
         }
 
-        if ([System.Version]$version -lt [System.Version]"5.0.9128")
-        {
+        if ([System.Version]$version -lt [System.Version]"5.0.9128") {
             Write-Host "2309 or older.. Should not force EHTTP"
             return $true
         }
@@ -600,7 +604,8 @@ function Get-VMFixes {
             $component.Props = $props
             $component.Put()
             return $true
-        } else {
+        }
+        else {
             write-host "IISSSLSTATE of $value looks good.. You should not be failing at prereq check"
             return $true
         }
@@ -667,9 +672,9 @@ function Get-VMFixes {
         $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
         $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
         $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
-        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse -ProgressAction SilentlyContinue| Out-Null }
-        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse -ProgressAction SilentlyContinue| Out-Null }
-        if (Test-Path $path3) { Remove-Item -Path $path3 -Force -ProgressAction SilentlyContinue| Out-Null }
+        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse -ProgressAction SilentlyContinue | Out-Null }
+        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse -ProgressAction SilentlyContinue | Out-Null }
+        if (Test-Path $path3) { Remove-Item -Path $path3 -Force -ProgressAction SilentlyContinue | Out-Null }
         return $true
     }
 
@@ -1099,6 +1104,63 @@ function Get-VMFixes {
     }
     #endregion
 
+    $Fix_RunSQL = {
+
+        $SqlFilePath = "$env:systemdrive\staging\SQLFix-Compat.sql"
+
+        if (-not (Test-Path $SqlFilePath)) {
+            return $true
+        }
+
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
+
+        $instances = (Get-ItemProperty -Path $regPath).PSObject.Properties |
+        Where-Object {
+            $_.MemberType -eq "NoteProperty" -and
+            $_.Name -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider"
+        } |
+        Select-Object -ExpandProperty Name
+
+        if (-not $instances) {
+            return $true
+        }
+
+        foreach ($instance in $instances) {
+
+            if ($instance -eq "MSSQLSERVER") {
+                $sqlInstanceName = "."
+            }
+            else {
+                $sqlInstanceName = ".\$instance"
+            }
+
+            try {
+                sqlcmd -S $sqlInstanceName -i $SqlFilePath 1>$null 2>$null
+            }
+            catch {
+                Write-Host "ERROR on ${sqlInstanceName}: $($_.Exception.Message)"
+                return $false
+            }
+
+        }
+
+        return $true
+    }
+
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix-RunSQL"
+        FixVersion        = "260117"
+        AppliesToNew      = $true 
+        AppliesToExisting = $true
+        AppliesToRoles    = @()
+        NotAppliesToRoles = @("OSDClient", "Linux", "AADClient", "WorkgroupMember", "InternetClient", "DC", "BDC")
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_RunSQL
+        RunAsAccount      = $vmNote.adminName
+        InjectFiles       = @("SQLFix-Compat.sql") # must exist in filesToInject\staging dir
+    }
+
+
     # ========================
     # Determine applicability
     # ========================
@@ -1120,6 +1182,13 @@ function Get-VMFixes {
                 $applicable = $true
             }
         }
+
+        if (-not $newVM) {
+            if ($vmNote.memLabsVersion -ge $vmFix.FixVersion) {
+                $applicable = $false
+            }
+        }
+
         $vmfix | Add-Member -MemberType NoteProperty -Name AppliesToThisVM -Value $applicable -force
 
         # Filter out null's'
