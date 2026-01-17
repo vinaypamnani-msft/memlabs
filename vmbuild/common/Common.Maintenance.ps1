@@ -94,7 +94,7 @@ function Start-Maintenance {
         }
     }
 
-    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 @() -argument2 $false
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
 
@@ -208,7 +208,7 @@ function Start-VMMaintenance {
     }
 
     if ($ApplyNewOnly.IsPresent) {
-        $vmFixes = Get-VMFixes -newVM $true-VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
     }
     else {
         $vmFixes = Get-VMFixes -newVM $false -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
@@ -1135,7 +1135,7 @@ function Get-VMFixes {
             }
 
             try {
-                sqlcmd -S $sqlInstanceName -i $SqlFilePath 1>$null 2>$null
+                sqlcmd -S $sqlInstanceName -i $SqlFilePath -C 1>$null 2>$null
             }
             catch {
                 Write-Host "ERROR on ${sqlInstanceName}: $($_.Exception.Message)"

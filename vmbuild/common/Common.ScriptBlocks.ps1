@@ -12,6 +12,8 @@ $global:Phase10Job = {
     try {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         if ($NewVMS) {
@@ -199,7 +201,7 @@ $global:VM_Create = {
            
                     $priority = 25
                     $buffer = 10
-                    if ($role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                    if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
                         $priority = 50
                         $buffer = 20
                     }

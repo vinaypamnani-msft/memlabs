@@ -1723,10 +1723,10 @@ function Set-VMNote {
     $vm = Get-VM2 $VmName -Fallback
     if ($vm) {
         if ($vmVersionUpdated) {
-            Write-Log "Setting VM Note for $vmName (version $vmVersion)" -Verbose
+            Write-Log "Setting VM Note for $vmName (version $vmVersion)" -LogOnly
         }
         else {
-            Write-Log "Setting VM Note for $vmName to $vmNoteJson" -Verbose -LogOnly
+            Write-Log "Setting VM Note for $vmName to $vmNoteJson" -LogOnly
         }
         $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
     }
@@ -2071,7 +2071,7 @@ function New-VirtualMachine {
             if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1))) {
                 $priority = 25
                 $buffer = 10
-                if ($role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
                     $priority = 50
                     $buffer = 20
                 }
@@ -4425,8 +4425,8 @@ if (-not $Common.Initialized) {
             $breakPrefix = "-----"
         }
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion        = "250204.0"
-            LatestHotfixVersion   = "250204.0"
+            MemLabsVersion        = "260117.0"
+            LatestHotfixVersion   = "260117.0"
             PS7                   = $PS7
             Initialized           = $true
             InJob                 = $InJob

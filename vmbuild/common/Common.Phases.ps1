@@ -309,7 +309,8 @@ function Start-PhaseJobs {
                 if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
                     continue
                 }       
-                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -argument1 @() -argument2 $true -ErrorAction Stop -ErrorVariable Err
+                # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                     $job_created_no++
@@ -1108,10 +1109,17 @@ function Get-Phase9ConfigurationData {
             $MultiDomain = $true
         }
         if ($MultiDomain) {
+            $role = $vm.role
+            
+            if ($role -eq "DomainMember") {
+                if ($vm.sqlVersion){
+                    $role = "SqlServer"
+                }
+            }
             $newItem = @{
                 NodeName = "$($vm.vmName).$($vm.domain)"
                 #NodeName = "$($vm.vmName)"
-                Role     = $vm.Role
+                Role     = $role
             }
         }
         #else {

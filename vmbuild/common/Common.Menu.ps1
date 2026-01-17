@@ -558,7 +558,11 @@ function select-ChangeDynamicMemory {
                 }
                 $priority = 25
                 $buffer = 10
-                if ($vm.role -in ("DC", "SQLSqlServer", "Primary", "SQLAO", "CAS")) {
+                $role = $vm.role
+                if ($vm.sqlVersion) {
+                    $role = "SqlServer"
+                }
+                if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
                     $priority = 50
                     $buffer = 20
                 }
