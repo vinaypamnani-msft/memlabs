@@ -81,14 +81,14 @@ Configuration Phase8
         $nextDepend = "[NTFSAccessEntry]PMPCApps"
 
         SmbShare "PMPCShare" {
-            Name                  = "PMPCApps"
-            Path                  = 'E:\PMPCApps'
+            Name        = "PMPCApps"
+            Path        = 'E:\PMPCApps'
             #Ensure                = "Present"
-            Description           = "Share for PMPC Apps"
+            Description = "Share for PMPC Apps"
             #FolderEnumerationMode = 'Unrestricted'
-            FullAccess            = "Everyone"
+            FullAccess  = "Everyone"
             #ReadAccess            = "Everyone"
-            DependsOn             = $nextDepend
+            DependsOn   = $nextDepend
         }
         $nextDepend = "[SmbShare]PMPCShare"
 
@@ -141,14 +141,14 @@ Configuration Phase8
                 $SqlServer = $serverToWait.VmName
             }
             InstallPMPC InstallPMPC {
-                DependsOn = $nextDepend
-                Path      = "C:\temp\pmpc.msi"
-                URL       = $deployConfig.URLS.PMPC
-                SiteCode  = $ThisVM.Sitecode
-                SqlServer = $SqlServer
+                DependsOn  = $nextDepend
+                Path       = "C:\temp\pmpc.msi"
+                URL        = $deployConfig.URLS.PMPC
+                SiteCode   = $ThisVM.Sitecode
+                SqlServer  = $SqlServer
                 SiteServer = $serverToWait.VmName
                 FileServer = $ThisVM.PatchMyPCFileServer
-                Ensure    = "Present"
+                Ensure     = "Present"
             }
             $nextDepend = '[InstallPMPC]InstallPMPC'
 
@@ -467,22 +467,27 @@ Configuration Phase8
                 $CMDownloadStatus = "Downloading Configuration Manager technical preview"
             }
 
-            WriteStatus DownLoadSCCM {
-                DependsOn = $nextDepend
-                Status    = $CMDownloadStatus
-            }
+            if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
 
-            DownloadSCCM DownLoadSCCM {
-                CM            = $CM
-                CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
-                Ensure        = "Present"
-                DependsOn     = "[WriteStatus]DownLoadSCCM"
+                WriteStatus DownLoadSCCM {
+                    DependsOn = $nextDepend
+                    Status    = $CMDownloadStatus
+                }
+                $nextDepend = "[WriteStatus]DownLoadSCCM"
+
+                DownloadSCCM DownLoadSCCM {
+                    CM            = $CM
+                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
+                    Ensure        = "Present"
+                    DependsOn     = $nextDepend
+                }
+                $nextDepend = "[DownLoadSCCM]DownLoadSCCM"
             }
 
             FileReadAccessShare CMSourceSMBShare {
                 Name      = $CM
                 Path      = "c:\$CM"
-                DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                DependsOn = $nextDepend
             }
 
             $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
@@ -531,12 +536,12 @@ Configuration Phase8
             }
 
             InstallPMPC InstallPMPC {
-                DependsOn = $nextDepend
-                Path      = "C:\temp\pmpc.msi"
-                URL       = $deployConfig.URLS.PMPC
-                Ensure    = "Present"
-                SiteCode  = $ThisVM.Sitecode
-                SqlServer = $SqlServer
+                DependsOn  = $nextDepend
+                Path       = "C:\temp\pmpc.msi"
+                URL        = $deployConfig.URLS.PMPC
+                Ensure     = "Present"
+                SiteCode   = $ThisVM.Sitecode
+                SqlServer  = $SqlServer
                 SiteServer = $ThisVM.VmName
                 FileServer = $ThisVM.PatchMyPCFileServer
             }

@@ -1,13 +1,13 @@
 
 
 $global:Phase10Job = {
-        param (
-            [object] $vm,
-            [array] $Dummy,
-            [boolean] $NewVMS,
-            [boolean] $Dummy2,
-            [string] $ScriptRoot
-        ) 
+    param (
+        [object] $vm,
+        [array] $Dummy,
+        [boolean] $NewVMS,
+        [boolean] $Dummy2,
+        [string] $ScriptRoot
+    ) 
        
     try {
         $global:ScriptBlockName = "Phase10Job"
@@ -72,7 +72,7 @@ $global:Initialize_Disk = {
     }
     catch {
         try {
-        (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+            (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
             Get-Disk | Update-Disk
             start-sleep -Seconds 30
         }
@@ -444,7 +444,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ProgressAction SilentlyContinue}
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ProgressAction SilentlyContinue }
                     }
                 }
             }
@@ -695,6 +695,61 @@ $global:VM_Create = {
 
                 # Eject ISO from guest
                 Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+            }
+            #Copy CM to the VM
+            if ($currentItem.CMInstallDir -and $createVM) {
+
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files to the VM."
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying CM installation files to the VM" -Completed
+
+                # Determine which SQL version files should be used
+                $CMFiles = $azureFileList.CMVersions | Where-Object { $deployConfig.cmOptions.version -in $_.versions }
+
+                if ($CMFiles.filename) {
+                    # CM Iso Path
+                    $CMIso = $CMFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }                
+                    $CMIsoPath = Join-Path $Common.AzureFilesPath $CMIso
+
+                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $CMIsoPath as a DVD drive"
+                    # Add CM ISO to guest
+                    $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
+
+                    if (-not $dvd) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive. Retrying"
+                        Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                        start-sleep -Seconds 20
+                        $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
+                    }
+                    write-log "[Phase $Phase]: $($currentItem.vmName): DVD = $dvd"
+
+                    if (-not $dvd) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive" -Failure -OutputStream
+                        return
+
+                    }
+                    # Create CM Dir inside VM
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
+
+                    # Copy files from DVD
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+               
+
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test CM Files" -ScriptBlock { get-item "c:\CMCB\cd.retail.LN\SMSSETUP\BIN\X64\setup.exe" }
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+
+                    # Eject ISO from guest
+                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                }
+                else {
+                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
+                }
             }
         }
         

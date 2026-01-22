@@ -323,11 +323,11 @@ function Test-ValidVmSupported {
 
     if ($VM.wsusDataBaseServer) {
         if ($VM.wsusDataBaseServer -ne "WID") {
-        Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
-        Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
+            Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
+            Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
 
-        $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) }
-         if (-not $SQLVM.sqlVersion) {
+            $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) }
+            if (-not $SQLVM.sqlVersion) {
                 Add-ValidationMessage -Message "$vmRole Validation: VM [$($VM.wsusDataBaseServer)] does not contain sql; When deploying WSUS Role with remote SQL, you must specify the SQL VM." -ReturnObject $ReturnObject -Warning
             }
         }
@@ -1435,13 +1435,15 @@ function Test-Configuration {
            
 
             foreach ($version in $common.AzureFileList.CmVersions) {
-                try {
-                    if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
-                        Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                if (-not $version.filename) {
+                    try {
+                        if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                            Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                        }
                     }
-                }
-                catch {
-                    Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                    catch {
+                        Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                    }
                 }
             }
 

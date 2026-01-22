@@ -185,22 +185,28 @@ configuration Phase3
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"
                 }
 
-                WriteStatus DownLoadSCCM {
-                    DependsOn = $nextDepend
-                    Status    = $CMDownloadStatus
-                }
+               
 
-                DownloadSCCM DownLoadSCCM {
-                    CM            = $CM
-                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
-                    Ensure        = "Present"
-                    DependsOn     = $prevDepend
+                if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
+
+                    WriteStatus DownLoadSCCM {
+                        DependsOn = $prevDepend
+                        Status    = $CMDownloadStatus
+                    }
+
+                    DownloadSCCM DownLoadSCCM {
+                        CM            = $CM
+                        CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
+                        Ensure        = "Present"
+                        DependsOn     = $prevDepend
+                    }
+                    $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
                 }
 
                 FileReadAccessShare CMSourceSMBShare {
                     Name      = $CM
                     Path      = "c:\$CM"
-                    DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                    DependsOn = $prevDepend
                 }
                 $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
                 #$nextDepend = "[FileReadAccessShare]CMSourceSMBShare"

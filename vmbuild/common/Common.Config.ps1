@@ -229,6 +229,7 @@ function Get-FilesForConfiguration {
     if ($config) {
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
+        $cmVersionsToGet = $config.cmOptions.version | Select-Object -Unique
         if ($config.cmOptions.PrePopulateObjects) {
             $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
         }
@@ -258,6 +259,20 @@ function Get-FilesForConfiguration {
         }
     }
 
+    foreach ($file in $Common.AzureFileList.CMVersions) {
+        if ($file.filename) {
+            if (-not $DownloadAll -and ($cmVersionsToGet -notin $file.versions)) { 
+                write-log "$cmVersionsToGet is not in $($file.versions)"
+                continue 
+            }
+            $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+            if (-not $worked) {
+                Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+                $allSuccess = $false
+            }
+        }
+    }
+
     foreach ($file in (Get-LinuxImages).Name) {
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
         $worked = Download-LinuxImage $file
@@ -269,7 +284,7 @@ function Get-FilesForConfiguration {
 
     #Check if any siteservers are in the config
     $siteServers = $null
-    $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary")}
+    $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
 
     if ($DownloadAll -or ($config.cmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
@@ -2912,7 +2927,7 @@ Function Show-Summary {
             }
             else {
                 if ($null -ne $_.remoteSQLVM) {
-                ("Remote -> " + $($_.remoteSQLVM))
+                    ("Remote -> " + $($_.remoteSQLVM))
                 }
             }
         }
