@@ -282,7 +282,7 @@ function Select-ConfigMenu {
             $stats = Get-DomainStatsLine -DomainName $item
 
             $domainList += "$($item.PadRight(22," ")) $stats"
-            $customOptions += [ordered]@{"$i" = "$($item.PadRight(22," ")) $stats%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+            $customOptions += [ordered]@{"-D$i" = "$($item.PadRight(22," ")) $stats%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
             $customOptions += [ordered]@{ "H$($i)" = "Manage or edit $item" }
             $domainMap[$i] = $item
         }
@@ -352,7 +352,7 @@ function Select-ConfigMenu {
        
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
         
-        $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false
+        $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -427,9 +427,28 @@ function Select-ConfigMenu {
                 }
             }
             Default {
+                write-log "Response $response"
+                $deleteDomain = $false
+                if ($response.StartsWith("-D") -and $response.Length -gt 2) {
+                    $response = $response.SubString(1)
+                    $deleteDomain = $true
+                }
                 if ($response -as [int] -is [int]) {
                     if ($domainMap[([int]$response)]) {
-                        $SelectedConfig = Select-DomainMenu -DomainName $domainMap[([int]$response)]
+                        $domain = $domainMap[([int]$response)]
+                        if ($deleteDomain) {
+                            Write-Host "Do you want to delete $domain permanently?"
+                            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (Y/n)" -HideHelp -timeout 45 -Default "y"
+                            if (-not [String]::IsNullOrWhiteSpace($response)) {
+                                if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
+                                    Remove-Domain -DomainName $domain
+                                    continue
+                                }
+                            }
+                        }
+                        else {
+                            $SelectedConfig = Select-DomainMenu -DomainName $domainMap[([int]$response)]
+                        }
                     }
                 }
                 
@@ -1090,8 +1109,8 @@ function Select-MainMenu {
             foreach ($existingVM in $global:existingMachines) {
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
-                $customOptions += [ordered]@{"$i" = "$name" }
-                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $($existingVM.vmName). Only some properties can be adjusted." }
+                $customOptions += [ordered]@{"-D$i" = "$name" }
+                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $($existingVM.vmName). Press [Del] to delete from Hyper-V. Only some properties can be adjusted." }
                 $VMNameToNumberMap[$i.ToString()] = $existingVM.vmName
             }
         }
@@ -1124,8 +1143,8 @@ function Select-MainMenu {
                 }
                 $i = $i + 1
                 $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
-                $customOptions += [ordered]@{"$i" = "$name" }
-                $customOptions += [ordered]@{"H$i" = "Modify the installation properties for $($virtualMachine.Vmname). This is a new VM that has not yet deployed." }
+                $customOptions += [ordered]@{"-D$i" = "$name" }
+                $customOptions += [ordered]@{"H$i" = "Modify the installation properties for $($virtualMachine.Vmname). Press [Del] to remove. This is a new VM that has not yet deployed." }
                 $VMNameToNumberMap[$i.ToString()] = $virtualMachine.vmName
                 #write-Option "$i" "$($name)"
             }
@@ -1157,7 +1176,7 @@ function Select-MainMenu {
             $ShortName = [io.path]::GetFileNameWithoutExtension($global:configfile)
             $MenuName += " - $ShortName"
         }
-        $response = Get-Menu2 -MenuName $MenuName -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false -
+        $response = Get-Menu2 -MenuName $MenuName -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false -AcceptsDelete
         write-Verbose "response $response"
         if ($response -eq "ESCAPE") {
             $response = "!"
@@ -1252,7 +1271,14 @@ function Select-MainMenu {
             default { 
                 # This will be a VM number, or 'N' for new VM
 
-                Select-VirtualMachines $vmNameToNumberMap[$response] 
+                if ($response.StartsWith("-D")) {
+                    $response = $response.SubString(2)
+                    write-log -verbose "Deleting VM $response"
+                    Select-VirtualMachines $vmNameToNumberMap[$response] "Z"
+                }
+                else {
+                    Select-VirtualMachines $vmNameToNumberMap[$response] 
+                }
             }
         }
     }
@@ -5305,12 +5331,13 @@ function Select-Options {
                 $itemMap[$i] = "network"
                 $i++
             }
+            $deletable = $false            
             #$padding = 27 - ($i.ToString().Length)
             $color = $null
             #write-log "Get-AdditionalInformation $item $value"
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             $color = Get-AdditionalInformationColor -item $item -data $value
-            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction
+            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
             $itemMap[$i] = $item
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
@@ -7005,7 +7032,9 @@ function Select-VirtualMachines {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $false, HelpMessage = "pre supplied response")]
-        [string] $response = $null
+        [string] $response = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "pre supplies result")]
+        [string] $result = $null
     )
 
     if (-not $response) {
@@ -7014,11 +7043,13 @@ function Select-VirtualMachines {
         return
     }
 
-    Write-Log -Activity -NoNewLine "Select VirtualMachines"
+    if ([string]::IsNullOrEmpty($result)) {
+        Write-Log -Activity -NoNewLine "Select VirtualMachines"
+    }
     #Write-Host
     Write-Verbose "8 Select-VirtualMachines"
     
-    Write-Log -LogOnly "Select VirtualMachines response = $response"
+    Write-Log -Verbose "Select VirtualMachines response = $response"
     if ([String]::IsNullOrWhiteSpace($response)) {
         return
     }
@@ -7046,8 +7077,8 @@ function Select-VirtualMachines {
                     $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{
-                        "D"  = "Delete this VM from Hyper-V"
-                        "HD" = "Danger: This will permanently delete the VM from Hyper-V"
+                        "Z"  = "Delete this VM from Hyper-V"
+                        "HZ" = "Danger: This will permanently delete the VM from Hyper-V"
                     }
                     $customOptions += [ordered]@{
                         "*N2" = ""
@@ -7059,7 +7090,7 @@ function Select-VirtualMachines {
 
 
                         if ($virtualMachine.Role -in ("Primary", "CAS")) {
-                            $existingPassive += Get-List2 -deployConfig $global:config | Where-Object { $_.SiteCode -eq $virtualMachine.SiteCode -and $_.Role -eq "PassiveSite" }
+                            $existingPassive = Get-List2 -deployConfig $global:config | Where-Object { $_.SiteCode -eq $virtualMachine.SiteCode -and $_.Role -eq "PassiveSite" }
                             if (-not $existingPassive) {
                                 
                                 # No Passive Site for this sitecode.. We can offer it here.
@@ -7105,7 +7136,12 @@ function Select-VirtualMachines {
                         $machineName = $virtualMachine.vmName
                     }
                     #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
-                    $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true -HelpFunction "Get-GenericHelp"
+                    if ([String]::IsNullOrEmpty($result)) {
+                        $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $virtualMachine -PropertyNum 1 -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$true -HelpFunction "Get-GenericHelp"
+                    }
+                    else {
+                        $newValue = $result
+                    }
                     #$newValue = Select-Options -Property $clone -prompt "Which Existing VM property to modify" -additionalOptions $customOptions -Test:$true
                     if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                         return
@@ -7122,16 +7158,24 @@ function Select-VirtualMachines {
                     }
 
                     write-log -logonly "Modify properties returned $newValue"
-                    if ($newValue -eq "D") {
-                        $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($virtualMachine.vmName)? (Y/n)" -HideHelp -timeout 180 -Default "y"
+                    if ($newValue -eq "Z") {
+                        $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($virtualMachine.vmName) from Hyper-V? (Y/n)" -HideHelp -timeout 180 -Default "y"
 
                         if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
+                            if ([string]::IsNullOrEmpty($result)) {
                             continue VMLoop
+                            }
+                            else {
+                                return
+                            }
                         }
                         else {
                             Remove-VirtualMachine -VmName $virtualMachine.vmName
                             if ($global:Config.existingVirtualMachines) {
                                 $global:Config.existingVirtualMachines = $global:Config.existingVirtualMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
+                            }
+                            if ($global:existingMachines) {
+                                $global:existingMachines = $global:existingMachines | where-object { $_.vmName -ne $virtualMachine.vmName }
                             }
                             Get-List -type VM -SmartUpdate | Out-Null
                             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
@@ -7351,7 +7395,12 @@ function Select-VirtualMachines {
                             "HZ"  = "Deletes this VM from the current configuration"
                         }
                         #Write-Log -Activity -NoNewLine "Modify Properties for $($virtualMachine.VMName)"
-                        $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
+                        if ([String]::IsNullOrEmpty($result)) {
+                            $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
+                        }
+                        else {
+                            $newValue = $result
+                        }
                         if ([string]::IsNullOrEmpty($newValue) -or $newValue -eq "ESCAPE") {
                             return
                         }

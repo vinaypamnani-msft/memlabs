@@ -43,6 +43,7 @@ function Add-MenuItem {
         [string] $Color2 = $Global:Common.Colors.GenConfigNormalNumber,
         [bool] $Selectable = $true,
         [bool] $Selected = $false,
+        [bool] $Deletable = $false,
         [string] $Function = $null,
         [string] $HelpText = $null,
         [string] $HelpFunction = $null        
@@ -50,14 +51,14 @@ function Add-MenuItem {
 
 
     if ($Selected -eq $true) {
+        write-log "Found pre-selected item for $ItemName $ItemText"
         foreach ($menuItem2 in $MenuItems) {
             if ($menuItem2.Selected) {
-                $Selected = $false
-                break
+                $menuItem2.Selected = $false                
             }
         }
     }
-    $MenuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -itemName $ItemName -text $ItemText -color1 $color1 -color2 $color2 -selectable:$selectable -selected:$selected -function $funtion -helpText $helpText -helpFunction $HelpFunction     
+    $MenuItem = New-MenuItem -MenuItems ([ref]$MenuItems) -itemName $ItemName -text $ItemText -color1 $color1 -color2 $color2 -selectable:$selectable -selected:$Selected -function $Function -helpText $helpText -helpFunction $HelpFunction -Deletable:$Deletable  
 
     
     if ($Global:MenuHistory) {
@@ -68,12 +69,14 @@ function Add-MenuItem {
     }
 
 
-    if ($ItemName -eq $currentItem) {
-        foreach ($menuItem2 in $MenuItems) {
-            $menuItem2.Selected = $false
+    if ($Selected -eq $false) {
+        if ($ItemName -eq $currentItem) {
+            foreach ($menuItem2 in $MenuItems) {
+                $menuItem2.Selected = $false
+            }
+            $MenuItem.Selected = $true
+            write-log "Setting Selected to $ItemName $ItemText"
         }
-        $MenuItem.Selected = $true
-
     }
     
     #$MenuItems.Add($MenuItem) | out-null
@@ -156,9 +159,10 @@ function New-MenuItem {
         [switch]$multiSelected = $false,
         [switch]$displayed = $false,
         [string]$helptext,
-        [string]$helpFunction = $null
+        [string]$helpFunction = $null,
+        [switch]$deletable = $false
     )
-    write-log -Verbose "Adding $itemName to menu.. Current Count $($menuItems.Count)"
+    write-log -Verbose "Adding $itemName to menu.. Current Count $($menuItems.Count) Deletable: $deletable Selected: $selected"
     $linecount = 0
     if ($text) {
         $TextValue = $text -split "%"
@@ -193,13 +197,17 @@ function New-MenuItem {
                 $function = $text
                 $text = $null
                 #write-host "Running Function $function -LineCount" 
-                $linecount =  Invoke-Expression -Command "$function -LineCount"                             
+                $linecount = Invoke-Expression -Command "$function -LineCount"                             
             }
             else {                    
                 $function = $null   
                 $linecount = 1             
             }   
             #$itemName = $null        
+        }
+        if ($itemName.StartsWith("-D") -and $ItemName.Length -gt 2) {
+            $itemName = $itemName.SubString(2)
+            $deletable = $true
         }
     }
    
@@ -215,6 +223,8 @@ function New-MenuItem {
         MultiSelected = $multiSelected
         Displayed     = $displayed
         HelpText      = $helptext
+        Operation     = $null
+        Deletable     = $deletable
     }
 
     if (-not $helptext -and $helpFunction) {
@@ -506,7 +516,8 @@ function Get-Menu2 {
         [Parameter(Mandatory = $false, HelpMessage = "Do Not clear the screen.. Dangerous")]
         [switch] $NoClear,
         [switch] $MultiSelect,
-        [switch] $AllSelected
+        [switch] $AllSelected,
+        [switch] $AcceptsDelete
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -547,9 +558,21 @@ function Get-Menu2 {
         }
         else {
             if ($response.itemName) {
-                $response = $response.itemName
+                if ($response.Operation -eq "DELETE") {
+                    if ($AcceptsDelete) {
+                        $response = "-D" + $response.itemName
+                        
+                    }
+                    else {
+                        return
+                    }
+                }
+                else {
+                    $response = $response.itemName                    
+                }
+
                 $Global:MenuHistory[$menuName] = $response   
-                write-log -verbose "[MenuHistory] Setting $menuName to $response"   
+                write-log -verbose "[MenuHistory] Setting $menuName to $response" 
             }
         }
         write-host
@@ -629,7 +652,7 @@ function Show-Menu {
         $HelpNeeded = $false
         $TotalLineCount = 0
         foreach ($menuitem in $menuItems) {
-            $TotalLineCount+= $menuitem.LineCount
+            $TotalLineCount += $menuitem.LineCount
             #Write-Host "Adding LineCount for $($menuitem.itemName) $($menuitem.Text) $($menuitem.LineCount)"
             if ($operation -eq "PGUP") {
                 $menuitem.Displayed = $false
@@ -664,7 +687,7 @@ function Show-Menu {
             $operation = ""
         }
 
-        if ($HelpNeeded)   {
+        if ($HelpNeeded) {
             $TotalLineCount += 5
         }
 
@@ -1099,6 +1122,8 @@ function Start-Navigation {
         #Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         
         $key = Get-KeyStroke # Get the key stroke from the user
+        write-log -Verbose -HostOnly "key: $key"
+
         $currentsize = $Host.UI.RawUI.WindowSize
         if ($currentsize -ne $startSize) {
             return
@@ -1133,8 +1158,8 @@ function Start-Navigation {
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
        
-        if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.Character -eq " ") {
-            # 13 = Enter key, 39 = Right arrow key
+        if ($key.VirtualKeyCode -eq 13 -or $key.VirtualKeyCode -eq 39 -or $key.VirtualKeyCode -eq 45 -or $key.VirtualKeyCode -eq 46 -or $key.Character -eq " ") {
+            # 13 = Enter key, 39 = Right arrow key, 45 = Insert, 46 = delete
             Write-Log -verbose -LogOnly "Entering return function"
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
             if ($NumSelectable -eq 0) {
@@ -1147,9 +1172,17 @@ function Start-Navigation {
                 $optionInt = ($($menuItems[$selectedIndex].ItemName) -as [int])
                 if ($optionInt) {                
                     if ($menuItems[$selectedIndex].MultiSelected) {
+                        #If insert was pressed, dont remove the selection
+                        if ($key.VirtualKeyCode -eq 45) {
+                            continue
+                        }
                         $menuItems[$selectedIndex].MultiSelected = $false
                     }
                     else {
+                        #If delete was pressed, dont enable the selection
+                        if ($key.VirtualKeyCode -eq 46) {
+                            continue
+                        }
                         $menuItems[$selectedIndex].MultiSelected = $true
                     }
 
@@ -1203,9 +1236,20 @@ function Start-Navigation {
                     return $return
                 }
             }
+            else {
+                # Insert only works on multiselect.
+                if ($key.VirtualKeyCode -eq 45) {
+                    continue
+                }
+            }
 
 
             if ($buffer) {
+                #If Delete was pressed while something is in the buffer.. Reset.
+                if ($key.VirtualKeyCode -eq 46) {
+                    $buffer = $null
+                    continue
+                }
                 foreach ($menuItem in $menuItems) {
                     if ($menuItem.ItemName) {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
@@ -1224,7 +1268,16 @@ function Start-Navigation {
                
             }
             else {
-                
+                # If delete was pressed with a deletable item, lets mark it for deletion - Fix Me
+                if ($key.VirtualKeyCode -eq 46) {
+                    if ($menuItems[$selectedIndex].Deletable) {
+                        $menuItems[$selectedIndex].Operation = "DELETE"
+                        write-log -Verbose "Returning operation DELETE on deletable object"
+                    }
+                    else {
+                        continue
+                    }
+                }
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
                 Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                 Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position

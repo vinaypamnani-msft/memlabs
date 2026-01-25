@@ -777,7 +777,7 @@ function Select-StopDomain {
 function Select-DeleteDomain {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Delete")]
         [string] $domain
     )
 
@@ -794,7 +794,7 @@ function Select-DeleteDomain {
             return
         }
         if ($response -eq "D") {
-            Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
+            Write-Host "Selecting 'Yes' will permanently all VMs and scopes."
             $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
