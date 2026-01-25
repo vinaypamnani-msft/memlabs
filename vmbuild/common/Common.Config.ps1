@@ -262,7 +262,7 @@ function Get-FilesForConfiguration {
     foreach ($file in $Common.AzureFileList.CMVersions) {
         if ($file.filename) {
             if (-not $DownloadAll -and ($cmVersionsToGet -notin $file.versions)) { 
-                write-log "$cmVersionsToGet is not in $($file.versions)"
+                write-log "CM Version $cmVersionsToGet is not in $($file.versions)" -verbose
                 continue 
             }
             $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure

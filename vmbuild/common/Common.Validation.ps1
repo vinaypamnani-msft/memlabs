@@ -1367,16 +1367,16 @@ function Test-Configuration {
         if ($deployConfig.cmOptions.version -eq "tech-preview") {
             $anyPS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "Primary" }
             if ($anyPS.Count -gt 1) {
-                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
             }
             if ($anyPS.Count -eq 1) {
                 if ($anyPS.parentSiteCode) {
-                    Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a parent Site Code [$($anyPS.parentSiteCode)]; Tech Preview doesn't support support a Hierarchy." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with a parent Site Code [$($anyPS.parentSiteCode)]; Tech Preview doesn't support support a Hierarchy." -ReturnObject $return -Warning
                 }
             }
             $anyCS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "CAS" }
             if ($anyCS) {
-                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a CAS; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with a CAS; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
             }
         }
 

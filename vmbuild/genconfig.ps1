@@ -427,7 +427,7 @@ function Select-ConfigMenu {
                 }
             }
             Default {
-                write-log "Response $response"
+                write-log -verbose "Response $response"
                 $deleteDomain = $false
                 if ($response.StartsWith("-D") -and $response.Length -gt 2) {
                     $response = $response.SubString(1)
@@ -984,7 +984,7 @@ function Get-GenericHelp {
     )
 
     switch (($text -split "=")[0].Trim()) {
-        "DeploymentType" { "Selects the default type of deployment, Primary, Heirarchy, or Technical Preview" }
+        "DeploymentType" { "Selects the default type of deployment, Primary or Hierarchy" }
         "DomainName" { "Change the FQDN of the domain" }
         "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
@@ -1746,19 +1746,19 @@ function Select-DeploymentType {
     $customOptions += [ordered]@{"*B1" = ""; "*BREAK1" = "DeploymentType%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{ 
         "1"  = "CAS and Primary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" 
-        "H1" = "Inital VM list will contain a CAS and Primary server for Configuration Manager"
+        "H1" = "Initial VM list will contain a CAS and Primary server for Configuration Manager"
     }
     $customOptions += [ordered]@{ 
         "2"  = "Primary Site only %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)"
-        "H2" = "Inital VM list will contain only a Primary server for Configuration Manager"
+        "H2" = "Initial VM list will contain only a Primary server for Configuration Manager"
     }
-    $customOptions += [ordered]@{
-        "3"  = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)"
-        "H3" = "Inital VM list will contain only Tech Preview Primary server for Configuration Manager"
-    }
+    #$customOptions += [ordered]@{
+    #    "3"  = "Tech Preview (NO CAS)%$($Global:Common.Colors.GenConfigTechPreview)"
+    #    "H3" = "Inital VM list will contain only Tech Preview Primary server for Configuration Manager"
+    #}
     $customOptions += [ordered]@{ 
-        "4"  = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" 
-        "H4" = "Inital VM list will not contain any ConfigMgr components"
+        "3"  = "No ConfigMgr%$($Global:Common.Colors.GenConfigNoCM)" 
+        "H3" = "Initial VM list will not contain any ConfigMgr components"
     }
 
 
@@ -1776,10 +1776,10 @@ function Select-DeploymentType {
             "2" {
                 return "Primary Site only"
             }     
+            #"3" {
+            #    return "Tech Preview (NO CAS)"
+            #}     
             "3" {
-                return "Tech Preview (NO CAS)"
-            }     
-            "4" {
                 return "No ConfigMgr"
             } 
         }    
@@ -1794,7 +1794,7 @@ function Get-NewDomainConfigHelp {
     )
 
     switch (($text -split "=")[0].Trim()) {
-        "DeploymentType" { "Selects the default type of deployment, Primary, Heirarchy, or Technical Preview" }
+        "DeploymentType" { "Selects the default type of deployment, Primary or Hierarchy" }
         "DomainName" { "Change the FQDN of the domain" }
         "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
@@ -1874,7 +1874,7 @@ function Select-NewDomainConfig {
             }
             "Tech Preview (NO CAS)" {
                 if ($newconfig.domainDefaults.CMVersion -ne "tech-preview") {
-                    $newconfig.domainDefaults.CMVersion = "tech-preview"
+                    $newconfig.domainDefaults.CMVersion = $Latestversion
                 }
 
                 $usedPrefixes = Get-List -Type UniquePrefix
@@ -1959,7 +1959,7 @@ Function Get-ConfigFiles {
    
     $files = @()
     $files += Get-ChildItem $ConfigPath\*.json -Include "Standalone.json", "Hierarchy.json" | Sort-Object -Property Name -Descending
-    $files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
+    #$files += Get-ChildItem $ConfigPath\*.json -Include "TechPreview.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "NoConfigMgr.json"
     $files += Get-ChildItem $ConfigPath\*.json -Include "AddToExisting.json"
     $files += Get-ChildItem $ConfigPath\*.json -Exclude "_*", "Hierarchy.json", "Standalone.json", "AddToExisting.json", "TechPreview.json", "NoConfigMgr.json" | Sort-Object -Descending -Property LastWriteTime
@@ -4058,7 +4058,7 @@ Function Get-CMVersionMenu {
             }
 
             "Tech-preview" {
-                $cmVersions += "$cmVersion (Installs the latest tech preview version of CM)"
+                #$cmVersions += "$cmVersion (Installs the latest tech preview version of CM)"
             }
 
             default {
