@@ -718,7 +718,7 @@ function Get-File {
             return $true
         }
         else {
-            Write-Log "Destinataion $Destination does not exist" -Failure
+            Write-Log "Destination $Destination does not exist" -Failure
         }
         Write-Log "Returning failure from Get-File"
         return $false
@@ -1147,7 +1147,7 @@ function Test-NetworkSwitch {
         $doNotRecreate = $true
     }
     if ($notes -eq "Unknown network") {
-       $doNotRecreate = $true
+        $doNotRecreate = $true
     }   
 
     try {
@@ -2028,7 +2028,12 @@ function New-VirtualMachine {
             }
             $vmTest | Remove-VM -Force
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse -ProgressAction SilentlyContinue| out-null
+            if ($Common.PS7) {
+                Remove-Item -Path $($vmTest.Path) -Force -Recurse -ProgressAction SilentlyContinue | out-null
+            }
+            else {
+                Remove-Item -Path $($vmTest.Path) -Force -Recurse | out-null
+            }
             Write-Log "$VmName`: Purge complete."
             Get-List -FlushCache | Out-Null # flush cache
         }
@@ -2043,7 +2048,12 @@ function New-VirtualMachine {
             $VmSubPath = Join-Path $VmPath $VmName
             if (Test-Path -Path $VmSubPath) {
                 Write-Log "$VmName`: Found existing directory for $VmName. Purging $VmSubPath folder..."
-                Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue| out-null
+                if ($Common.PS7) {
+                    Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue | out-null
+                }
+                else {
+                    Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                }
                 Write-Log "$VmName`: Purge complete."
             }
 
@@ -2051,7 +2061,12 @@ function New-VirtualMachine {
             if (Test-Path -Path $VmSubPath) {
                 Start-Sleep -Seconds 30
                 Write-Log "$VmName`: (Retry) Found existing directory for $VmName. Purging $VmSubPath folder..."
-                Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue| out-null
+                if ($Common.PS7) {
+                    Remove-Item -Path $VmSubPath -Force -Recurse -ProgressAction SilentlyContinue | out-null
+                }
+                else {
+                    Remove-Item -Path $VmSubPath -Force -Recurse | out-null
+                }
                 Write-Log "$VmName`: Purge complete."
             }
 
@@ -2443,12 +2458,12 @@ function Wait-ForVm {
     $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
     $timeSpan = New-TimeSpan -Minutes $TimeoutMinutes
     $stopWatch.Start()
-    $vmTest = Get-VM2 -Name $VmName
+    $vmTest = Get-VM2 -Name $VmName -Fallback
     if ($VmState) {
         Write-Log "$VmName`: Waiting for VM to enter $VmState state..."
         do {
             try {
-                $vmTest = Get-VM2 -Name $VmName
+                $vmTest = Get-VM2 -Name $VmName -Fallback
                 if (-not $vmTest) {
                     Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
                     Write-Log -Failure "Could not find VM $VMName"
@@ -2672,15 +2687,23 @@ function Wait-ForVm {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
             else {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
-                if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
-                    if (-not $restarted) {
-                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
-                        stop-vm2 -name $vmName
-                        start-sleep -seconds 30
-                        start-vm2 -name $vmName
-                        start-sleep -seconds 30
-                        $restarted = $true
+                $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path "C:\" } -SuppressLog
+                $readytest = $true -eq $outtest.ScriptBlockOutput
+
+                if ($readytest) {
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding. Waiting for $PathToVerify to exist."
+                }
+                else {
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
+                    if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
+                        if (-not $restarted) {
+                            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
+                            stop-vm2 -name $vmName
+                            start-sleep -seconds 30
+                            start-vm2 -name $vmName
+                            start-sleep -seconds 30
+                            $restarted = $true
+                        }
                     }
                 }
             }
@@ -3913,11 +3936,10 @@ function Get-FileWithHash {
             #Get-File -Source $FileUrl -Destination $localImagePath -DisplayName "Hash Missing. Downloading '$FileName' to $localImagePath..." -Action "Downloading" -ResumeDownload -UseCDN:$UseCDN -UseBITS:$UseBITS -WhatIf:$WhatIf
 
             # Calculate file hash, save to local hash file
-            #Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
-            #$hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
-            #$localFileHash = $hashFileResult.Hash
-            #$localFileHash | Out-File -FilePath $localImageHashPath -Force
-            $return.download = $true
+            Write-Log "Calculating $hashAlg hash for $FileName in $($Common.AzureFilesPath)..."
+            $hashFileResult = Get-FileHash -Path $localImagePath -Algorithm $hashAlg
+            $localFileHash = $hashFileResult.Hash
+            $localFileHash | Out-File -FilePath $localImageHashPath -Force            
         }
         # For dynamically updated packages, its impossible to know the hash ahead of time, so we just re-download these every run
         if ($ExpectedHash -ne "NONE") {
@@ -3937,8 +3959,8 @@ function Get-FileWithHash {
             }
             else {
                 Write-OrangePoint "Found $FileName in $($Common.AzureFilesPath) but file hash $localFileHash does not match expected hash $ExpectedHash. Redownloading..."
-                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
-                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
+                Remove-Item -Path $localImagePath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
+                Remove-Item -Path $localImageHashPath -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
                 $return.download = $true
             }
         }
@@ -4511,7 +4533,7 @@ if (-not $Common.Initialized) {
             try {
                 if ($global:common.CachePath) {
                     $threshold = 2
-                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force -ProgressAction SilentlyContinue| out-null
+                    Get-ChildItem -Path $global:common.CachePath -File -Filter "*.json" | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$threshold) } | Remove-Item -Force -ProgressAction SilentlyContinue | out-null
                 }
             }
             catch {}
