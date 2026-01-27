@@ -306,7 +306,7 @@ function Get-FilesForConfiguration {
         #Get a list of all OSISO files, and delete any .ISO files in the OS folder that are not in the list
         $osISOFiles = $Common.AzureFileList.OSISO
         #Get Just the filenames without iso\os in front, eg iso\os\Windows11_24h2.iso becomes Windows11_24h2.iso
-        $osISOFileNames = $Common.AzureFileList.OSISO | ForEach-Object { [System.IO.Path]::GetFileName($_.filename) }
+        $osISOFileNames = $osISOFiles| ForEach-Object { [System.IO.Path]::GetFileName($_.filename) }
         #Join AzureFilesPath + ISO\OS
         $ISOPath = Join-Path $Common.AzureFilesPath "ISO\OS"
         $osFiles = Get-ChildItem -Path $ISOPath -Filter "*.iso" -Recurse 
@@ -498,7 +498,7 @@ function Add-RemoteSQLVMToDeployConfig {
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
     $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
     if (-not $remoteSQLVM) {
-        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
+        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it does not, please modify the hyper-v config to reflect the new name" -Failure
         return
     }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
@@ -519,7 +519,7 @@ function Add-ExistingVMsToDeployConfig {
     #Update Cache
     get-list -type vm -SmartUpdate | out-null
 
-    # Add exising DC to list
+    # Add existing DC to list
     if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
         $existingDC = $config.parameters.ExistingDCName
         if ($existingDC) {
@@ -849,9 +849,6 @@ function Add-VMToAccountLists {
             continue
         }
 
-        $DomainName = $deployConfig.vmOptions.domainName
-        #$DName = $DomainName.Split(".")[0]
-
         $DName = $deployConfig.vmOptions.domainNetBiosName
         if ($SQLSysAdminAccounts) {
             $accountLists.SQLSysAdminAccounts += "$DNAME\$($vmToAdd.vmName)$"
@@ -884,7 +881,7 @@ function Get-SQLAOConfig {
         return $null
     }
     if (-not ($PrimaryAO.OtherNode)) {
-        #ignore this.. We run this on all SQLAO nodes,and dont care about 2ndary
+        #ignore this.. We run this on all SQLAO nodes,and don't care about secondary
         return $null
     }
 
@@ -993,7 +990,6 @@ function Get-ValidPRISiteCodes {
         $containsPS = $Config.virtualMachines.role -contains "Primary"
         if ($containsPS) {
             $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            # We dont support multiple subnets per config yet
             $existingSiteCodes += $PSVM.siteCode
         }
     }
@@ -1667,7 +1663,7 @@ function Get-VMSizeCached {
 
 
     #write-host "Making new Entry for $($vm.vmName)"
-    # if we didnt return the cache entry, get new data, and add it to cache
+    # if we didn't return the cache entry, get new data, and add it to cache
     if (-not $Common.InJob) {
         $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
         $MemoryStartup = $vm.MemoryStartup
@@ -1719,7 +1715,7 @@ function Get-VMNetworkCached {
         }
     }
 
-    # if we didnt return the cache entry, get new data, and add it to cache
+    # if we didn't return the cache entry, get new data, and add it to cache
     $vmNet = ($vm | Get-VMNetworkAdapter)
     $vmCacheEntry = [PSCustomObject]@{
         vmId       = $vm.vmID
@@ -1817,7 +1813,7 @@ function Update-VMInformation {
                     }
                 }
                 else {
-                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not running [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                 }
             }
         }
@@ -1851,7 +1847,7 @@ function Update-VMInformation {
                     }
                 }
                 else {
-                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not running [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                 }
             }
         }
@@ -1913,7 +1909,7 @@ function Get-VMFromHyperV {
 
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
     if ($vmObject.Domain) {
-        #If we dont have a domain, its not one of ours.
+        #If we don't have a domain, its not one of ours.
         return $vmObject
     }
     return $null
@@ -1943,8 +1939,8 @@ function Update-VMFromHyperV {
     }
 
     if ($vmNoteObject) {
-        if ([String]::isnullorwhitespace($vmNoteObject.role)) {
-            # If we dont have a vmName property, this is not one of our VM's
+        if ([String]::IsNullOrWhiteSpace($vmNoteObject.role)) {
+            # If we don't have a vmName property, this is not one of our VM's
             $vmNoteObject = $null
         }
     }
@@ -2099,12 +2095,12 @@ function Get-List {
 
         if ($DeployConfig) {
             try {
-                $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 5
-                $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
+                $DeployConfigJson = $DeployConfig | ConvertTo-Json -Depth 5
+                $DeployConfigClone = $DeployConfigJson | ConvertFrom-Json
             }
             catch {
                 write-log "Failed to convert DeployConfig: $DeployConfig" -Failure
-                write-log "Failed to convert DeployConfig: $DepoloyConfigJson" -Failure
+                write-log "Failed to convert DeployConfig: $DeployConfigJson" -Failure
                 Write-Log "$($_.ScriptStackTrace)" -LogOnly
             }
 
@@ -2316,19 +2312,19 @@ function Test-InProgress {
         [object] $DeployConfig
     )
 
-    $InProgessVMs = @()
+    $InProgressVMs = @()
     foreach ($thisVM in $deployConfig.virtualMachines) {
         $thisVMObject = Get-VMFromList2 -deployConfig $deployConfig -vmName $thisVM.vmName
         if ($thisVMObject.inProgress -eq $true) {
-            $InProgessVMs += $thisVMObject.vmName
+            $InProgressVMs += $thisVMObject.vmName
         }
     }
 
-    if ($InProgessVMs.Count -gt 0) {
+    if ($InProgressVMs.Count -gt 0) {
         Write-Host
         write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
-        write-host2 -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
-        write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
+        write-host2 -ForegroundColor Red "ERROR: Virtual Machines: [ $($InProgressVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+        write-log "ERROR: Virtual Machines: [ $($InProgressVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
         write-host
         write-host2 -ForegroundColor Snow "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
         write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
@@ -2615,7 +2611,7 @@ Function Get-LinuxImages {
         }
     }
     else {
-        # Get a copy if the file doesnt exist
+        # Get a copy if the file doesn't exist
         & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
     }
     $linux = Get-Content $linuxJson | convertfrom-json
@@ -2660,7 +2656,7 @@ Function Download-LinuxImage {
         }
     }
 
-    # If we downloaded a new file, or one didnt exist
+    # If we downloaded a new file, or one didn't exist
 
     # If we downloaded a new file, delete the old one
     if (test-path $fullfileVHDX -PathType Leaf) {

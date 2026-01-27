@@ -1500,7 +1500,7 @@ class DownloadSCCM {
             return $false
         }
 
-        # if C:\CMCB doesnt exist, fail
+        # if C:\CMCB does not exist, fail
         $cmsourcepath = "c:\$_CM"
         if (!(Test-Path $cmsourcepath)) {
             return $false
@@ -2146,11 +2146,11 @@ class RegisterTaskScheduler {
             Start-Sleep -Seconds 10
         }
 
-        $sourceDirctory = "$($this.ScriptPath)\*"
-        $destDirctory = "$ProvisionToolPath\"
+        $sourceDirectory = "$($this.ScriptPath)\*"
+        $destDirectory = "$ProvisionToolPath\"
 
-        Write-Status "Copying $sourceDirctory to $destDirctory"
-        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
+        Write-Status "Copying $sourceDirectory to $destDirectory"
+        Copy-item -Force -Recurse $sourceDirectory -Destination $destDirectory
 
         $TaskDescription = "vmbuild task"
         $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -2158,7 +2158,7 @@ class RegisterTaskScheduler {
 
         Write-Status "Task script full path is : $TaskScript "
 
-        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
+        $TaskArg = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
 
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
         Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
@@ -2172,7 +2172,7 @@ class RegisterTaskScheduler {
 
         $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
         $Password = $($this.AdminCreds).GetNetworkCredential().Password
-        $certauthFile = $destDirctory + "\" + "certauth.txt"
+        $certauthFile = $destDirectory + "\" + "certauth.txt"
         $Password | Out-file -FilePath $certauthFile -Force
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
@@ -2434,8 +2434,8 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'Kerberos Password Change UDP' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 464 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For DC"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For DC"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For DC"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For DC"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For DC"
             #Dynamic Port
@@ -2456,12 +2456,12 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'PPTP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1723 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'PPTP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1723 -Group "For SCCM"
 
-            #priary site server(out) ->DC
+            #primary site server(out) ->DC
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM"
 
 
             #Dynamic Port?
@@ -2578,8 +2578,8 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM MP"
 
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'SMB Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM MP"
@@ -2831,7 +2831,7 @@ class InstallFeatureForSCCM {
             }
 
             if ($_Role -contains "Endpoint Protection point") {
-                #.NET 3.5 SP1 is intalled
+                #.NET 3.5 SP1 is installed
             }
 
             if ($_Role -contains "Enrollment point") {
@@ -2859,7 +2859,7 @@ class InstallFeatureForSCCM {
                 #installed .net 4.5 or later
             }
             if ($_Role -contains "WSUS") {
-                #Write-Status "Installing Windows Features: WSUS Stuff.. This shouldnt be used anymore."
+                #Write-Status "Installing Windows Features: WSUS Stuff.. This should nto be used anymore."
                 #Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
@@ -3714,7 +3714,7 @@ class InstallPBIRS {
 }
 
 [DscResource()]
-class ImportCertifcateTemplate {
+class ImportCertificateTemplate {
     [DscProperty(Key)]
     [string]$TemplateName
 
@@ -3773,7 +3773,7 @@ class ImportCertifcateTemplate {
         return $false
     }
 
-    [ImportCertifcateTemplate] Get() {
+    [ImportCertificateTemplate] Get() {
         return $this
     }
 
@@ -4146,8 +4146,8 @@ class AddCertificateToIIS {
             $_FriendlyName = $this.FriendlyName
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             $certdata = netsh http show sslcert ipport=0.0.0.0:443
-            $thumprint = $($cert.Thumbprint).ToLower()
-            if ($certdata.ToLower() -match $thumprint ) {
+            $thumbPrint = $($cert.Thumbprint).ToLower()
+            if ($certdata.ToLower() -match $thumbPrint ) {
                 return $true
             }
         }

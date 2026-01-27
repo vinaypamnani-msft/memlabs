@@ -38,7 +38,7 @@ function Convert-ValidationMessages {
 
     $messages = $($TestObject.Message) -split "\r\n"
     foreach ($msg in $messages.Trim()) {
-        if (-not [string]::isnullorwhitespace($msg)) {
+        if (-not [string]::IsNullOrWhiteSpace($msg)) {
             Add-ErrorMessage -message $msg
         }
     }

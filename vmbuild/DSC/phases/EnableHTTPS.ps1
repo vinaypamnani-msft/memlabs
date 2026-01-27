@@ -8,7 +8,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
@@ -91,7 +91,7 @@ else {
         if ($isCas) {
        
             $NameSpace = "ROOT\SMS\site_$SiteCode"
-            #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
+            #Hack for CAS.. Since Set-CMSite doesn't appear to work on CAS:
             # Get the WMI object
             $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
             # Get the Props array

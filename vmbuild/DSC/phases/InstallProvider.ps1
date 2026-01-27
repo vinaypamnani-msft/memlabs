@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
 $DomainName = $DomainFullName.Split(".")[0]
 $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
@@ -52,7 +52,7 @@ foreach ($prov in $deployConfig.virtualMachines | Where-Object { $_.InstallSMSPr
     $Install = $true
     $thisSiteCode = $thisVM.SiteCode
     if ($prov.SiteCode -ne $thisSiteCode) {
-        #If this is the remote SQL Server for this site code, dont continue
+        #If this is the remote SQL Server for this site code, don't continue
         if ($prov.vmName -ne $thisVM.RemoteSQLVM) {
             continue
         }

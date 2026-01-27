@@ -273,7 +273,7 @@ function ProcessObject($SourcePKIServicesDE, $TargetPKIServicesDE, $RelativeDN, 
                 $NewDE.psbase.CommitChanges()
             }
         }
-        #Copy secuirty descriptor to new object. Only DACL is copied.
+        #Copy security descriptor to new object. Only DACL is copied.
         $BinarySecurityDescriptor = $SourceObjectDE.psbase.ObjectSecurity.GetSecurityDescriptorBinaryForm()
         $NewDE.psbase.ObjectSecurity.SetSecurityDescriptorBinaryForm($BinarySecurityDescriptor, [System.Security.AccessControl.AccessControlSections]::Access)
         $NewDE.psbase.CommitChanges()
@@ -307,7 +307,7 @@ function GetPKIServicesContainer([System.DirectoryServices.ActiveDirectory.Direc
 #
 trap
 {
-    write-error "The script has encoutnered a fatal error. Terminating script."
+    write-error "The script has encountered a fatal error. Terminating script."
     break
 }
 
@@ -341,7 +341,7 @@ switch($ObjectType.ToLower())
 {
     all
     {
-        write-host ("Enrollment Serverices Container")
+        write-host ("Enrollment Services Container")
 	    ProcessAllObjects $SourcePKIServicesDE $TargetPKIServicesDE "CN=Enrollment Services"
         write-host ("Certificate Templates Container")
         ProcessAllObjects $SourcePKIServicesDE $TargetPKIServicesDE "CN=Certificate Templates"

@@ -113,7 +113,7 @@ Configuration Phase9
                 NodeName         = $WaitFor
                 RetryIntervalSec = 15
                 RetryCount       = 1200
-                Dependson        = $nextDepend
+                DependsOn        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
         }
@@ -400,7 +400,7 @@ Configuration Phase9
 
         WriteStatus WaitActive {
             Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"
-            Dependson = '[InstallADK]ADKInstall'
+            DependsOn = '[InstallADK]ADKInstall'
         }
 
         WaitForAll ActiveNode {
@@ -408,7 +408,7 @@ Configuration Phase9
             NodeName         = $ThisVM.thisParams.ActiveNode
             RetryIntervalSec = 15
             RetryCount       = 1200
-            Dependson        = '[WriteStatus]WaitActive'
+            DependsOn        = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {

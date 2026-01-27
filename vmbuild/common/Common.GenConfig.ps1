@@ -378,7 +378,7 @@ function write-help {
     }
 }
 
-function Read-YesorNoWithTimeout {
+function Read-YesOrNoWithTimeout {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]

@@ -28,7 +28,7 @@ $containsSecondary = $false
 
 if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and ($ThisVM.domain) -and ($ThisVm.domain -ne $deployConfig.vmOptions.DomainName)) {
     $scenario = "MultiDomain"
-    Write-DscStatus "Multi Domain Scenerio"
+    Write-DscStatus "Multi Domain Scenario"
 }
 else {
     # contains passive?
@@ -116,7 +116,7 @@ if (-not $Configuration) {
         }
         elseif ($CurrentRole -eq "Primary") {
             [hashtable]$Actions = @{
-                WaitingForCASFinsihedInstall = @{
+                WaitingForCASFinishedInstall = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''

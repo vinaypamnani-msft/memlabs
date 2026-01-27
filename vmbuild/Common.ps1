@@ -8,7 +8,7 @@ param (
     [Parameter()]
     [switch]$DevBranch,
     [Parameter()]
-    [switch]$GetLastestHotfixVersion
+    [switch]$GetLatestHotfixVersion
 )
 
 ########################
@@ -664,7 +664,7 @@ function Get-File {
         $i = 0
         $timedOut = $false
 
-        # Wait for existing download to finish, dont bother when action is copying
+        # Wait for existing download to finish, do not bother when action is copying
         if ($Action -eq "Downloading") {
             while (Get-Process -Name "curl" -ErrorAction SilentlyContinue) {
                 Write-Log "Download for '$sourceDisplay' waiting on an existing download. Checking again in 2 minutes..." -Warning
@@ -683,7 +683,7 @@ function Get-File {
             return $false
         }
 
-        # Skip re-download if file already exists, dont bother when action is copying
+        # Skip re-download if file already exists, do not bother when action is copying
         if ($Action -eq "Downloading" -and (Test-Path $Destination) -and -not $ForceDownload.IsPresent -and -not $ResumeDownload.IsPresent) {
             Write-Log "Download skipped. $Destination already exists." -LogOnly
             return $true
@@ -779,7 +779,7 @@ function Copy-ItemSafe {
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
             if ($ps) {
-                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) Whatif:$($using:WhatIF)" -LogOnly
+                Write-Log "[Copy-ItemSafe] [$($using:VMName)] Copying $($using:Path) to $($using:Destination) WhatIf:$($using:WhatIF)" -LogOnly
                 Copy-Item -ToSession $ps -Path $using:Path -Destination $using:Destination -Recurse:$using:Recurse -Container:$using:Container -Force:$using:Force -verbose:$using:enableVerbose -WhatIf:$using:WhatIF
             }
             else {
@@ -794,7 +794,7 @@ function Copy-ItemSafe {
         return $true
     }
 
-    write-log "[Copy-Itemsafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
+    write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
     $retries = 3
     while ($retries -gt 0) {
@@ -841,7 +841,9 @@ function Test-URL {
     }
 
     try {
-        $output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url
+        #$output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url
+        $output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url 2>&1
+        $lastexit = $LASTEXITCODE
         if ($LASTEXITCODE -eq 0) {
             if ($output -match 'Location: https://www.bing.com') {
                 Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
@@ -853,11 +855,14 @@ function Test-URL {
             return $true
         }
         else {
+            if ($LASTEXITCODE -eq 60) {
+                write-log "Curl failed($lastexit): $output"
+            }
             #ipconfig /flushdns
             Clear-DnsClientCache
             start-sleep -seconds 30
-            write-log "Curl retrying.. Last failure $output" -LogOnly
-            $output = & $curlPath --retry 16 --retry-delay 10 --retry-max-time 160 -s -L --head -f $url
+            write-log "Curl retrying.. Last failure Exit code $lastexit $output" -LogOnly
+            $output = & $curlPath --retry 16 --retry-delay 10 --retry-max-time 160 -s -L --head -f $url 2>&1
 
             if ($LASTEXITCODE -ne 0) {
                 Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE"
@@ -1050,7 +1055,7 @@ Function Set-Window {
                 If ($Rectangle.Top -lt 0 -AND $Rectangle.LEft -lt 0) {
                     Write-Warning "Window is minimized! Coordinates will not be accurate."
                 }
-                $Object = [pscustomobject]@{
+                $Object = [PSCustomObject]@{
                     ProcessID   = $ProcessID
                     Size        = $Size
                     TopLeft     = $TopLeft
@@ -1198,7 +1203,7 @@ function Test-NetworkSwitch {
 
         try {
             $adapter = Get-NetAdapter | Where-Object { $_.Name -like "*$NetworkName*" }
-            if ($null -ne $Commmon.CorpNetInterfaceIndex) {
+            if ($null -ne $Common.CorpNetInterfaceIndex) {
                 Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
             }
         }
@@ -1251,7 +1256,7 @@ function Test-NoRRAS {
         return
     }
 
-    $router = (get-itemproperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
+    $router = (Get-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     if ((Get-WindowsFeature Routing).Installed -or $router -eq 0) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
         Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
@@ -1259,7 +1264,7 @@ function Test-NoRRAS {
             Remove-VMSwitch2 -NetworkName "External"
         }
         catch {}
-        $response = Read-YesorNoWithTimeout -Prompt "Reboot needed after RRAS removal and IpEnableRouter TCP Value. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
+        $response = Read-YesOrNoWithTimeout -Prompt "Reboot needed after RRAS removal and IpEnableRouter TCP Value. Reboot now? (Y/n)" -HideHelp -Default "y" -timeout 300
         if ($response -eq "n") {
             Write-log "Please Reboot."
             Exit 1
@@ -1512,7 +1517,7 @@ function Test-DHCPScope {
                 catch {
                     Write-Log "Exception: Failed to add '$ScopeID ($ScopeName)' to DHCP. $_" -Failure
                     if ($_ -like '*Failed to get version of the DHCP server*') {
-                        write-log -Failure "DCHP service is not connectable.  Please reboot your LABHOST VM."
+                        write-log -Failure "DHCP service is not connectable.  Please reboot your LABHOST VM."
                         return $false
                     }
                     $dhcp = Start-DHCP -restart
@@ -1702,7 +1707,7 @@ function Set-VMNote {
     }
     if ($force -eq $false) {
         #If we are not forcing an overwrite, use the new note to update the contents of the old note.
-        #Old Note may have more properties than the new note, and we dont want to lose those.
+        #Old Note may have more properties than the new note, and we do not want to lose those.
         $oldvmNote = Get-VMNote -VMName $vmName
         if ($oldvmNote) {
             foreach ($note in $vmNote.PSObject.Properties) {
@@ -2294,7 +2299,6 @@ function New-VirtualMachine {
                 }
 
                 $ip = $null
-                $ipa = $null
                 try {
                     $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
                     if (! $ip) {
@@ -3101,14 +3105,16 @@ function Get-StorageConfig {
             $fileListName = "_fileList_develop.json"
         }
         $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
         $storageConfigPath = Join-Path $Common.ConfigPath $storageConfigName
         $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
 
 
         $productIDName = "productID.txt"
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
         $productID = "productID"
         $productIdPath = "E:\$productIDName"
-        $procuctIdLocation = "$($StorageConfig.StorageLocation)/$productIDName"
+        $productIdLocation = "$($StorageConfig.StorageLocation)/$productIDName"
 
 
 
@@ -3174,7 +3180,7 @@ function Get-StorageConfig {
             if (-not (Test-Path $productIdPath)) {
 
                 Write-Log "Updating $($productIDName) from azure storage" -LogOnly
-                $productIDURL = $procuctIdLocation + "?$($StorageConfig.StorageToken)"
+                $productIDURL = $productIdLocation + "?$($StorageConfig.StorageToken)"
                 try {
                     $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
                 }
@@ -3487,7 +3493,7 @@ function Install-Tools {
                     if ($tool.Appinstall -eq $true) {
                         if ($vm.operatingSystem.Contains("Windows 1")) {
                             if ($vm.Role -eq "DomainMember") {
-                                #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. dont add it to tools
+                                #If this is a Domain Member, windows 10 or 11, and the app is auto deployed.. do not add it to tools
                                 Write-Progress2 "Injecting tools" -Status "Skipping $($tool.Name) on $VmName, should be deployed via CM" -Log
                                 continue
 
@@ -3526,6 +3532,7 @@ function Install-Tools {
                 }
 
                 $ToolList += $tool
+                Write-Log -LogOnly "[Injecting tool] Injecting $($tool.Name) to $($vm.vmName) Percent: $percent"
                 #Write-Progress2 "Injecting tool" -Status "Injecting $($tool.Name) to $($vm.vmName)" -Log -percentcomplete $percent
 
             }
@@ -4139,7 +4146,7 @@ function Set-SupportedOptions {
         OperatingSystems   = $operatingSystems
         SqlVersions        = $sqlVersions
         CMVersions         = $cmVersions
-        UpdateablePropList = $updatablePropList
+        UpdatablePropList = $updatablePropList
         PropsToUpdate      = $propsToUpdate
     }
 
@@ -4231,7 +4238,7 @@ Function Install-HostToServer2025 {
     $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
     if (Test-Path $filename) {
 
-        $response = Read-YesorNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host? (Y/n)" -HideHelp -Default "y" -timeout 180
+        $response = Read-YesOrNoWithTimeout -Prompt "Do you want to install Windows Server 2025 on this host? (Y/n)" -HideHelp -Default "y" -timeout 180
         if ($response -eq "n") {
             return
         }
@@ -4509,7 +4516,7 @@ if (-not $Common.Initialized) {
         }
 
 
-        if (-not $InJob -or $GetLastestHotfixVersion) {
+        if (-not $InJob -or $GetLatestHotfixVersion) {
             Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
             Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
             $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion

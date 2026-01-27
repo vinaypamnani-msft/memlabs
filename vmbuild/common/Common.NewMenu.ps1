@@ -500,7 +500,7 @@ function Get-Menu2 {
         [object] $preOptions = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress newline")]
         [switch] $NoNewLine,
         [Parameter(Mandatory = $false, HelpMessage = "Split response")]
         [switch] $split,
@@ -614,7 +614,7 @@ function Get-Menu2 {
             Write-Log -LogOnly  "[$menuName] [Get-Menu2] Returned (CV) '$CurrentValue'"
             return $CurrentValue
         }
-        Write-Log -LogOnly  "[$menuName] [Get-Menu2] Didnt Return Anything"
+        Write-Log -LogOnly  "[$menuName] [Get-Menu2] Did not Return Anything"
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
@@ -693,7 +693,7 @@ function Show-Menu {
 
         $TotalLineCount += 2 #For Prompt
        
-        $WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
+        #$WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $RoomLeft = Get-RoomLeftFromCurrentPosition
@@ -809,7 +809,7 @@ function Show-Menu {
                     continue
                 }
 
-                if ($menuItem.itemName.StartsWith("*B") -and -not [string]::isnullorwhitespace($menuitem.Text)) {
+                if ($menuItem.itemName.StartsWith("*B") -and -not [string]::IsNullOrWhiteSpace($menuitem.Text)) {
                     if ($center) {
 
                         $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
@@ -987,7 +987,7 @@ Function Update-HelpText {
            
         Set-CursorPosition -X 0 -Y $HelpPosition.Y
         write-host2 " ╭───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
-        write-host2 " │" -nonewline -ForegroundColor MediumOrchid
+        write-host2 " │" -noNewLine -ForegroundColor MediumOrchid
         write-host2 "🕮  " -ForegroundColor BlanchedAlmond -noNewLine
         write-host2 "$CurrentHelpText" -foregroundColor $Color
         write-host2 " ╰───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
@@ -1016,7 +1016,7 @@ function Update-Prompt {
     $AnyHelpText = $false
     [System.Console]::CursorVisible = $false
     $CurrentValue = $null
-    $cursorPosition = Get-CursorPosition # Get the current cursor position
+    #$cursorPosition = Get-CursorPosition # Get the current cursor position
     Set-CursorPosition -X $PromptPosition.X -Y $PromptPosition.Y # Set the cursor position to the prompt position
     write-host "             " -NoNewline
     Set-CursorPosition -X $PromptPosition.X -Y $PromptPosition.Y # Set the cursor position to the prompt position
@@ -1172,14 +1172,14 @@ function Start-Navigation {
                 $optionInt = ($($menuItems[$selectedIndex].ItemName) -as [int])
                 if ($optionInt) {                
                     if ($menuItems[$selectedIndex].MultiSelected) {
-                        #If insert was pressed, dont remove the selection
+                        #If insert was pressed, do not remove the selection
                         if ($key.VirtualKeyCode -eq 45) {
                             continue
                         }
                         $menuItems[$selectedIndex].MultiSelected = $false
                     }
                     else {
-                        #If delete was pressed, dont enable the selection
+                        #If delete was pressed, do not enable the selection
                         if ($key.VirtualKeyCode -eq 46) {
                             continue
                         }

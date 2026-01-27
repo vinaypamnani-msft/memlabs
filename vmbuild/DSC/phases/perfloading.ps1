@@ -128,49 +128,49 @@ else {
 
         #creating an application
         $appname = "MEMLABS-" + "$($_.Name)" 
-        Write-DscStatus "$Tag Creating an MEMLBAS application for $($_.Name) as App model"
+        Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
         New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully created an MEMLBAS application for $($_.Name) as App model"
+        Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
         #remove an application
         #Remove-CMApplication -Name "MEMLABS-*" -Force
 
-        Write-DscStatus "$Tag Creating an MEMLBAS application deployment for $($_.Name) as App model"
+        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
         #create a deployment for each application (tim help on pulling the site server name)
         Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Sucessfully an MEMLBAS application deployment for $($_.Name) as App model"
+        Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
 
-        Write-DscStatus "$Tag Distributing MEMLBAS application $($_.Name) to all DPs"
+        Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
         #distribute the content to All DPs
         Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLBAS application $($_.Name) to all DPs"
+        Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
 
-        Write-DscStatus "$Tag Deploying MEMLBAS application $($_.Name) to all Systems as available deployment"
+        Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
         #deploy apps to all systems
         New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag successfully deployed MEMLBAS application $($_.Name) to all Systems as available deployment"
+        Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
 
-        Write-DscStatus "$Tag Creating an MEMLBAS application deployment for $($_.Name) as Package model"
+        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
         # Create the Package
         $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-        Write-DscStatus "$Tag Sucessfully created a MEMLBAS application deployment for $($_.Name) as Package model"
+        Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
         #Remove a package
         #Remove-CMPackage -Id "CS100023" -Force
 
-        Write-DscStatus "$Tag Creating an MEMLBAS pacakage deployment for $($_.Name) as Package model"
+        Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
         $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
         # Create a Program for the Package
         New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
-        Write-DscStatus "$Tag Sucessfully created a MEMLBAS pacakage deployment for $($_.Name) as Package model"
+        Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
 
-        Write-DscStatus "$Tag Distributing MEMLBAS pacakage $($_.Name) to all DPs"
+        Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
         #Distribute all packages to ALL DPs group
         Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLBAS package $($_.Name) to all DPs"
+        Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
 
-        Write-DscStatus "$Tag Deploying MEMLBAS package $($_.Name) to all Systems as available deployment"
+        Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
         #Deploy all packages to all systems
         New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-        Write-DscStatus "$Tag successfully deployed MEMLBAS package $($_.Name) to all Systems as available deployment"
+        Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
     }
 
 
@@ -246,7 +246,7 @@ else {
             if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
                 $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
                 Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesnt have that feature yet) Tim help needed here
+                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
                 Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
 
                 ##for testing if you want to remove all the scripts
@@ -559,21 +559,21 @@ else {
             $filename = $baselineFolder + "\" + $ConfigName.Name
             Write-DscStatus "$Tag Importing cab from $filename location"
             Import-CMConfigurationItem -FileName $filename -Force
-            Write-DscStatus "$Tag Succesfully created Configuration Item for $baselinename"
+            Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
     
             # Create the configuration baseline
             New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
-            Write-DscStatus "$Tag Succesfully created Configuration Baseline for $baselinename"
+            Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
 
             # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
             $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
             Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
-            Write-DscStatus "$Tag Succesfully linked CI and CB for $baselinename"
+            Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
 
             # Deploy the configuration baseline to a collection
 
             New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
-            Write-DscStatus "$Tag Succesfully deployed the baseline $baselinename to All systems"
+            Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
 
         }
         else {
@@ -591,7 +591,7 @@ else {
 
         # Enable the PowerShell Execution Policy setting
         Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-        Write-DscStatus "$Tag Powershell policy succesfully changed for $customclientsetting client setting "
+        Write-DscStatus "$Tag Powershell policy successfully changed for $customclientsetting client setting "
 
         New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
@@ -988,7 +988,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
     }
 
-    #install Endpoint protection role in heirarchy to support defender updates
+    #install Endpoint protection role in hierarchy to support defender updates
     if (!(Get-CMEndpointProtectionPoint -AllSite)) {
     
         # this is needed for defender updates and management
@@ -1038,7 +1038,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
         $products += "Microsoft Defender for Endpoint"
     
-        # Add double quotes around each product name as few products have commans in their name
+        # Add double quotes around each product name as few products have commas in their name
         $products = @($products | ForEach-Object { "$_" })
 
         Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
@@ -1103,7 +1103,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         function Invoke-finalfullsync {
             $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
             $filePath = Join-Path $folderPath "full.syn"
-            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to intialize a full syncronization"
+            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to initialize a full synchronization"
     
             # Ensure the folder exists; create it if it doesn't
             if (Test-Path $folderPath) {
@@ -1181,7 +1181,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 Write-DscStatus "$Tag $productclassifications before enabling"
                 $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
                 Write-DscStatus "$Tag $productclassifications1 after enabling"
-                Write-DscStatus "$Tag !!Final !! sync after enabling products and classfications" 
+                Write-DscStatus "$Tag !!Final !! sync after enabling products and classifications" 
                 Invoke-finalfullsync
 
             }
@@ -1246,7 +1246,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created package: $PackageName"
                     Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Successfully distributed MEMLAB $PackageName to all DPs"
+                    Write-DscStatus "$Tag Successfully distributed MEMLABS $PackageName to all DPs"
                     New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
                     Write-DscStatus "$Tag Successfully created SUG $PackageName"
                 
@@ -1334,7 +1334,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             catch {
                 Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
             }
-            ##this sync will take a long time as it will almost pull 3k-5k updates down so dont wait for the process to finish
+            ##this sync will take a long time as it will almost pull 3k-5k updates down so don't wait for the process to finish
             Invoke-finalfullsync
         }
 

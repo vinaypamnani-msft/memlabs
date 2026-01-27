@@ -104,7 +104,7 @@ Test-NoRRAS
 
 
 if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
-    Set-VMhost -EnableEnhancedSessionMode $True
+    Set-VMHost -EnableEnhancedSessionMode $True
 }
 
 if (-not $NoWindowResize.IsPresent) {
@@ -285,7 +285,7 @@ try {
 
     # Load config
     if ($Configuration) {       
-        $ConfigurationShort = Split-Path $Configuration -LeafBase
+        $Global:ConfigurationShort = Split-Path $Configuration -LeafBase
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
@@ -336,7 +336,7 @@ try {
 
                 if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
                     Write-Host       
-                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
+                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
                             write-host

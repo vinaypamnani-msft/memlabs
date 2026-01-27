@@ -373,12 +373,12 @@
 
             $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
             $waitOnDependency = "[DnsServerConditionalForwarder]Forwarder1"
-
+            [System.Management.Automation.PSCredential]$RemoteDomainCreds = New-Object System.Management.Automation.PSCredential ("$($OtherDCVM.thisParams.Domain)\$($Admincreds.UserName)", $Admincreds.Password)
             ADDomainTrust 'Trust' {
                 Ensure               = 'Present'
                 SourceDomainName     = $DomainName
                 TargetDomainName     = $($OtherDCVM.thisParams.Domain)
-                TargetCredential     = $Admincreds
+                TargetCredential     = $RemoteDomainCreds
                 TrustDirection       = 'Bidirectional'
                 TrustType            = 'Forest'
                 AllowTrustRecreation = $false
@@ -513,7 +513,7 @@
 
             if ($usePKI) {
                 
-                WriteStatus ImportCertifcateTemplate {
+                WriteStatus ImportCertificateTemplate {
                     DependsOn = $nextDepend
                     Status    = "Importing Template to Domain"
                 }
@@ -521,26 +521,26 @@
                 $waitOnDependency = @($nextDepend)
 
                 if ($iisCount) {
-                    ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                    ImportCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                         TemplateName = "ConfigMgrClientDistributionPointCertificate"
                         DNPath       = $DNName
                         DependsOn    = $nextDepend
                     }
-                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-                    ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                    ImportCertificateTemplate ConfigMgrWebServerCertificate {
                         TemplateName = "ConfigMgrWebServerCertificate"
                         DNPath       = $DNName
                         DependsOn    = $nextDepend
                     }
-                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrWebServerCertificate"
                 }
-                ImportCertifcateTemplate ConfigMgrClientCertificate {
+                ImportCertificateTemplate ConfigMgrClientCertificate {
                     TemplateName = "ConfigMgrClientCertificate"
                     DNPath       = $DNName
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
+                $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientCertificate"
             }
             else {
                 $waitOnDependency = $nextDepend

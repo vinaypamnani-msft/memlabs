@@ -76,7 +76,7 @@ Configuration Phase8
                     )
                 }
             )
-            Dependson         = $nextDepend
+            DependsOn         = $nextDepend
         }
         $nextDepend = "[NTFSAccessEntry]PMPCApps"
 
@@ -123,7 +123,7 @@ Configuration Phase8
                     NodeName         = $WaitFor
                     RetryIntervalSec = 15
                     RetryCount       = 2400
-                    Dependson        = $nextDepend
+                    DependsOn        = $nextDepend
                 }
                 $nextDepend = '[WaitForAll]WaitSCCM'
             }
@@ -229,7 +229,7 @@ Configuration Phase8
                 NodeName         = $WaitFor
                 RetryIntervalSec = 15
                 RetryCount       = 2400
-                Dependson        = $nextDepend
+                DependsOn        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
         }
@@ -600,7 +600,7 @@ Configuration Phase8
 
         WriteStatus WaitActive {
             Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"
-            Dependson = '[InstallADK]ADKInstall'
+            DependsOn = '[InstallADK]ADKInstall'
         }
 
         WaitForAll ActiveNode {
@@ -608,7 +608,7 @@ Configuration Phase8
             NodeName         = $ThisVM.thisParams.ActiveNode
             RetryIntervalSec = 25
             RetryCount       = 1300
-            Dependson        = '[WriteStatus]WaitActive'
+            DependsOn        = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {

@@ -20,7 +20,7 @@ function Get-Menu {
         [object] $preOptions = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress newline")]
         [switch] $NoNewLine,
         [Parameter(Mandatory = $false, HelpMessage = "Split response")]
         [switch] $split,
@@ -220,7 +220,7 @@ function get-ValidResponse {
                 $response = Read-SingleKeyWithTimeout -timeout 0
             }
             $first = $false
-            if ([string]::isnullorwhitespace($response)) {
+            if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "return null"
                 return $null
             }
@@ -425,7 +425,7 @@ function Read-Host2 {
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
         [string] $currentValue = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
+        [Parameter(Mandatory = $false, HelpMessage = "Do not display the help before the prompt")]
         [switch] $HideHelp
     )
     if (-not $HideHelp.IsPresent) {
@@ -455,7 +455,7 @@ function Read-Single {
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
         [string] $currentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
+        [Parameter(Mandatory = $false, HelpMessage = "Do not display the help before the prompt")]
         [switch] $HideHelp,
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 0,
@@ -635,7 +635,7 @@ function Select-StartDomain {
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        #$customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
+        #$customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critical VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
             $response = $null
@@ -795,7 +795,7 @@ function Select-DeleteDomain {
         }
         if ($response -eq "D") {
             Write-Host "Selecting 'Yes' will permanently all VMs and scopes."
-            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
+            $response2 = Read-YesOrNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
@@ -804,7 +804,7 @@ function Select-DeleteDomain {
             }
         }
         else {
-            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM(s) $($response -Join ",")? (y/N)" -HideHelp -timeout 180 -Default "n"
+            $response2 = Read-YesOrNoWithTimeout -Prompt "Delete VM(s) $($response -Join ",")? (y/N)" -HideHelp -timeout 180 -Default "n"
 
             if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue

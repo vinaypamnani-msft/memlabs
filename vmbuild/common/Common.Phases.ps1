@@ -44,7 +44,7 @@ function Write-JobProgress {
                         $jobName2 = "  $($jobName.PadRight($padding," "))"
                     }
                     else {
-                        $jobName = "[Unknown VM] [Unkown Role]"
+                        $jobName = "[Unknown VM] [Unknown Role]"
                     }
 
                     if ($Common.PS7) {
@@ -580,7 +580,7 @@ function Get-ConfigurationData {
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd -and -not $global:NoSnapshot) {
-                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $ConfigurationShort
+                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
@@ -588,7 +588,7 @@ function Get-ConfigurationData {
                 }
 
                 if (-not $snapshot) {
-                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
+                    $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
                         write-log -HostOnly ""

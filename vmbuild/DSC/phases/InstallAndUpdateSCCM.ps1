@@ -33,7 +33,7 @@ if ($locale -and $locale -ne "en-US") {
 # Set scenario
 $scenario = "Standalone"
 if ($ThisVM.role -eq "CAS" -or $ThisVM.parentSiteCode) { $scenario = "Hierarchy" }
-Write-DscStatus "InstallAndUpdateSCCM.ps1 Scenerio $scenario"
+Write-DscStatus "InstallAndUpdateSCCM.ps1 Scenario $scenario"
 # Set Install Dir
 $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
 if ($ThisVM.cmInstallDir) {
@@ -213,7 +213,7 @@ CurrentBranch=1
     else {
         $cmini = $cmini.Replace('Preview=0', "")
         if ($installAction -eq "InstallCAS") {
-            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+            if (-not [string]::IsNullOrWhiteSpace($ThisVM.siteName)) {
                 $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
             }
             else {
@@ -221,7 +221,7 @@ CurrentBranch=1
             }
         }
         else {
-            if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+            if (-not [string]::IsNullOrWhiteSpace($ThisVM.siteName)) {
                 $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
             }
             else {
@@ -300,7 +300,7 @@ CurrentBranch=1
             Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
         }
         else {
-            #If we didnt find it, increment fail count, and bail after 10 fails
+            #If we didn't find it, increment fail count, and bail after 10 fails
             Clear-DnsClientCache -ErrorAction SilentlyContinue
             $success = 0
             $fail++
@@ -316,19 +316,6 @@ CurrentBranch=1
             start-sleep -Seconds 30
         }
     }
-
-    #Fix 0 byte files in CMCB
-
-    # Get-ChildItem $CMBIN | ForEach-Object {
-    #     if(!$_.PSIsContainer -and $_.length -eq 0) {
-    #        write-host (“{0} -> {1} {2}” -f $_.FullName, $_.Name, $_.Length)
-    #        $RedistFile = (Join-Path $CMRedist $_.Name)
-    #        if ((Test-Path $RedistFile)) {
-    #        write-host "found $RedistFile"
-    #        Copy-Item $RedistFile $_.FullName -force
-    #        }
-    #        }
-    #     }
 
     # Create ini
     $cmini > $CMINIPath
@@ -661,7 +648,7 @@ if ($UpdateRequired) {
                         Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                     }
 
-                    # Been an hour, incrememt retry counter
+                    # Been an hour, increment retry counter
                     if ($downloadspan.Hours -ge 1) {
                         Write-DscStatus "Still waiting for '$($updatepack.Name)' download to begin, Restarting SmsExec and incrementing retry counter."
                         Restart-Service -DisplayName "SMS_Executive"

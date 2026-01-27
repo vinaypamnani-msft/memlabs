@@ -32,7 +32,7 @@ Function Get-LabVMs {
             
             if ($i -eq $headers.Length - 1) {
                 [Math]::Max($headerLength, $maxDataLength)
-            }  # Last column doesnt need padding
+            }  # Last column doesn't need padding
             else { 
                 [Math]::Max($headerLength, $maxDataLength) + 2 
             }  # Add padding           
@@ -48,7 +48,7 @@ Function Get-LabVMs {
                 
                 if ($i -eq $headers.Length - 1) {
                     [Math]::Max($headerLength, $maxDataLength)
-                }  # Last column doesnt need padding
+                }  # Last column doesn't need padding
                 else { 
                     [Math]::Max($headerLength, $maxDataLength) + 1
                 }  # Add padding           
@@ -65,7 +65,7 @@ Function Get-LabVMs {
                 
                 if ($i -eq $headers.Length - 1) {
                     [Math]::Max($headerLength, $maxDataLength)
-                }  # Last column doesnt need padding
+                }  # Last column doesn't need padding
                 else { 
                     [Math]::Max($headerLength, $maxDataLength) + 1
                 }  # Add padding           

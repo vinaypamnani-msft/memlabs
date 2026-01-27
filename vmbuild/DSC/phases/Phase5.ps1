@@ -19,9 +19,11 @@ Configuration Phase5
 
     # Log share
     $LogFolder = "DSC"
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
     $LogPath = "c:\staging\$LogFolder"
 
     # Domain Creds
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
     [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
@@ -58,7 +60,7 @@ Configuration Phase5
                 NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
                 RetryIntervalSec = 5
                 RetryCount       = 400
-                Dependson        = $nextDepend
+                DependsOn        = $nextDepend
                 PsDscRunAsCredential = $Admincreds
             }
             $nextDepend = "[WaitForAny]DCComplete$($primaryVM.vmName)"
@@ -134,7 +136,7 @@ Configuration Phase5
                         )
                     }
                 )
-                Dependson         = "[File]ClusterWitness$i"
+                DependsOn         = "[File]ClusterWitness$i"
             }
 
 
@@ -190,7 +192,7 @@ Configuration Phase5
                         )
                     }
                 )
-                Dependson         = "[File]ClusterBackup$i"
+                DependsOn         = "[File]ClusterBackup$i"
             }
 
             SmbShare "ClusterShare$i" {
@@ -217,7 +219,7 @@ Configuration Phase5
         }
 
         WriteStatus Complete {
-            Dependson = $WaitDepend
+            DependsOn = $WaitDepend
             Status    = "Complete!"
         }
 
@@ -347,7 +349,7 @@ Configuration Phase5
         #    NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
         #    RetryIntervalSec = 5
         #    RetryCount       = 450
-        #    Dependson        = $nextDepend
+        #    DependsOn        = $nextDepend
         #}
         #$nextDepend = '[WaitForAny]DCComplete'
 
@@ -545,7 +547,7 @@ Configuration Phase5
             Ensure               = 'Present'
             ServicePrincipalName = $lspn1
             Account              = $account
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -553,7 +555,7 @@ Configuration Phase5
             Ensure               = 'Present'
             ServicePrincipalName = $lspn2
             Account              = $account
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -561,7 +563,7 @@ Configuration Phase5
             Ensure               = 'Present'
             ServicePrincipalName = $lspn3
             Account              = $account
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -569,7 +571,7 @@ Configuration Phase5
             Ensure               = 'Present'
             ServicePrincipalName = $lspn4
             Account              = $account
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -585,7 +587,7 @@ Configuration Phase5
             NodeName         = $node2
             RetryIntervalSec = 6
             RetryCount       = 900
-            Dependson        = $nextDepend
+            DependsOn        = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -596,7 +598,7 @@ Configuration Phase5
 
             WriteStatus SetRecoveryModel {
                 DependsOn = $nextDepend
-                Status    = "Creaing $dbName and setting to Full Recovery Model"
+                Status    = "Creating $dbName and setting to Full Recovery Model"
             }
 
             SqlDatabase 'SetRecoveryModel' {
@@ -702,7 +704,7 @@ Configuration Phase5
             NodeName         = $DC
             RetryIntervalSec = 5
             RetryCount       = 300
-            Dependson        = $nextDepend
+            DependsOn        = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = "[WaitForAny]DCComplete"
@@ -806,7 +808,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -816,7 +818,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -826,7 +828,7 @@ Configuration Phase5
             LoginType            = 'WindowsUser'
             ServerName           = $Node.NodeName
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = $nextDepend
+            DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
 
@@ -886,11 +888,11 @@ Configuration Phase5
             InstanceName         = $node1vm.sqlInstanceName
             ServerName           = $Node.NodeName
             PsDscRunAsCredential = $Admincreds
-            Dependson            = '[SqlEndpoint]HADREndpoint'
+            DependsOn            = '[SqlEndpoint]HADREndpoint'
         }
 
         WriteStatus SQLAOWait {
-            Dependson = '[SqlAlwaysOnService]EnableHADR'
+            DependsOn = '[SqlAlwaysOnService]EnableHADR'
             Status    = "Waiting for '$node1' to create the Availability Group"
         }
 
@@ -900,7 +902,7 @@ Configuration Phase5
             RetryCount           = 300
             ServerName           = $node1
             InstanceName         = $node1vm.sqlInstanceName
-            Dependson            = '[SqlAlwaysOnService]EnableHADR'
+            DependsOn            = '[SqlAlwaysOnService]EnableHADR'
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[SqlAlwaysOnService]EnableHADR', '[SqlWaitForAG]SQLConfigureAG-WaitAG'
@@ -915,7 +917,7 @@ Configuration Phase5
             NodeName         = $node1
             RetryIntervalSec = 5
             RetryCount       = 450
-            Dependson        = $nextDepend
+            DependsOn        = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[WaitForAll]AG'
@@ -972,7 +974,7 @@ Configuration Phase5
                 NodeName         = $node1
                 RetryIntervalSec = 5
                 RetryCount       = 450
-                Dependson        = $nextDepend
+                DependsOn        = $nextDepend
                 PsDscRunAsCredential = $Admincreds
             }
 
@@ -981,7 +983,7 @@ Configuration Phase5
                 NodeName         = $node1
                 RetryIntervalSec = 5
                 RetryCount       = 450
-                Dependson        = '[WaitForAll]RecoveryModel'
+                DependsOn        = '[WaitForAll]RecoveryModel'
                 PsDscRunAsCredential = $Admincreds
             }
 
@@ -1026,7 +1028,7 @@ Configuration Phase5
             Status = "Creating AD Group and assigning SPN for SQL Availability Group"
         }
 
-        $adGroupDependancy = @('[WriteStatus]SQLAOGroup')
+        $adGroupDependency = @('[WriteStatus]SQLAOGroup')
         $sqlAOPrimaryNodes = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "SQLAO" -and $_.OtherNode }
 
         $i = 0
@@ -1042,11 +1044,11 @@ Configuration Phase5
                 DependsOn   = '[WriteStatus]SQLAOGroup'
             }
 
-            $adGroupDependancy += "[ADGroup]SQLAOGroup$($pNode.vmName)"
+            $adGroupDependency += "[ADGroup]SQLAOGroup$($pNode.vmName)"
         }
 
         WriteStatus Complete {
-            Dependson = $adGroupDependancy
+            DependsOn = $adGroupDependency
             Status    = "Complete!"
         }
 

@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -85,7 +85,7 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
 
     $thisSiteCode = $thisVM.SiteCode
     if ($rp.SiteCode -ne $thisSiteCode) {
-        #If this is the remote SQL Server for this site code, dont continue
+        #If this is the remote SQL Server for this site code, don't continue
         if ($rp.vmName -ne $thisVM.RemoteSQLVM) {
             continue
         }
@@ -282,7 +282,7 @@ if ($configureSUP) {
                     }
                 }  until ($syncFinished -or $syncTimeout)
             }
-            #Start a 2nd Sync, or an intial sync if not top-level
+            #Start a 2nd Sync, or an initial sync if not top-level
             start-sleep -seconds 30
             Sync-CMSoftwareUpdate
         }

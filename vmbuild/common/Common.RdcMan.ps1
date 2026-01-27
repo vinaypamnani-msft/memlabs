@@ -4,7 +4,7 @@
 
 
 function Install-RDCman {
-    # ARM template installs sysinternal tools via choco
+    # ARM template installs sysinternals tools via choco
     $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
     $Global:newrdcmanpath = "C:\tools"
     $rdcmanexe = "RDCMan.exe"
@@ -38,7 +38,7 @@ function Install-RDCman {
 }
 
 
-function Save-RdcManSettignsFile {
+function Save-RdcManSettingsFile {
     param(
         [string]$rdcmanfile
     )
@@ -119,7 +119,7 @@ function Save-RdcManSettignsFile {
     #Write-Host "Count: $FilesToOpenCount"
     #FilesToOpen is blank
     if (($FilesToOpenCount -eq 0) ) {
-        Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
+        Write-Verbose "[Save-RdcManSettingsFile] Copying FilesToOpen from template, since it was missing in existing file"
         $settings.RemoveChild($FilesToOpen)
         $newFiles = $FilesToOpenFromTemplate.Clone()
         $FilesToOpen = $file.ImportNode($newFiles, $true)
@@ -264,7 +264,7 @@ function Save-RdcManSettignsFile {
 #    if ($group.properties.Name -eq "VMASTEMPLATE") {
 #        [void]$file.RemoveChild($group)
 #    }
-#    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+#    Save-RdcManSettingsFile -rdcmanfile $rdcmanfile
 #    # Save to desired filename
 #    if ($shouldSave) {
 #        Write-Log "Killing RDCMan, if necessary and saving $rdcmanfile." -Success
@@ -670,7 +670,7 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
-    $killed = Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+    $killed = Save-RdcManSettingsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
         try {

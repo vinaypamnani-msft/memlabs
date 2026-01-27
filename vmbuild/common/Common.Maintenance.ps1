@@ -57,7 +57,7 @@ function Start-Maintenance {
     $stoppedVms = @()
     if ($applyNewOnly -eq $false) {
         if ($vmCount -gt 0) {
-            $response = Read-YesorNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (y/N)" -HideHelp -Default "n" -timeout 15
+            $response = Read-YesOrNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (y/N)" -HideHelp -Default "n" -timeout 15
             if ($response -eq "n") {
                 return
             }
@@ -68,7 +68,7 @@ function Start-Maintenance {
                 }
             }
             if ($stoppedCount -gt 0) {
-                $response = Read-YesorNoWithTimeout -Prompt "$stoppedCount VMs stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
+                $response = Read-YesOrNoWithTimeout -Prompt "$stoppedCount VMs stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
                 if ($response -eq "y") {
                     Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
                 }
@@ -137,7 +137,6 @@ function Show-FailedDomains {
 
     $longest = 130
     $longestMinus1 = $longest - 1
-    $longestMinus2 = $longest - 2
 
     Write-Host
     Write-Host2 "  #".PadRight($longest, "#") -ForegroundColor Yellow
@@ -298,7 +297,7 @@ function Start-VMFixes {
 
     if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
         foreach ($vm in $toStop) {
-            if ([string]::isnullorwhitespace($vm)) {
+            if ([string]::IsNullOrWhiteSpace($vm)) {
                 continue
             }
             $vmNote = Get-VMNote -VMName $vm
@@ -846,7 +845,7 @@ function Get-VMFixes {
     #endregion
 
     #region Fix-DisableIEESC
-    # Disable IE Enhanced Security for all usres via Scheduled task
+    # Disable IE Enhanced Security for all users via Scheduled task
     $Fix_DisableIEESC = {
 
         $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue

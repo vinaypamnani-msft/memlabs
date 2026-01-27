@@ -43,7 +43,7 @@ configuration Phase3
                 UserLocale           = $l.UserLocale
                 CopySystem           = $true
                 CopyNewUser          = $true
-                Dependson            = "[LanguagePack]InstallLanguagePack"
+                DependsOn            = "[LanguagePack]InstallLanguagePack"
             }
 
             LocalConfigurationManager {
@@ -91,7 +91,7 @@ configuration Phase3
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
         }
 
-        $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
+        $addUserDependency = @('[WriteStatus]AddLocalAdmin')
         $i = 0
         foreach ($user in $ThisVM.thisParams.LocalAdminAccounts) {
             $i++
@@ -100,11 +100,11 @@ configuration Phase3
                 Name              = $user
                 NetbiosDomainName = $NetBiosDomainName
             }
-            $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
+            $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
         WriteStatus InstallFeature {
-            DependsOn = $addUserDependancy
+            DependsOn = $addUserDependency
             Status    = "Installing required windows features for role $featureRoles"
         }
 

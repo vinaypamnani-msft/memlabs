@@ -20,7 +20,7 @@ $global:Phase10Job = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
         }
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLastestHotfixVersion
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
      
         # Get variables from parent scope
         $currentItem = $using:currentItem
@@ -1035,7 +1035,7 @@ $global:VM_Config = {
                                         $DCNetwork = $deployConfig.vmOptions.Network
                                     }
                                     $DNSServer = ($DCNetwork.Substring(0, $DCNetwork.LastIndexOf(".")) + ".1")
-                                    $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
+                                    $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -ErrorAction SilentlyContinue
 
                                     start-vm2 -Name $currentItem.vmname
                                     $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
@@ -2130,7 +2130,7 @@ $global:VM_Config = {
                                 #  [x] [<ScriptBlock>] ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
                                 # This condition is expected, and we are actually rebooting.
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Machine reboot failed*") {
-                                    #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
+                                    #If we do not reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                                     Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to reboot"
                                     continue
                                 }
@@ -2310,8 +2310,8 @@ $global:VM_Config = {
                         $bailEarly = $true
                     }
 
-                    #ERROR: Computer account doesn't have admininstrative rights to the SQL Server~
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have admininstrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
+                    #ERROR: Computer account doesn't have administrative rights to the SQL Server~
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have administrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
                         $failEntry = $result.ScriptBlockOutput.Line
                         $bailEarly = $true

@@ -317,7 +317,7 @@ Function Get-DrawingColor {
         } #else
     } #if PSBoundParameters contains Name
     else {
-        Write-Verbose "Geting all drawing color names"
+        Write-Verbose "Getting all drawing color names"
         $colors = [system.drawing.color].GetProperties().name | Where-Object { $_ -notmatch "^\bIs|Name|[RGBA]\b" }
     }
     Write-Verbose "Processing $($colors.count) colors"

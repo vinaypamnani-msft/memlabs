@@ -196,7 +196,7 @@ configuration Phase4
                         Ensure               = 'Present'
                         ServicePrincipalName = $spn
                         Account              = $ThisVM.SqlServiceAccount
-                        Dependson            = $nextDepend
+                        DependsOn            = $nextDepend
                         PsDscRunAsCredential = $Admincreds
                     }
 
