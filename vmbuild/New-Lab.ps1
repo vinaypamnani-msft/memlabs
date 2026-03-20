@@ -140,7 +140,7 @@ if ($Common.FatalError) {
 
 # Validate PS7
 if (-not $Common.PS7) {
-    Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
+    Write-Log "You must use PowerShell version 7.4 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     exit 1
 }
 

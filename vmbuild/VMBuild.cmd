@@ -25,12 +25,12 @@ where /q wt
 IF ERRORLEVEL 1 set WT=0
 
 IF NOT EXIST "C:\Program Files\PowerShell\7\pwsh.exe" GOTO INSTALLPS7
-IF EXIST "C:\Program Files\PowerShell\7\pwsh.exe" GOTO PS7
 
-
+FOR /F "tokens=*" %%V IN ('"C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NonInteractive -Command "$v=$PSVersionTable.PSVersion;if($v.Major -gt 7 -or ($v.Major -eq 7 -and $v.Minor -ge 4)){'OK'}else{'OLD'}"') DO SET PS7VER=%%V
+IF "%PS7VER%"=="OK" GOTO PS7
 
 :INSTALLPS7
-choco install pwsh -y
+choco upgrade pwsh -y
 IF EXIST "C:\Program Files\PowerShell\7\pwsh.exe" GOTO PS7 ELSE GOTO PS5
 
 :PS7

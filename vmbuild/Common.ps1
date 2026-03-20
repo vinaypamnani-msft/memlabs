@@ -4338,7 +4338,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.menu.ps1
 
 
-if ($PSVersionTable.PSVersion.Major -eq 7) {
+if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
     $PS7 = $true
     $PSStyle.Progress.Style = "`e[38;5;123m"
     $psstyle.Formatting.TableHeader = "`e[3;38;5;195m"
