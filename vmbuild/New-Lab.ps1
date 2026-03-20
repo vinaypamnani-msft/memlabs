@@ -144,7 +144,7 @@ if (-not $Common.PS7) {
     exit 1
 }
 
- if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+ if ([Environment]::OSVersion.Version -lt [System.version]"10.0.26100.0") {
           Write-Log "This version of MemLabs requires Server 2025 or greater." -Failure  
           Install-HostToServer2025
 }
