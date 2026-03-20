@@ -1283,6 +1283,51 @@ class DelegateControl {
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
+    # Helper method to join multi-line dsacls output
+    hidden [string[]] JoinDsaclsOutput([string[]] $rawOutput) {
+        $joinedLines = @()
+        $currentLine = ""
+
+        foreach ($line in $rawOutput) {
+            if ($line -match '^\s{2,}' -and $currentLine) {
+                # This is a continuation line - append to current
+                $currentLine += " " + $line.Trim()
+            }
+            else {
+                # This is a new entry - save previous and start new
+                if ($currentLine) { $joinedLines += $currentLine }
+                $currentLine = $line
+            }
+        }
+        if ($currentLine) { $joinedLines += $currentLine }
+        
+        return $joinedLines
+    }
+
+    # Helper method to check if permissions exist
+    hidden [bool] CheckPermissions([string[]] $permissionInfo, [string] $machineName, [string] $domainName) {
+        # Join multi-line output
+        $joinedLines = $this.JoinDsaclsOutput($permissionInfo)
+        
+        if ($this.IsGroup) {
+            $searchPattern = "*$domainName\$machineName*FULL CONTROL*"
+            Write-Verbose "Searching for pattern: $searchPattern"
+            $match = $joinedLines | Where-Object { $_ -like $searchPattern }
+        }
+        else {
+            $searchPattern = "*$machineName`$*FULL CONTROL*"
+            Write-Verbose "Searching for pattern: $searchPattern"
+            $match = $joinedLines | Where-Object { $_ -like $searchPattern }
+        }
+        
+        if ($match) {
+            Write-Verbose "Found matching permission: $match"
+            return $true
+        }
+        
+        return $false
+    }
+
     [void] Set() {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
@@ -1345,17 +1390,10 @@ class DelegateControl {
             $targ1 = "CN=System Management,CN=System,$root"
             $permissioninfo = & $tcmd $targ1
 
-            if ($this.IsGroup) {
-                Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
-                if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                    break
-                }
-            }
-            else {
-                Write-Verbose "Testing for *$($_machinename)$* IsGroup: $($this.IsGroup)"
-                if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                    break
-                }
+            # Use helper method to check permissions
+            if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
+                Write-Verbose "Permissions verified successfully"
+                break
             }
 
             Write-Verbose "$tcmd $targ1 did not contain the new permissions. Sleeping 60 seconds and trying again"
@@ -1380,23 +1418,13 @@ class DelegateControl {
             return $false
         }
 
-        Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
+        Write-Verbose "Testing for permissions. IsGroup: $($this.IsGroup)"
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if ($this.IsGroup) {
-            if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                return $true
-            }
-        }
-        else {
-            if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                return $true
-            }
-        }
-
-        return $false
+        # Use helper method to check permissions
+        return $this.CheckPermissions($permissioninfo, $_machinename, $DomainName)
     }
 
     [DelegateControl] Get() {
@@ -3347,13 +3375,103 @@ class ConfigureWSUS {
     [DscProperty()]
     [string]$TemplateName
 
+    hidden [void] CleanupWSUS() {
+        Write-Status "Cleaning up WSUS IIS configuration..."
+        
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        
+        # Stop WSUS Service
+        $ServiceName = 'WSUSService'
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Status "Stopping WSUS Service..."
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Remove WSUS Administration website
+        Write-Status "Removing WSUS Administration website..."
+        $wsusWebsite = Get-Website -Name "WSUS Administration" -ErrorAction SilentlyContinue
+        if ($wsusWebsite) {
+            Remove-Website -Name "WSUS Administration" -ErrorAction SilentlyContinue
+            Write-Verbose "WSUS Administration website removed"
+        }
+        
+        # Remove Application Pools
+        Write-Status "Removing WSUS Application Pools..."
+        $appPools = @('WsusPool', 'WSUSPool')
+        foreach ($poolName in $appPools) {
+            $pool = Get-IISAppPool -Name $poolName -ErrorAction SilentlyContinue
+            if ($pool) {
+                Remove-WebAppPool -Name $poolName -ErrorAction SilentlyContinue
+                Write-Verbose "Removed app pool: $poolName"
+            }
+        }
+        
+        # Remove IIS application directories
+        Write-Status "Removing WSUS IIS directories..."
+        $iisApps = @(
+            'IIS:\Sites\WSUS Administration\ApiRemoting30',
+            'IIS:\Sites\WSUS Administration\ClientWebService',
+            'IIS:\Sites\WSUS Administration\DSSAuthWebService',
+            'IIS:\Sites\WSUS Administration\Inventory',
+            'IIS:\Sites\WSUS Administration\ReportingWebService',
+            'IIS:\Sites\WSUS Administration\ServerSyncWebService',
+            'IIS:\Sites\WSUS Administration\SimpleAuthWebService'
+        )
+        
+        foreach ($app in $iisApps) {
+            if (Test-Path $app) {
+                Remove-Item -Path $app -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Verbose "Removed: $app"
+            }
+        }
+        
+        # Remove physical directories
+        Write-Status "Removing WSUS physical directories..."
+        $wsusPath = "$env:ProgramFiles\Update Services\WebServices"
+        if (Test-Path $wsusPath) {
+            Remove-Item -Path $wsusPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Verbose "Removed: $wsusPath"
+        }
+        
+        # Remove SSL bindings for port 8531
+        Write-Status "Removing SSL bindings..."
+        $sslBinding = Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https" -ErrorAction SilentlyContinue
+        if ($sslBinding) {
+            Remove-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https" -ErrorAction SilentlyContinue
+            Write-Verbose "Removed HTTPS binding on port 8531"
+        }
+        
+        # Remove HTTP bindings for ports 8530
+        $httpBinding = Get-WebBinding -Name "WSUS Administration" -Port 8530 -Protocol "http" -ErrorAction SilentlyContinue
+        if ($httpBinding) {
+            Remove-WebBinding -Name "WSUS Administration" -Port 8530 -Protocol "http" -ErrorAction SilentlyContinue
+            Write-Verbose "Removed HTTP binding on port 8530"
+        }
+        
+        # Clean up any remaining IIS configuration
+        Write-Status "Cleaning up IIS configuration..."
+        $iisConfigPaths = @(
+            "IIS:\AppPools\WsusPool",
+            "IIS:\AppPools\WSUSPool",
+            "IIS:\Sites\WSUS Administration"
+        )
+        
+        foreach ($path in $iisConfigPaths) {
+            if (Test-Path $path) {
+                Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Verbose "Removed IIS config: $path"
+            }
+        }
+        
+        Write-Status "WSUS cleanup completed"
+    }
+
     [void] Set() {
 
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
-
-
 
         $ServiceName = 'WSUSService'
 
@@ -3375,7 +3493,6 @@ class ConfigureWSUS {
         }
 
         try {
-            #write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
@@ -3387,17 +3504,71 @@ class ConfigureWSUS {
                 write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                
+                # Check for "object identifier does not represent a valid object" error
+                if ($postinstallOutput -match "object identifier does not represent a valid object") {
+                    Write-Status "Detected invalid object error. Performing full WSUS cleanup..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    $this.CleanupWSUS()
+                    
+                    Write-Status "Re-running WSUS postinstall after cleanup..."
+                    Start-Sleep -Seconds 5
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
+                
+                # Check for Server 2022 and schema version error
+                $osVersion = [System.Environment]::OSVersion.Version
+                $isServer2022 = ($osVersion.Major -eq 10 -and $osVersion.Build -ge 20348)
+                
+                if ($isServer2022 -and $postinstallOutput -match "schema version of the database is from a newer version of WSUS") {
+                    Write-Status "Detected schema version error on Server 2022. Running fix-postinstall.ps1..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    & c:\tools\fix-postinstall.ps1
+                    
+                    Write-Status "Re-running WSUS postinstall after fix..."
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
             }
             else {
                 write-Status ("Configuring WSUS for WID in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                
+                # Check for "object identifier does not represent a valid object" error
+                if ($postinstallOutput -match "object identifier does not represent a valid object") {
+                    Write-Status "Detected invalid object error. Performing full WSUS cleanup..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    $this.CleanupWSUS()
+                    
+                    Write-Status "Re-running WSUS postinstall after cleanup..."
+                    Start-Sleep -Seconds 5
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
+                
+                # Check for Server 2022 and schema version error
+                $osVersion = [System.Environment]::OSVersion.Version
+                $isServer2022 = ($osVersion.Major -eq 10 -and $osVersion.Build -ge 20348)
+                
+                if ($isServer2022 -and $postinstallOutput -match "schema version of the database is from a newer version of WSUS") {
+                    Write-Status "Detected schema version error on Server 2022. Running fix-postinstall.ps1..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    & c:\tools\fix-postinstall.ps1
+                    
+                    Write-Status "Re-running WSUS postinstall after fix..."
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
             }
+            Write-Verbose "WSUS postinstall output: $postinstallOutput"
         }
         catch {
             Write-Status "Failed to Configure WSUS"
             Write-Verbose "$_ $postinstallOutput"
         }
+        
         try {
             $wsus = get-WsusServer
         }
@@ -3469,7 +3640,6 @@ class ConfigureWSUS {
     [ConfigureWSUS] Get() {
         return $this
     }
-
 }
 
 [DscResource()]

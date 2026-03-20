@@ -869,6 +869,9 @@ function ConvertTo-DeployConfigEx {
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                         $ExternalTopLevelSiteServer = $ExternalSiteServer
+                        $otherDC = "$($OtherDc.VmName).$($ThisVM.ForestTrust)"
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "OtherDC" -Value $otherDC -Force
+
                         $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
                         if ($RemoteSS.ParentSiteCode) {
                             $RemoteCAS = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM

@@ -4244,7 +4244,8 @@ Function Install-HostToServer2025 {
         }
 
         $expandLocation = "C:\temp\Upgrade2025"
-        Expand-Archive -Path  $filename -DestinationPath $expandLocation -Force
+
+        powershell.exe -NoProfile -Command "Expand-Archive -Path '$filename' -DestinationPath '$expandLocation' -Force"
     }
     else {
         Write-Log "Failed to download $filename" -Failure
@@ -4441,6 +4442,13 @@ if (-not $Common.Initialized) {
         if (-not $InJob) {
             $colors = Get-Colors
             if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+            if (-not $isAzureVM) {
+                try{ $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } - }
+                catch {}
+                if ($meta -and $meta.compute -and $meta.compute.azEnvironment -ne $null) {
+                    $isAzureVM = $true
+                }
+            }
         }
 
         if (-not $header1) {

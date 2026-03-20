@@ -1012,6 +1012,11 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     
     $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
 
+    if ($deployConfig.cmOptions.OfflineSUP) {
+        $Sups = $false
+        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"        
+    }
+
     if ($Sups) {
 
         # Get the Software Update Point Component
@@ -1051,12 +1056,22 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 [string]$SiteCode
             )
      
-            $syncFinished = $syncTimeout = $false
+            $syncFinished = $syncTimeout = $syncFailed = $false
             $i = 0
      
             do {                    
                 $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
     
+                if (-not $($syncState.WSUSServerName)) {
+                    start-sleep -Seconds 120
+                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                     if (-not $($syncState.WSUSServerName)) {
+                        Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
+                        $syncFailed = $true
+                        return $false
+                     }                 
+                }
+
                 if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
                     Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                     Sync-CMSoftwareUpdate
@@ -1095,7 +1110,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                         return $false
                     }
                 }
-            }  until ($syncFinished -or $syncTimeout)
+            }  until ($syncFinished -or $syncTimeout -or $syncFailed)
      
             return $false
         }

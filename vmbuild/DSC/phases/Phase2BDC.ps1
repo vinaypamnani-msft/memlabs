@@ -53,7 +53,7 @@
             VM        = $ThisVM | ConvertTo-Json
         }
 
-        $PageFileSize = ($thisVM.memory)/2MB
+        $PageFileSize = ($thisVM.memory) / 2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[InitializeDisks]InitDisks"
             Drive       = 'C:'
@@ -103,11 +103,64 @@
         WaitForADDomain 'WaitForestAvailability' {
             DomainName              = $DomainName
             Credential              = $DomainCreds
-            RestartCount            = 2
+            RestartCount            = 4
             WaitForValidCredentials = $true
-            WaitTimeout             = 900
+            WaitTimeout             = 600
             DependsOn               = $nextDepend
         }
+        $nextDepend = "[WaitForADDomain]WaitForestAvailability"
+
+        OpenFirewallPortForSCCM OpenFirewall {
+            DependsOn = $nextDepend
+            Name      = "DC"
+            Role      = "DC"
+        }
+
+        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
+
+        WriteStatus InstallDotNet {
+            DependsOn = $nextDepend
+            Status    = "Installing .NET 4.8"
+        }
+
+        InstallDotNet4 DotNet {
+            DownloadUrl = $deployConfig.URLS.DotNet
+            FileName    = "ndp48-x86-x64-allos-enu.exe"
+            NetVersion  = "528040"
+            Ensure      = "Present"
+            DependsOn   = "[WriteStatus]InstallDotNet"
+        }
+        $nextDepend = "[InstallDotNet4]DotNet"
+
+        File ShareFolder {
+            DestinationPath = $LogPath
+            Type            = 'Directory'
+            Ensure          = 'Present'
+            DependsOn       = $nextDepend
+        }
+        $nextDepend = "[File]ShareFolder"
+
+        RemoteDesktopAdmin RemoteDesktopSettings {
+            IsSingleInstance   = 'yes'
+            Ensure             = 'Present'
+            UserAuthentication = 'NonSecure'
+            DependsOn          = $nextDepend
+        }
+
+        $nextDepend = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+
+        AddNtfsPermissions AddNtfsPerms {
+            Ensure    = "Present"
+            DependsOn = $nextDepend
+        }
+        $nextDepend = "[AddNtfsPermissions]AddNtfsPerms"
+
+        RebootNow RebootNow {
+            FileName  = 'C:\Temp\BDCReboot.txt'
+            DependsOn = $nextDepend
+        }
+
+        $nextDepend = "[RebootNow]RebootNow"
 
         ADDomainController 'DomainControllerAllProperties' {
             DomainName                    = $DomainName
@@ -117,24 +170,21 @@
             LogPath                       = 'C:\Windows\Logs'
             SysvolPath                    = 'C:\Windows\SYSVOL'
             #SiteName                      = 'Europe'
-            IsGlobalCatalog               = $true
+            IsGlobalCatalog               = $false
             InstallDns                    = $false
-            DependsOn                     = '[WaitForADDomain]WaitForestAvailability'
+            DependsOn                     = $nextDepend
         }
 
         $nextDepend = '[ADDomainController]DomainControllerAllProperties'
-        AddNtfsPermissions AddNtfsPerms {
-            Ensure    = "Present"
+
+        FileReadAccessShare DomainSMBShare {
+            Name      = $LogFolder
+            Path      = $LogPath
             DependsOn = $nextDepend
         }
 
-        OpenFirewallPortForSCCM OpenFirewall {
-            DependsOn = "[AddNtfsPermissions]AddNtfsPerms"
-            Name      = "DC"
-            Role      = "DC"
-        }
-
-        $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
+        $nextDepend = "[FileReadAccessShare]DomainSMBShare"
+        
         if ($ThisVM.InstallCA) {
 
             WriteStatus ADCS {
@@ -150,42 +200,9 @@
             $nextDepend = "[InstallCA]InstallCA"
         }
 
-        WriteStatus InstallDotNet {
-            DependsOn = $nextDepend
-            Status    = "Installing .NET 4.8"
-        }
-
-        InstallDotNet4 DotNet {
-            DownloadUrl = $deployConfig.URLS.DotNet
-            FileName    = "ndp48-x86-x64-allos-enu.exe"
-            NetVersion  = "528040"
-            Ensure      = "Present"
-            DependsOn   = "[WriteStatus]InstallDotNet"
-        }
-
-        File ShareFolder {
-            DestinationPath = $LogPath
-            Type            = 'Directory'
-            Ensure          = 'Present'
-            DependsOn       = "[InstallDotNet4]DotNet"
-        }
-
-        FileReadAccessShare DomainSMBShare {
-            Name      = $LogFolder
-            Path      = $LogPath
-            DependsOn = "[File]ShareFolder"
-        }
-        $nextDepend = "[FileReadAccessShare]DomainSMBShare"
-
-        RemoteDesktopAdmin RemoteDesktopSettings {
-            IsSingleInstance   = 'yes'
-            Ensure             = 'Present'
-            UserAuthentication = 'NonSecure'
-            DependsOn          = $nextDepend
-        }
-
+        
         WriteStatus Complete {
-            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+            DependsOn = $nextDepend
             Status    = "Complete!"
         }
 
@@ -194,7 +211,7 @@
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[RemoteDesktopAdmin]RemoteDesktopSettings"
+            DependsOn = $nextDepend
         }
 
     }

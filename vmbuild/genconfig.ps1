@@ -817,7 +817,7 @@ function get-VMOptionsSummary {
     }
     $domainName = "[$($options.domainName)]".PadRight(21)
     $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)] [Locale $($options.locale)]"
-    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 34)
+    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 38)
     if ($Output.Length -ge $MaxWidth) {
         $Output = $Output.Substring(0, $MaxWidth - 3) + "..."
     }
@@ -2018,7 +2018,7 @@ function Select-Config {
         $i = 0
         $currentVMs = Get-List -type VM
         $maxLength = 40
-        $MaxWidth = ($host.UI.RawUI.WindowSize.Width - $maxLength - 9)
+        $MaxWidth = ($host.UI.RawUI.WindowSize.Width - $maxLength - 12)
         
         foreach ($file in $files) {
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
@@ -5924,9 +5924,9 @@ function get-VMString {
         }
         $name += "]"
     }
+    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)
+    write-log "Name is $name $virtualMachine and max is $MaxWidth" -logonly
 
-    write-log "Name is $name $virtualMachine" -verbose
-    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 8)
     if ($name.Length -ge $MaxWidth) {
         $name = $name.Substring(0, $MaxWidth - 3) + "..."
     }

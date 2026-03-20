@@ -152,7 +152,7 @@ function Start-NormalJobs {
 
         Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
         if ($argument1) {
-        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+            $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
         } 
         else {
             $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
@@ -639,16 +639,46 @@ function Get-ConfigurationData {
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
                 $Global:ProgressPreference = 'SilentlyContinue'
-                $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-                $Global:ProgressPreference = $OriginalProgressPreference
-
-                if (-not $testNet) {
-                    Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -Warning
-                    Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
-                    Start-Sleep -Seconds 20
+    
+                # Test if VM is responsive with multiple checks
+                $isResponsive = Test-VmResponsive -VmName $dc.NodeName -TimeoutSeconds 15
+    
+                if (-not $isResponsive) {
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): VM is not responsive. Performing hard restart." -Warning
+        
+                    # Hard cycle the VM
+                    $restarted = Restart-UnresponsiveVm -VmName $dc.NodeName -WaitTimeSeconds 90
+        
+                    if (-not $restarted) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM failed to become responsive after restart" -Error
+                        # You might want to throw an exception here or handle the failure
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM successfully restarted and is responsive"
+                    }
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): VM is responsive" -LogOnly
+        
+                    # Your existing RDP-specific test if needed
+                    $job = Start-Job -ScriptBlock {
+                        param($computerName)
+                        Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
+                    } -ArgumentList $dc.NodeName
+        
+                    $testNet = Wait-Job -Job $job -Timeout 10 | Receive-Job
+                    Remove-Job -Job $job -Force
+        
+                    if ($null -eq $testNet -or -not $testNet) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible. Attempting soft restart." -Warning
+                        Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
+                        Start-Sleep -Seconds 20
+                    }
                 }
             }
-            catch {}
+            catch {
+                Write-Log "[Phase $Phase]: Error during VM connectivity test: $_" -Error
+            }
             finally {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
                 $Global:ProgressPreference = $OriginalProgressPreference
@@ -1112,7 +1142,7 @@ function Get-Phase9ConfigurationData {
             $role = $vm.role
             
             if ($role -eq "DomainMember") {
-                if ($vm.sqlVersion){
+                if ($vm.sqlVersion) {
                     $role = "SqlServer"
                 }
             }

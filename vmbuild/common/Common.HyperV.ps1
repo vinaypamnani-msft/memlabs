@@ -188,6 +188,108 @@ function Start-VM2 {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
+function Test-VmResponsive {
+    param(
+        [string]$VmName,
+        [int]$TimeoutSeconds = 30
+    )
+    
+    try {
+        # Check if VM is running
+        $vm = Get-VM2 -Name $VmName -ErrorAction Stop
+        if ($vm.State -ne 'Running') {
+            Write-Log "VM $VmName is not running (State: $($vm.State))" -Warning
+            return $false
+        }
+        
+        # Test heartbeat integration service
+        $heartbeat = $vm | Get-VMIntegrationService | Where-Object { $_.Name -eq 'Heartbeat' }
+        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription -ne 'OK') {
+            Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
+            return $false
+        }
+        
+        # Test basic ping with timeout
+        $pingTest = Test-Connection -ComputerName $VmName -Count 2 -Quiet -ErrorAction SilentlyContinue
+        if (-not $pingTest) {
+            Write-Log "VM $VmName not responding to ping" -Warning
+            return $false
+        }
+        
+        # Test RDP port with timeout using job
+        $job = Start-Job -ScriptBlock {
+            param($computerName)
+            Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
+        } -ArgumentList $VmName
+        
+        $testNet = Wait-Job -Job $job -Timeout $TimeoutSeconds | Receive-Job
+        Remove-Job -Job $job -Force
+        
+        if ($null -eq $testNet -or -not $testNet) {
+            Write-Log "VM $VmName RDP port test failed or timed out" -Warning
+            return $false
+        }
+        
+        return $true
+    }
+    catch {
+        Write-Log "Error testing VM $VmName responsiveness: $_" -Warning
+        return $false
+    }
+}
+
+function Restart-UnresponsiveVm {
+    param(
+        [string]$VmName,
+        [int]$MaxRetries = 2,
+        [int]$WaitTimeSeconds = 60
+    )
+    
+    Write-Log "Attempting to restart unresponsive VM: $VmName" -Warning
+    
+    try {
+        # Try graceful shutdown first
+        Write-Log "Attempting graceful shutdown of $VmName..."
+        Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        Start-Sleep -Seconds 10
+        
+        # Force stop if still running
+        $vm = Get-VM2 -Name $VmName
+        if ($vm.State -ne 'Off') {
+            Write-Log "Forcing stop of $VmName..."
+            Stop-VM2 -Name $VmName -Force -TurnOff
+            Start-Sleep -Seconds 5
+        }
+        
+        # Start the VM
+        Write-Log "Starting $VmName..."
+        Start-VM2 -Name $VmName
+        
+        # Wait for VM to boot and become responsive
+        Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
+        $startTime = Get-Date
+        $isResponsive = $false
+        
+        while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+            Start-Sleep -Seconds 10
+            
+            if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
+                $isResponsive = $true
+                Write-Log "$VmName is now responsive"
+                break
+            }
+            
+            Write-Log "Still waiting for $VmName to respond..."
+        }
+        
+        return $isResponsive
+    }
+    catch {
+        Write-Log "Error restarting VM ${VmName}: $_" -Error
+        return $false
+    }
+}
+
 function Stop-VM2 {
     [CmdletBinding()]
     param (
