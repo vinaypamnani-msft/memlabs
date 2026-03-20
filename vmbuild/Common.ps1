@@ -3163,10 +3163,16 @@ function Get-StorageConfig {
                 }
                 catch {
                     start-sleep -second 5
-                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                    try {
+                        $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Exception -ExceptionInfo $_ 
+                    }
                 }
                 if (-not $response) {
-                    $Common.FatalError = "Failed to download file list."
+                    Write-Log "Failed to download updated file list. Enabling Offline Mode." -Warning
+                    $Common.OfflineMode = $true
                 }
                 else {
                     $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
@@ -3189,7 +3195,8 @@ function Get-StorageConfig {
                     $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
                 }
                 if (-not $response) {
-                    Write-Log "Failed to download updated Product ID"
+                    Write-Log "Failed to download updated Product ID. Enabling Offline Mode." -Warning
+                    $Common.OfflineMode = $true
                 }
                 else {
                     $response.Content.Trim() | Out-File -FilePath $productIdPath -Force -ErrorAction SilentlyContinue
@@ -4135,25 +4142,61 @@ function Set-SupportedOptions {
 
     $cmVersions += Get-CMVersions
 
-    $operatingSystems = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
+    $operatingSystems = Get-OperatingSystems
 
-    $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique | Sort-Object
+    $sqlVersions = Get-SqlVersions
 
     $supported = [PSCustomObject]@{
-        Roles              = $roles
-        RolesForExisting   = $rolesForExisting
-        AllRoles           = ($roles + $rolesForExisting | Select-Object -Unique)
-        OperatingSystems   = $operatingSystems
-        SqlVersions        = $sqlVersions
-        CMVersions         = $cmVersions
+        Roles             = $roles
+        RolesForExisting  = $rolesForExisting
+        AllRoles          = ($roles + $rolesForExisting | Select-Object -Unique)
+        OperatingSystems  = $operatingSystems
+        SqlVersions       = $sqlVersions
+        CMVersions        = $cmVersions
         UpdatablePropList = $updatablePropList
-        PropsToUpdate      = $propsToUpdate
+        PropsToUpdate     = $propsToUpdate
     }
 
     $Common.Supported = $supported
 
 }
 
+function Get-SqlVersions {
+    $sqlVersions = $Common.AzureFileList.ISO.id | Select-Object -Unique | Sort-Object
+    if ($common.OfflineMode) {
+        #Remove any SQL version that dont have downloaded files. In offline mode, we only want to show SQL version options that are fully available for deployment
+        Foreach ($sqlVersion in $sqlVersions) {
+            $filesForVersion = $Common.AzureFileList.ISO | Where-Object { $_.id -eq $sqlVersion } | Select-Object -ExpandProperty filename
+            foreach ($file in $filesForVersion) {
+                if (-not (Test-Path (Join-Path $Common.AzureFilesPath $file))) {
+                    Write-Log "In Offline Mode, removing SQL version $sqlVersion from supported SQL version list since file $file is not downloaded."
+                    $sqlVersions = $sqlVersions | Where-Object { $_ -ne $sqlVersion }
+                    break
+                }
+            }
+        }
+    }
+    return $sqlVersions
+}
+
+function Get-OperatingSystems {
+    $osList = $Common.AzureFileList.OS.id | Where-Object { $_ -ne "vmbuildadmin" } | Sort-Object
+    if ($Common.OfflineMode) {
+        #Remove any OS that dont have downloaded files. In offline mode, we only want to show OS options that are fully available for deployment
+        Foreach ($os in $osList) {
+            $filesForOS = $Common.AzureFileList.OS | Where-Object { $_.id -eq $os } | Select-Object -ExpandProperty filename
+            foreach ($file in $filesForOS) {
+                if (-not (Test-Path (Join-Path $Common.AzureFilesPath $file))) {
+                    Write-Log "In Offline Mode, removing $os from supported OS list since file $file is not downloaded."
+                    $osList = $osList | Where-Object { $_ -ne $os }
+                    break
+                }
+            }
+        }
+        return $osList
+    }
+    return $osList
+}
 function Get-CMVersions {
     $cmVersions = @()
     foreach ($version in $Common.AzureFileList.CMVersions) {
@@ -4163,6 +4206,22 @@ function Get-CMVersions {
         $cmversions += $version.versions
     }
     $cmVersions = $cmVersions | Sort-Object -Descending
+
+    if ($common.OfflineMode) {
+        #Remove any CM version that dont have downloaded files. In offline mode, we only want to show CM version options that are fully available for deployment
+        #If there is a downloadURL keep it in the list, since this means the file is available from the web.
+        Foreach ($cmVersion in $cmVersions) {
+                       
+            $filesForVersion = $Common.AzureFileList.CMVersions | Where-Object { $null -ne $_.filename } 
+            foreach ($file in $filesForVersion) {
+                if (-not (Test-Path (Join-Path $Common.AzureFilesPath $file.filename))) {
+                    Write-Log "In Offline Mode, removing CM version $cmVersion from supported CM version list since file $file is not downloaded."
+                    $cmVersions = $cmVersions | Where-Object { $_ -ne $cmVersion }
+                    break
+                }
+            }
+        }
+    }
     return $cmVersions
 }
 
@@ -4233,7 +4292,12 @@ Function Set-PS7ProgressWidth {
     }
 }
 Function Install-HostToServer2025 {
-
+    $filename = (Join-Path $common.AzureFilesPath $server2025.filename)
+    if (-not (Test-Path $filename) -and $common.OfflineMode) {
+        Write-Log "Offline mode is enabled and $filename does not exist. Cannot proceed with Server 2025 installation." -Failure
+        return
+    }   
+    
     if (-not $common.IsAzureVM) {
         Write-Log "This host is not an Azure VM. Please update this host manually to server 2025." -Warning
         Start-Sleep -Seconds 15
@@ -4449,7 +4513,7 @@ if (-not $Common.Initialized) {
             $colors = Get-Colors
             if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
             if (-not $isAzureVM) {
-                try{ $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
                 catch {}
                 if ($meta -and $meta.compute -and $meta.compute.azEnvironment -ne $null) {
                     $isAzureVM = $true
@@ -4504,6 +4568,7 @@ if (-not $Common.Initialized) {
             Colors                = $colors
             IsAzureVM             = $isAzureVM
             CorpNetInterfaceIndex = $corpNetInterfaceIndex
+            OfflineMode           = $false
         }
 
         # Storage config
