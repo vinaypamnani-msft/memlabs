@@ -4449,7 +4449,7 @@ if (-not $Common.Initialized) {
             $colors = Get-Colors
             if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
             if (-not $isAzureVM) {
-                try{ $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -ErrorAction Stop }
+                try{ $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
                 catch {}
                 if ($meta -and $meta.compute -and $meta.compute.azEnvironment -ne $null) {
                     $isAzureVM = $true
