@@ -4233,6 +4233,12 @@ Function Set-PS7ProgressWidth {
     }
 }
 Function Install-HostToServer2025 {
+
+    if (-not $common.IsAzureVM) {
+        Write-Log "This host is not an Azure VM. Please update this host manually to server 2025." -Warning
+        Start-Sleep -Seconds 15
+        return
+    }
     $server2025 = $common.azureFilelist.SupportFiles | Where-Object { $_.id -like "*Server 2025*" }
     Get-FileFromStorage $server2025
     $filename = (Join-Path $common.AzureFilesPath $server2025.filename)

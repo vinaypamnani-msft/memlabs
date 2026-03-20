@@ -144,6 +144,11 @@ if (-not $Common.PS7) {
     exit 1
 }
 
+ if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+          Write-Log "This version of MemLabs requires Server 2025 or greater." -Failure  
+          Install-HostToServer2025
+}
+
 Set-PS7ProgressWidth
 
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
