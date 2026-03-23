@@ -602,77 +602,106 @@ function Get-File {
 
     # Display name for source
     $sourceDisplay = $Source
+    $bearerToken   = $null
 
-    # Add storage token, if source is like Storage URL
+    # ---- Add auth if source is a storage URL ----
     if ($Source -and $Source -like "$($StorageConfig.StorageLocation)*") {
-        $Source = "$Source`?$($StorageConfig.StorageToken)"
         $sourceDisplay = Split-Path $sourceDisplay -Leaf
 
-        if ($UseCDN.IsPresent) {
-            $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
-        }
+        if ($StorageConfig.UseBearerAuth) {
+            # Bearer auth — URL stays clean, token injected via curl headers
+            $bearerToken = Get-StorageToken
+            if ($null -eq $bearerToken) {
+                Write-Log "Get-File: Failed to get bearer token from Get-StorageToken." -Failure
+                return $false
+            }
 
-        #Write-Log "Download Source: $Source"
+            # BITS does not support custom auth headers — force curl
+            if ($UseBITS.IsPresent) {
+                Write-Log "Get-File: UseBITS is not supported with bearer auth, falling back to curl." -LogOnly
+                $UseBITS = $false
+            }
+
+            # CDN edge nodes do not honour Azure bearer tokens — skip
+            if ($UseCDN.IsPresent) {
+                Write-Log "Get-File: UseCDN is not supported with bearer auth, ignoring." -LogOnly
+            }
+
+        } else {
+            # SAS auth — append token as query string
+            $Source = "$Source`?$($StorageConfig.StorageToken)"
+
+            if ($UseCDN.IsPresent) {
+                $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
+            }
+        }
     }
 
-    # What If
+    # ---- WhatIf ----
     if ($WhatIf -and -not $Silent) {
         Write-Log "WhatIf: $Action $sourceDisplay file to $Destination"
         return $true
     }
 
-    # Not making these mandatory to allow WhatIf to run with null values
+    # ---- Parameter validation ----
+    # Not mandatory to allow WhatIf to work with null values
     if (-not $Source -and -not $Destination) {
-        Write-Log "Source and Destination parameters must be specified." -Failure
+        Write-Log "Get-File: Source and Destination parameters must be specified." -Failure
         return $false
     }
 
-    # Not making these mandatory to allow WhatIf to run with null values
     if (-not $Action) {
-        Write-Log "Action must be specified." -Failure
+        Write-Log "Get-File: Action must be specified." -Failure
         return $false
     }
 
+    # Copying implies a local path — bearer auth on a local copy makes no sense
+    if ($Action -eq "Copying" -and $StorageConfig.UseBearerAuth -and $bearerToken) {
+        Write-Log "Get-File: Action 'Copying' should not be used with bearer auth. Use 'Downloading' instead." -Warning
+    }
+
+    # ---- Build transfer arguments ----
     $destinationFile = Split-Path $Destination -Leaf
 
     $HashArguments = @{
         Source      = $Source
         Destination = $Destination
-        Description = "$Action $destinationFile using BITS"
+        Description = "$Action $destinationFile"
     }
 
-    if ($DisplayName) { $HashArguments.Add("DisplayName", $DisplayName) }
+    if ($DisplayName) { $HashArguments["DisplayName"] = $DisplayName }
 
     if (-not $Silent) {
         Write-Log "$Action $sourceDisplay to $Destination... "
         if ($DisplayName) { Write-Log "$DisplayName" -LogOnly }
     }
 
+    # ---- Remove existing file if requested ----
     if ($RemoveIfPresent.IsPresent -and (Test-Path $Destination)) {
         Remove-Item -Path $Destination -Force -Confirm:$false -WhatIf:$WhatIf -ProgressAction SilentlyContinue
     }
 
-    # Create destination directory if it doesn't exist
+    # ---- Create destination directory if needed ----
     $destinationDirectory = Split-Path $Destination -Parent
     if (-not (Test-Path $destinationDirectory)) {
         New-Item -Path $destinationDirectory -ItemType Directory -Force | Out-Null
     }
 
     $OriginalProgressPreference = $Global:ProgressPreference
-    $Global:ProgressPreference = 'Continue'
+    $Global:ProgressPreference  = 'Continue'
+
     try {
-        $i = 0
         $timedOut = $false
 
-        # Wait for existing download to finish, do not bother when action is copying
+        # ---- Wait for any existing curl process to finish ----
         if ($Action -eq "Downloading") {
+            $i = 0
             while (Get-Process -Name "curl" -ErrorAction SilentlyContinue) {
                 Write-Log "Download for '$sourceDisplay' waiting on an existing download. Checking again in 2 minutes..." -Warning
                 Start-Sleep -Seconds 120
-
                 $i++
                 if ($i -gt 5) {
-                    Write-Log "Timed out while waiting to download '$sourceDisplay'." -Failure
+                    Write-Log "Get-File: Timed out while waiting to download '$sourceDisplay'." -Failure
                     $timedOut = $true
                     break
                 }
@@ -683,52 +712,53 @@ function Get-File {
             return $false
         }
 
-        # Skip re-download if file already exists, do not bother when action is copying
+        # ---- Skip re-download if file exists and no force/resume flags set ----
         if ($Action -eq "Downloading" -and (Test-Path $Destination) -and -not $ForceDownload.IsPresent -and -not $ResumeDownload.IsPresent) {
-            Write-Log "Download skipped. $Destination already exists." -LogOnly
+            Write-Log "Get-File: Download skipped. $Destination already exists." -LogOnly
             return $true
         }
 
+        # ---- Perform transfer ----
         if ($Action -eq "Downloading") {
-            if ($UseBITS.IsPresent) {
+            if ($UseBITS) {
+                # Note: UseBITS is forced to $false earlier when bearer auth is active
+                # so this block will never run with a bearer token
                 try {
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
-                }
-                catch {
-                    Write-log "Start-BitsTransfer $_" -LogOnly
-                    if ($_ -Match "the module could not be loaded" ) {
-                        Write-Log -Failure "Could not invoke Start-BitsTransfer due to load failure.  Please close all powershell windows and retry."
+                } catch {
+                    Write-Log "Get-File: Start-BitsTransfer failed: $_" -LogOnly
+                    if ($_ -match "the module could not be loaded") {
+                        Write-Log "Get-File: Could not invoke Start-BitsTransfer due to load failure. Please close all PowerShell windows and retry." -Failure
                     }
                 }
-            }
-            else {
+            } else {
+                if ($StorageConfig.UseBearerAuth -and $bearerToken) {
+                    $HashArguments["BearerToken"] = $bearerToken.AccessToken
+                }
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
-                    Write-Log "Failed to download file using curl"
+                    Write-Log "Get-File: Failed to download '$sourceDisplay' using curl." -Failure
                     return $false
                 }
             }
-        }
-        else {
-
+        } else {
+            # Copying — always uses BITS
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
         }
 
+        # ---- Verify destination exists after transfer ----
         if (Test-Path $Destination) {
             return $true
+        } else {
+            Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
+            return $false
         }
-        else {
-            Write-Log "Destination $Destination does not exist" -Failure
-        }
-        Write-Log "Returning failure from Get-File"
+
+    } catch {
+        Write-Log "Get-File: $Action '$sourceDisplay' failed. Error: $($_.ToString().Trim())" -Failure
+        Write-Log "Get-File: $Action '$sourceDisplay' failed. StackTrace: $($_.ScriptStackTrace)" -LogOnly
         return $false
-    }
-    catch {
-        Write-Log "$Action $sourceDisplay failed. Error: $($_.ToString().Trim())" -Failure
-        Write-Log "$Action $sourceDisplay failed. Error: $($_.ScriptStackTrace)" -LogOnly
-        return $false
-    }
-    finally {
+    } finally {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
@@ -889,48 +919,82 @@ function Start-CurlTransfer {
         [Parameter(Mandatory = $false)]
         [string] $DisplayName,
         [Parameter(Mandatory = $false)]
+        [string] $BearerToken,
+        [Parameter(Mandatory = $false)]
         [switch]$Silent
     )
 
-    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    # ---- Find curl ----
+    $curlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    if (-not $curlPath) {
+        $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    }
+
     if (-not (Test-Path $curlPath)) {
+        Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
         & choco install curl -y | Out-Null
     }
 
     if (-not (Test-Path $curlPath)) {
-        Write-Log "Curl was not found, and could not be installed." -Failure
+        Write-Log "Start-CurlTransfer: curl.exe was not found and could not be installed." -Failure
         return $false
     }
 
+    # ---- Build auth headers ----
+    $authArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($BearerToken)) {
+        $authArgs = @(
+            "-H", "Authorization: Bearer $BearerToken",
+            "-H", "x-ms-version: 2020-04-08"
+        )
+    }
+
+    $maxRetries = 10
     $retryCount = 0
-    $success = $false
+    $success    = $false
+
     Write-Host
+
     do {
         $retryCount++
+
         if ($Silent) {
-            & $curlPath -s -L -o $Destination -C - "$Source"
-        }
-        else {
-            & $curlPath -L -o $Destination -C - "$Source"
-        }
-
-        if ($LASTEXITCODE -eq 0) {
-            $success = $true
-            Write-Host
-            break
-        }
-        else {
-            Write-Host
-            Write-Log "Download $Source failed with exit code $LASTEXITCODE. Will retry $(20 - $retryCount) more times."
-            Write-Host
-            Start-Sleep -Seconds 5
+            & $curlPath -s -L -C - @authArgs -o $Destination "$Source"
+        } else {
+            & $curlPath -L -C - @authArgs -o $Destination "$Source"
         }
 
-    } while ($retryCount -le 10)
+        switch ($LASTEXITCODE) {
+            0 {
+                # Success
+                $success = $true
+                Write-Host
+                break
+            }
+            33 {
+                # Range request not satisfied — partial file is likely corrupt or already complete
+                # Delete and restart from scratch
+                Write-Host
+                Write-Log "Start-CurlTransfer: Resume failed (exit 33) for '$Source'. Removing partial file and restarting." -Warning
+                Remove-Item -Path $Destination -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+            }
+            default {
+                Write-Host
+                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $LASTEXITCODE. Will retry $(($maxRetries - $retryCount)) more time(s)."
+                Write-Host
+                Start-Sleep -Seconds 5
+            }
+        }
+
+    } while (-not $success -and $retryCount -le $maxRetries)
+
+    if (-not $success) {
+        Write-Log "Start-CurlTransfer: Download '$Source' failed after $retryCount attempt(s)." -Failure
+    }
 
     return $success
 }
-
 function New-Directory {
     param(
         $DirectoryPath
@@ -3055,228 +3119,7 @@ function Get-VmSession {
     Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
 }
 
-function Get-StorageConfig {
 
-
-    $newStorageConfigName = "_storageConfig2024.json"
-    $newconfigPath = Join-Path $Common.ConfigPath $newStorageConfigName
-    $StorageConfigName = "_storageConfig2024.json"
-    $configPath = Join-Path $Common.ConfigPath $newStorageConfigName
-
-    if (-not (Test-Path $newconfigPath)) {
-        $GetNewStorageConfig = $true
-        $storageConfigName = "_storageConfig2022.json"
-
-        $configPath = Join-Path $Common.ConfigPath $storageConfigName
-
-        if (-not (Test-Path $configPath)) {
-            Write-Log "Could not find $newconfigPath. Exiting."
-            $Common.FatalError = "Storage Config path '$newconfigPath' not found. Refer to internal documentation."
-            Write-Log "File $newconfigPath does not exist."
-            return $false
-        }
-    }
-
-    if (-not (Test-Path $configPath)) {
-        $Common.FatalError = "Storage Config path '$configPath' not found. Refer to internal documentation."
-        Write-Log "File $configPath does not exist."
-        return $false
-    }
-
-    try {
-
-        # Disable Progress and Verbose
-        $pp = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        $vp = $VerbosePreference
-        $VerbosePreference = 'SilentlyContinue'
-
-        # Get storage config
-        $config = Get-Content -Path $configPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        $StorageConfig.StorageLocation = $config.storageLocation
-        $StorageConfig.StorageToken = $config.storageToken
-
-        # Get image list from storage location
-        $updateList = $true
-
-        # Set file name based on git branch
-        $fileListName = "_fileList.json"
-        if ($Common.DevBranch) {
-            $fileListName = "_fileList_develop.json"
-        }
-        $fileListPath = Join-Path $Common.AzureFilesPath $fileListName
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
-        $storageConfigPath = Join-Path $Common.ConfigPath $storageConfigName
-        $fileListLocation = "$($StorageConfig.StorageLocation)/$fileListName"
-
-
-        $productIDName = "productID.txt"
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
-        $productID = "productID"
-        $productIdPath = "E:\$productIDName"
-        $productIdLocation = "$($StorageConfig.StorageLocation)/$productIDName"
-
-
-
-        # See if image list needs to be updated
-        if (Test-Path $fileListPath) {
-            Write-Log -Verbose "Reading file list from $fileListPath"
-            $Common.AzureFileList = Get-Content -Path $fileListPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            $updateList = $Common.AzureFileList.UpdateFromStorage
-        }
-
-        # Update StorageConfig
-
-        if (-not $InJob.IsPresent) {
-
-
-            if ($GetNewStorageConfig) {
-                $storageConfigLocation = "$($StorageConfig.StorageLocation)/$newStorageConfigName"
-                Write-Log "Updating $($newStorageConfigName) from azure storage" -LogOnly
-                $storageConfigURL = $storageConfigLocation + "?$($StorageConfig.StorageToken)"
-                try {
-                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
-                }
-                catch {
-                    start-sleep -second 5
-                    $response = Invoke-WebRequest -Uri $storageConfigURL -UseBasicParsing -ErrorAction Stop
-                }
-                if (-not $response) {
-                    Write-Log "Failed to download updated storage config"
-                }
-                else {
-                    $response.Content.Trim() | Out-File -FilePath $newconfigPath -Force -ErrorAction SilentlyContinue
-                }
-
-            }
-
-            # Update file list
-            if (($updateList) -or -not (Test-Path $fileListPath)) {
-
-                Write-Log "Updating fileList from azure storage" -LogOnly
-
-                # Get file list
-                #$worked = Get-File -Source $fileListLocation -Destination $fileListPath -DisplayName "Updating file list" -Action "Downloading" -Silent -ForceDownload
-                $fileListUrl = $fileListLocation + "?$($StorageConfig.StorageToken)"
-                try {
-                    $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
-                }
-                catch {
-                    start-sleep -second 5
-                    try {
-                        $response = Invoke-WebRequest -Uri $fileListUrl -UseBasicParsing -ErrorAction Stop
-                    }
-                    catch {
-                        Write-Exception -ExceptionInfo $_ 
-                    }
-                }
-                if (-not $response) {
-                    Write-Log "Failed to download updated file list. Enabling Offline Mode." -Warning
-                    $Common.OfflineMode = $true
-                }
-                else {
-                    $response.Content.Trim() | Out-File -FilePath $fileListPath -Force -ErrorAction SilentlyContinue
-                    $Common.AzureFileList = $response.Content.Trim() | ConvertFrom-Json -ErrorAction Stop
-                }
-
-            }
-
-            # Get ProductID
-
-            if (-not (Test-Path $productIdPath)) {
-
-                Write-Log "Updating $($productIDName) from azure storage" -LogOnly
-                $productIDURL = $productIdLocation + "?$($StorageConfig.StorageToken)"
-                try {
-                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
-                }
-                catch {
-                    start-sleep -second 5
-                    $response = Invoke-WebRequest -Uri $productIDURL -UseBasicParsing -ErrorAction Stop
-                }
-                if (-not $response) {
-                    Write-Log "Failed to download updated Product ID. Enabling Offline Mode." -Warning
-                    $Common.OfflineMode = $true
-                }
-                else {
-                    $response.Content.Trim() | Out-File -FilePath $productIdPath -Force -ErrorAction SilentlyContinue
-                }
-            }
-
-            if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
-                Write-Log "Testing upgrade to 2025 cleanup" -LogOnly
-                if (test-path "C:\temp\Upgrade2025") {
-                    write-host "Removing 2025 Upgrade Support files - C:\temp\Upgrade2025"
-                    Remove-Item -Path "C:\temp\Upgrade2025" -Recurse -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
-                }
-                $sourceLocation = Join-Path $Common.AzureFilesPath "support\WindowsServer2025.zip"
-                if (test-path $sourceLocation) {
-                    write-host "Removing 2025 Upgrade Support files - $sourceLocation"
-                    remove-item -Path $sourceLocation -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
-                }
-            }
-
-        }
-
-        if ($InJob.IsPresent) {
-            Write-Log "Skipped updating fileList from azure storage, since we're running inside a job." -Verbose
-        }
-
-        # Get local admin password, regardless of whether we should update file list
-        $username = "vmbuildadmin"
-        $item = $Common.AzureFileList.OS | Where-Object { $_.id -eq $username }
-        $fileUrl = "$($StorageConfig.StorageLocation)/$($item.filename)?$($StorageConfig.StorageToken)"
-        $filePath = Join-Path $PSScriptRoot "cache\$username.txt"
-        if (Test-Path $filePath -PathType leaf) {
-            $response = Get-Content $filePath
-            $response = $response.Trim()
-        }
-        else {
-            $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
-            if ($response) {
-                $response.Content.Trim() | Out-file $filePath -Force
-            }
-            else {
-                Write-Log "Trying to get $username.txt" -LogOnly
-                start-sleep -seconds 60
-                $response = Invoke-WebRequest -Uri $fileUrl -UseBasicParsing -ErrorAction Stop
-                if (-not $response) {
-                    $Common.FatalError = "Could not download default credentials from azure. Please check your token"
-                    return $false
-                }
-                $response.Content.Trim() | Out-file $filePath -Force
-            }
-            $response = $response.Content.Trim()
-        }
-
-        if ($response) {
-            $s = ConvertTo-SecureString $response -AsPlainText -Force
-            $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential ($username, $s)
-        }
-        else {
-            $Common.FatalError = "Admin file from azure is empty"
-        }
-
-        if ([string]::IsNullOrWhiteSpace($common.FatalError) ) {
-
-            return $true
-        }
-        else {
-            return $false
-        }
-
-    }
-    catch {
-        $Common.FatalError = "Storage Access failed. $_"
-        Write-Exception -ExceptionInfo $_
-        Write-Host $_.ScriptStackTrace | Out-Host
-        return $false
-    }
-    finally {
-        $ProgressPreference = $pp
-        $VerbosePreference = $vp
-    }
-}
 
 function Get-Tools {
     param (
@@ -4297,7 +4140,7 @@ Function Install-HostToServer2025 {
         Write-Log "Offline mode is enabled and $filename does not exist. Cannot proceed with Server 2025 installation." -Failure
         return
     }   
-    
+
     if (-not $common.IsAzureVM) {
         Write-Log "This host is not an Azure VM. Please update this host manually to server 2025." -Warning
         Start-Sleep -Seconds 15
@@ -4386,6 +4229,7 @@ Function Set-TitleBar {
 ####################
 ### DOT SOURCING ###
 ####################
+. $PSScriptRoot\common\Common.StorageToken.ps1
 . $PSScriptRoot\common\Common.Colors.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
@@ -4569,12 +4413,15 @@ if (-not $Common.Initialized) {
             IsAzureVM             = $isAzureVM
             CorpNetInterfaceIndex = $corpNetInterfaceIndex
             OfflineMode           = $false
+            NewestStorageConfigFileName  = "_storageConfig2026.json"
+            StorageConfigLocation = $null
         }
 
         # Storage config
         $global:StorageConfig = [PSCustomObject]@{
             StorageLocation = $null
             StorageToken    = $null
+            UseBearerAuth   = $false
         }
         $global:DSC_Copied = @()
 
@@ -4587,11 +4434,17 @@ if (-not $Common.Initialized) {
         ### Test Storage config and access
         Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Checking Storage Config" -PercentComplete 9
-        $getresults = Get-StorageConfig
-        if ($getresults -eq $false) {
-            $global:init_failed = $true
-            Write-Log "failed to get the storage JSON file" -Failure
-            return
+        try {
+            $getresults = Initialize-Storage
+        }
+        catch {
+            #Write-Exception $_         
+            $common.OfflineMode = $true
+            Write-Log "Exception getting storage config. Using Offline Mode" -Warning
+        }
+        if (-not $getresults ) {
+            $common.OfflineMode = $true
+            Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
         }
 
 
@@ -4661,7 +4514,8 @@ if (-not $Common.Initialized) {
     }
     catch {
         Write-Log "Failed to initialize MemLabs. $_ " -Failure
-        Get-PSCallStack | out-Host
+        Write-Exception $_
+        #Get-PSCallStack | out-Host
         Write-Progress2 "MemLabs initializing" -Completed
         $global:init_failed = $true
         return
