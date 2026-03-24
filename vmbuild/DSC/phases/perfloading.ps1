@@ -1017,6 +1017,10 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"        
     }
 
+    if (-not $Sups) {
+        Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
+    }
+
     if ($Sups) {
 
         # Get the Software Update Point Component
