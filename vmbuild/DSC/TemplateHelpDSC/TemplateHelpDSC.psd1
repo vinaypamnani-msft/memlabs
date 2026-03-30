@@ -4,6 +4,8 @@
 RootModule = 'TemplateHelpDSC.psm1'
 
 DscResourcesToExport = @(
+    'InstallPMPC',
+    'InstallConsole',
     'InstallADK',
     'InstallSSMS',
     'InstallDotNet4',
@@ -43,7 +45,7 @@ DscResourcesToExport = @(
     'WSUSSync',
     'InstallPBIRS',
     'AddCertificateTemplate',
-    'ImportCertifcateTemplate',
+    'ImportCertificateTemplate',
     'AddCertificateToIIS',
     'RebootNow',
     'AddToAdminGroup',

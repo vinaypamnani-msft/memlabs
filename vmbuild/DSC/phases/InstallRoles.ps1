@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
 
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -80,17 +80,17 @@ $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 # Reporting Install
-
+Write-DscStatus "Installing Reporting Point"
 foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
 
     $thisSiteCode = $thisVM.SiteCode
     if ($rp.SiteCode -ne $thisSiteCode) {
-        #If this is the remote SQL Server for this site code, dont continue
+        #If this is the remote SQL Server for this site code, don't continue
         if ($rp.vmName -ne $thisVM.RemoteSQLVM) {
             continue
         }
     }
-
+    Write-DscStatus "Installing Reporting Point on $($rp.vmName) for site $($thisSiteCode)."
     $netbiosName = $deployConfig.vmOptions.DomainNetBiosName
     $username = $netbiosName + "\cm_svc"
     $databaseName = "CM_" + $thisSiteCode
@@ -195,15 +195,23 @@ foreach ($SUP in $SUPs) {
     }
 
     $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
+    $domainUserName = "$($DomainFullName)\$($SUP.ServerName.Trim())"
+    Write-DscStatus "Installing SUP on $SUPFQDN"
+    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
+
+    if (-not $exists) {
+        New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+            -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+    }
     Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
 }
 
 # Configure SUP
 #$productsToAdd = @("Windows 10, version 1903 and later", "Microsoft Server operating system-21H2")
-$productsToAdd = @("SQL Server 2005")
+#$productsToAdd = @("SQL Server 2005")
 #$productsToAdd = @("PowerShell - x64")
-#$classificationsToAdd = @("Critical Updates", "Security Updates", "Updates")
-$classificationsToAdd = @("Tools")
+#$classificationsToAdd = @("Critical Updates","Definition updates","Security Updates","Upgrades","updates")
+$classificationsToAdd = @("Updates")
 if ($configureSUP) {
 
     if ($offlineSUP) {
@@ -211,41 +219,36 @@ if ($configureSUP) {
         Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -SynchronizeAction DoNotSynchronizeFromMicrosoftUpdateOrUpstreamDataSource -Schedule $NULL
     }
     else {
+        $syncFinished = $syncTimeout = $false
         Write-DscStatus "Configuring SUP, and adding Products [$($productsToAdd -join ',')] and Classifications [$($classificationsToAdd -join ',')]"
         $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2022/1/1 00:00:00"
-        $attempts = 0
-        $configured = $false
-        do {
-            try {
-                if ($topSite) {
-                    $attempts++
-                    Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent. Attempt #$attempts"
-                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true
-                    $configured = $true
+
+        try {
+            if ($topSite) {
+                                            
+                $productclassifications = Get-CMSoftwareUpdateCategory -Fast | Where-Object { $_.IsSubscribed } | Select-Object -Expand LocalizedCategoryInstanceName
+                $match = $($productclassifications -contains $classificationsToAdd)
+                if (-not $match) {
+                    Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
+                    #Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
+                    Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
                     Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
                     Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
                 }
-            }
-            catch {
-                # Run sync to refresh categories, wait for sync, then try again?
-                if (-not $syncTimeout) {
-                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent failed. Running Sync to refresh products. Attempt #$attempts $_"
-                    Sync-CMSoftwareUpdate
-                    Start-Sleep -Seconds 120 # Sync waits for 2 mins anyway, so sleep before even checking status
-                }
-                else {
-                    Write-DscStatus "Timed out while waiting for sync to finish. Monitoring again..."
-                }
-                $syncFinished = $syncTimeout = $false
-                $i = 0
-                do {
-                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode }
+ 
+                Sync-CMSoftwareUpdate
+                Write-DscStatus "SUM Component Sync started."
 
-                    if (-not $syncState.LastSyncState ) {
+
+                $i = 0
+                do {                    
+                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+
+                    if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
                         Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
                         Sync-CMSoftwareUpdate
                         Start-Sleep -Seconds 120
-                    }
+                    } 
                     else {
                         $syncStateString = "Unknown"
                         switch ($($syncState.LastSyncState)) {
@@ -266,29 +269,27 @@ if ($configureSUP) {
                             $syncFinished = $true
                             Write-DscStatus "SUM Sync finished."
                         }
-                    }
 
-                    if (-not $syncFinished) {
-                        $i++
-                        Start-Sleep -Seconds 60
-                    }
+                        if (-not $syncFinished) {
+                            $i++
+                            Start-Sleep -Seconds 60
+                        }
 
-                    if ($i -gt 20) {
-                        $syncTimeout = $true
-                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                        if ($i -gt 30) {
+                            $syncTimeout = $true
+                            Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                        }
                     }
-                } until ($syncFinished -or $syncTimeout)
+                }  until ($syncFinished -or $syncTimeout)
             }
-        } until ($configured -or $attempts -ge 5)
-
-        if ($configured) {
-            Write-DscStatus "SUM Component Configuration successful. Invoking another SUM sync and exiting."
-            Start-Sleep -Seconds 15
+            #Start a 2nd Sync, or an initial sync if not top-level
+            start-sleep -seconds 30
             Sync-CMSoftwareUpdate
         }
-        else {
-            Write-DscStatus "SUM Component Configuration failed."
-        }
+        catch { 
+            Write-DscStatus "SUM Component Sync failed $_"
+            Sync-CMSoftwareUpdate
+        }                         
     }
 }
 $Configuration.InstallSUP.Status = 'Completed'

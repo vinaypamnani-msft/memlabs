@@ -12,7 +12,7 @@ function Get-ToolsForBaseImage {
     $toolsPath = Join-Path $Common.StagingInjectPath "tools"
     if ((Test-Path $toolsPath) -and $ForceTools.IsPresent) {
         Write-Log "ForceTools switch is present, and '$toolsPath' exists. Purging items inside the folder." -Warning
-        Remove-Item -Path $toolsPath\* -Force -Recurse -WhatIf:$WhatIf | Out-Null
+        Remove-Item -Path $toolsPath\* -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
     }
 
     foreach ($item in $Common.AzureFileList.Tools) {
@@ -35,7 +35,7 @@ function Get-ToolsForBaseImage {
             Write-Log "Found $fileName in $($Common.TempPath)."
             if ($ForceTools.IsPresent) {
                 Write-Log "ForceTools switch present. Removing pre-existing $fileName file..." -Warning -Verbose
-                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf | Out-Null
+                Remove-Item -Path $downloadPath -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null 
             }
             else {
                 # Write-Log "ForceTools switch not present. Skip downloading/recopying '$fileName'." -Warning
@@ -95,6 +95,7 @@ function Import-WimFromIso {
     try {
         $isomount = Mount-DiskImage -ImagePath $IsoPath -PassThru -NoDriveLetter -ErrorAction Stop
         $iso = $isomount.devicepath
+        write-Log "$IsoPath mounted as $($isomount.devicepath)"
 
     }
     catch {
@@ -106,6 +107,7 @@ function Import-WimFromIso {
     # Get install.WIM
     if (Test-Path -Path (Join-Path $iso "sources\install.wim")) {
         $installWimFound = $true
+        Write-Log "Found $iso\sources\install.wim"
     }
     else {
         Write-Log "Error accessing install.wim!" -Failure
@@ -122,7 +124,12 @@ function Import-WimFromIso {
     # Copy out the WIM file from the selected ISO
     try {
         Write-Log "Purging temp folder at $($Common.TempPath)..."
-        Remove-Item -Path "$($Common.TempPath)\$WimName" -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path $($Common.TempPath))) {
+            New-Item -Path $($Common.TempPath)-ItemType Directory -Force | Out-Null
+        }
+        if ((Test-Path "$($Common.TempPath)\$WimName")) {
+            Remove-Item -Path "$($Common.TempPath)\$WimName" -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue | Out-Null
+        }
         Write-Log "Purge complete."
         if ($installWimFound) {
             Write-Log "Copying WIM file to the temp folder..."
@@ -135,7 +142,7 @@ function Import-WimFromIso {
     }
     catch {
         Write-Log "Couldn't copy from the source" -Failure
-        Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        Write-Log "$($_.ScriptStackTrace)" -Failure
         invoke-removeISOmount -inputObject $isomount
         return $null
     }
@@ -244,6 +251,7 @@ function New-VhdxFile {
         $unattendContent = $unattendContent.Replace("%vmbuildpassword%", $vmbuildpass)
         $unattendContent = $unattendContent.Replace("%adminpassword%", $adminpass)
         $unattendContent | Out-File $unattendPathToInject -Force -Encoding utf8
+        Write-Log "Saved updated unattend to $unattendPathToInject"
     }
     else {
         Write-Log "Answer file doesn't contain '%vmbuildpassword%' placeholder." -Failure
@@ -265,7 +273,7 @@ function New-VhdxFile {
     }
 
     # Convert WIM to VHDX
-    # Probably better to add an option to use without unattend/filesToInject, but we alwasy need it so don't care ATM.
+    # Probably better to add an option to use without unattend/filesToInject, but we always need it so don't care ATM.
     try {
         Convert-Wim2VHD -Path $VhdxPath `
             -SourcePath $WimPath `
@@ -288,7 +296,7 @@ function New-VhdxFile {
     }
     finally {
         if (Test-Path $unattendPathToInject) {
-            Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $unattendPathToInject -Force -ErrorAction SilentlyContinue 
         }
     }
 }

@@ -1,10 +1,13 @@
 {
   "cmOptions": {
-    "version": "current-branch",
+    "version": "2509",
     "install": true,
     "pushClientToDomainMembers": true,
     "EVALVersion": false,
-    "UsePKI": false
+    "UsePKI": false,
+    "PrePopulateObjects": true,
+    "OfflineSCP": false,
+    "OfflineSUP": false
   },
   "vmOptions": {
     "prefix": "CS2-",
@@ -33,12 +36,15 @@
       "additionalDisks": {
         "E": "250GB"
       },
-      "memory": "4GB",
+      "memory": "5GB",
       "virtualProcs": 4,
       "remoteSQLVM": "CS1SQL",
       "InstallRP": true,
       "InstallSUP": true,
-      "wsusContentDir": "E:\\WSUS"
+      "InstallPatchMyPC": true,
+      "wsusDataBaseServer": "WID",
+      "wsusContentDir": "E:\\WSUS",
+      "PatchMyPCFileServer": "FS1"
     },
     {
       "vmName": "CS1SQL",
@@ -53,22 +59,40 @@
         "E": "120GB"
       },
       "sqlPort": "1433",
-      "InstallRP": false
+      "InstallRP": false,
+      "InstallSMSProv": false
     },
     {
-      "vmName": "DPMP1",
+      "vmName": "FS1",
+      "role": "FileServer",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      },
+      "dynamicMinRam": "3GB"
+    },
+    {
+      "vmName": "PS1DPMPSUP1",
       "operatingSystem": "Server 2022",
       "role": "SiteSystem",
       "additionalDisks": {
         "E": "250GB"
       },
-      "memory": "3GB",
+      "memory": "5GB",
       "virtualProcs": 4,
       "siteCode": "PS1",
       "installMP": true,
       "installDP": true,
       "InstallRP": false,
-      "InstallSUP": false
+      "InstallSUP": true,
+      "InstallSMSProv": false,
+      "wsusDataBaseServer": "PS1SQL",
+      "wsusContentDir": "E:\\WSUS"
     },
     {
       "vmName": "PS1SITE",
@@ -99,7 +123,8 @@
         "E": "120GB"
       },
       "sqlPort": "1433",
-      "InstallRP": false
+      "InstallRP": false,
+      "InstallSMSProv": false
     },
     {
       "vmName": "W10Client1",

@@ -1,3 +1,29 @@
+function Install-HyperV {
+    if ((get-windowsFeature -name Hyper-V).InstallState -ne 'Installed') {  
+
+        Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+        Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+        if ((get-windowsFeature -name Hyper-V).InstallState -eq 'Installed') {
+            Write-Log "Hyper-V and management tools installed successfully." -Success
+        }
+        else {
+            Write-Log "Failed to install Hyper-V and management tools." -Failure
+        }
+    }
+
+    if ((get-service -name vmms).Status -ne "Running") {
+        Start-Service vmms
+        if ((get-service -name vmms).Status -eq "Running") {
+            Write-Log "Hyper-V Virtual Machine Management Service started successfully." -Success
+        }
+        else {
+            Write-Log "Failed to start Hyper-V Virtual Machine Management Service." -Failure
+        }
+    }
+}
+
 function Get-VM2 {
     param (
         [Parameter(Mandatory = $true)]
@@ -71,7 +97,7 @@ function Start-VM2 {
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
     try {
-        $vm = Get-VM2 -Name $Name
+        $vm = Get-VM2 -Name $Name -Fallback
 
         if ($vm.State -eq "Running") {
             Write-Log "${Name}: VM is already running." -LogOnly
@@ -93,8 +119,24 @@ function Start-VM2 {
                 else {
                     write-progress2 "Start VM" -Status "Starting VM $Name"  -force
                 }
+                $StopError = $null
                 Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-                $vm = Get-VM2 -Name $Name
+                if (($StopError -ne $null) -and ($StopError.Exception.Message.contains("authentication tag"))) {
+                    write-progress2 "Start VM" -Status "Removing saved state for $Name"  -force
+                    try {
+                        Remove-VMSavedState -vm $vm -ErrorAction Stop
+                    }
+                    catch {
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+
+                        stop-vm -vm $vm -TurnOff -force:$true -WarningAction SilentlyContinue   
+                        start-sleep -seconds 3
+                        Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
+                    }                                        
+                    Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
+                $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     $running = $true
                 }
@@ -116,7 +158,7 @@ function Start-VM2 {
                 }
             }
             else {
-                $vm = Get-VM2 -Name $Name
+                $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
                     Write-Log "${Name}: VM was started." -LogOnly
                     if ($Passthru.IsPresent) {
@@ -146,6 +188,108 @@ function Start-VM2 {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
+function Test-VmResponsive {
+    param(
+        [string]$VmName,
+        [int]$TimeoutSeconds = 30
+    )
+    
+    try {
+        # Check if VM is running
+        $vm = Get-VM2 -Name $VmName -ErrorAction Stop
+        if ($vm.State -ne 'Running') {
+            Write-Log "VM $VmName is not running (State: $($vm.State))" -Warning
+            return $false
+        }
+        
+        # Test heartbeat integration service
+        $heartbeat = $vm | Get-VMIntegrationService | Where-Object { $_.Name -eq 'Heartbeat' }
+        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription -ne 'OK') {
+            Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
+            return $false
+        }
+        
+        # Test basic ping with timeout
+        $pingTest = Test-Connection -ComputerName $VmName -Count 2 -Quiet -ErrorAction SilentlyContinue
+        if (-not $pingTest) {
+            Write-Log "VM $VmName not responding to ping" -Warning
+            return $false
+        }
+        
+        # Test RDP port with timeout using job
+        $job = Start-Job -ScriptBlock {
+            param($computerName)
+            Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
+        } -ArgumentList $VmName
+        
+        $testNet = Wait-Job -Job $job -Timeout $TimeoutSeconds | Receive-Job
+        Remove-Job -Job $job -Force
+        
+        if ($null -eq $testNet -or -not $testNet) {
+            Write-Log "VM $VmName RDP port test failed or timed out" -Warning
+            return $false
+        }
+        
+        return $true
+    }
+    catch {
+        Write-Log "Error testing VM $VmName responsiveness: $_" -Warning
+        return $false
+    }
+}
+
+function Restart-UnresponsiveVm {
+    param(
+        [string]$VmName,
+        [int]$MaxRetries = 2,
+        [int]$WaitTimeSeconds = 60
+    )
+    
+    Write-Log "Attempting to restart unresponsive VM: $VmName" -Warning
+    
+    try {
+        # Try graceful shutdown first
+        Write-Log "Attempting graceful shutdown of $VmName..."
+        Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        Start-Sleep -Seconds 10
+        
+        # Force stop if still running
+        $vm = Get-VM2 -Name $VmName
+        if ($vm.State -ne 'Off') {
+            Write-Log "Forcing stop of $VmName..."
+            Stop-VM2 -Name $VmName -Force -TurnOff
+            Start-Sleep -Seconds 5
+        }
+        
+        # Start the VM
+        Write-Log "Starting $VmName..."
+        Start-VM2 -Name $VmName
+        
+        # Wait for VM to boot and become responsive
+        Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
+        $startTime = Get-Date
+        $isResponsive = $false
+        
+        while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+            Start-Sleep -Seconds 10
+            
+            if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
+                $isResponsive = $true
+                Write-Log "$VmName is now responsive"
+                break
+            }
+            
+            Write-Log "Still waiting for $VmName to respond..."
+        }
+        
+        return $isResponsive
+    }
+    catch {
+        Write-Log "Error restarting VM ${VmName}: $_" -Error
+        return $false
+    }
+}
+
 function Stop-VM2 {
     [CmdletBinding()]
     param (
@@ -163,7 +307,7 @@ function Stop-VM2 {
 
     try {
         $force = $true
-        $vm = Get-VM2 -Name $Name
+        $vm = Get-VM2 -Name $Name -Fallback
 
         if ($vm.State -eq "Off") {
             Write-Log "${Name}: VM is already stopped." -LogOnly
@@ -192,12 +336,12 @@ function Stop-VM2 {
 
             if ($StopError.Count -ne 0) {
                 
-                    Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
-                    Start-Sleep -Seconds $RetrySeconds
-                    $vm = Get-VM2 -Name $Name
-                    if ($vm.State -eq "Off") {
-                        return $true
-                    }
+                Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+                Start-Sleep -Seconds $RetrySeconds
+                $vm = Get-VM2 -Name $Name -Fallback
+                if ($vm.State -eq "Off") {
+                    return $true
+                }
                 
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
                 
@@ -239,7 +383,7 @@ function Get-VMCheckpoint2 {
         [string]$Name
     )
 
-    $vm = Get-VM2 -Name $VMName
+    $vm = Get-VM2 -Name $VMName -Fallback
 
     if ($vm) {
         if ($name) {
@@ -261,7 +405,7 @@ function Remove-VMCheckpoint2 {
         [string]$Name
     )
 
-    $vm = Get-VM2 -Name $VMName
+    $vm = Get-VM2 -Name $VMName -Fallback
 
     if ($vm) {
         return Remove-VMCheckpoint -VM $vm -Name $Name -ErrorAction SilentlyContinue
@@ -278,7 +422,7 @@ function Checkpoint-VM2 {
         [string]$SnapshotName
     )
 
-    $vm = Get-VM2 -Name $Name
+    $vm = Get-VM2 -Name $Name -Fallback
 
     if ($vm) {
         $json = $SnapshotName + ".json"

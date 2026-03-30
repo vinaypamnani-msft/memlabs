@@ -43,8 +43,10 @@
     # Wait on machines to join domain
     $waitOnDomainJoin = $ThisVM.thisParams.ServersToWaitOn
 
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+    
+    $Domain = $deployConfig.vmOptions.domainName
+    $DNName = 'DC=' + $Domain.Replace('.',',DC=')    
+
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)

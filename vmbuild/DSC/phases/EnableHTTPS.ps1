@@ -8,14 +8,14 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $isCas = $ThisVM.Role -eq "CAS"
 $DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
 # Read Site Code from registry
-Write-DscStatus "Setting PS Drive for ConfigMgr" -NoStatus
+
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
 
@@ -30,9 +30,9 @@ $initParams = @{}
 if ($null -eq (Get-Module ConfigurationManager)) {
     Import-Module $modulePath
 }
-
+Write-DscStatus "Setting PS Drive for ConfigMgr Site: $Sitecode on Provider $ProviderMachineName" -NoStatus
 # Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+#New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
 $psDriveFailcount = 0
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     $psDriveFailcount++
@@ -55,6 +55,8 @@ $maxAttempts = 5
 
 if (-not $FirstRun) {
     # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
+    Write-DscStatus "Not the first run.. Skipping HTTPS setup."
+    return
     $attempts = $maxAttempts
 }
 
@@ -73,38 +75,51 @@ if (-not (Test-Path $CertPath)) {
     Write-DscStatus "Exported root CA to $CertPath"
 }
 
-do {
-    $attempts++   
-    Write-DscStatus "Enable HTTPS"
-    if ($isCas) {
-        $NameSpace = "ROOT\SMS\site_$SiteCode"
-        #Hack for CAS.. Since Set-CMSite doesnt appear to work on CAS:
-        # Get the WMI object
-        $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
-        # Get the Props array
-        $props = $component.Props
-        # Find the index of the IISSSLState property in the Props array
-        $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
-        # Change the Value of the IISSSLState property
-        $props[$index].Value = 63
-        # Assign the modified Props array back to the component
-        $component.Props = $props
-        # Save the changes
-        $component.Put()
-        #End Hack 
-    }
-    Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
 
-    Start-Sleep 10
+$flagFile = "C:\staging\DSC\EnableEHTTPorHTTPS.flag"
 
-    $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-    $enabled = ($prop.Value -eq 63)
-    Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15
-} until ($attempts -ge $maxAttempts)
-
-if (-not $enabled) {
-    Write-DscStatus "HTTPS not enabled after trying $attempts times, skip."
+# Check if the flag file exists
+if (Test-Path $flagFile) {
+    Write-DscStatus "HTTPS already enabled. Flag file exists. Skipping execution."
 }
 else {
-    Write-DscStatus "HTTPS was enabled."
+    do {
+        $attempts++   
+        Write-DscStatus "Enable HTTPS"
+        $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+
+        if ($isCas) {
+       
+            $NameSpace = "ROOT\SMS\site_$SiteCode"
+            #Hack for CAS.. Since Set-CMSite doesn't appear to work on CAS:
+            # Get the WMI object
+            $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
+            # Get the Props array
+            $props = $component.Props
+            # Find the index of the IISSSLState property in the Props array
+            $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
+            # Change the Value of the IISSSLState property
+            $props[$index].Value = 63
+            # Assign the modified Props array back to the component
+            $component.Props = $props
+            # Save the changes
+            $component.Put()
+            #End Hack 
+        }
+        Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
+
+        Start-Sleep 10
+
+        $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+        $enabled = ($prop.Value -eq 63)
+        Write-DscStatus "IISSSLState Value is $($prop.Value). HTTPS enabled: $enabled" -RetrySeconds 15
+    } until ($attempts -ge $maxAttempts)
+
+    if (-not $enabled) {
+        Write-DscStatus "HTTPS not enabled after trying $attempts times, skip."
+    }
+    else {
+        Write-DscStatus "HTTPS was enabled."
+        New-Item -ItemType File -Path $flagFile -Force | Out-Null
+    }
 }

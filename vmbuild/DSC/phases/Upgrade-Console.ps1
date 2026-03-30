@@ -49,24 +49,17 @@ $RequiredExtensionVersion = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\M
 $RequiredExtensionSiteVersion = (gwmi -namespace "root\sms\Site_$($sitecode)" -Query "SELECT FileVersion from SMS_ConsoleSetupInfo WHERE FileName = ""ConfigMgr.AC_Extension.i386.cab""").FileVersion
 
 
-if ($AdminConsoleVersion) {
-    $ConsoleShortVersion = ([System.Version]$AdminConsoleVersion).Minor
-}
-if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion) { 
 
-    if ($RequiredExtensionVersion -ne $RequiredExtensionSiteVersion) {
-        Write-DscStatus "Upgrade-Console: RequiredExtensionVersion is not the same as RequiredExtensionSiteVersion.  Upgrading to $RequiredExtensionSiteVersion"
-    }
-    else {    
-        # Do Nothing
-        Write-DScStatus "Upgrade-Console: Console is already at the correct version Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
-        return
-    }
-}
-else {
-    Write-DScStatus "Upgrade-Console: $ConsoleShortVersion is not the correct version.  Upgrading to $($deployConfig.cmOptions.Version)"
 
+if ($RequiredExtensionVersion -ne $RequiredExtensionSiteVersion) {
+    Write-DscStatus "Upgrade-Console: RequiredExtensionVersion is not the same as RequiredExtensionSiteVersion.  Upgrading to $RequiredExtensionSiteVersion"
 }
+else {    
+    # Do Nothing
+    Write-DScStatus "Upgrade-Console: Console is already at the correct version Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
+    return
+}
+
 
 
 
@@ -119,7 +112,7 @@ if ($AdminConsoleVersion) {
 Write-DscStatus -NoStatus "Upgrade-Console: Checking if the console installed successfully"
 
 
-if ($deployConfig.cmOptions.Version -eq $ConsoleShortVersion -and $RequiredExtensionVersion -eq $RequiredExtensionSiteVersion) { 
+if ($RequiredExtensionVersion -eq $RequiredExtensionSiteVersion) { 
     Write-DscStatus "Console installed successfully Console: $ConsoleShortVersion Extensions: $RequiredExtensionSiteVersion"
 }
 else {

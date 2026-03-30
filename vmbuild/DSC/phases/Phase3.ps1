@@ -43,7 +43,7 @@ configuration Phase3
                 UserLocale           = $l.UserLocale
                 CopySystem           = $true
                 CopyNewUser          = $true
-                Dependson            = "[LanguagePack]InstallLanguagePack"
+                DependsOn            = "[LanguagePack]InstallLanguagePack"
             }
 
             LocalConfigurationManager {
@@ -91,7 +91,7 @@ configuration Phase3
             Status = "Adding required accounts [$($ThisVM.thisParams.LocalAdminAccounts -join ',')] to Administrators group"
         }
 
-        $addUserDependancy = @('[WriteStatus]AddLocalAdmin')
+        $addUserDependency = @('[WriteStatus]AddLocalAdmin')
         $i = 0
         foreach ($user in $ThisVM.thisParams.LocalAdminAccounts) {
             $i++
@@ -100,11 +100,11 @@ configuration Phase3
                 Name              = $user
                 NetbiosDomainName = $NetBiosDomainName
             }
-            $addUserDependancy += "[AddUserToLocalAdminGroup]$DscNodeName"
+            $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
         WriteStatus InstallFeature {
-            DependsOn = $addUserDependancy
+            DependsOn = $addUserDependency
             Status    = "Installing required windows features for role $featureRoles"
         }
 
@@ -151,12 +151,12 @@ configuration Phase3
         }
 
         GpUpdate GpUpdate {
-            Run = "True"
+            Run       = "True"
             DependsOn = $nextDepend
         }
         $nextDepend = "[GpUpdate]GpUpdate"
 
-        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite") {
+        if ($ThisVM.role -eq 'CAS' -or $ThisVM.role -eq "Primary" -or $ThisVM.role -eq "PassiveSite" -or $ThisVM.InstallSMSProv) {
 
             $prevDepend = $nextDepend
 
@@ -166,17 +166,18 @@ configuration Phase3
             }
 
             InstallADK ADKInstall {
-                ADKPath      = "C:\temp\adksetup.exe"
-                ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-                ADKDownloadPath = $deployConfig.URLS.ADK
+                ADKPath              = "C:\temp\adksetup.exe"
+                ADKWinPEPath         = "c:\temp\adksetupwinpe.exe"
+                ADKDownloadPath      = $deployConfig.URLS.ADK
                 ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE              
-                Ensure       = "Present"
-                DependsOn    = "[WriteStatus]ADKInstall"
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]ADKInstall"
             }
             
 
             $nextDepend = "[InstallADK]ADKInstall"
-            if (-not $ThisVM.thisParams.ParentSiteServer -and $ThisVM.role -ne "PassiveSite" -and -not $ThisVM.hidden) {
+            #Find the toplevel site server that is newly being deployed
+            if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS", "Primary")) {
 
                 $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
@@ -184,22 +185,28 @@ configuration Phase3
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"
                 }
 
-                WriteStatus DownLoadSCCM {
-                    DependsOn = $nextDepend
-                    Status    = $CMDownloadStatus
-                }
+               
 
-                DownloadSCCM DownLoadSCCM {
-                    CM            = $CM
-                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
-                    Ensure        = "Present"
-                    DependsOn     = $prevDepend
+                if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
+
+                    WriteStatus DownLoadSCCM {
+                        DependsOn = $prevDepend
+                        Status    = $CMDownloadStatus
+                    }
+
+                    DownloadSCCM DownLoadSCCM {
+                        CM            = $CM
+                        CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
+                        Ensure        = "Present"
+                        DependsOn     = $prevDepend
+                    }
+                    $prevDepend = "[DownLoadSCCM]DownLoadSCCM"
                 }
 
                 FileReadAccessShare CMSourceSMBShare {
                     Name      = $CM
                     Path      = "c:\$CM"
-                    DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                    DependsOn = $prevDepend
                 }
                 $nextDepend = @($nextDepend, "[FileReadAccessShare]CMSourceSMBShare")
                 #$nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
@@ -259,12 +266,35 @@ configuration Phase3
         InstallOleDbDriver InstallOleDbDriver {
             DependsOn = "[WriteStatus]OleDbDriverInstall"
             URL       = $deployConfig.URLS.OleDB
-            Path  = "C:\temp\msoledbsql.msi"
+            Path      = "C:\temp\msoledbsql.msi"
             Ensure    = "Present"
         }
 
 
-        $nextDepend = "[InstallODBCDriver]ODBCDriverInstall"
+        $nextDepend = "[InstallOleDbDriver]InstallOleDbDriver"
+
+
+        if ($ThisVM.installDP) {
+            Registry RAMDiskTFTPWIndowSize {
+                DependsOn = $nextDepend
+                Ensure    = "Present"
+                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                ValueName = "RamDiskTFTPWindowSize"
+                ValueData = "16"
+                ValueType = "DWord"
+            }
+
+            Registry RAMDiskTFTPBlockSize {
+                DependsOn = $nextDepend
+                Ensure    = "Present"
+                Key       = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\SMS\DP"
+                ValueName = "RamDiskTFTPBlockSize"
+                ValueData = "4096"
+                ValueType = "DWord"
+            }
+
+            $nextDepend = "[Registry]RAMDiskTFTPBlockSize"
+        }
 
         if ($AddIISCert) {
 

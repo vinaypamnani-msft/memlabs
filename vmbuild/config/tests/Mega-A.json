@@ -87,7 +87,8 @@
       "AlwaysOnListenerName": "ALWAYSON2",
       "SqlServiceAccount": "SQLCLUSTER2Svc",
       "SqlAgentAccount": "SQLCLUSTER2Agent",
-      "installRP": false
+      "installRP": false,
+      "InstallSMSProv": false
     },
     {
       "vmName": "CS1SQLAO2",
@@ -135,7 +136,8 @@
       "installMP": true,
       "installSUP": false,
       "installRP": false,
-      "siteCode": "PS1"
+      "siteCode": "PS1",
+      "InstallSMSProv": false
     },
     {
       "vmName": "PS1SITE",
@@ -161,10 +163,10 @@
       "siteName": "ConfigMgr Primary Site"
     },
     {
-      "vmName": "PS2DPMP1",
+      "vmName": "PS2DPMPSUP1",
       "role": "SiteSystem",
       "operatingSystem": "Server 2025",
-      "memory": "3GB",
+      "memory": "5GB",
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
@@ -173,10 +175,13 @@
       },
       "installDP": true,
       "installMP": true,
-      "installSUP": false,
+      "installSUP": true,
       "installRP": false,
       "siteCode": "PS2",
-      "enablePullDP": false
+      "enablePullDP": false,
+      "InstallSMSProv": false,
+      "wsusDataBaseServer": "PS2SQLAO1",
+      "wsusContentDir": "E:\\WSUS"
     },
     {
       "vmName": "PS2SITE",
@@ -238,7 +243,8 @@
       "AlwaysOnListenerName": "ALWAYSON",
       "SqlServiceAccount": "SQLCLUSTERSvc",
       "SqlAgentAccount": "SQLCLUSTERAgent",
-      "installRP": false
+      "installRP": false,
+      "InstallSMSProv": false
     },
     {
       "vmName": "PS2SQLAO2",

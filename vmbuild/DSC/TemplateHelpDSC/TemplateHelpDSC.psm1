@@ -850,6 +850,145 @@ class InstallAndConfigWSUS {
 }
 
 [DscResource()]
+class InstallPMPC {
+    [DscProperty(Key)]
+    [string] $Path
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [DscProperty(Mandatory)]
+    [string] $URL
+
+    [DscProperty(Mandatory)]
+    [string] $SiteCode
+
+    [DscProperty(Mandatory)]
+    [string] $SqlServer
+
+    [DscProperty(Mandatory)]
+    [string] $SiteServer
+
+    [DscProperty(Mandatory)]
+    [string] $FileServer
+   
+    [void] Set() {
+        $_path = $this.Path
+        $_URL = $this.URL
+
+        $Name = "Patch my PC"
+        Invoke-DownloadFile $_URL $_path
+       
+        $cmd = "msiexec"
+        $arg1 = "/i"
+        $arg2 = $_Path
+        $arg3 = "/qn"
+        $arg4 = "/l*v"
+        $arg5 = "c:\temp\pmpc.log"
+       
+        try {
+            Write-Status "Installing $Name  $_path..."
+            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
+            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
+            Write-Status "$Name  $_path was Installed Successfully!"
+        }
+        catch {
+            $ErrorMessage = $_.Exception.Message
+            Write-Status "Failed to install $Name  with error: $ErrorMessage"
+            throw "Failed to install $Name  with error: $ErrorMessage"
+        }
+        Start-Sleep -Seconds 10
+
+        $SettingsXML = Get-Content "C:\Staging\DSC\Phases\PMPC.Settings.Template" -Raw
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESITECODE", $this.SiteCode)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESQLSERVER", $this.SqlServer)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATESITESERVER", $this.SiteServer)
+        $SettingsXML = $SettingsXML.Replace("TEMPLATEFILESERVER", $this.FileServer)
+        stop-service -name PatchMyPCService
+ 
+        $SettingsXML | out-file "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml" -Force -Encoding utf8
+        $SupportedProduct = Get-Content "C:\Staging\DSC\Phases\PMPC.SupportedProducts.Template" -Raw
+        $SupportedProduct | out-file "C:\Program Files\Patch My PC\Patch My PC Publishing Service\SupportedProducts.xml" -Force -Encoding utf8
+        start-service -name PatchMyPCService 
+        start-sleep -seconds 120
+        & "C:\Program Files\Patch My PC\Patch My PC Publishing Service\PatchMyPC-Settings.exe" /SyncNow
+    }
+
+    [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
+        if ((Test-Path -Path "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml")) {
+            return $true
+        }        
+        return $false
+    }
+
+    [InstallPMPC] Get() {
+        
+        return $this
+    }
+
+}
+
+
+[DscResource()]
+class InstallConsole {
+    [DscProperty(Key)]
+    [string] $SiteServerFQDN
+    [DscProperty(Mandatory)]
+    [string] $CMInstallDir
+   
+    [void] Set() {
+        $_SiteServer = $this.SiteServerFQDN
+        $_CMInstallDir = $this.CMInstallDir
+
+        if ($null -eq $_SiteServer) {
+            Write-Status "SiteServerFQDN is null, cannot install SCCM Console"
+            throw "SiteServerFQDN is null, cannot install SCCM Console"
+        }
+        if ($null -eq $_CMInstallDir) {
+            Write-Status "CMInstallDir is null, cannot install SCCM Console"
+            throw "CMInstallDir is null, cannot install SCCM Console"
+        }
+
+        Write-Status "Installing SCCM Console..."
+        & C:\staging\DSC\phases\Install-Console.ps1 -SiteServer $_SiteServer -CMInstallDir $_CMInstallDir
+        Write-Status "Finished installing SCCM Console... Rebooting"  
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1      
+    }
+
+    [bool] Test() {
+        Write-Status "DSC Test- Checking deployment status"
+        try {
+            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        }
+        catch {
+            return $false
+        }
+        if (-not $key) {
+            return $false
+        }
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        if ($subKey) {
+            $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+        }
+        else {
+            return $false
+        }
+        if ($uiInstallPath) {
+            return $true
+        }
+        return $false
+    }
+
+    [InstallConsole] Get() {
+        
+        return $this
+    }
+
+}
+
+[DscResource()]
 class WriteEvent {
 
     [DscProperty(Mandatory)]
@@ -1144,6 +1283,51 @@ class DelegateControl {
     [DscProperty(NotConfigurable)]
     [Nullable[datetime]] $CreationTime
 
+    # Helper method to join multi-line dsacls output
+    hidden [string[]] JoinDsaclsOutput([string[]] $rawOutput) {
+        $joinedLines = @()
+        $currentLine = ""
+
+        foreach ($line in $rawOutput) {
+            if ($line -match '^\s{2,}' -and $currentLine) {
+                # This is a continuation line - append to current
+                $currentLine += " " + $line.Trim()
+            }
+            else {
+                # This is a new entry - save previous and start new
+                if ($currentLine) { $joinedLines += $currentLine }
+                $currentLine = $line
+            }
+        }
+        if ($currentLine) { $joinedLines += $currentLine }
+        
+        return $joinedLines
+    }
+
+    # Helper method to check if permissions exist
+    hidden [bool] CheckPermissions([string[]] $permissionInfo, [string] $machineName, [string] $domainName) {
+        # Join multi-line output
+        $joinedLines = $this.JoinDsaclsOutput($permissionInfo)
+        
+        if ($this.IsGroup) {
+            $searchPattern = "*$domainName\$machineName*FULL CONTROL*"
+            Write-Verbose "Searching for pattern: $searchPattern"
+            $match = $joinedLines | Where-Object { $_ -like $searchPattern }
+        }
+        else {
+            $searchPattern = "*$machineName`$*FULL CONTROL*"
+            Write-Verbose "Searching for pattern: $searchPattern"
+            $match = $joinedLines | Where-Object { $_ -like $searchPattern }
+        }
+        
+        if ($match) {
+            Write-Verbose "Found matching permission: $match"
+            return $true
+        }
+        
+        return $false
+    }
+
     [void] Set() {
         $_machinename = $this.Machine
         $root = (Get-ADRootDSE).defaultNamingContext
@@ -1206,17 +1390,10 @@ class DelegateControl {
             $targ1 = "CN=System Management,CN=System,$root"
             $permissioninfo = & $tcmd $targ1
 
-            if ($this.IsGroup) {
-                Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
-                if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                    break
-                }
-            }
-            else {
-                Write-Verbose "Testing for *$($_machinename)$* IsGroup: $($this.IsGroup)"
-                if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                    break
-                }
+            # Use helper method to check permissions
+            if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
+                Write-Verbose "Permissions verified successfully"
+                break
             }
 
             Write-Verbose "$tcmd $targ1 did not contain the new permissions. Sleeping 60 seconds and trying again"
@@ -1241,23 +1418,13 @@ class DelegateControl {
             return $false
         }
 
-        Write-Verbose "Testing for *$($DomainName)\$($_machinename)* IsGroup: $($this.IsGroup)"
+        Write-Verbose "Testing for permissions. IsGroup: $($this.IsGroup)"
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        if ($this.IsGroup) {
-            if (($permissioninfo | Where-Object { $_ -like "*$($DomainName)\$($_machinename)*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                return $true
-            }
-        }
-        else {
-            if (($permissioninfo | Where-Object { $_ -like "*$($_machinename)$*" } | Where-Object { $_ -like "*FULL CONTROL*" }).COUNT -gt 0) {
-                return $true
-            }
-        }
-
-        return $false
+        # Use helper method to check permissions
+        return $this.CheckPermissions($permissioninfo, $_machinename, $DomainName)
     }
 
     [DelegateControl] Get() {
@@ -1361,7 +1528,7 @@ class DownloadSCCM {
             return $false
         }
 
-        # if C:\CMCB doesnt exist, fail
+        # if C:\CMCB does not exist, fail
         $cmsourcepath = "c:\$_CM"
         if (!(Test-Path $cmsourcepath)) {
             return $false
@@ -2007,11 +2174,11 @@ class RegisterTaskScheduler {
             Start-Sleep -Seconds 10
         }
 
-        $sourceDirctory = "$($this.ScriptPath)\*"
-        $destDirctory = "$ProvisionToolPath\"
+        $sourceDirectory = "$($this.ScriptPath)\*"
+        $destDirectory = "$ProvisionToolPath\"
 
-        Write-Status "Copying $sourceDirctory to $destDirctory"
-        Copy-item -Force -Recurse $sourceDirctory -Destination $destDirctory
+        Write-Status "Copying $sourceDirectory to $destDirectory"
+        Copy-item -Force -Recurse $sourceDirectory -Destination $destDirectory
 
         $TaskDescription = "vmbuild task"
         $TaskCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -2019,7 +2186,7 @@ class RegisterTaskScheduler {
 
         Write-Status "Task script full path is : $TaskScript "
 
-        $TaskArg = "-WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
+        $TaskArg = "-WindowStyle Hidden -NonInteractive -ExecutionPolicy unrestricted -file $TaskScript $($this.ScriptArgument)"
 
         $Action = New-ScheduledTaskAction -Execute $TaskCommand -Argument $TaskArg
         Write-Verbose "New-ScheduledTaskAction : $TaskCommand $TaskArg"
@@ -2033,7 +2200,7 @@ class RegisterTaskScheduler {
 
         $Principal = New-ScheduledTaskPrincipal -UserId $($this.AdminCreds.UserName) -RunLevel Highest
         $Password = $($this.AdminCreds).GetNetworkCredential().Password
-        $certauthFile = $destDirctory + "\" + "certauth.txt"
+        $certauthFile = $destDirectory + "\" + "certauth.txt"
         $Password | Out-file -FilePath $certauthFile -Force
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
@@ -2153,25 +2320,41 @@ class AddUserToLocalAdminGroup {
     [void] Set() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-        $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Status "Adding $_DomainName\$_Name to administrators group"
-        if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
-            $GroupObj.Add("WinNT://$_DomainName/$_Name")
+        try {
+            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
+            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+            Write-Status "Adding $_DomainName\$_Name to administrators group"
+            if (-not $GroupObj.IsMember("WinNT://$_DomainName/$_Name")) {
+                $GroupObj.Add("WinNT://$_DomainName/$_Name")
+            }
         }
-
+        catch {
+            Write-Status "AddUserToLocalAdminGroup: Failed to add $_DomainName\$_Name to administrators group $_"
+            if ($(Test-ComputerSecureChannel) -eq $False) { 
+                Write-Status "AddUserToLocalAdminGroup: Secure Channel is broken. Attempting to reboot to fix it."
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
+            }
+        }
+    
     }
 
     [bool] Test() {
         $_DomainName = $($this.NetbiosDomainName)
         $_Name = $this.Name
-        $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
-        $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
-        Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
-        if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
-            return $true
+        try {
+            $AdminGroupName = (Get-WmiObject -Class Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"').Name
+            $GroupObj = [ADSI]"WinNT://$env:COMPUTERNAME/$AdminGroupName"
+            Write-Verbose "[$(Get-Date -format HH:mm:ss)] Testing $_DomainName\$_Name is in administrators group"
+            if ($GroupObj.IsMember("WinNT://$_DomainName/$_Name") -eq $true) {
+                return $true
+            }
+            return $false
         }
-        return $false
+        catch {
+            Write-Verbose "AddUserToLocalAdminGroup: Failed to test $_DomainName\$_Name in administrators group $_"
+            return $false
+        }
     }
 
     [AddUserToLocalAdminGroup] Get() {
@@ -2279,8 +2462,8 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'Kerberos Password Change UDP' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 464 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For DC"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For DC"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For DC"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For DC"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For DC"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For DC"
             New-NetFirewallRule -DisplayName 'RPC Endpoint Mapper UDP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 135 -Group "For DC"
             #Dynamic Port
@@ -2301,12 +2484,12 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'PPTP Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1723 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'PPTP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 1723 -Group "For SCCM"
 
-            #priary site server(out) ->DC
+            #primary site server(out) ->DC
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM"
 
 
             #Dynamic Port?
@@ -2423,8 +2606,8 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 389 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 636 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'LDAP(SSL) UDP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol UDP -LocalPort 636 -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM MP"
-            New-NetFirewallRule -DisplayName 'Global Catelog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3268 -Group "For SCCM MP"
+            New-NetFirewallRule -DisplayName 'Global Catalog LDAP SSL Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 3269 -Group "For SCCM MP"
 
             New-NetFirewallRule -DisplayName 'SMB Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM MP"
             New-NetFirewallRule -DisplayName 'SMB Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SCCM MP"
@@ -2564,7 +2747,7 @@ class InstallFeatureForSCCM {
         # Install on all devices
         try {
             Write-Status "Installing Windows Feature TelnetClient"
-            dism /online /Enable-Feature /FeatureName:TelnetClient
+            dism / online / Enable-Feature / FeatureName:TelnetClient
         }
         catch {}
         #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
@@ -2676,7 +2859,7 @@ class InstallFeatureForSCCM {
             }
 
             if ($_Role -contains "Endpoint Protection point") {
-                #.NET 3.5 SP1 is intalled
+                #.NET 3.5 SP1 is installed
             }
 
             if ($_Role -contains "Enrollment point") {
@@ -2704,7 +2887,7 @@ class InstallFeatureForSCCM {
                 #installed .net 4.5 or later
             }
             if ($_Role -contains "WSUS") {
-                #Write-Status "Installing Windows Features: WSUS Stuff.. This shouldnt be used anymore."
+                #Write-Status "Installing Windows Features: WSUS Stuff.. This should nto be used anymore."
                 #Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
             }
             if ($_Role -contains "State migration point") {
@@ -3192,13 +3375,124 @@ class ConfigureWSUS {
     [DscProperty()]
     [string]$TemplateName
 
+    hidden [void] CleanupWSUS() {
+        Write-Status "Cleaning up WSUS IIS configuration..."
+        
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        
+        # Stop WSUS Service
+        $ServiceName = 'WSUSService'
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Status "Stopping WSUS Service..."
+            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Remove WSUS Administration website
+        Write-Status "Removing WSUS Administration website..."
+        $wsusWebsite = Get-Website -Name "WSUS Administration" -ErrorAction SilentlyContinue
+        if ($wsusWebsite) {
+            Remove-Website -Name "WSUS Administration" -ErrorAction SilentlyContinue
+            Write-Verbose "WSUS Administration website removed"
+        }
+        
+        # Remove Application Pools
+        Write-Status "Removing WSUS Application Pools..."
+        $appPools = @('WsusPool', 'WSUSPool')
+        foreach ($poolName in $appPools) {
+            $pool = Get-IISAppPool -Name $poolName -ErrorAction SilentlyContinue
+            if ($pool) {
+                Remove-WebAppPool -Name $poolName -ErrorAction SilentlyContinue
+                Write-Verbose "Removed app pool: $poolName"
+            }
+        }
+        
+        # Remove IIS application directories
+        Write-Status "Removing WSUS IIS directories..."
+        $iisApps = @(
+            'IIS:\Sites\WSUS Administration\ApiRemoting30',
+            'IIS:\Sites\WSUS Administration\ClientWebService',
+            'IIS:\Sites\WSUS Administration\DSSAuthWebService',
+            'IIS:\Sites\WSUS Administration\Inventory',
+            'IIS:\Sites\WSUS Administration\ReportingWebService',
+            'IIS:\Sites\WSUS Administration\ServerSyncWebService',
+            'IIS:\Sites\WSUS Administration\SimpleAuthWebService'
+        )
+        
+        foreach ($app in $iisApps) {
+            if (Test-Path $app) {
+                Remove-Item -Path $app -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Verbose "Removed: $app"
+            }
+        }
+        
+        # Remove physical directories
+        Write-Status "Removing WSUS physical directories..."
+        $wsusPath = "$env:ProgramFiles\Update Services\WebServices"
+        if (Test-Path $wsusPath) {
+            Remove-Item -Path $wsusPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Verbose "Removed: $wsusPath"
+        }
+        
+        # Remove SSL bindings for port 8531
+        Write-Status "Removing SSL bindings..."
+        $sslBinding = Get-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https" -ErrorAction SilentlyContinue
+        if ($sslBinding) {
+            Remove-WebBinding -Name "WSUS Administration" -Port 8531 -Protocol "https" -ErrorAction SilentlyContinue
+            Write-Verbose "Removed HTTPS binding on port 8531"
+        }
+        
+        # Remove HTTP bindings for ports 8530
+        $httpBinding = Get-WebBinding -Name "WSUS Administration" -Port 8530 -Protocol "http" -ErrorAction SilentlyContinue
+        if ($httpBinding) {
+            Remove-WebBinding -Name "WSUS Administration" -Port 8530 -Protocol "http" -ErrorAction SilentlyContinue
+            Write-Verbose "Removed HTTP binding on port 8530"
+        }
+        
+        # Clean up any remaining IIS configuration
+        Write-Status "Cleaning up IIS configuration..."
+        $iisConfigPaths = @(
+            "IIS:\AppPools\WsusPool",
+            "IIS:\AppPools\WSUSPool",
+            "IIS:\Sites\WSUS Administration"
+        )
+        
+        foreach ($path in $iisConfigPaths) {
+            if (Test-Path $path) {
+                Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Verbose "Removed IIS config: $path"
+            }
+        }
+        
+        Write-Status "WSUS cleanup completed"
+    }
+
     [void] Set() {
 
         $_HTTPSurl = $this.HTTPSUrl
         $_FriendlyName = $this.TemplateName
         $postinstallOutput = ""
+
+        $ServiceName = 'WSUSService'
+
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            write-verbose "Service $ServiceName not found."
+            throw
+        }
+
+        # If disabled, set to Automatic
+        if ($svc.StartType -eq 'Disabled') {
+            Set-Service -Name $ServiceName -StartupType Automatic
+            $svc = Get-Service -Name $ServiceName
+        }
+
+        # Start if not running
+        if ($svc.Status -ne 'Running') {
+            Start-Service -Name $ServiceName
+        }
+
         try {
-            #write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
             try {
                 New-Item -Path $this.ContentPath -ItemType Directory -Force
             }
@@ -3210,22 +3504,76 @@ class ConfigureWSUS {
                 write-Status ("Configuring WSUS for $($this.SqlServer) in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                
+                # Check for "object identifier does not represent a valid object" error
+                if ($postinstallOutput -match "object identifier does not represent a valid object") {
+                    Write-Status "Detected invalid object error. Performing full WSUS cleanup..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    $this.CleanupWSUS()
+                    
+                    Write-Status "Re-running WSUS postinstall after cleanup..."
+                    Start-Sleep -Seconds 5
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
+                
+                # Check for Server 2022 and schema version error
+                $osVersion = [System.Environment]::OSVersion.Version
+                $isServer2022 = ($osVersion.Major -eq 10 -and $osVersion.Build -ge 20348)
+                
+                if ($isServer2022 -and $postinstallOutput -match "schema version of the database is from a newer version of WSUS") {
+                    Write-Status "Detected schema version error on Server 2022. Running fix-postinstall.ps1..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    & c:\tools\fix-postinstall.ps1
+                    
+                    Write-Status "Re-running WSUS postinstall after fix..."
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall SQL_INSTANCE_NAME=$($this.SqlServer) CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
             }
             else {
                 write-Status ("Configuring WSUS for WID in $($this.ContentPath)")
                 write-verbose ("running:  'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath)")
                 $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                
+                # Check for "object identifier does not represent a valid object" error
+                if ($postinstallOutput -match "object identifier does not represent a valid object") {
+                    Write-Status "Detected invalid object error. Performing full WSUS cleanup..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    $this.CleanupWSUS()
+                    
+                    Write-Status "Re-running WSUS postinstall after cleanup..."
+                    Start-Sleep -Seconds 5
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
+                
+                # Check for Server 2022 and schema version error
+                $osVersion = [System.Environment]::OSVersion.Version
+                $isServer2022 = ($osVersion.Major -eq 10 -and $osVersion.Build -ge 20348)
+                
+                if ($isServer2022 -and $postinstallOutput -match "schema version of the database is from a newer version of WSUS") {
+                    Write-Status "Detected schema version error on Server 2022. Running fix-postinstall.ps1..."
+                    Write-Verbose "Error output: $postinstallOutput"
+                    
+                    & c:\tools\fix-postinstall.ps1
+                    
+                    Write-Status "Re-running WSUS postinstall after fix..."
+                    $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
+                }
             }
+            Write-Verbose "WSUS postinstall output: $postinstallOutput"
         }
         catch {
             Write-Status "Failed to Configure WSUS"
             Write-Verbose "$_ $postinstallOutput"
         }
+        
         try {
             $wsus = get-WsusServer
         }
         catch {
-            Write-Status "Failed to Configure WSUS"
+            Write-Status "Failed to Configure WSUS. Could not locate WSUS Server after postinstall"
             Write-Verbose "$_"
             throw
         }
@@ -3292,7 +3640,6 @@ class ConfigureWSUS {
     [ConfigureWSUS] Get() {
         return $this
     }
-
 }
 
 [DscResource()]
@@ -3411,40 +3758,40 @@ class InstallPBIRS {
                 Write-Status "Calling Set-RsDatabase"
                 if ($this.IsRemoteDatabaseServer) {
                     try {
-                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
                 else {
                     try {
-                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                     catch {
-                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
-                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
+                        Write-Status ("Calling2 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -TrustServerCertificate")
+                        Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -TrustServerCertificate
                     }
                 }
             }
             catch {
                 Write-Verbose ("InstallPBIRS $_")
                 if ($this.IsRemoteDatabaseServer) {
-                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -IsRemoteDatabaseServer -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
                 else {
-                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
-                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
+                    Write-Status ("Calling3 Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential xxxx -IsExistingDatabase -TrustServerCertificate")
+                    Set-RsDatabase -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -DatabaseServerName $($this.SqlServer) -DatabaseName ReportServer -DatabaseCredentialType Windows -Confirm:$false -DatabaseCredential $_Creds -IsExistingDatabase -TrustServerCertificate
                 }
             }
 
 
-            Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext
+            Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
 
 
             if ($this.TemplateName) {
@@ -3461,7 +3808,7 @@ class InstallPBIRS {
                 $version = (Get-WmiObject -namespace root\Microsoft\SqlServer\ReportServer\$wmiName -class __Namespace).Name
                 $rsConfig = Get-WmiObject -namespace "root\Microsoft\SqlServer\ReportServer\$wmiName\$version\Admin" -class MSReportServer_ConfigurationSetting
 
-                Write-Status ("Removing ReportServerWebApp ReportServerWebService URLS")
+                Write-Status ("Removing HTTP ReportServerWebApp ReportServerWebService URLS")
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://+:$httpsPort", $lcid)
                 $rsConfig.RemoveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
                 $rsConfig.ReserveURL("ReportServerWebApp", "https://$($_dnsName):$httpsPort", $lcid)
@@ -3474,7 +3821,7 @@ class InstallPBIRS {
                     throw "Could not find cert with friendly Name $_FriendlyName"
                 }
 
-                Write-Status ("Adding ReportServerWebApp ReportServerWebService URLS")
+                Write-Status ("Adding HTTPS ReportServerWebApp ReportServerWebService URLS")
                 $thumbprint = $cert.ThumbPrint.ToLower()
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebApp', $Thumbprint, $ipAddress, $httpsport, $lcid)
                 $rsConfig.CreateSSLCertificateBinding('ReportServerWebService', $Thumbprint, $ipAddress, $httpsport, $lcid)
@@ -3488,8 +3835,8 @@ class InstallPBIRS {
             Start-Sleep -seconds 10
             Restart-Service -Name "PowerBIReportServer" -Force
             Start-Sleep -Seconds 10
-            Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext")
-            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion SQLServervNext } catch {}
+            Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
+            try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer } catch {}
             Write-Status ("Restart PowerBIReportServer Service")
             Restart-Service -Name "PowerBIReportServer" -Force
             try {
@@ -3499,6 +3846,7 @@ class InstallPBIRS {
         }
         catch {
             Write-Status "Failed to Configure PBIRS"
+            Write
             Write-Verbose "$_"
         }
     }
@@ -3536,7 +3884,7 @@ class InstallPBIRS {
 }
 
 [DscResource()]
-class ImportCertifcateTemplate {
+class ImportCertificateTemplate {
     [DscProperty(Key)]
     [string]$TemplateName
 
@@ -3595,7 +3943,7 @@ class ImportCertifcateTemplate {
         return $false
     }
 
-    [ImportCertifcateTemplate] Get() {
+    [ImportCertificateTemplate] Get() {
         return $this
     }
 
@@ -3738,17 +4086,24 @@ class AddCertificateTemplate {
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
-                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0
+                Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -SkipPublisherCheck
             }
             Write-Status "Adding Certificate Template $_TemplateName .." 
             start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
-            Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
+            #Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
             $retries = 0
             $success = $false
             while ($retries -lt 10 -and $success -eq $false) {
-                Write-Status "Adding Certificate Template $_TemplateName ..." 
+                Write-Status "Adding Certificate Template $_TemplateName ..."                 
+                try {
+                    if ($retries -eq 0) {
+                        Get-CertificationAuthority | Get-CRLValidityPeriod | Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" -DeltaCRL "0 days" -ErrorAction SilentlyContinue
+                        #Get-CertificationAuthority | Get-CRLValidityPeriod | Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "2 weeks" -DeltaCRL "1 hours" -DeltaCRLOverlap "1 weeks" -ErrorAction SilentlyContinue
+                    }
+                }
+                catch {}
                 $retries++
                 try {
                     Write-Status "PSPKI\Get-CertificateTemplate -Name $_TemplateName -ErrorAction stop"
@@ -3961,8 +4316,8 @@ class AddCertificateToIIS {
             $_FriendlyName = $this.FriendlyName
             $cert = Get-ChildItem Cert:\LocalMachine\My | Where-Object { $_.FriendlyName -eq $_FriendlyName } | Select-Object -Last 1
             $certdata = netsh http show sslcert ipport=0.0.0.0:443
-            $thumprint = $($cert.Thumbprint).ToLower()
-            if ($certdata.ToLower() -match $thumprint ) {
+            $thumbPrint = $($cert.Thumbprint).ToLower()
+            if ($certdata.ToLower() -match $thumbPrint ) {
                 return $true
             }
         }
@@ -4042,7 +4397,7 @@ class AddToAdminGroup {
                 start-sleep -seconds 5
                 continue
             }
-            Write-Status "Done."
+            Write-Status "Done $DisplayAccountName."
             return
         }
 

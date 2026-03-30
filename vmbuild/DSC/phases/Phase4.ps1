@@ -52,6 +52,11 @@ configuration Phase4
             Status = "Preparing to Install SQL '$($ThisVM.sqlVersion)'"
         }
 
+        ModuleAdd SQLServerModule {
+            Key             = 'Always'
+            CheckModuleName = 'SqlServer'
+        }
+        
         $nextDepend = '[WriteStatus]SQLInstallStarted'
         if (-not ($ThisVM.Hidden)) {
             RebootNow RebootNow {
@@ -191,7 +196,7 @@ configuration Phase4
                         Ensure               = 'Present'
                         ServicePrincipalName = $spn
                         Account              = $ThisVM.SqlServiceAccount
-                        Dependson            = $nextDepend
+                        DependsOn            = $nextDepend
                         PsDscRunAsCredential = $Admincreds
                     }
 

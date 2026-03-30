@@ -56,13 +56,13 @@ Configuration Phase9
     Node $AllNodes.Where{ $_.Role -eq 'SqlServer' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
-         # Domain Creds
-    $DomainName = $deployConfig.parameters.domainName
-    if ($ThisVM.Domain) {
-        $DomainName = $ThisVM.Domain
-    }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+        # Domain Creds
+        $DomainName = $deployConfig.parameters.domainName
+        if ($ThisVM.Domain) {
+            $DomainName = $ThisVM.Domain
+        }
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Disable-AgentJob-Set.sql"
         $AgentJobTest = "C:\staging\DSC\SQLScripts\AgentJob-Test.sql"
@@ -83,7 +83,7 @@ Configuration Phase9
             GetFilePath          = $AgentJobGet
             DisableVariables     = $true
             Variable             = @('FilePath=C:\temp\')
-            PsDscRunAsCredential =  $Admincreds
+            PsDscRunAsCredential = $Admincreds
             Encrypt              = "Optional"
         }
         $nextDepend = '[SqlScript]DisableAgentJob'
@@ -113,7 +113,7 @@ Configuration Phase9
                 NodeName         = $WaitFor
                 RetryIntervalSec = 15
                 RetryCount       = 1200
-                Dependson        = $nextDepend
+                DependsOn        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
         }
@@ -135,7 +135,7 @@ Configuration Phase9
             DisableVariables     = $true
             DependsOn            = $nextDepend
             Variable             = @('FilePath=C:\temp\')
-            PsDscRunAsCredential =  $Admincreds
+            PsDscRunAsCredential = $Admincreds
             Encrypt              = "Optional"
         }
         $nextDepend = '[SqlScript]EnableAgentJob'
@@ -149,13 +149,13 @@ Configuration Phase9
     Node $AllNodes.Where{ $_.Role -eq 'DC' }.NodeName
     {
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
-           # Domain Creds
-    $DomainName = $deployConfig.parameters.domainName
-    if ($ThisVM.Domain) {
-        $DomainName = $ThisVM.Domain
-    }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+        # Domain Creds
+        $DomainName = $deployConfig.parameters.domainName
+        if ($ThisVM.Domain) {
+            $DomainName = $ThisVM.Domain
+        }
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.PSName
         $CSName = $ThisVM.thisParams.CSName
 
@@ -193,9 +193,9 @@ Configuration Phase9
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
                 MachineName = if ($CSName) { $CSName } else { $PSName }
-                ExtFolder = $CM
-                Ensure    = "Present"
-                DependsOn = "[WriteStatus]WaitExtSchema"
+                ExtFolder   = $CM
+                Ensure      = "Present"
+                DependsOn   = "[WriteStatus]WaitExtSchema"
             }
         }
 
@@ -210,13 +210,13 @@ Configuration Phase9
     {
 
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
-           # Domain Creds
-    $DomainName = $deployConfig.parameters.domainName
-    if ($ThisVM.Domain) {
-        $DomainName = $ThisVM.Domain
-    }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+        # Domain Creds
+        $DomainName = $deployConfig.parameters.domainName
+        if ($ThisVM.Domain) {
+            $DomainName = $ThisVM.Domain
+        }
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
         $PSName = $ThisVM.thisParams.ParentSiteServer
 
         #$ParentSiteCode = ($deployConfig.virtualMachines | where-object { $_.vmName -eq ($Node.NodeName) }).ParentSiteCode
@@ -246,7 +246,7 @@ Configuration Phase9
 
         WriteStatus ODBCDriverInstall {
             DependsOn = "[WriteEvent]WriteConfigFinished"
-            Status = "Downloading and installing ODBC driver version 18"
+            Status    = "Downloading and installing ODBC driver version 18"
         }
 
         InstallODBCDriver ODBCDriverInstall {
@@ -266,32 +266,32 @@ Configuration Phase9
     {
         $ThisMachineName = $Node.NodeName
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
-           # Domain Creds
-    $DomainName = $deployConfig.parameters.domainName
-    if ($ThisVM.Domain) {
-        $DomainName = $ThisVM.Domain
-    }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+        # Domain Creds
+        $DomainName = $deployConfig.parameters.domainName
+        if ($ThisVM.Domain) {
+            $DomainName = $ThisVM.Domain
+        }
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"
         }
 
         InstallADK ADKInstall {
-            ADKPath      = "C:\temp\adksetup.exe"
-            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKPath              = "C:\temp\adksetup.exe"
+            ADKWinPEPath         = "c:\temp\adksetupwinpe.exe"
+            ADKDownloadPath      = $deployConfig.URLS.ADK
             ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE          
-            Ensure       = "Present"
-            DependsOn    = "[WriteStatus]ADKInstall"
+            Ensure               = "Present"
+            DependsOn            = "[WriteStatus]ADKInstall"
         }
 
         $nextDepend = "[InstallADK]ADKInstall"
 
         WriteStatus ODBCDriverInstall {
             DependsOn = $nextDepend
-            Status = "Downloading and installing ODBC driver version 18"
+            Status    = "Downloading and installing ODBC driver version 18"
         }
 
         InstallODBCDriver ODBCDriverInstall {
@@ -309,23 +309,28 @@ Configuration Phase9
             if ($CM -eq "CMTP") {
                 $CMDownloadStatus = "Downloading Configuration Manager technical preview"
             }
+           
 
-            WriteStatus DownLoadSCCM {
-                DependsOn = $nextDepend
-                Status    = $CMDownloadStatus
-            }
+            if ($ThisVM.thisParams.cmDownloadVersion.downloadUrl) {
 
-            DownloadSCCM DownLoadSCCM {
-                CM            = $CM
-                CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
-                Ensure        = "Present"
-                DependsOn     = "[WriteStatus]DownLoadSCCM"
+                WriteStatus DownLoadSCCM {
+                    DependsOn = $nextDepend
+                    Status    = $CMDownloadStatus
+                }
+            
+                DownloadSCCM DownLoadSCCM {
+                    CM            = $CM
+                    CMDownloadUrl = $ThisVM.thisParams.cmDownloadVersion.downloadUrl
+                    Ensure        = "Present"
+                    DependsOn     = "[WriteStatus]DownLoadSCCM"
+                }
+                $nextDepend = "[DownLoadSCCM]DownLoadSCCM"
             }
 
             FileReadAccessShare CMSourceSMBShare {
                 Name      = $CM
                 Path      = "c:\$CM"
-                DependsOn = "[DownLoadSCCM]DownLoadSCCM"
+                DependsOn = $nextDepend
             }
 
             $nextDepend = "[FileReadAccessShare]CMSourceSMBShare"
@@ -372,30 +377,30 @@ Configuration Phase9
     {
         $ThisMachineName = $Node.NodeName
         $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $node.NodeName.split(".")[0] }
-           # Domain Creds
-    $DomainName = $deployConfig.parameters.domainName
-    if ($ThisVM.Domain) {
-        $DomainName = $ThisVM.Domain
-    }
-    [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
-    [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+        # Domain Creds
+        $DomainName = $deployConfig.parameters.domainName
+        if ($ThisVM.Domain) {
+            $DomainName = $ThisVM.Domain
+        }
+        [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
+        [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"
         }
 
         InstallADK ADKInstall {
-            ADKPath      = "C:\temp\adksetup.exe"
-            ADKWinPEPath = "c:\temp\adksetupwinpe.exe"
-            ADKDownloadPath = $deployConfig.URLS.ADK
+            ADKPath              = "C:\temp\adksetup.exe"
+            ADKWinPEPath         = "c:\temp\adksetupwinpe.exe"
+            ADKDownloadPath      = $deployConfig.URLS.ADK
             ADKWinPEDownloadPath = $deployConfig.URLS.ADKPE         
-            Ensure       = "Present"
-            DependsOn    = "[WriteStatus]ADKInstall"
+            Ensure               = "Present"
+            DependsOn            = "[WriteStatus]ADKInstall"
         }
 
         WriteStatus WaitActive {
             Status    = "Waiting for $($ThisVM.thisParams.ActiveNode) to finish adding passive site server role"
-            Dependson = '[InstallADK]ADKInstall'
+            DependsOn = '[InstallADK]ADKInstall'
         }
 
         WaitForAll ActiveNode {
@@ -403,7 +408,7 @@ Configuration Phase9
             NodeName         = $ThisVM.thisParams.ActiveNode
             RetryIntervalSec = 15
             RetryCount       = 1200
-            Dependson        = '[WriteStatus]WaitActive'
+            DependsOn        = '[WriteStatus]WaitActive'
         }
 
         WriteStatus Complete {

@@ -1,15 +1,27 @@
 
 
 $global:Phase10Job = {
-    
+    param (
+        [object] $vm,
+        [array] $Dummy,
+        [boolean] $NewVMS,
+        [boolean] $Dummy2,
+        [string] $ScriptRoot
+    ) 
+       
     try {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
+        if ($NewVMS) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
+        }
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
-
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
+     
         # Get variables from parent scope
         $currentItem = $using:currentItem
         $Phase = $using:Phase
@@ -19,7 +31,7 @@ $global:Phase10Job = {
         if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
-        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$true
+        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
@@ -60,7 +72,7 @@ $global:Initialize_Disk = {
     }
     catch {
         try {
-        (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+            (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
             Get-Disk | Update-Disk
             start-sleep -Seconds 30
         }
@@ -96,7 +108,7 @@ $global:VM_Create = {
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
         # Get variables from parent scope
         $deployConfig = $using:deployConfigCopy
@@ -112,7 +124,7 @@ $global:VM_Create = {
 
         # Validate token exists
         if ($Common.FatalError) {
-            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
+            Write-Output "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
             return
         }
 
@@ -152,10 +164,84 @@ $global:VM_Create = {
         # Set base VM path
         $virtualMachinePath = Join-Path $deployConfig.vmOptions.basePath $deployConfig.vmOptions.domainName
 
+        $dynamicMinRam = 0
+        if ($currentItem.dynamicMinRam) {
+            $dynamicMinRam = $currentItem.dynamicMinRam
+        }
+
+        if (-not $CreateVM) {
+            # Check if memory matches
+            $restart = $false
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if memory has changed."
+            $vm = Get-VM2 -name $currentItem.VmName
+            # VM vs Config
+            $memory = ($currentItem.Memory / 1)            
+            $currentMemory = $vm.MemoryStartup
+
+            $dynamicRamEnabledRequested = ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1)))
+            $dynamicRamEnabledCurrent = $vm.DynamicMemoryEnabled
+            if ($dynamicRamEnabledRequested) {
+                $dynamicRamInBytes = ($dynamicMinRam / 1)
+                $dynamicRamCurrent = $vm.MemoryMinimum
+            }
+            else {
+                $dynamicRamInBytes = 0
+                $dynamicRamCurrent = 0
+            }
+
+
+            if ($memory -ne $currentMemory -or $dynamicRamEnabledCurrent -ne $dynamicRamEnabledRequested -or $dynamicRamInBytes -ne $dynamicRamCurrent) {
+               
+                if ($vm.State -eq "Running") {
+                    stop-vm2 -name $vm.VmName
+                    $restart = $true
+                }
+
+                if ($dynamicRamEnabledRequested) {
+           
+                    $priority = 25
+                    $buffer = 10
+                    if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
+                        $priority = 50
+                        $buffer = 20
+                    }
+                    if ($dynamicRamInBytes -gt 40MB) {
+                        Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                        $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
+                    }
+                    else {
+                        Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                    }
+                }
+                else {
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }                
+            }
+
+            $currentprocs = $vm.ProcessorCount
+            $requestedprocs = $currentItem.VirtualProcs
+
+            if ($currentprocs -ne $requestedprocs) {
+                if ($vm.State -eq "Running") {
+                    stop-vm2 -name $vm.VmName
+                    $restart = $true
+                }
+                $vm | Set-VM -ProcessorCount $requestedprocs                
+            }
+
+            if ($restart) {
+                if ($vm.Role -ne "DC") {
+                    start-sleep -seconds 60
+                }
+                start-vm2 -name $vm.VmName
+                start-sleep -Seconds 60
+            }
+        }
+
         if ($createVM) {
 
             # Check if VM already exists
-            $exists = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
+            $exists = Get-VM2 -Fallback -Name $currentItem.vmName -ErrorAction SilentlyContinue
             if ($exists) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): VM already exists. Exiting." -Failure -OutputStream -HostOnly
                 return
@@ -190,12 +276,7 @@ $global:VM_Create = {
             if ($currentItem.tpmEnabled) {
                 $tpmEnabled = $currentItem.tpmEnabled
             }
-
-
-            $dynamicMinRam = 0
-            if ($currentItem.dynamicMinRam) {
-                $dynamicMinRam = $currentItem.dynamicMinRam
-            }
+           
 
             if ($currentItem.Role -eq "DomainMember" -and $currentItem.SqlVersion) {
                 $role = "SqlServer"                
@@ -363,7 +444,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ProgressAction SilentlyContinue }
                     }
                 }
             }
@@ -615,6 +696,61 @@ $global:VM_Create = {
                 # Eject ISO from guest
                 Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
             }
+            #Copy CM to the VM
+            if ($currentItem.CMInstallDir -and $createVM) {
+
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files to the VM."
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying CM installation files to the VM" -Completed
+
+                # Determine which SQL version files should be used
+                $CMFiles = $azureFileList.CMVersions | Where-Object { $deployConfig.cmOptions.version -in $_.versions }
+
+                if ($CMFiles.filename) {
+                    # CM Iso Path
+                    $CMIso = $CMFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }                
+                    $CMIsoPath = Join-Path $Common.AzureFilesPath $CMIso
+
+                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $CMIsoPath as a DVD drive"
+                    # Add CM ISO to guest
+                    $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
+
+                    if (-not $dvd) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive. Retrying"
+                        Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                        start-sleep -Seconds 20
+                        $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $CMIsoPath -Passthru
+                    }
+                    write-log "[Phase $Phase]: $($currentItem.vmName): DVD = $dvd"
+
+                    if (-not $dvd) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Mounting $CMIsoPath as a DVD drive" -Failure -OutputStream
+                        return
+
+                    }
+                    # Create CM Dir inside VM
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
+
+                    # Copy files from DVD
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+               
+
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test CM Files" -ScriptBlock { get-item "c:\CMCB\cd.retail.LN\SMSSETUP\BIN\X64\setup.exe" }
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                        return
+                    }
+
+                    # Eject ISO from guest
+                    Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                }
+                else {
+                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
+                }
+            }
         }
         
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
@@ -728,7 +864,7 @@ $global:VM_Config = {
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
         if (-not ($Common.LogPath)) {
             Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
@@ -746,7 +882,7 @@ $global:VM_Config = {
     try {
         # Validate token exists
         if ($Common.FatalError) {
-            Write-Log "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
+            Write-Output "Critical Failure! $($Common.FatalError)" -Failure -OutputStream
             return
         }
 
@@ -880,32 +1016,49 @@ $global:VM_Config = {
                         if ($ip.StartsWith("169.254")) {
                             $success = $false
                             #$currentItem.network
-
+                            $currentNetwork = $currentItem.network
+                            if (-not $currentNetwork) {
+                                $currentNetwork = $deployConfig.vmOptions.Network
+                            }
                             if ($retryCount -eq 1) {
-                                Write-Progress2 $Activity -Status "Attempting to repair network $($currentItem.network) " -percentcomplete 10 -force
-                                stop-vm2 -Name $currentItem.vmname
-                                Remove-VMSwitch2 -NetworkName $($currentItem.network)
-                                Remove-DhcpServerv4Scope -scopeID $($currentItem.network) -ErrorAction SilentlyContinue
-                                stop-service "DHCPServer" | Out-Null
-                                $dhcp = Start-DHCP
-                                start-sleep -seconds 10
-                                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-                                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-                                $worked = Add-SwitchAndDhcp -NetworkName $currentItem.network -NetworkSubnet $currentItem.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -erroraction SilentlyContinue
+                                try {
+                                    Write-Progress2 $Activity -Status "Attempting to repair network $($currentNetwork) " -percentcomplete 10 -force
+                                    stop-vm2 -Name $currentItem.vmname
+                                    Remove-VMSwitch2 -NetworkName $($currentNetwork)
+                                    Remove-DhcpServerv4Scope -scopeID $($currentNetwork) -ErrorAction SilentlyContinue
+                                    stop-service "DHCPServer" | Out-Null
+                                    $dhcp = Start-DHCP
+                                    start-sleep -seconds 10
+                                    $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+                                    $DCNetwork = $DC.Network
+                                    if (-not $DCNetwork) {
+                                        $DCNetwork = $deployConfig.vmOptions.Network
+                                    }
+                                    $DNSServer = ($DCNetwork.Substring(0, $DCNetwork.LastIndexOf(".")) + ".1")
+                                    $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -ErrorAction SilentlyContinue
 
-                                start-vm2 -Name $currentItem.vmname
-                                $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
-                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                                    start-vm2 -Name $currentItem.vmname
+                                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
+                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                                }
+                                catch {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to repair network $($currentNetwork). $($_.Exception.Message)" -Warning -OutputStream
+                                    return
+                                }
                             }
                             if ($retryCount -eq 0) {
-                                stop-service "DHCPServer" | Out-Null
-                                start-sleep -seconds 5
-                                $dhcp = Start-DHCP
-                                $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                                try {
+                                    stop-service "DHCPServer" | Out-Null
+                                    start-sleep -seconds 5
+                                    $dhcp = Start-DHCP
+                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
+                                }
+                                catch {                                   
+                                }
                             }
                             if ($retryCount -eq 2) {
                                 $count = (Get-VMSwitch).Count
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentItem.network) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Could not obtain a DHCP IP Address ($ip) Should be on $($currentNetwork) ($count Hyper-V switches in use. If this is over 20, this could be the issue)" -Failure -OutputStream
                                 return
                             }
                             $retryCount++
@@ -1070,8 +1223,10 @@ $global:VM_Config = {
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
         $guestZipHash = $result.ScriptBlockOutput.Hash
 
+        $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
-        if (-not $alreadyCopiedDSC -or -not $guestZipHash) {
+
+        if (-not $alreadyCopiedDSC -or ($guestZipHash -ne $dscZipHash)) {
             # Copy DSC files
             Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
@@ -1185,6 +1340,10 @@ $global:VM_Config = {
                         Import-Module $folder.Name -Force
                     }
                 }
+                #Create the zip flag
+                $zipflag = "C:\staging\DSC\DSC.zip.Installed"
+                New-Item -Path $zipflag -ItemType File -Force -ErrorAction SilentlyContinue                
+
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -1200,8 +1359,18 @@ $global:VM_Config = {
         }
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
-
-        if ($dscZipHash -ne $guestZipHash) {
+        $flagFound = $false
+        $zipflag = "C:\staging\DSC\DSC.zip.Installed"
+        
+        if (Test-Path $zipflag) {
+            $flagFound = $true
+        }
+        if ($dscZipHash -ne $guestZipHash -or -not $flagFound) {
+            #Remove the zip flag
+            if ($flagFound) {
+                Remove-Item -Path $zipflag -Force -ErrorAction SilentlyContinue
+            }
+            
             Write-Progress2 $Activity -Status "Expanding Modules" -percentcomplete 40 -force
             # Extract DSC modules
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
@@ -1277,6 +1446,10 @@ $global:VM_Config = {
                     $newName = $dscLog -replace "Log.log", ((get-date).ToString("_yyyyMMdd_HHmmss") + ".log")
                     "Renaming $dscLog to $newName" | Out-File $log -Append
                     Rename-Item -Path $dscLog -NewName $newName -Force -Confirm:$false -ErrorAction Stop
+                }
+                $dscLogOld = "C:\staging\DSC\DSC_Log.txt"
+                if (Test-Path $dscLogOld) {
+                    Remove-Item $dscLog -Force -Confirm:$false -ErrorAction SilentlyContinue                    
                 }
 
                 # Rename previous MOF path
@@ -1710,6 +1883,8 @@ $global:VM_Config = {
                 foreach ($node in ($ConfigurationData.AllNodes.NodeName | Where-Object { $_ -ne "*" })) {
                     $nodeList.Add($node) | Out-Null
                 }
+
+                
                 $attempts = 0
                 $maxAttempts = 150
                 do {
@@ -1722,9 +1897,9 @@ $global:VM_Config = {
                         if (-not $node) {
                             continue
                         }
-                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
-                        if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -eq $true) {
-                            Write-Log "[Phase $Phase]: Node $node is NOT ready."
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
+                        if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -eq $true)) {
+                            Write-Log "[Phase $Phase]: Node $node is NOT ready. File Exists: $($result.ScriptBlockOutput) Fail: $($result.ScriptBlockFailed)"
                             $allNodesReady = $false
                         }
                         else {
@@ -1955,7 +2130,7 @@ $global:VM_Config = {
                                 #  [x] [<ScriptBlock>] ADA-W11Client1: DSC encountered failures. Attempting to continue. Status: Failure Output: Machine reboot failed. Please reboot it manually to finish processing the request.
                                 # This condition is expected, and we are actually rebooting.
                                 if ($($dscStatus.ScriptBlockOutput.Error) -like "*Machine reboot failed*") {
-                                    #If we dont reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
+                                    #If we do not reboot, maybe have a counter here, and after 30 or so, we can invoke a reboot command.
                                     Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "DSC is attempting to reboot"
                                     continue
                                 }
@@ -2135,8 +2310,8 @@ $global:VM_Config = {
                         $bailEarly = $true
                     }
 
-                    #ERROR: Computer account doesn't have admininstrative rights to the SQL Server~
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have admininstrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
+                    #ERROR: Computer account doesn't have administrative rights to the SQL Server~
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have administrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
                     if ($result.ScriptBlockOutput.Line) {
                         $failEntry = $result.ScriptBlockOutput.Line
                         $bailEarly = $true

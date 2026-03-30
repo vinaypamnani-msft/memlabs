@@ -191,7 +191,7 @@ $vmName = "z$vmName"
 
 # Check if VM exists
 $createVm = $true
-$vmTest = Get-VM2 -Name $vmName
+$vmTest = Get-VM2 -Fallback -Name $vmName
 if ($vmTest) {
     Write-Log "Found $vmName in Hyper-V."
     if ($ForceNewVm.IsPresent) {
@@ -199,6 +199,7 @@ if ($vmTest) {
     }
     else {
         Write-Log "ForceNewVm switch not present. Re-using existing VM may have undesired effects. Check if use of existing VM is allowed..." -Warning
+        start-vm2 -Name $vmName
         if ($UseExistingVm.IsPresent) {
             Write-Log "UseExistingVm switch present. Re-using existing VM..." -Warning
             $createVm = $false
@@ -220,7 +221,7 @@ if ($createVm) {
     }
 }
 
-Write-Log "Wait for $vmName to be ready to start customization..."
+Write-Log "Wait for $vmName to be ready to start customization... Auth Errors are expected for 5+ minutes while unattend runs"
 $connected = Wait-ForVm -VmName $VmName -OobeComplete -WhatIf:$WhatIf
 if (-not $connected) {
     Write-Log "Could not verify if VM is ready for customization. Exiting!" -Failure
@@ -261,7 +262,7 @@ if (-not $connected) {
 if ($PauseAfterCustomization.IsPresent) {
     $ready = $false
     do {
-        $response = Read-Host -Prompt "Pausing for post-customization changes. Press [y] to confinue"
+        $response = Read-Host -Prompt "Pausing for post-customization changes. Press [y] to continue"
         if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
             $ready = $true
         }
@@ -276,15 +277,22 @@ Write-Log "Customization finished. Waiting for sysprep, and VM to stop..." -Acti
 $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
 
 if (-not $connected) {
-    Write-Log "Timed out while waiting for VM to stop. Exiting!" -Failure
-    return
+    $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
+    if (-not $connected) {
+        start-sleep -Seconds 60
+        $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
+    }
+    if (-not $connected) {
+        Write-Log "Timed out while waiting for VM to stop. Exiting!" -Failure
+        return
+    }
 }
 
 Write-Log "Capturing the golden image from $vmName..." -Activity
 
 Write-Log "Obtaining OS disk path of $vmName..."
 if (-not $WhatIf) {
-    $f = Get-VM2 -Name $vmName | Get-VMFirmware
+    $f = Get-VM2 -Fallback -Name $vmName | Get-VMFirmware
     $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
     $osDiskPath = $f_hd.Device.Path
 
@@ -300,7 +308,9 @@ if (-not $WhatIf) {
 
 if ($purgeGoldImage) {
     Write-Log "Deleting existing 'golden' image $goldImagePath..."
-    Remove-Item -Path $goldImagePath -Force | Out-Null
+    if (test-path $goldImagePath) {
+        Remove-Item -Path $goldImagePath -Force | Out-Null
+    }
 }
 
 Write-Log "Copying the 'golden' image..."
@@ -313,7 +323,7 @@ else {
     Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
 
     # Delete VM
-    $vmTest = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+    $vmTest = Get-VM2 -Fallback -Name $VmName -ErrorAction SilentlyContinue
     if ($vmTest -and $DeleteVM.IsPresent) {
         if ($vmTest.State -ne "Off") {
             Write-Log "$VmName`: Turning the VM off forcefully..."

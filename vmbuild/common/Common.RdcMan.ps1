@@ -4,7 +4,7 @@
 
 
 function Install-RDCman {
-    # ARM template installs sysinternal tools via choco
+    # ARM template installs sysinternals tools via choco
     $rdcmanpath = "C:\ProgramData\chocolatey\lib\sysinternals\tools"
     $Global:newrdcmanpath = "C:\tools"
     $rdcmanexe = "RDCMan.exe"
@@ -15,7 +15,7 @@ function Install-RDCman {
     }
 
     # Download rdcman, if not present
-    if (-not (Test-Path "$rdcmanapath\$rdcmanexe")) {
+    if (-not (Test-Path "$rdcmanpath\$rdcmanexe")) {
 
         try {
             $ProgressPreference = 'SilentlyContinue'
@@ -38,7 +38,7 @@ function Install-RDCman {
 }
 
 
-function Save-RdcManSettignsFile {
+function Save-RdcManSettingsFile {
     param(
         [string]$rdcmanfile
     )
@@ -119,7 +119,7 @@ function Save-RdcManSettignsFile {
     #Write-Host "Count: $FilesToOpenCount"
     #FilesToOpen is blank
     if (($FilesToOpenCount -eq 0) ) {
-        Write-Verbose "[Save-RdcManSettignsFile] Copying FilesToOpen from template, since it was missing in existing file"
+        Write-Verbose "[Save-RdcManSettingsFile] Copying FilesToOpen from template, since it was missing in existing file"
         $settings.RemoveChild($FilesToOpen)
         $newFiles = $FilesToOpenFromTemplate.Clone()
         $FilesToOpen = $file.ImportNode($newFiles, $true)
@@ -264,7 +264,7 @@ function Save-RdcManSettignsFile {
 #    if ($group.properties.Name -eq "VMASTEMPLATE") {
 #        [void]$file.RemoveChild($group)
 #    }
-#    Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+#    Save-RdcManSettingsFile -rdcmanfile $rdcmanfile
 #    # Save to desired filename
 #    if ($shouldSave) {
 #        Write-Log "Killing RDCMan, if necessary and saving $rdcmanfile." -Success
@@ -283,6 +283,7 @@ function New-RDCManFileFromHyperV {
         [string]$rdcmanfile,
         [bool]$OverWrite = $false,
         [switch]$NoActivity,
+        [switch]$UseIP,
         [switch]$WhatIf
     )
 
@@ -296,14 +297,14 @@ function New-RDCManFileFromHyperV {
 
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
-            Write-Log "Regenerating new MEMLabs.RDG: stopping RDCMan.exe, and Deleting $rdcmanfile."
+            Write-Log "Stopping RDCMan.exe, deleting $rdcmanfile, and regenerating a new MEMLabs.RDG."
             $p = Get-Process -Name rdcman -ea Ignore
             if ($p) {
-                $p | Stop-Process
+                $p | Stop-Process -force
                 $killedAlready = $true
             }
             Start-Sleep 1
-            Remove-Item $rdcmanfile | out-null
+            Remove-Item $rdcmanfile -ProgressAction SilentlyContinue| out-null
         }
         $shouldSave = $true
     }
@@ -343,6 +344,7 @@ function New-RDCManFileFromHyperV {
         $group = $file.group
         if ($null -eq $group) {
             Write-Log "Could not load group section from $rdcmanfile" -Failure
+            Get-Content -Path $rdcmanfile | Out-Host
             if ($OverWrite -eq $false) {
                 return New-RDCManFileFromHyperV -rdcmanfile $rdcmanfile -OverWrite $true
             }
@@ -418,15 +420,18 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
-            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
 
             if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
-                if ( $null -eq $vm.SqlVersion -and $vm.deployedOS.Contains("Server")) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                $deployedOS = $vm.deployedOS
+                $isServer = $deployedOS -match "Server"
+
+                if ( $null -eq $vm.SqlVersion -and $isServer) {
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                 }
                 else {
-                    if (-not ($vm.deployedOS.Contains("Server"))) {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient"
+                    if (-not $isServer) {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient" -force
                     }
                 }
 
@@ -434,10 +439,10 @@ function New-RDCManFileFromHyperV {
 
             if ($vm.Role -eq "WSUS") {
                 if ($vm.installSUP) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)"
+                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)" -force
                 }
                 else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                 }
             }
 
@@ -448,20 +453,24 @@ function New-RDCManFileFromHyperV {
                         $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
                     }
                 }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary","CAS" }
+                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary", "CAS" }
                 if ($SiteServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)"
+                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)" -force
                 }
                 else {
                     if ($vm.Role -eq "DomainMember") {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer"
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                     }
                 }
             }
 
             $comment = $c | ConvertTo-Json
-
-            $name = $($vm.VmName)
+            if ($useIP) {
+                $name = $($vm.LastKnownIP)
+            }
+            else {
+                $name = $($vm.VmName)
+            }            
             $rolename = ""
             $ForceOverwrite = $false
             switch ($vm.Role) {
@@ -542,6 +551,25 @@ function New-RDCManFileFromHyperV {
             $clonedSG.properties.name = "OSD Clients"
             $clonedSG.ruleGroup.rule.value = "OSDClient"
             [void]$findgroup.AppendChild($clonedSG)
+            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
+            $subKeys = @(
+                "AllowDefaultCredentialsDomain",
+                "AllowSavedCredentialsDomain",
+                "AllowDefaultCredentials",
+                "AllowFreshCredentialsDomain",
+                "AllowFreshCredentials",
+                "AllowFreshCredentialsWhenNTLMOnly",
+                "AllowFreshCredentialsWhenNTLMOnlyDomain",
+                "AllowSavedCredentials",
+                "AllowSavedCredentialsWhenNTLMOnly"
+            )
+            foreach ($subKey in $subKeys) {
+                $fullPath = Join-Path $policyDefaultsPath $subKey
+
+                if (-not (Test-Path $fullPath)) {
+                    New-Item -Path $fullPath -Force | Out-Null
+                }
+            }
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
@@ -558,6 +586,25 @@ function New-RDCManFileFromHyperV {
             $clonedSG.properties.name = "Linux"
             $clonedSG.ruleGroup.rule.value = "Linux"
             [void]$findgroup.AppendChild($clonedSG)
+            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
+            $subKeys = @(
+                "AllowDefaultCredentialsDomain",
+                "AllowSavedCredentialsDomain",
+                "AllowDefaultCredentials",
+                "AllowFreshCredentialsDomain",
+                "AllowFreshCredentials",
+                "AllowFreshCredentialsWhenNTLMOnly",
+                "AllowFreshCredentialsWhenNTLMOnlyDomain",
+                "AllowSavedCredentials",
+                "AllowSavedCredentialsWhenNTLMOnly"
+            )
+            foreach ($subKey in $subKeys) {
+                $fullPath = Join-Path $policyDefaultsPath $subKey
+
+                if (-not (Test-Path $fullPath)) {
+                    New-Item -Path $fullPath -Force | Out-Null
+                }
+            }
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
@@ -610,7 +657,7 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $unknownVMs) {
             Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
-            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") }
+            foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
             $comment = $c | ConvertTo-Json
             $name = $($vm.VmName)
             $displayName = $($vm.VmName)
@@ -623,7 +670,7 @@ function New-RDCManFileFromHyperV {
         [void]$file.AppendChild($findgroup)
     }
 
-    $killed = Save-RdcManSettignsFile -rdcmanfile $rdcmanfile
+    $killed = Save-RdcManSettingsFile -rdcmanfile $rdcmanfile
     # Save to desired filename
     if ($shouldSave) {
         try {
@@ -884,16 +931,16 @@ function Get-RDCManPassword {
     param(
         [string]$rdcmanpath
     )
- 
+
     $rdcmandllpath = "$($common.AzureFilesPath)\support\rdcman.dll"
- 
+
     $rdcManFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "RdcManDLL" }
     $worked = Get-FileFromStorage -File $rdcManFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$false
     if (-not $worked) {
         Write-Log -Verbose "$rdcManFile Failed to download via Get-FileFromStorage"
     }
     unblock-file $rdcmandllpath
- 
+
     if (-not(test-path $rdcmandllpath)) {
         Write-Log "Rdcman.dll was not copied." -Failure
         return $null

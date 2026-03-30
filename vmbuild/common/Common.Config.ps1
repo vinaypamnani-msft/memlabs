@@ -76,7 +76,7 @@ function Get-UserConfiguration {
         }
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
-                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName
+                $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force
             }
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
@@ -86,19 +86,19 @@ function Get-UserConfiguration {
             if ($null -ne $vm.SQLInstanceName) {
                 if ($null -eq $vm.sqlPort) {
                     if ($vm.SQLInstanceName -eq "MSSQLSERVER") {
-                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433"
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "1433" -force
                     }
                     else {
-                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433"
+                        $vm | Add-Member -MemberType NoteProperty -Name "sqlPort" -Value "2433" -force
                     }
                 }
             }
             if ($null -ne $vm.AlwaysOnName ) {
                 if ($null -eq ($vm.AlwaysOnGroupName)) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnGroupName" -Value $vm.AlwaysOnName -force
                 }
                 if ($null -eq ($vm.AlwaysOnListenerName)) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName
+                    $vm | Add-Member -MemberType NoteProperty -Name "AlwaysOnListenerName" -Value $vm.AlwaysOnName -force
                 }
                 $vm.PsObject.properties.Remove('AlwaysOnName')
 
@@ -130,6 +130,9 @@ function Get-UserConfiguration {
                     if ($null -eq $vm.InstallDP) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
                     }
+                    if ($null -eq $vm.InstallSMSProv) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
+                    }
                 }
             }
 
@@ -137,7 +140,10 @@ function Get-UserConfiguration {
                 foreach ($listVM in $config.VirtualMachines) {
                     if ($listVM.RemoteSQLVM -eq $vm.VmName) {
                         if ($null -eq $vm.InstallRP) {
-                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force                            
+                        }
+                        if ($null -eq $vm.InstallSMSProv) {
+                            $vm | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                         }
                     }
                 }
@@ -159,7 +165,7 @@ function Get-UserConfiguration {
 
         if ($null -eq $config.vmOptions.domainNetBiosName ) {
             $netbiosName = $config.vmOptions.domainName.Split(".")[0]
-            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName
+            $config.vmOptions | Add-Member -MemberType NoteProperty -Name "domainNetBiosName" -Value $netbiosName -force
         }
 
         if ($null -ne $config.cmOptions.installDPMPRoles) {
@@ -223,6 +229,7 @@ function Get-FilesForConfiguration {
     if ($config) {
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
+        $cmVersionsToGet = $config.cmOptions.version | Select-Object -Unique
         if ($config.cmOptions.PrePopulateObjects) {
             $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
         }
@@ -252,6 +259,20 @@ function Get-FilesForConfiguration {
         }
     }
 
+    foreach ($file in $Common.AzureFileList.CMVersions) {
+        if ($file.filename) {
+            if (-not $DownloadAll -and ($cmVersionsToGet -notin $file.versions)) { 
+                write-log "CM Version $cmVersionsToGet is not in $($file.versions)" -verbose
+                continue 
+            }
+            $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+            if (-not $worked) {
+                Write-Log -Verbose "$file Failed to download via Get-FileFromStorage"
+                $allSuccess = $false
+            }
+        }
+    }
+
     foreach ($file in (Get-LinuxImages).Name) {
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
         $worked = Download-LinuxImage $file
@@ -261,7 +282,11 @@ function Get-FilesForConfiguration {
         }
     }
 
-    if ($config.cmOptions.PrePopulateObjects) {
+    #Check if any siteservers are in the config
+    $siteServers = $null
+    $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
+
+    if ($DownloadAll -or ($config.cmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
         $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
@@ -277,6 +302,42 @@ function Get-FilesForConfiguration {
                 $allSuccess = $false
             }
         }
+
+        #Get a list of all OSISO files, and delete any .ISO files in the OS folder that are not in the list
+        $osISOFiles = $Common.AzureFileList.OSISO
+        #Get Just the filenames without iso\os in front, eg iso\os\Windows11_24h2.iso becomes Windows11_24h2.iso
+        $osISOFileNames = $osISOFiles| ForEach-Object { [System.IO.Path]::GetFileName($_.filename) }
+        #Join AzureFilesPath + ISO\OS
+        $ISOPath = Join-Path $Common.AzureFilesPath "ISO\OS"
+        $osFiles = Get-ChildItem -Path $ISOPath -Filter "*.iso" -Recurse 
+        if ($osFiles) {
+            Write-Log "Deleting old OS ISO files that are not in the filelist.json: $($osFiles | ForEach-Object { $_.FullName })" -LogOnly
+            foreach ($file in $osFiles) {
+                #Check if the file is not in the list of osISOFileNames
+                if ($osISOFileNames -contains $file.Name) {
+                    Write-Log "Keeping $($file.FullName) as it is in the filelist.json." -LogOnly
+                    #Write-GreenCheck "Keeping $($file.FullName) as it is in the current config."
+                    continue
+                }
+                try {
+                    #Log to screen using Write-GreenCheck that the file is being deleted
+                    Write-GreenCheck "Deleting old OS ISO file: $($file.FullName)"
+                    Remove-Item -Path $file.FullName -Force -ErrorAction Stop -ProgressAction SilentlyContinue                   
+                    #Remove the .MD5 file if it exists
+                    $md5File = "$($file.FullName).md5"  
+                    if (Test-Path $md5File) {
+                        Write-GreenCheck "Deleting old OS ISO MD5 file: $md5File"
+                        Remove-Item -Path $md5File -Force -ErrorAction Stop -ProgressAction SilentlyContinue
+                    }
+                    
+                }
+                catch {
+                    Write-Log "Failed to delete file $($file.FullName): $_" -Failure
+                    $allSuccess = $false
+                }
+            }
+        }
+
     }
     
 
@@ -309,7 +370,7 @@ function New-DeployConfig {
         # domainAdminName was renamed, this is here for backward compat
         if ($null -ne ($configObject.vmOptions.domainAdminName)) {
             if ($null -eq ($configObject.vmOptions.adminName)) {
-                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName
+                $configObject.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $configObject.vmOptions.domainAdminName -force
             }
             $configObject.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
@@ -324,6 +385,12 @@ function New-DeployConfig {
 
             if ($item.remoteSQLVM -and -not $item.remoteSQLVM.StartsWith($configObject.vmOptions.prefix)) {
                 $item.remoteSQLVM = $configObject.vmOptions.prefix + $item.remoteSQLVM
+            }
+
+            if ($item.wsusDataBaseServer -and -not $item.wsusDataBaseServer.StartsWith($configObject.vmOptions.prefix)) {
+                if ($item.wsusDataBaseServer -ne "WID") {
+                    $item.wsusDataBaseServer = $configObject.vmOptions.prefix + $item.wsusDataBaseServer
+                }
             }
 
             if ($item.domainUser) {
@@ -359,6 +426,14 @@ function New-DeployConfig {
             }
         }
 
+        $pmpcVMs = $virtualMachines | Where-Object { $_.InstallPatchMyPC -and -not $_.Hidden } 
+        if ($pmpcVMs) {
+            foreach ($pmpcVM in $pmpcVMs) {
+                if ($pmpcVM.PatchMyPCFileServer -and -not $pmpcVM.PatchMyPCFileServer.StartsWith($configObject.vmOptions.prefix)) {
+                    $pmpcVM.PatchMyPCFileServer = $configObject.vmOptions.prefix + $pmpcVM.PatchMyPCFileServer
+                }
+            }
+        }
         # create params object
 
         $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
@@ -423,7 +498,7 @@ function Add-RemoteSQLVMToDeployConfig {
     Add-ExistingVMToDeployConfig -vmName $vmName -configToModify $configToModify -hidden:$hidden
     $remoteSQLVM = Get-VMFromList2 -deployConfig $configToModify -vmName $vmName -SmartUpdate:$true -Global:$true
     if (-not $remoteSQLVM) {
-        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it doesnt, please modify the hyper-v config to reflect the new name" -Failure
+        Write-Log "Could not get $vmName from List2.  Please make sure this VM exists in Hyper-V, and if it does not, please modify the hyper-v config to reflect the new name" -Failure
         return
     }
     Add-ExistingVMToDeployConfig -vmName $remoteSQLVM.VmName -configToModify $configToModify -hidden:$hidden
@@ -444,7 +519,7 @@ function Add-ExistingVMsToDeployConfig {
     #Update Cache
     get-list -type vm -SmartUpdate | out-null
 
-    # Add exising DC to list
+    # Add existing DC to list
     if ($config.virtualMachines | Where-Object { $_.role -notin ("OSDClient") }) {
         $existingDC = $config.parameters.ExistingDCName
         if ($existingDC) {
@@ -475,17 +550,26 @@ function Add-ExistingVMsToDeployConfig {
     }
 
     # Add Primary to list, when adding SiteSystem, also add the current site server to the list.
-    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" }
+    $systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -or $_.SqlVersion }
     #$systems = $config.virtualMachines | Where-Object { $_.role -eq "SiteSystem" -and -not $_.Hidden }
     foreach ($system in $systems) {
-        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        if ($system.SiteCode) {
+            $siteCode = $System.SiteCode
+        }
+        else {
+            $siteCode = Get-SiteCodeForSQLServer -deployConfig $config -SqlServer $system.VmName -SmartUpdate:$false
+            if (-not $siteCode) {
+                continue
+            }
+        }
+        $systemSite = Get-PrimarySiteServerForSiteCode -deployConfig $config -siteCode $siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
                 Add-RemoteSQLVMToDeployConfig -vmName $systemSite.RemoteSQLVM -configToModify $config
-            }
+            }            
         }
-        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $system.siteCode -type VM -SmartUpdate:$false
+        $systemSite = Get-SiteServerForSiteCode -deployConfig $config -siteCode $siteCode -type VM -SmartUpdate:$false
         if ($systemSite) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.vmName -configToModify $config
             if ($systemSite.RemoteSQLVM) {
@@ -494,6 +578,14 @@ function Add-ExistingVMsToDeployConfig {
         }
         if ($systemSite.pullDPSourceDP) {
             Add-ExistingVMToDeployConfig -vmName $systemSite.pullDPSourceDP -configToModify $config
+        }
+        if ($system.RemoteSQLVM) {
+            Add-RemoteSQLVMToDeployConfig -vmName $system.RemoteSQLVM -configToModify $config
+        }
+        if ($system.wsusDataBaseServer) {
+            if ($system.wsusDataBaseServer -ne "WID") {
+                Add-RemoteSQLVMToDeployConfig -vmName $system.wsusDataBaseServer -configToModify $config
+            }
         }
     }
 
@@ -545,6 +637,11 @@ function Add-ExistingVMsToDeployConfig {
         if ($vm.RemoteSQLVM) {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
+        if ($vm.wsusDataBaseServer) {
+            if ($vm.wsusDataBaseServer -ne "WID") {
+                Add-RemoteSQLVMToDeployConfig -vmName $vm.wsusDataBaseServer -configToModify $config
+            }
+        }
     }
 
 
@@ -558,11 +655,6 @@ function Add-ExistingVMsToDeployConfig {
             Add-ExistingVMToDeployConfig -vmName $SQLAOVM.OtherNode -configToModify $config
         }
     }
-
-
-
-
-
 
     $wsus = $config.virtualMachines | Where-Object { $_.role -eq "WSUS" -and -not $_.Hidden }
     foreach ($sup in $wsus) {
@@ -627,6 +719,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         "domain",
         "network",
         "prefix",
+        "domaindefaults"
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
@@ -756,9 +849,6 @@ function Add-VMToAccountLists {
             continue
         }
 
-        $DomainName = $deployConfig.vmOptions.domainName
-        #$DName = $DomainName.Split(".")[0]
-
         $DName = $deployConfig.vmOptions.domainNetBiosName
         if ($SQLSysAdminAccounts) {
             $accountLists.SQLSysAdminAccounts += "$DNAME\$($vmToAdd.vmName)$"
@@ -791,7 +881,7 @@ function Get-SQLAOConfig {
         return $null
     }
     if (-not ($PrimaryAO.OtherNode)) {
-        #ignore this.. We run this on all SQLAO nodes,and dont care about 2ndary
+        #ignore this.. We run this on all SQLAO nodes,and don't care about secondary
         return $null
     }
 
@@ -805,9 +895,10 @@ function Get-SQLAOConfig {
     $ServiceAccount = $PrimaryAO.SqlServiceAccount
     $AgentAccount = $PrimaryAO.SqlAgentAccount
 
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $cnUsersName = "CN=Users,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
-    $cnComputersName = "CN=Computers,DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+    $Domain = $deployConfig.vmOptions.domainName
+    $DN = 'DC=' + $Domain.Replace('.', ',DC=')    
+    $cnUsersName = "CN=Users,$DN"
+    $cnComputersName = "CN=Computers,$DN"
     #$netbiosName = $deployConfig.vmOptions.domainName.Split(".")[0]
     $netbiosName = $deployConfig.vmOptions.domainNetBiosName
     if (-not ($PrimaryAO.ClusterIPAddress)) {
@@ -899,7 +990,6 @@ function Get-ValidPRISiteCodes {
         $containsPS = $Config.virtualMachines.role -contains "Primary"
         if ($containsPS) {
             $PSVM = $Config.virtualMachines | Where-Object { $_.role -eq "Primary" }
-            # We dont support multiple subnets per config yet
             $existingSiteCodes += $PSVM.siteCode
         }
     }
@@ -1049,6 +1139,82 @@ function Get-ExistingForNetwork {
     }
 }
 
+function Get-ParentSiteServerForSiteCode {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $false, HelpMessage = "SiteCode")]
+        [object] $SiteCode,
+        [Parameter(Mandatory = $false, HelpMessage = "Return Object Type")]
+        [ValidateSet("Name", "VM")]
+        [string] $type = "Name",
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true,
+        [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
+        [string] $DomainName
+    )
+
+    if (-not $SiteCode) {
+        throw "SiteCode is NULL"
+        return $null
+    }
+
+    $SiteServerRoles = @("Primary", "Secondary", "CAS")
+    if ($DomainName) {
+        $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) })
+        if ($vmList) {
+            $first = $vmList | Select-Object -First 1
+   
+            $vmList = @(get-list -type VM -domain $DomainName | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) })
+
+            if ($type -eq "Name") {
+                return ($vmList | Select-Object -First 1).vmName
+            }
+            else {
+                return $vmList | Select-Object -First 1
+            }
+        }
+        return
+    }
+
+    $configVMs = @()
+    $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+    if ($configVMs) {
+        $first = $configVMs | Select-Object -First 1
+
+        $configVMs = @()
+        $configVMs += $deployConfig.virtualMachines | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) -and -not $_.hidden }
+        $first = $configVMs | Select-Object -First 1
+        
+        if ($type -eq "Name") {
+            return ($configVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $configVMs | Select-Object -First 1
+        }
+    }
+    $existingVMs = @()
+    $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $siteCode -and ($_.role -in $SiteServerRoles) }
+    if ($existingVMs) {
+        $first = $existingVMs | Select-Object -First 1
+      
+        $existingVMs = @()
+        $existingVMs += get-list -type VM -domain $deployConfig.vmOptions.DomainName -SmartUpdate:$SmartUpdate | Where-Object { $_.SiteCode -eq $($first.ParentSiteCode) -and ($_.role -in $SiteServerRoles) }
+        $first = $existingVMs | Select-Object -First 1
+        
+        if ($type -eq "Name") {
+            return ($existingVMs | Select-Object -First 1).vmName
+        }
+        else {
+            return $existingVMs | Select-Object -First 1
+        }
+    }
+    Add-ErrorMessage "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    
+    return $null
+}
 
 function Get-TopSiteServerForSiteCode {
     [CmdletBinding()]
@@ -1064,8 +1230,8 @@ function Get-TopSiteServerForSiteCode {
         [bool] $SmartUpdate = $true,
         [Parameter(Mandatory = $false, HelpMessage = "Optional Domain Name")]
         [string] $DomainName
-
     )
+
     if (-not $SiteCode) {
         throw "SiteCode is NULL"
         return $null
@@ -1122,7 +1288,9 @@ function Get-TopSiteServerForSiteCode {
             return $existingVMs | Select-Object -First 1
         }
     }
-    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $DomainName"
+    Add-ErrorMessage "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    throw "Could not find current or existing SiteServer for SiteCode: $SiteCode Domain: $($deployConfig.vmOptions.DomainName)"
+    
     return $null
 }
 
@@ -1293,6 +1461,24 @@ function Get-VMFromList2 {
     }
 }
 
+function Get-SiteCodeForSQLServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "DeployConfig")]
+        [object] $deployConfig,
+        [Parameter(Mandatory = $true, HelpMessage = "SQLServer VMName")]
+        [object] $SqlServer,
+        [Parameter(Mandatory = $false, HelpMessage = "SmartUpdate")]
+        [bool] $SmartUpdate = $true
+    )
+    $vm = Get-List2 -DeployConfig $deployConfig -SmartUpdate:$SmartUpdate | Where-Object { $_.RemoteSQLVM -eq $SqlServer }
+    if ($vm) {
+        if ($vm.siteCode) {
+            return $vm.siteCode
+        }
+    }
+}
+
 function Get-PrimarySiteServerForSiteCode {
     [CmdletBinding()]
     param (
@@ -1459,6 +1645,9 @@ function Get-VMSizeCached {
     if (Test-Path $cacheFile) {
         try {
             $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+            if ($common.InJob) {
+                return $vmCacheEntry
+            }
         }
         catch {}
     }
@@ -1474,8 +1663,15 @@ function Get-VMSizeCached {
 
 
     #write-host "Making new Entry for $($vm.vmName)"
-    # if we didnt return the cache entry, get new data, and add it to cache
-    $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+    # if we didn't return the cache entry, get new data, and add it to cache
+    if (-not $Common.InJob) {
+        $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+        $MemoryStartup = $vm.MemoryStartup
+    }
+    else {
+        $diskSize = 0
+        $MemoryStartup = 0
+    }
     $MemoryStartup = $vm.MemoryStartup
     $vmCacheEntry = [PSCustomObject]@{
         vmId          = $vm.vmID
@@ -1483,7 +1679,9 @@ function Get-VMSizeCached {
         MemoryStartup = $MemoryStartup
         EntryAdded    = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
-    ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
+    if (-not $Common.InJob) {
+        ConvertTo-Json  $vmCacheEntry | Out-File $cacheFile -Force
+    }
     return $vmCacheEntry
 }
 
@@ -1503,6 +1701,9 @@ function Get-VMNetworkCached {
     if (Test-Path $cacheFile) {
         try {
             $vmCacheEntry = Get-Content $cacheFile | ConvertFrom-Json
+            if ($common.InJob) {
+                return $vmCacheEntry
+            }
         }
         catch {}
     }
@@ -1514,8 +1715,7 @@ function Get-VMNetworkCached {
         }
     }
 
-
-    # if we didnt return the cache entry, get new data, and add it to cache
+    # if we didn't return the cache entry, get new data, and add it to cache
     $vmNet = ($vm | Get-VMNetworkAdapter)
     $vmCacheEntry = [PSCustomObject]@{
         vmId       = $vm.vmID
@@ -1524,7 +1724,7 @@ function Get-VMNetworkCached {
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
 
-    if ($vmNet.SwitchName) {
+    if ($vmNet.SwitchName -and -not $Common.InJob) {
         ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     }
     return $vmCacheEntry
@@ -1573,7 +1773,7 @@ function Update-VMInformation {
             $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                 if ($null -eq $vmNoteObject.LastKnownIP) {
-                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress
+                    $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $IPAddress -force
                 }
                 else {
                     $vmNoteObject.LastKnownIP = $IPAddress
@@ -1592,7 +1792,7 @@ function Update-VMInformation {
         # Detect if we need to update VM VMName, if VM Note doesn't have vmName prop
 
         if (-not $vmNoteObject.vmName) {
-            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "vmName" -Value $vm.Name
+            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "vmName" -Value $vm.Name -force
             Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
         }
 
@@ -1613,7 +1813,7 @@ function Update-VMInformation {
                     }
                 }
                 else {
-                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not running [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                 }
             }
         }
@@ -1647,7 +1847,7 @@ function Update-VMInformation {
                     }
                 }
                 else {
-                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not runnning [$vmState] or deployment is in progress [$inProgress]." -LogOnly
+                    Write-Log "Site code for $vmName is missing in VM Note, but VM is not running [$vmState] or deployment is in progress [$inProgress]." -LogOnly
                 }
             }
         }
@@ -1666,8 +1866,6 @@ function Update-VMInformation {
     }
 }
 
-
-
 function Get-VMFromHyperV {
     [CmdletBinding()]
     param (
@@ -1676,9 +1874,11 @@ function Get-VMFromHyperV {
     )
 
     #$diskSize = (Get-VHD -VMId $vm.ID | Measure-Object -Sum FileSize).Sum
-    $sizeCache = Get-VMSizeCached -vm $vm
-    $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
-    $diskSizeGB = $sizeCache.diskSize / 1GB
+    if (-not $common.InJob) {
+        $sizeCache = Get-VMSizeCached -vm $vm
+        $diskSizeGB = $sizeCache.diskSize / 1GB
+        $memoryStartupGB = $sizeCache.MemoryStartup / 1GB
+    }       
 
     if (-not $memoryStartupGB) {
         $memoryStartupGB = 0
@@ -1708,7 +1908,11 @@ function Get-VMFromHyperV {
     }
 
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
-    return $vmObject
+    if ($vmObject.Domain) {
+        #If we don't have a domain, its not one of ours.
+        return $vmObject
+    }
+    return $null
 }
 
 function Update-VMFromHyperV {
@@ -1721,6 +1925,7 @@ function Update-VMFromHyperV {
         [Parameter(Mandatory = $false)]
         [object] $vmNoteObject
     )
+
     if (-not $vmNoteObject) {
         try {
             if ($vm.Notes) {
@@ -1734,8 +1939,8 @@ function Update-VMFromHyperV {
     }
 
     if ($vmNoteObject) {
-        if ([String]::isnullorwhitespace($vmNoteObject.role)) {
-            # If we dont have a vmName property, this is not one of our VM's
+        if ([String]::IsNullOrWhiteSpace($vmNoteObject.role)) {
+            # If we don't have a vmName property, this is not one of our VM's
             $vmNoteObject = $null
         }
     }
@@ -1770,7 +1975,31 @@ function Update-VMFromHyperV {
                     }
                 }
                 default {
-                    $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                    
+                    switch ($value) {
+                        "True" {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $true -Force
+                            continue
+                        }
+                        "False" {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $false -Force
+                            continue
+                        }
+                        { $PSItem -like "*GB" -or $PSItem -like "*MB" -or $PSItem -like "*.*" } {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                            continue
+                        }
+                        { $PSItem -as [int] -is [int] } {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value ([int]$value) -Force
+                            continue
+                        }
+                        default {
+                            $vmObject | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $value -Force
+                        }
+
+                        
+                    }
+                   
                 }
             }
         }
@@ -1783,6 +2012,9 @@ function Update-VMFromHyperV {
         $vmObject.Role = "SiteSystem"
     }
 
+    if (-not $vmObject.DynamicMinRam) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name "DynamicMinRam" -Value $vmObject.Memory -Force
+    }
     #add missing Properties
     if ($vmObject.Role -in "SiteSystem", "CAS", "Primary") {
         if ($null -eq $vmObject.InstallRP) {
@@ -1798,6 +2030,9 @@ function Update-VMFromHyperV {
             if ($null -eq $vmObject.InstallDP) {
                 $vmObject | Add-Member -MemberType NoteProperty -Name "InstallDP" -Value $false -Force
             }
+            if ($null -eq $vmObject.InstallSMSProv) {
+                $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
+            }
         }
     }
 
@@ -1806,6 +2041,9 @@ function Update-VMFromHyperV {
             if ($listVM.RemoteSQLVM -eq $vmObject.VmName) {
                 if ($null -eq $vmObject.InstallRP) {
                     $vmObject | Add-Member -MemberType NoteProperty -Name "InstallRP" -Value $false -Force
+                }
+                if ($null -eq $vmObject.InstallSMSProv) {
+                    $vmObject | Add-Member -MemberType NoteProperty -Name "InstallSMSProv" -Value $false -Force
                 }
             }
         }
@@ -1838,9 +2076,9 @@ function Get-List {
     $return = $null
     #Get-PSCallStack | out-host
     if ($global:DisableSmartUpdate -eq $true) {
-        $doSmartUpdate = $false
+        $doSmartUpdate = $false        
     }
-    else {
+    else {        
         $mutexName = "GetList" + $pid
         $mtx = New-Object System.Threading.Mutex($false, $mutexName)
         #write-log "Attempting to acquire '$mutexName' Mutex" -LogOnly -Verbose
@@ -1857,12 +2095,12 @@ function Get-List {
 
         if ($DeployConfig) {
             try {
-                $DepoloyConfigJson = $DeployConfig | ConvertTo-Json -Depth 5
-                $DeployConfigClone = $DepoloyConfigJson | ConvertFrom-Json
+                $DeployConfigJson = $DeployConfig | ConvertTo-Json -Depth 5
+                $DeployConfigClone = $DeployConfigJson | ConvertFrom-Json
             }
             catch {
                 write-log "Failed to convert DeployConfig: $DeployConfig" -Failure
-                write-log "Failed to convert DeployConfig: $DepoloyConfigJson" -Failure
+                write-log "Failed to convert DeployConfig: $DeployConfigJson" -Failure
                 Write-Log "$($_.ScriptStackTrace)" -LogOnly
             }
 
@@ -1900,7 +2138,9 @@ function Get-List {
                             #    if (-not $global:vm_List.vmID -contains $vmID){
                             #write-host "adding missing vm $($vm.vmName)"
                             $vmObject = Get-VMFromHyperV -vm $vm
-                            $global:vm_List += $vmObject
+                            if ($vmObject) {
+                                $global:vm_List += $vmObject
+                            }
                         }
                         else {
                             if ($DomainName) {
@@ -1929,8 +2169,9 @@ function Get-List {
                     foreach ($vm in $virtualMachines) {
 
                         $vmObject = Get-VMFromHyperV -vm $vm
-
-                        $return += $vmObject
+                        if ($vmObject) {
+                            $return += $vmObject
+                        }
                     }
 
                     $global:vm_List = $return
@@ -2071,19 +2312,19 @@ function Test-InProgress {
         [object] $DeployConfig
     )
 
-    $InProgessVMs = @()
+    $InProgressVMs = @()
     foreach ($thisVM in $deployConfig.virtualMachines) {
         $thisVMObject = Get-VMFromList2 -deployConfig $deployConfig -vmName $thisVM.vmName
         if ($thisVMObject.inProgress -eq $true) {
-            $InProgessVMs += $thisVMObject.vmName
+            $InProgressVMs += $thisVMObject.vmName
         }
     }
 
-    if ($InProgessVMs.Count -gt 0) {
+    if ($InProgressVMs.Count -gt 0) {
         Write-Host
         write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
-        write-host2 -ForegroundColor Red "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
-        write-log "ERROR: Virtual Machiness: [ $($InProgessVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
+        write-host2 -ForegroundColor Red "ERROR: Virtual Machines: [ $($InProgressVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE."
+        write-log "ERROR: Virtual Machines: [ $($InProgressVMs -join ",") ] ARE CURRENTLY IN A PENDING STATE." -LogOnly
         write-host
         write-host2 -ForegroundColor Snow "The Previous deployment may be in progress, or may have failed. Please wait for existing deployments to finish, or delete these in-progress VMs"
         write-host2 -ForegroundColor Blue "*************************************************************************************************************************************"
@@ -2149,12 +2390,14 @@ Function Write-GreenCheck {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
-        [string] $ForegroundColor
-    )
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
+    )        
     $CHECKMARK = ([char]8730)
     $text = $text.Replace("SUCCESS: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor LimeGreen "$CHECKMARK" -NoNewline
@@ -2183,15 +2426,18 @@ Function Write-RedX {
         [Parameter()]
         [switch] $NoIndent,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("ERROR: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
-    Write-Host "[" -NoNewLine
+        
+    Write-Host2 "[" -NoNewLine -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     Write-Host2 -ForeGroundColor Red "x" -NoNewline
-    Write-Host "] " -NoNewline
+    Write-Host2 "] " -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     if ($ForegroundColor) {
         Write-ColorizedBrackets -ForegroundColor $ForegroundColor $text
 
@@ -2218,11 +2464,13 @@ Function Write-WhiteI {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2        
     )
     $text = $text.Replace("Info: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor White "i" -NoNewline
@@ -2293,11 +2541,13 @@ Function Write-OrangePoint2 {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("WARNING: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Orange "⚠️" -NoNewline
@@ -2361,7 +2611,7 @@ Function Get-LinuxImages {
         }
     }
     else {
-        # Get a copy if the file doesnt exist
+        # Get a copy if the file doesn't exist
         & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
     }
     $linux = Get-Content $linuxJson | convertfrom-json
@@ -2406,16 +2656,16 @@ Function Download-LinuxImage {
         }
     }
 
-    # If we downloaded a new file, or one didnt exist
+    # If we downloaded a new file, or one didn't exist
 
     # If we downloaded a new file, delete the old one
     if (test-path $fullfileVHDX -PathType Leaf) {
-        Remove-Item $fullfileVHDX -force
+        Remove-Item $fullfileVHDX -force -ProgressAction SilentlyContinue
     }
 
     # If the intermediate file exists, delete it so we can extract a new one.
     if (test-path $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -PathType Leaf) {
-        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force
+        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force -ProgressAction SilentlyContinue
     }
 
     #Expand the downloaded file
@@ -2433,6 +2683,7 @@ Function Show-Summary {
     )
 
     $fixedConfig = $deployConfig.virtualMachines | Where-Object { -not $_.hidden }
+    $existingConfig = $deployConfig.virtualMachines | Where-Object { $_.hidden }
     $DC = $deployConfig.virtualMachines  | Where-Object { $_.role -eq "DC" }
 
     #$CHECKMARK = ([char]8730)
@@ -2462,7 +2713,7 @@ Function Show-Summary {
             $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
             if ($deployConfig.cmOptions.OfflineSCP) {
                 if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed."
+                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed"
                     $versionInfoPrinted = $true
                 }
             }
@@ -2472,7 +2723,7 @@ Function Show-Summary {
                     Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
                 }
                 else {                    
-                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed."
+                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed"
                 }
 
             }
@@ -2517,11 +2768,11 @@ Function Show-Summary {
             }
         }
         else {
-            Write-RedX "ConfigMgr will not be installed."
+            Write-RedX "ConfigMgr will not be installed"
         }
 
         if ($deployConfig.cmOptions.usePKI) {
-            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and reporting roles"
+            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and Reporting Point role"
         }
         else {
             Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
@@ -2533,17 +2784,17 @@ Function Show-Summary {
        
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
-            Write-GreenCheck "DP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "DP role: $($testSystem.vmName -Join ",")"
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.InstallMP }
         if ($testSystem) {
-            Write-GreenCheck "MP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "MP role: $($testSystem.vmName -Join ",")"
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
-            Write-GreenCheck "SUP role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "SUP role: $($testSystem.vmName -Join ",")"
             if ($deployConfig.cmOptions.OfflineSUP) {
                 Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
             }
@@ -2551,7 +2802,7 @@ Function Show-Summary {
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
         if ($testSystem) {
-            Write-GreenCheck "Reporting Point role will be installed on $($testSystem.vmName -Join ",")"
+            Write-GreenCheck "RP role: $($testSystem.vmName -Join ",")"
         }
 
 
@@ -2582,7 +2833,7 @@ Function Show-Summary {
             $PassiveVM = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
         }
         else {
-            Write-RedX "ConfigMgr will not be installed."
+            Write-RedX "ConfigMgr will not be installed"
         }
     }
 
@@ -2649,6 +2900,7 @@ Function Show-Summary {
             if ($_.InstallSUP) { $roles += "SUP" }
             if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }
+            if ($_.InstallSMSProv) { $roles += "PROV" }
             if ($_.InstallDP) {
                 if ($_.pullDPSourceDP) { $roles += "Pull DP" }
                 else {
@@ -2671,15 +2923,36 @@ Function Show-Summary {
             }
             else {
                 if ($null -ne $_.remoteSQLVM) {
-                ("Remote -> " + $($_.remoteSQLVM))
+                    ("Remote -> " + $($_.remoteSQLVM))
                 }
             }
         }
     } ` | Out-String
+
+    $list = Get-List -Type VM
+    $existingPrinted = $false
+    Foreach ($evm in $existingConfig) {
+        $CurrentVM = $list | Where-Object { $_.vmName -eq $evm.vmName }
+        $propsToInclude = $common.supported.PropsToUpdate
+        if ($CurrentVM) {
+            foreach ($prop in $evm.PSObject.Properties) {
+                $name = $prop.Name
+                if ($name -in $propsToInclude) {
+                    if ($evm."$name" -ne $CurrentVM."$name") {
+                        if (-not $existingPrinted) {
+                            Write-GreenCheck "Changes to the following existing VMs will be performed"
+                            $existingPrinted = $true
+                        }
+                        
+                        Write-WhiteI -indent 6 "$($evm.VmName) $name = [$($CurrentVM."$name")] -> [$($evm."$name")]"
+                    }
+                }
+            }
+        }
+    }
     Write-Host
     $outIndented = $out.Trim() -split "\r\n"
     foreach ($line in $outIndented) {
         Write-Host "  $line"
     }
-
 }

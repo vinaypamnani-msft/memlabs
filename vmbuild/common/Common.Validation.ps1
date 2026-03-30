@@ -5,9 +5,10 @@ function Add-ValidationMessage {
         [switch]$Failure,
         [switch]$Warning
     )
-
+    Write-Log -Verbose $Message
     $ReturnObject.Problems += 1
     [void]$ReturnObject.Message.AppendLine($Message)
+
 
     if ($Failure.IsPresent) {
         $ReturnObject.Failures += 1
@@ -29,7 +30,19 @@ function Write-ValidationMessages {
         Write-RedX $msg
     }
 }
+function Convert-ValidationMessages {
 
+    param (
+        [object]$TestObject
+    )
+
+    $messages = $($TestObject.Message) -split "\r\n"
+    foreach ($msg in $messages.Trim()) {
+        if (-not [string]::IsNullOrWhiteSpace($msg)) {
+            Add-ErrorMessage -message $msg
+        }
+    }
+}
 
 function Test-ValidVmOptions {
     param (
@@ -41,6 +54,13 @@ function Test-ValidVmOptions {
     if (-not $ConfigObject.vmOptions.prefix) {
         Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix not present in vmOptions. You must specify the prefix that will be added to name of Virtual Machine(s)." -ReturnObject $ReturnObject -Failure
     }
+
+    $ExistingPrefixes = Get-list -type Prefix | where-object { $_.Domain -ne $ConfigObject.vmOptions.DomainName } | Select-Object -ExpandProperty Prefix
+
+    if ($ConfigObject.vmOptions.prefix -in $ExistingPrefixes) {
+        Add-ValidationMessage -Message "VM Options Validation: vmOptions.prefix value [$($ConfigObject.vmOptions.prefix)] is already in use by another domain. You must specify a different prefix." -ReturnObject $ReturnObject -Failure
+    }
+
 
     # basePath
     if (-not $ConfigObject.vmOptions.basePath) {
@@ -214,7 +234,8 @@ function Test-MachineNameExists {
 
     write-log "Testing $name" -Verbose
 
-    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name }
+    $nameWithPrefix = $config.vmOptions.prefix + $name
+    $vm = Get-List2 -deployConfig $config -SmartUpdate | where-object { $_.vmName -eq $name -or $_.vmName -eq $nameWithPrefix }
 
     if (-not $vm) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid reference VM: $name. VM does not exist." -ReturnObject $ReturnObject -Warning
@@ -300,6 +321,18 @@ function Test-ValidVmSupported {
         Test-MachineNameExists $VM.remoteSQLVM -ReturnObject $ReturnObject -config $ConfigObject
     }
 
+    if ($VM.wsusDataBaseServer) {
+        if ($VM.wsusDataBaseServer -ne "WID") {
+            Test-ValidMachineName $VM.wsusDataBaseServer -ReturnObject $ReturnObject
+            Test-MachineNameExists $VM.wsusDataBaseServer -ReturnObject $ReturnObject -config $ConfigObject
+
+            $SQLVM = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $($VM.wsusDataBaseServer) }
+            if (-not $SQLVM.sqlVersion) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$($VM.wsusDataBaseServer)] does not contain sql; When deploying WSUS Role with remote SQL, you must specify the SQL VM." -ReturnObject $ReturnObject -Warning
+            }
+        }
+    }
+
     if ($VM.fileServerVM) {
         Test-ValidMachineName $VM.fileServerVM -ReturnObject $ReturnObject
         Test-MachineNameExists $VM.fileServerVM -ReturnObject $ReturnObject -config $ConfigObject
@@ -322,6 +355,10 @@ function Test-ValidVmSupported {
     if ($VM.remoteContentLibVM) {
         Test-ValidMachineName $VM.remoteContentLibVM -ReturnObject $ReturnObject
         Test-MachineNameExists $VM.remoteContentLibVM -ReturnObject $ReturnObject -config $ConfigObject
+    }
+    if ($VM.PatchMyPCFileServer) {
+        Test-ValidMachineName $VM.PatchMyPCFileServer -ReturnObject $ReturnObject
+        Test-MachineNameExists $VM.PatchMyPCFileServer -ReturnObject $ReturnObject -config $ConfigObject
     }
 
     if ($VM.ClusterName) {
@@ -641,7 +678,7 @@ function Test-ValidRoleSiteServer {
     $vmRole = $VM.role
 
     # Primary/CAS must contain SQL
-    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -ne "Secondary") {
+    if (-not $VM.sqlVersion -and -not $VM.remoteSQLVM -and $vmRole -in ("CAS", "Primary")) {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not contain sqlVersion; When deploying $vmRole Role, you must specify the SQL Version." -ReturnObject $ReturnObject -Warning
     }
 
@@ -685,13 +722,15 @@ function Test-ValidRoleSiteServer {
 
     }
     else {
-        # Local SQL
-        $minMem = 6
-        if ($vmRole -eq "Secondary") { $minMem = 3 }
-
-        # Minimum Memory
-        if ($VM.memory / 1 -lt $minMem * 1GB) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
+        if ($VM.SqlVersion) {
+            # Local SQL
+            $minMem = 6
+            if ($vmRole -eq "Secondary") { $minMem = 3 }
+            if ($vmRole -eq "SiteSystem") { $minMem = 4 }
+            # Minimum Memory
+            if ($VM.memory / 1 -lt $minMem * 1GB) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] has SQL; must contain a minimum of $($minMem)GB memory." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
@@ -716,17 +755,21 @@ function Test-ValidRoleSiteServer {
         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] reserved for Configuration Manager and Windows." -ReturnObject $ReturnObject -Failure
     }
 
-    $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode }
-    foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+    if ($vm.Role -in "CAS", "Primary", "Secondary" ) {
+        $otherVMs = $ConfigObject.VirtualMachines | Where-Object { $_.vmName -ne $VM.vmName } | Where-Object { $null -ne $_.Sitecode } | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" }
+        foreach ($vmWithSiteCode in $otherVMs) {
+            if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
+                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+            }
         }
-    }
 
-    $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $null -ne $_.siteCode }
-    foreach ($vmWithSiteCode in $otherVMs) {
-        if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
-            Add-ValidationMessage -Message "$vmRole Validation: VM contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+        $otherVMs = Get-List -type VM -DomainName $($ConfigObject.vmOptions.DomainName) -SmartUpdate | Where-Object { $null -ne $_.siteCode } | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" }
+        foreach ($vmWithSiteCode in $otherVMs) {
+            if ($VM.siteCode.ToUpperInvariant() -eq $vmWithSiteCode.siteCode.ToUpperInvariant() -and ($vmWithSiteCode.role -in "CAS", "Primary", "Secondary")) {
+                if ($vmName -ne $($vmWithSiteCode.vmName)) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] contains Site Code [$($VM.siteCode)] that is already used by another siteserver [$($vmWithSiteCode.vmName)]." -ReturnObject $ReturnObject -Failure
+                }
+            }
         }
     }
 
@@ -929,7 +972,11 @@ function Test-Configuration {
     )
     #Get-PSCallStack | out-host
 
-
+    $disableSmartUpdateValue = (Get-Variable -Name 'DisableSmartUpdate' -Scope Global -ErrorAction SilentlyContinue).Value
+    $OrigSmartUpdateValue = $disableSmartUpdateValue
+    if ($null -eq $OrigSmartUpdateValue ) {
+        $OrigSmartUpdateValue = $false
+    }
     try {
 
         $return = [PSCustomObject]@{
@@ -945,7 +992,7 @@ function Test-Configuration {
             try {
                 $configObject = Get-Content $FilePath -Force | ConvertFrom-Json
                 #update cache, and then disable re-loading it until we complete
-                get-list2 -deployConfig $configObject -SmartUpdate | out-null
+                get-list2 -deployConfig $configObject -SmartUpdate | out-null                                
                 $global:DisableSmartUpdate = $true
             }
             catch {
@@ -985,13 +1032,13 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Creating DeployConfig" -PercentComplete 5
         $deployConfig = New-DeployConfig -configObject $configObject
 
-        if ($deployConfig.virtualMachines.Count -eq 0) {
-            $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
-            $return.Problems += 1
-            #$return.Failures += 1
-            Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
-            return $return
-        }
+        #if ($deployConfig.virtualMachines.Count -eq 0) {
+        #    $return.Message = "Configuration contains no Virtual Machines. Nothing to deploy."
+        #    $return.Problems += 1
+        #$return.Failures += 1
+        #    Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+        #    return $return
+        #}
 
         $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
@@ -1027,6 +1074,7 @@ function Test-Configuration {
         # ==============
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
+            $vmName = $vm.VmName
             $i++
             if ($i -ge 35) {
                 $i = 35
@@ -1103,7 +1151,51 @@ function Test-Configuration {
                 }
             }
 
-            Test-ValidUserName -name $vm.domainUser -vmname $vm.vmName
+            # WSUS Validations
+            # ================
+            Write-Progress2 -Activity "Validating Configuration" -Status "Testing WSUS" -PercentComplete 37
+            if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
+                if (-not $vm.wsusContentDir) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
+                }
+                if ($vm.InstallSup -and -not $vm.SiteCode) {
+                    Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
+                }
+
+                if ($vm.InstallSUP) {                  
+                    $property = $vm
+                    if ($property.ParentSiteCode -or $property.SiteCode) {
+                        $sitecode = $property.SiteCode                    
+                        if ($sitecode) {
+                            $Parent = Get-ParentSiteServerForSiteCode -deployConfig $deployConfig -siteCode $sitecode -type VM -SmartUpdate:$false
+                         
+                            if ($Parent.SiteCode) {
+                                $list2 = Get-List2 -deployConfig $deployConfig
+                                $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
+                                if (-not $existingSUP) {                                                       
+                                    Add-ValidationMessage -Message "$vmName SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
+                                }
+                            }
+                            else {
+                                if ($vm.role -eq "CAS") {                     
+                                    #Get a list of child site codes
+                                    $childSiteCodes = @($deployConfig.virtualMachines | Where-Object { $_.ParentSiteCode -eq $vm.sitecode } | Select-Object -ExpandProperty SiteCode -Unique)
+
+                                    # This is the Top Level Site, Child sites should have a SUP role. Validate that.
+                                    $childSites = @($deployConfig.virtualMachines | Where-Object { ($_.SiteCode -in $childSiteCodes) -and $_.InstallSUP })
+
+                                    if ($childSites.Count -eq 0) {
+                                        #Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary ($($childSiteCodes -join ',')) site having a SUP role." -ReturnObject $return -Failure
+                                        Add-ValidationMessage -Message "$vmName SUP role installed on the CAS ($($sitecode)) must also have a SUP on a Primary ($($childSiteCodes -join ',')) site." -ReturnObject $return -Failure
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Test-ValidUserName -name $vm.domainUser -vmName $vm.vmName
 
         }
 
@@ -1112,17 +1204,7 @@ function Test-Configuration {
         Write-Progress2 -Activity "Validating Configuration" -Status "Testing DC" -PercentComplete 35
         Test-ValidRoleDC -ConfigObject $deployConfig -ReturnObject $return
 
-        # WSUS Validations
-        # ================
-
-        if ($vm.Role -eq "WSUS" -or $vm.InstallSUP) {
-            if (-not $vm.wsusContentDir) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a wsusContentDir." -ReturnObject $return -Failure
-            }
-            if ($vm.InstallSup -and -not $vm.SiteCode) {
-                Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
-            }
-        }
+       
 
         # CAS Validations
         # ==============
@@ -1142,7 +1224,7 @@ function Test-Configuration {
                 }
 
                 # Validate CAS role
-                Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $CSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 #}
             }
@@ -1156,6 +1238,9 @@ function Test-Configuration {
                 if ($vm.siteName.Length -gt 127) {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$($vm.vmName)] siteName is greater than 127 chars" -ReturnObject $return -Warning
                 }
+            }
+            if ($vm.SiteCode) {
+                Test-ValidRoleSiteServer -VM $vm -ConfigObject $deployConfig -ReturnObject $return
             }
         }
 
@@ -1173,7 +1258,7 @@ function Test-Configuration {
                 $vmName = $PSVM.vmName
                 $vmRole = $PSVM.role
                 $psParentSiteCode = $PSVM.parentSiteCode
-                Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $PSVM -ConfigObject $deployConfig -ReturnObject $return
 
                 # Valid parent Site Code
                 if ($psParentSiteCode) {
@@ -1214,7 +1299,7 @@ function Test-Configuration {
 
             # Prep for multi-subnet, but blocked right now by Test-SingleRole
             foreach ($SECVM in $SecondaryVMs) {
-                Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
+                #Test-ValidRoleSiteServer -VM $SECVM -ConfigObject $deployConfig -ReturnObject $return
             }
 
             #}
@@ -1282,16 +1367,16 @@ function Test-Configuration {
         if ($deployConfig.cmOptions.version -eq "tech-preview") {
             $anyPS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "Primary" }
             if ($anyPS.Count -gt 1) {
-                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with more than one Primary; Tech Preview doesn't support support multiple sites." -ReturnObject $return -Warning
             }
             if ($anyPS.Count -eq 1) {
                 if ($anyPS.parentSiteCode) {
-                    Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a parent Site Code [$($anyPS.parentSiteCode)]; Tech Preview doesn't support support a Hierarchy." -ReturnObject $return -Warning
+                    Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with a parent Site Code [$($anyPS.parentSiteCode)]; Tech Preview doesn't support support a Hierarchy." -ReturnObject $return -Warning
                 }
             }
             $anyCS = $deployConfig.VirtualMachines | Where-Object { $_.role -eq "CAS" }
             if ($anyCS) {
-                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specfied with a CAS; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
+                Add-ValidationMessage -Message "Version Conflict: Tech-Preview specified with a CAS; Tech Preview doesn't support CAS." -ReturnObject $return -Warning
             }
         }
 
@@ -1350,13 +1435,15 @@ function Test-Configuration {
            
 
             foreach ($version in $common.AzureFileList.CmVersions) {
-                try {
-                    if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
-                        Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                if (-not $version.filename) {
+                    try {
+                        if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                            Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                        }
                     }
-                }
-                catch {
-                    Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                    catch {
+                        Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                    }
                 }
             }
 
@@ -1443,11 +1530,11 @@ function Test-Configuration {
         $return.Problems += 1
         #$return.Failures += 1
         Write-Exception -ExceptionInfo $_
-        Write-Progress2 -Activity "Validating Configuration"  -Completed
+        Write-Progress2 -Activity "Validating Configuration"  -Completed        
         return $return
     }
-    finally {
-        $global:DisableSmartUpdate = $false
+    finally {        
+        $global:DisableSmartUpdate = $OrigSmartUpdateValue
         Write-Progress2 -Activity "Validating Configuration"  -Completed
     }
 }

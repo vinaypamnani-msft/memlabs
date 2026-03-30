@@ -92,7 +92,7 @@ $enableVerbose = if ($PSBoundParameters.Verbose -eq $true) { $true } else { $fal
 $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false };
 
 # Dot source common
-. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -InJob:$false
 
 if ($global:init_failed) {
     Write-Log "Failed to initialize common. Exiting." -Failure
@@ -104,7 +104,7 @@ Test-NoRRAS
 
 
 if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
-    Set-VMhost -EnableEnhancedSessionMode $True
+    Set-VMHost -EnableEnhancedSessionMode $True
 }
 
 if (-not $NoWindowResize.IsPresent) {
@@ -112,18 +112,19 @@ if (-not $NoWindowResize.IsPresent) {
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
-        $percent = 0.70
+        $percent = 0.85
+        $percentheight = 0.90
         $width = $screen.Bounds.Width * $percent
-        $height = $screen.Bounds.Height * $percent
+        $height = $screen.Bounds.Height * $percentheight
 
         # Set Window
         Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
         $parent = (Get-CimInstance win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+        $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
         if ($parent) {
             # set parent, cmd -> ps
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
-        }
-
+        }       
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
@@ -139,8 +140,13 @@ if ($Common.FatalError) {
 
 # Validate PS7
 if (-not $Common.PS7) {
-    Write-Log "You must use PowerShell version 7.1 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
+    Write-Log "You must use PowerShell version 7.4 or above. `n  Please use VMBuild.cmd to automatically install latest version of PowerShell or install manually from https://docs.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows.`n  If PowerShell 7.1 or above is already installed, run pwsh.exe to launch PowerShell and run the script again." -Failure
     exit 1
+}
+
+ if ([Environment]::OSVersion.Version -lt [System.version]"10.0.26100.0") {
+          Write-Log "This version of MemLabs requires Server 2025 or greater." -Failure  
+          Install-HostToServer2025
 }
 
 Set-PS7ProgressWidth
@@ -238,6 +244,7 @@ try {
 
     # Automatically update DSC.Zip
     if ($Common.DevBranch) {
+        Set-Location $PSScriptRoot  | Out-Null
         $psdLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psd1").LastWriteTime
         $psmLastWriteTime = (Get-ChildItem ".\DSC\TemplateHelpDSC\TemplateHelpDSC.psm1").LastWriteTime
         if (Test-Path ".\DSC\DSC.zip") {
@@ -252,6 +259,8 @@ try {
     }
 
 
+    # Verify Hyper-V is installed
+    Install-HyperV
 
     ### Run maintenance
     if (-not $Configuration) {
@@ -281,7 +290,7 @@ try {
 
     # Load config
     if ($Configuration) {       
-        $ConfigurationShort = Split-Path $Configuration -LeafBase
+        $Global:ConfigurationShort = Split-Path $Configuration -LeafBase
         Write-Log "Validating specified configuration: $Configuration"
         $configResult = Get-UserConfiguration -Configuration $Configuration  # Get user configuration
         if ($configResult.Loaded) {
@@ -314,7 +323,7 @@ try {
         Write-Log -Verbose "Phase 1 is scheduled to run"
     }
     else {
-        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVms = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
+        Write-Log -Verbose "Phase 1 is not scheduled to run: ExistingVMs = $($existingVMs.vmName -join ",") NewVMs = $($userConfig.virtualMachines.vmName -join ",")"
     }
 
 
@@ -332,13 +341,17 @@ try {
 
                 if ($runPhase1 -eq $false -and -not $SkipValidation.IsPresent) {         
                     Write-Host       
-                    $response = Read-YesorNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
+                    $response = Read-YesOrNoWithTimeout -Prompt "Configuration failed to validate. Continue anyway? (Y/n)" -HideHelp -Default "y" -timeout 15
                     if (-not [String]::IsNullOrWhiteSpace($response)) {
                         if ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no") {                           
                             write-host
                             Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
                             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
                             Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+                            write-host
+                            Write-Log "If you want to retry with validation, run the following command" 
+                            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`""
+                            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`""
                             write-host
                             exit 1
                         }
@@ -361,6 +374,10 @@ try {
             Write-Log "Validation failed. If you want to continue bypassing the checks, run the following command" 
             Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
             Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`" -SkipValidation"
+            write-host
+            Write-Log "If you want to retry with validation, run the following command" 
+            Write-Log "./New-Lab.ps1 -Configuration `"$Global:configfile`""
+            Add-CmdHistory "./New-Lab.ps1 -Configuration `"$Global:configfile`""
             write-host
             exit 1
         }
@@ -707,13 +724,17 @@ finally {
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
-        #  $job | Stop-Job
-        Write-Host -NoNewline "."
+        if (-not $enableVerbose) {
+            $job | Stop-Job
+            Write-Host -NoNewline "."
+        }
     }
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
-            #   $job | Remove-Job
-            Write-Host -NoNewline "."
+            if (-not $enableVerbose) {
+                $job | Remove-Job
+                Write-Host -NoNewline "."
+            }
         }
     }
     Write-host "`r                                                                                                                              "

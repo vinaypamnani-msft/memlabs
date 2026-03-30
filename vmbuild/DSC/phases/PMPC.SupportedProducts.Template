@@ -1,0 +1,331 @@
+<SupportedProducts>
+	<Vendor name="Amazon Corretto" id="455d6d42-bc24-4013-8ff4-f62bcf9248e9">
+		<Product name="Amazon Corretto 8 (x86)" id="fcccf336-189d-4a41-8f18-9af1aa3d5a99" vendorid="455d6d42-bc24-4013-8ff4-f62bcf9248e9">
+			<Include>Amazon Corretto 8%(x86)</Include>
+			<KillProcessList>java.exe|javaw.exe</KillProcessList>
+			<SkipProcessList>java.exe|javaw.exe</SkipProcessList>
+			<SQLSearchInclude>Amazon Corretto%(x86)</SQLSearchInclude>
+			<SQLSearchVersionInclude>1.8%</SQLSearchVersionInclude>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<SupportsLogging/>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>MSI</InstallerType>
+			<RecommendedPreScriptPath>https://patchmypc.com/scupcatalog/downloads/scripts/PatchMyPC-Remove-AmazonCorretto-32bit-Only.ps1</RecommendedPreScriptPath>
+			<RecommendedPreScriptDescription>This recommended pre-update installation script will remove previous Amazon Corretto 8 (x86) installs automatically before installing the latest update.</RecommendedPreScriptDescription>
+			<DisplayInfo language="en">
+				<Description>Amazon Corretto is a no-cost, multiplatform, production-ready distribution of the Open Java Development Kit (OpenJDK).</Description>
+				<Documentation>https://docs.aws.amazon.com/corretto/</Documentation>
+				<Keywords>Corretto|Amazon|Java|Runtime</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/AdoptOpenJDK.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://aws.amazon.com/corretto/faqs/</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="Amazon Corretto 8 (x64)" id="fac0e876-2454-4f5c-95de-a54b6b05371a" vendorid="455d6d42-bc24-4013-8ff4-f62bcf9248e9">
+			<Include>Amazon Corretto 8%(x64)</Include>
+			<KillProcessList>java.exe|javaw.exe</KillProcessList>
+			<SkipProcessList>java.exe|javaw.exe</SkipProcessList>
+			<SQLSearchInclude>Amazon Corretto%(x64)</SQLSearchInclude>
+			<SQLSearchVersionInclude>1.8%</SQLSearchVersionInclude>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<SupportsLogging/>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>MSI</InstallerType>
+			<RecommendedPreScriptPath>https://patchmypc.com/scupcatalog/downloads/scripts/PatchMyPC-Remove-AmazonCorretto-64bit-Only.ps1</RecommendedPreScriptPath>
+			<RecommendedPreScriptDescription>This recommended pre-update installation script will remove previous Amazon Corretto 8 (x64) installs automatically before installing the latest update.</RecommendedPreScriptDescription>
+			<DisplayInfo language="en">
+				<Description>Amazon Corretto is a no-cost, multiplatform, production-ready distribution of the Open Java Development Kit (OpenJDK).</Description>
+				<Documentation>https://docs.aws.amazon.com/corretto/</Documentation>
+				<Keywords>Corretto|Amazon|Java|Runtime</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/AdoptOpenJDK.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://aws.amazon.com/corretto/faqs/</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+	<Vendor name="Mozilla" id="4665643a-9a55-4e83-aea3-54e58b164ee1">
+		<Product name="Mozilla Firefox (x86 en-US)" id="1aa0758e-aebd-4a29-84c6-89c9373af717" vendorid="4665643a-9a55-4e83-aea3-54e58b164ee1">
+			<Include>Mozilla Firefox%(x86 en-US)</Include>
+			<Exclude>%ESR%</Exclude>
+			<KillProcessList>firefox.exe</KillProcessList>
+			<SkipProcessList>firefox.exe</SkipProcessList>
+			<Self-Updater>
+				<Registry Action="Update" Key="Software\Policies\Mozilla\Firefox" Value="DisableAppUpdate" WOW6432Node="True" Type="DWORD">1</Registry>
+			</Self-Updater>
+			<ShortcutFileName>Firefox|Mozilla Firefox</ShortcutFileName>
+			<SQLSearchInclude>Mozilla Firefox%(x86 en-US)</SQLSearchInclude>
+			<SQLSearchExclude>%ESR%</SQLSearchExclude>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<SilentUninstallArg>-ms</SilentUninstallArg>
+			<DisplayInfo language="en">
+				<Description>Mozilla Firefox is a free and open-source web browser developed by the Mozilla Foundation and its subsidiary, Mozilla Corporation. Firefox is available for Microsoft Windows, macOS, Linux, BSD, illumos and Solaris operating systems. Its sibling, Firefox for Android, is also available.</Description>
+				<Documentation>https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide</Documentation>
+				<Keywords>Mozilla Firefox|Firefox|browser|web browser|web</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/MozillaFirefox.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.mozilla.org/en-US/privacy/</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="Mozilla Firefox (x64 en-US)" id="7a350c10-408b-4628-91cb-7725f75aa85f" vendorid="4665643a-9a55-4e83-aea3-54e58b164ee1">
+			<Include>Mozilla Firefox%(x64 en-US)</Include>
+			<Exclude>%ESR%</Exclude>
+			<KillProcessList>firefox.exe</KillProcessList>
+			<SkipProcessList>firefox.exe</SkipProcessList>
+			<Self-Updater>
+				<Registry Action="Update" Key="Software\Policies\Mozilla\Firefox" Value="DisableAppUpdate" WOW6432Node="False" Type="DWORD">1</Registry>
+			</Self-Updater>
+			<ShortcutFileName>Firefox|Mozilla Firefox</ShortcutFileName>
+			<SQLSearchInclude>Mozilla Firefox%(x64 en-US)</SQLSearchInclude>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<SQLSearchExclude>%ESR%</SQLSearchExclude>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<SilentUninstallArg>-ms</SilentUninstallArg>
+			<DisplayInfo language="en">
+				<Description>Mozilla Firefox is a free and open-source web browser developed by the Mozilla Foundation and its subsidiary, Mozilla Corporation. Firefox is available for Microsoft Windows, macOS, Linux, BSD, illumos and Solaris operating systems. Its sibling, Firefox for Android, is also available.</Description>
+				<Documentation>https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide</Documentation>
+				<Keywords>Mozilla Firefox|Firefox|browser|web browser|web</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/MozillaFirefox.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.mozilla.org/en-US/privacy/</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+	<Vendor name="Devolutions inc." id="c04c2fb7-4ca4-4f15-a9f3-f945ab427b69">
+		<Product name="Remote Desktop Manager (MSI-x64)" id="1ab400e9-5755-402f-9254-a9947808075a" vendorid="c04c2fb7-4ca4-4f15-a9f3-f945ab427b69">
+			<Include>Remote Desktop Manager % (MSI%)</Include>
+			<KillProcessList>RDMAgent.exe|RemoteDesktopManager.exe|RemoteDesktopManager64.exe</KillProcessList>
+			<SkipProcessList>RDMAgent.exe|RemoteDesktopManager.exe|RemoteDesktopManager64.exe</SkipProcessList>
+			<SQLSearchInclude>Remote Desktop Manager%</SQLSearchInclude>
+			<RecommendedPreScriptPath>https://patchmypc.com/scupcatalog/downloads/scripts/PatchMyPC-dotNet8Check.ps1</RecommendedPreScriptPath>
+			<RecommendedPreScriptDescription>This script will fail the install process if .Net 8 Desktop Runtime is not installed. This prevents the RDM installer from hanging on install.</RecommendedPreScriptDescription>
+			<Self-Updater>
+				<Registry Action="Update" Key="SOFTWARE\Policies\Devolutions\RemoteDesktopManager" Value="DisableAutoUpdate" WOW6432Node="True" Type="DWORD">1</Registry>
+			</Self-Updater>
+			<SupportsLogging/>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>MSI</InstallerType>
+			<DisplayInfo language="en">
+				<Description>IT departments are responsible for managing and controlling access to an ever-growing inventory of on-site and off-site servers, computers and devices. Yet relying on multiple remote connection tools and password managers is inefficient, frustrating and unsecure. Instead of being treated to streamlined clarity, IT pros, sysadmins and help desk technicians struggle with ongoing chaos. The solution is to centralize remote connection technologies, remote machine data, password management, and access control on a platform that is secure, scalable, and refreshingly simple to use.</Description>
+				<Documentation>https://help.remotedesktopmanager.com/documents.htm</Documentation>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/RemoteDesktopManager.png</Icon>
+				<Keywords>RDP|remote desktop|connection|Remote Desktop Manager</Keywords>
+				<Privacy>https://devolutions.net/legal</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+	<Vendor name="Microsoft Corporation" id="ada467cf-9435-4ba1-bfe7-679f2cd8f6bf">
+		<Product name="Microsoft Power BI Desktop (x86)" id="6dca1456-cda4-4d97-930f-fec8d75b7a72" vendorid="ada467cf-9435-4ba1-bfe7-679f2cd8f6bf">
+			<Include>Microsoft Power BI Desktop%x86%</Include>
+			<Exclude>%Report Server%</Exclude>
+			<KillProcessList>PBIDesktop.exe</KillProcessList>
+			<SkipProcessList>PBIDesktop.exe</SkipProcessList>
+			<ShortcutFileName>Power BI Desktop</ShortcutFileName>
+			<SQLSearchInclude>Microsoft Power BI Desktop%</SQLSearchInclude>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<SupportsLogging/>
+			<LoggingSwitch>-log {path}</LoggingSwitch>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<UseUninstallString/>
+			<DisplayInfo language="en">
+				<Description>Go from data to insight to action with Power BI Desktop. Create rich, interactive reports with visual analytics at your fingertips—for free.</Description>
+				<Documentation>https://powerbi.microsoft.com/en-us/search/documentation/</Documentation>
+				<Keywords>Power BI|PowerBI|reports|analytics</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/MicrosoftPowerBIDesktop.png</Icon>
+				<!-- Icon from From official vendors source | https://powerbi.microsoft.com/en-us/what-is-power-bi/ -->
+				<Privacy>https://docs.microsoft.com/en-us/power-bi/desktop-privacy-levels</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="Microsoft Power BI Desktop (x64)" id="3d716130-ee15-41e5-82a7-5d56961393f5" vendorid="ada467cf-9435-4ba1-bfe7-679f2cd8f6bf">
+			<Include>Microsoft Power BI Desktop%x64%</Include>
+			<Exclude>%Report Server%</Exclude>
+			<KillProcessList>PBIDesktop.exe</KillProcessList>
+			<SkipProcessList>PBIDesktop.exe</SkipProcessList>
+			<ShortcutFileName>Power BI Desktop</ShortcutFileName>
+			<SQLSearchInclude>Microsoft Power BI Desktop%(x64)</SQLSearchInclude>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<SupportsLogging/>
+			<LoggingSwitch>-log {path}</LoggingSwitch>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<UseUninstallString/>
+			<DisplayInfo language="en">
+				<Description>Go from data to insight to action with Power BI Desktop. Create rich, interactive reports with visual analytics at your fingertips—for free.</Description>
+				<Documentation>https://powerbi.microsoft.com/en-us/search/documentation/</Documentation>
+				<Keywords>Power BI|PowerBI|reports|analytics</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/MicrosoftPowerBIDesktop.png</Icon>
+				<!-- Icon from From official vendors source | https://powerbi.microsoft.com/en-us/what-is-power-bi/ -->
+				<Privacy>https://docs.microsoft.com/en-us/power-bi/desktop-privacy-levels</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+	<Vendor name="VideoLAN" id="35e2696e-50b5-4a44-8f12-1ae919de9bd1">
+		<Product name="VLC Media Player (x86) - EXE Install" id="639fc339-efb3-4f47-bb2d-b26b08d71478" vendorid="35e2696e-50b5-4a44-8f12-1ae919de9bd1">
+			<Include>VLC Media Player%EXE-x86%</Include>
+			<KillProcessList>vlc.exe|vlc-cache-gen.exe</KillProcessList>
+			<SkipProcessList>vlc.exe|vlc-cache-gen.exe</SkipProcessList>
+			<ShortcutFileName>VLC media player</ShortcutFileName>
+			<SQLSearchInclude>VLC Media Player%</SQLSearchInclude>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<SilentUninstallArg>/S</SilentUninstallArg>
+			<DisplayInfo language="en">
+				<Description>VLC media player is a free and open-source, portable, cross-platform media player and streaming media server developed by the VideoLAN project.</Description>
+				<Documentation>https://www.videolan.org/doc/</Documentation>
+				<Keywords>VLC|media player|video|mp3</Keywords>
+				<Icon>https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/VLC_Icon.svg/500px-VLC_Icon.svg.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.videolan.org/privacy.html</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="VLC Media Player (x64) - EXE Install" id="0bfb180d-e2f9-4173-a662-91a693ca8e05" vendorid="35e2696e-50b5-4a44-8f12-1ae919de9bd1">
+			<Include>VLC Media Player%EXE-x64%</Include>
+			<KillProcessList>vlc.exe|vlc-cache-gen.exe</KillProcessList>
+			<SkipProcessList>vlc.exe|vlc-cache-gen.exe</SkipProcessList>
+			<ShortcutFileName>VLC media player</ShortcutFileName>
+			<SQLSearchInclude>VLC Media Player%</SQLSearchInclude>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>EXE</InstallerType>
+			<SilentUninstallArg>/S</SilentUninstallArg>
+			<DisplayInfo language="en">
+				<Description>VLC media player is a free and open-source, portable, cross-platform media player and streaming media server developed by the VideoLAN project.</Description>
+				<Documentation>https://www.videolan.org/doc/</Documentation>
+				<Keywords>VLC|media player|video|mp3</Keywords>
+				<Icon>https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/VLC_Icon.svg/500px-VLC_Icon.svg.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.videolan.org/privacy.html</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="VLC Media Player (x86) - MSI Install" id="c6565f30-a19c-4db0-a352-7f0f6b804ab3" vendorid="35e2696e-50b5-4a44-8f12-1ae919de9bd1">
+			<Include>VLC Media Player%MSI-x86%</Include>
+			<KillProcessList>vlc.exe|vlc-cache-gen.exe</KillProcessList>
+			<SkipProcessList>vlc.exe|vlc-cache-gen.exe</SkipProcessList>
+			<ShortcutFileName>VLC media player</ShortcutFileName>
+			<SQLSearchInclude>VLC Media Player%</SQLSearchInclude>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>MSI</InstallerType>
+			<SupportsLogging/>
+			<DisplayInfo language="en">
+				<Description>VLC media player is a free and open-source, portable, cross-platform media player and streaming media server developed by the VideoLAN project.</Description>
+				<Documentation>https://www.videolan.org/doc/</Documentation>
+				<Keywords>VLC|media player|video|mp3</Keywords>
+				<Icon>https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/VLC_Icon.svg/500px-VLC_Icon.svg.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.videolan.org/privacy.html</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="VLC Media Player (x64) - MSI Install" id="1a6db9c2-46d2-432a-b4dd-2464928a65ae" vendorid="35e2696e-50b5-4a44-8f12-1ae919de9bd1">
+			<Include>VLC Media Player%MSI-x64%</Include>
+			<KillProcessList>vlc.exe|vlc-cache-gen.exe</KillProcessList>
+			<SkipProcessList>vlc.exe|vlc-cache-gen.exe</SkipProcessList>
+			<ShortcutFileName>VLC media player</ShortcutFileName>
+			<SQLSearchInclude>VLC Media Player%</SQLSearchInclude>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<Capability>UpdateAndInstall</Capability>
+			<InstallerType>MSI</InstallerType>
+			<SupportsLogging/>
+			<DisplayInfo language="en">
+				<Description>VLC media player is a free and open-source, portable, cross-platform media player and streaming media server developed by the VideoLAN project.</Description>
+				<Documentation>https://www.videolan.org/doc/</Documentation>
+				<Keywords>VLC|media player|video|mp3</Keywords>
+				<Icon>https://upload.wikimedia.org/wikipedia/commons/thumb/e/e6/VLC_Icon.svg/500px-VLC_Icon.svg.png</Icon>
+				<!-- Icon from From Wikimedia Commons, the free media repository | https://commons.wikimedia.org/wiki/Category:Images -->
+				<Privacy>https://www.videolan.org/privacy.html</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+	<Vendor name="Zoom" id="5ee2273c-96a0-4767-9b63-156a78673a5c">
+		<Product name="Zoom Workplace (MSI-x64)" id="e5feb46d-0a26-4bd6-8462-1dfe707b37d7" vendorid="5ee2273c-96a0-4767-9b63-156a78673a5c">
+			<Include>Zoom Workplace%(MSI-x64)</Include>
+			<KillProcessList>CptHost.exe|Zoom.exe</KillProcessList>
+			<SkipProcessList>CptHost.exe|Zoom.exe</SkipProcessList>
+			<ShortcutFileName>Zoom Workplace</ShortcutFileName>
+			<SQLSearchInclude>Zoom Workplace (64-bit)</SQLSearchInclude>
+			<RegexAppToSearch>^Zoom(\s*Workplace)?(\s*\(64-?bit\))?$</RegexAppToSearch>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<Self-Updater>
+				<Registry Action="Update" Key="Software\Policies\Zoom\Zoom Meetings\General" Value="EnableClientAutoUpdate" WOW6432Node="False" Type="DWORD">0</Registry>
+			</Self-Updater>
+			<RegistryDetection>
+				<Registry Key="SOFTWARE\Zoom\MSI" Value="Home" WOW6432Node="False" Type="REGSZ" Operator="Like">*Zoom\bin</Registry>
+			</RegistryDetection>
+			<Capability>UpdateAndInstall</Capability>
+			<SupportsLogging />
+			<InstallerType>MSI</InstallerType>
+			<DisplayInfo language="en">
+				<Description>Zoom Meetings for desktop and mobile provides the tools to make every meeting a great one. Focus on your meeting – click record to leave the note taking to Zoom’s auto-generated, searchable transcripts. Share and play videos with full audio and video transmit without uploading the content.</Description>
+				<Documentation>https://support.zoom.us/hc/en-us</Documentation>
+				<Keywords>Meeting|Zoom Meetings|Zoom|Video|conferencing</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/ZoomMeetings.png</Icon>
+				<Privacy>https://zoom.us/privacy</Privacy>
+			</DisplayInfo>
+		</Product>
+
+		<Product name="Zoom Workplace (MSI-x86)" id="3282be1c-1b86-4062-b4ee-378430a4ed09" vendorid="5ee2273c-96a0-4767-9b63-156a78673a5c">
+			<Include>Zoom Workplace%(MSI-x86)</Include>
+			<KillProcessList>CptHost.exe|Zoom.exe</KillProcessList>
+			<SkipProcessList>CptHost.exe|Zoom.exe</SkipProcessList>
+			<ShortcutFileName>Zoom Workplace</ShortcutFileName>
+			<SQLSearchInclude>Zoom Workplace (32-bit)</SQLSearchInclude>
+			<RegexAppToSearch>^Zoom(\s*Workplace)?(\s*\(32-?bit\))?$</RegexAppToSearch>
+			<SQLSearchTarget>Target32Bit</SQLSearchTarget>
+			<Self-Updater>
+				<Registry Action="Update" Key="Software\Policies\Zoom\Zoom Meetings\General" Value="EnableClientAutoUpdate" WOW6432Node="False" Type="DWORD">0</Registry>
+			</Self-Updater>
+			<RegistryDetection>
+				<Registry Key="SOFTWARE\Zoom\MSI" Value="Home" WOW6432Node="True" Type="REGSZ" Operator="Like">*Zoom\bin</Registry>
+			</RegistryDetection>
+			<Capability>UpdateAndInstall</Capability>
+			<SupportsLogging />
+			<InstallerType>MSI</InstallerType>
+			<DisplayInfo language="en">
+				<Description>Zoom Meetings for desktop and mobile provides the tools to make every meeting a great one. Focus on your meeting – click record to leave the note taking to Zoom’s auto-generated, searchable transcripts. Share and play videos with full audio and video transmit without uploading the content.</Description>
+				<Documentation>https://support.zoom.us/hc/en-us</Documentation>
+				<Keywords>Meeting|Zoom Meetings|Zoom|Video|conferencing</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/ZoomMeetings.png</Icon>
+				<Privacy>https://zoom.us/privacy</Privacy>
+			</DisplayInfo>
+		</Product>
+		
+		<Product name="Zoom Workplace (User-x64)" id="b45b78d8-a718-4dd7-a5b9-4e54c9c470b3" vendorid="5ee2273c-96a0-4767-9b63-156a78673a5c">
+			<Include>Zoom Workplace%(User-x64)</Include>
+			<KillProcessList>CptHost.exe|Zoom.exe</KillProcessList>
+			<SkipProcessList>CptHost.exe|Zoom.exe</SkipProcessList>
+			<ShortcutFileName>Zoom Workplace</ShortcutFileName>
+			<SQLSearchInclude>Zoom Workplace</SQLSearchInclude>
+			<RegexAppToSearch>^Zoom(\s*Workplace)?$</RegexAppToSearch>
+			<SQLSearchTarget>Target64Bit</SQLSearchTarget>
+			<Capability>Install</Capability>
+			<IncludeIntuneUpdates />
+			<UseUninstallString />
+			<SkipRegistryKeyValidation />
+			<InstallationBehavior>User</InstallationBehavior>
+			<InstallerType>EXE</InstallerType>
+			<DisplayInfo language="en">
+				<Description>Zoom Meetings for desktop and mobile provides the tools to make every meeting a great one. Focus on your meeting – click record to leave the note taking to Zoom’s auto-generated, searchable transcripts. Share and play videos with full audio and video transmit without uploading the content.</Description>
+				<Documentation>https://support.zoom.us/hc/en-us</Documentation>
+				<Keywords>Meeting|Zoom Meetings|Zoom|Video|conferencing</Keywords>
+				<Icon>https://patchmypc.com/scupcatalog/downloads/icons/ZoomMeetings.png</Icon>
+				<Privacy>https://zoom.us/privacy</Privacy>
+			</DisplayInfo>
+		</Product>
+	</Vendor>
+
+</SupportedProducts>

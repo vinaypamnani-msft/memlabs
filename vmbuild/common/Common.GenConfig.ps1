@@ -49,7 +49,7 @@ function Get-ValidSubnets {
     $usedSubnets += (Get-NetworkList).Network
 
     #exclude any networks that already exist on the host
-    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$","0" } )
+    $usedSubnets += ((Get-NetIPAddress -AddressFamily IPV4).IPAddress | ForEach-Object { $_ -replace "\d{1,3}$", "0" } )
     $usedSubnets += $excludeList
     if (-not $AllowExisting) {
         $usedSubnets += $configToCheck.vmOptions.network
@@ -62,7 +62,7 @@ function Get-ValidSubnets {
 
     $subnetlist = @()
     if ($vmToCheck) {
-        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck       
+        $subnetlist = Get-ValidNetworksForVM -ConfigToCheck $configToCheck -Currentvm $vmToCheck
     }
 
     $usedSubnets += $subnetList
@@ -134,7 +134,7 @@ function Get-ValidDomainNames {
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
         "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
         "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" #; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs (no longer needed)
     }
     foreach ($domain in (Get-DomainList)) {
         if ($domain) {
@@ -378,7 +378,7 @@ function write-help {
     }
 }
 
-function Read-YesorNoWithTimeout {
+function Read-YesOrNoWithTimeout {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
@@ -441,7 +441,7 @@ function Get-CriticalVMs {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "VMs to bucketize, names only")]
-        [string[]] $vmNames = $null
+        [object] $vmNames = $null
     )
 
     $return = [pscustomObject]@{
@@ -454,7 +454,9 @@ function Get-CriticalVMs {
         NONCRIT = @()
     }
 
+    $allvms = @()
     if ($vmNames) {
+        write-log -LogOnly "[Get-CriticalVMs] Found $vmNames"
         $allvms += get-list -type vm -SmartUpdate
     }
     else {
@@ -463,9 +465,10 @@ function Get-CriticalVMs {
 
     $vms = @()
     if ($vmNames) {
-        foreach ($vm in $vmNames) {
-            $vms += $allvms | Where-Object { $_.vmName -eq $vm }
-        }
+        #foreach ($vm in $vmNames) {
+        $vms += $allvms | Where-Object { $_.vmName -in $vmNames }
+        write-log -verbose "[Get-CriticalVMs] Adding $($vms.VmName)"
+        #}
     }
     else {
         $vms += $allvms
@@ -495,6 +498,7 @@ function Get-CriticalVMs {
     $fileServerNames = @()
     $fileServerNames += ($vms | Where-Object { $_.remoteContentLibVM }).remoteContentLibVM
     $fileServerNames += ($vms | Where-Object { $_.fileServerVM }).fileServerVM
+    $fileServerNames += ($vms | Where-Object { $_.patchMyPCFileServer }).patchMyPCFileServer
     $fileServerNames = $fileServerNames | Select-Object -Unique
 
     foreach ($fsName in $fileServerNames) {
@@ -519,7 +523,7 @@ function Get-CriticalVMs {
 function Invoke-SmartStartVMs {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Vms To Start, from Get-CriticalVMs")]
+        [Parameter(Mandatory = $true, HelpMessage = "VMs To Start, from Get-CriticalVMs")]
         [psCustomObject] $CritList,
         [Parameter(Mandatory = $false, HelpMessage = "Critical Only")]
         [switch] $CriticalOnly = $false,
@@ -699,12 +703,20 @@ function Invoke-StopVMs {
         [bool] $quiet = $false
     )
 
+
     if (-not $vmList) {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
     }
     foreach ($vm in $vmList) {
+        $vm2 = $null
+        if ($vm -is [String]) {
+            $vm = Get-VM2 -name $vm -ErrorAction SilentlyContinue
+            $vm2 = $vm
+        }
         if ($vm.State -eq "Running") {
-            $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            if (-not $vm2) {
+                $vm2 = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            }
             if (-not $quiet) {
                 Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
@@ -797,10 +809,10 @@ function ConvertTo-DeployConfigEx {
 
             "OtherDC" {
                 $ODC = Get-list -Type VM | Where-Object { $_.vmName -eq $thisVm.VmName }
-                $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain
+                $thisParams | Add-Member -MemberType NoteProperty -Name "Domain" -Value $ODC.domain -force
                 $ODCIP = $ODC.network -replace "\d{1,3}$", "1"
 
-                $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP
+                $thisParams | Add-Member -MemberType NoteProperty -Name "IPAddr" -Value $ODCIP -force
             }
             "DC" {
                 $DomainAccountsUPN = @()
@@ -857,6 +869,9 @@ function ConvertTo-DeployConfigEx {
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                         $ExternalTopLevelSiteServer = $ExternalSiteServer
+                        $otherDC = "$($OtherDc.VmName).$($ThisVM.ForestTrust)"
+                        $thisParams | Add-Member -MemberType NoteProperty -Name "OtherDC" -Value $otherDC -Force
+
                         $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
                         if ($RemoteSS.ParentSiteCode) {
                             $RemoteCAS = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -SiteCode $RemoteSS.ParentSiteCode -DomainName $thisVM.ForestTrust -type VM
@@ -953,6 +968,11 @@ function ConvertTo-DeployConfigEx {
                             $thisParams | Add-Member -MemberType NoteProperty -Name "WSUSSqlServer" -Value $($sql.vmName)  -Force
                         }
                     }
+                }
+                if ($thisVM.wsusDataBaseServer -and $thisVM.wsusDataBaseServer -ne "WID") {
+                    $sqlVM = $deployConfig.virtualMachines | Where-Object { $_.VmName -eq $thisVM.wsusDataBaseServer }
+
+                    Add-VMToAccountLists -thisVM $thisVM -VM $sqlVM -accountLists $accountLists -deployConfig $deployconfig -LocalAdminAccounts -SQLSysAdminAccounts -WaitOnDomainJoin
                 }
             }
             "WSUS" {
@@ -1260,6 +1280,13 @@ function ConvertTo-DeployConfigEx {
     }
 
 
+    $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+    if ($Common.CorpNetInterfaceIndex) {
+        $hostDnsServers = (Get-DnsClientServerAddress -AddressFamily IPv4 -InterfaceIndex $Common.CorpNetInterfaceIndex).ServerAddresses
+        $IPAddresses = $hostDnsServers #+ $IPAddresses
+    }
+
+    $deployConfigEx | Add-Member -MemberType NoteProperty -name "DNSForwarders" -Value $IPAddresses -Force
     # Add Apps
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "Tools" -Value $Common.AzureFileList.Tools -Force
     $deployConfigEx | Add-Member -MemberType NoteProperty -name "URLS" -Value $Common.AzureFileList.Urls -Force

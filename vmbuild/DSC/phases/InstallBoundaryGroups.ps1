@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
 $DomainName = $DomainFullName.Split(".")[0]
 $NetbiosDomainName = $deployConfig.vmOptions.domainNetBiosName
@@ -53,26 +53,6 @@ Set-Location "$($SiteCode):\"
 if ((Get-Location).Drive.Name -ne $SiteCode) {
     Write-DscStatus "Failed to Set-Location to $SiteCode`:"
     return $false
-}
-
-$cm_svc_file = "$LogPath\cm_svc.txt"
-if (Test-Path $cm_svc_file) {
-    # Add cm_svc user as a CM Account
-    $secure = Get-Content $cm_svc_file | ConvertTo-SecureString -AsPlainText -Force
-    Write-DscStatus "Adding cm_svc domain account as CM account"
-    Start-Sleep -Seconds 5
-    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
-    # Remove-Item -Path $cm_svc_file -Force -Confirm:$false
-
-    # Set client push account
-    Write-DscStatus "Setting the Client Push Account"
-    Set-CMClientPushInstallation -SiteCode $SiteCode -AddAccount $cm_svc
-    Start-Sleep -Seconds 5
-
-    # Restart services to make sure push account is acknowledged by CCM
-    Write-DscStatus "Restarting services"
-    Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-    Restart-Service -DisplayName "SMS_Site_Component_Manager" -ErrorAction SilentlyContinue
 }
 
 
@@ -162,14 +142,16 @@ foreach ($bg in $bgs) {
 
 # Setup System Discovery
 Write-DscStatus "Enabling AD system discovery"
-$lastdomainname = $DomainFullName.Split(".")[-1]
+
+$Domain = $DomainFullName
+$DN = 'DC=' + $Domain.Replace('.',',DC=')    
 do {
     $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
 
     if ($adiscovery.Value1.ToLower() -ne "active") {
         Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://DC=$DomainName,DC=$lastdomainname" -Recursive
+        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DN" -Recursive
     }
     else {
         Write-DscStatus "AD System Discovery state is: $($adiscovery.Value1)"
@@ -185,7 +167,7 @@ do {
 
         Write-DscStatus "AD Group Discovery state is: $($adiscovery.Value1)" -RetrySeconds 30
         Start-Sleep -Seconds 30
-        $sgscope = New-CMADGroupDiscoveryScope -name Allscope -SiteCode $SiteCode -LdapLocation "LDAP://DC=$DomainName,DC=$lastdomainname" -RecursiveSearch $true -Verbose
+        $sgscope = New-CMADGroupDiscoveryScope -name Allscope -SiteCode $SiteCode -LdapLocation "LDAP://$DN" -RecursiveSearch $true -Verbose
         Set-CMDiscoveryMethod -ActiveDirectoryGroupDiscovery -AddGroupDiscoveryScope $sgscope -Enabled $true -Verbose
     }
     else {
@@ -195,7 +177,6 @@ do {
 
 # Run discovery
 Write-DscStatus "Invoking AD system discovery"
-Start-Sleep -Seconds 5
 Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
 
@@ -220,31 +201,36 @@ if (-not $pushClients) {
 # Wait for collection to populate
 
 if ($ClientNames) {
-    $CollectionName = "All Systems"
-    Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
-    Invoke-CMSystemDiscovery
-    Invoke-CMDeviceCollectionUpdate -Name $CollectionName
+
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+    $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+    if ($PackageSuccess -eq 0) {
+        $CollectionName = "All Systems"
+        Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
+        Invoke-CMSystemDiscovery
+        Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 
 
-    if ($false) {
-        #Let PushClients.ps1 handle this later.
-        $failCount = 0
-        $success = $false
-        while (-not $success) {
+        if ($false) {
+            #Let PushClients.ps1 handle this later.
+            $failCount = 0
+            $success = $false
+            while (-not $success) {
    
-            $failCount++
-            Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
-            $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-            Start-Sleep -Seconds 30
-            $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
-            $success = $PackageSuccess -ge 1
+                $failCount++
+                Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 15"
+                $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+                Start-Sleep -Seconds 30
+                $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+                $success = $PackageSuccess -ge 1
 
-            if ($failCount -ge 15) {
-                $success = $true   
-            }
+                if ($failCount -ge 15) {
+                    $success = $true   
+                }
     
+            }
+            Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
         }
-        Write-DscStatus "Waiting for $ClientNames to appear in '$CollectionName'"
     }
 }
 else {

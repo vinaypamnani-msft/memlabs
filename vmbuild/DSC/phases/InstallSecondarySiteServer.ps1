@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
 
 # Read Actions file
@@ -157,7 +157,7 @@ $Install_Secondary = {
 
                 $siteName = "Secondary Site"
 
-                if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+                if (-not [string]::IsNullOrWhiteSpace($ThisVM.siteName)) {
                     $siteName = $ThisVM.siteName
                 }
 

@@ -20,7 +20,7 @@ function Get-Menu {
         [object] $preOptions = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Supress newline")]
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress newline")]
         [switch] $NoNewLine,
         [Parameter(Mandatory = $false, HelpMessage = "Split response")]
         [switch] $split,
@@ -62,9 +62,17 @@ function Get-Menu {
                     continue
                 }
 
-                if ($item.StartsWith("*")) {
-                    write-host2 -ForeGroundColor $color1 $TextValue[0]
-                    continue
+                if ($item.StartsWith("*B")) {
+                    $breakPrefix = " $($common.BreakPrefix) "
+                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix -NoNewline
+                    write-host2 -ForeGroundColor $color1 $TextValue[0] -NoNewline
+                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix
+                }
+                else {
+                    if ($item.StartsWith("*")) {
+                        write-host2 -ForeGroundColor $color1 $TextValue[0]
+                        continue
+                    }
                 }
                 Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
             }
@@ -131,7 +139,7 @@ function Get-Menu {
     $totalOptions = $preOptions + $additionalOptions
 
 
-    Show-GenConfigErrorMessages
+    #Show-GenConfigErrorMessages
     #Write-Verbose "Calling Get-ValidResponse with -return:true"
     $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
 
@@ -212,7 +220,7 @@ function get-ValidResponse {
                 $response = Read-SingleKeyWithTimeout -timeout 0
             }
             $first = $false
-            if ([string]::isnullorwhitespace($response)) {
+            if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "return null"
                 return $null
             }
@@ -332,9 +340,12 @@ function Write-Option {
         [Parameter(Mandatory = $false, HelpMessage = "Description Color")]
         [object] $color,
         [Parameter(Mandatory = $false, HelpMessage = "Option Color")]
-        [object] $color2
+        [object] $color2,
+        [switch] $MultiSelect = $false,
+        [switch] $MultiSelected = $false
     )
 
+    Write-Log -verbose "Write-Option called with option: $option, text: $text, color: $color, color2: $color2, MultiSelect: $MultiSelect, MultiSelected: $MultiSelected"
     if ($null -eq $color) {
         $color = $Global:Common.Colors.GenConfigNormal
         $color2 = $Global:Common.Colors.GenConfigNormalNumber
@@ -342,23 +353,65 @@ function Write-Option {
     if ($null -eq $color2) {
         $color2 = $color
     }
-    write-host "[" -NoNewline
+    #trim the colors to remove spaces
+    $color = $color.Trim()
+    $color2 = $color2.Trim()
+    
+    if ($MultiSelect) {
+        $optionInt = $option -as [int]
+        if ($optionInt) {                    
+            write-host2 "[" -NoNewline -ForegroundColor Yellow
+            if ($MultiSelected) {
+                $CHECKMARK = ([char]8730)
+                Write-Host2 -ForegroundColor green $CHECKMARK -NoNewline
+            }
+            else {
+                Write-Host2 -ForegroundColor Yellow " " -NoNewline
+            }
+            write-host2 "] " -NoNewline -ForegroundColor Yellow
+        }
+        else {
+            write-host "    " -NoNewline
+        }
+    }
+    write-host2 "[" -NoNewline -ForegroundColor $Global:Common.Colors.GenConfigBrackets
     Write-Host2 -ForegroundColor $color2 $option -NoNewline
-    Write-Host "] ".PadRight(4 - $option.Length) -NoNewLine
+    Write-Host2 "] ".PadRight(4 - $option.Length) -NoNewLine -ForegroundColor $Global:Common.Colors.GenConfigBrackets
 
     Write-ColorizedBrackets -ForeGroundColor $color $text
     write-host
 }
 
-function Show-GenConfigErrorMessages {
 
-    if ((($global:GenConfigErrorMessages | Measure-Object).Count) -gt 0) {
-        Write-Host
+function Get-GenConfigErrorMessagesLineCount {
+    $count = ($global:GenConfigErrorMessages | Measure-Object).Count
+
+    if ($count -gt 0) {
+        $count += 4 #Add 1 line for header, Add 3 for extra lines
+    }
+    return $count
+}
+
+function Show-GenConfigErrorMessages {
+    param(
+        [switch] $LineCount
+    )
+
+    $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
+    $count = ($Errors | Measure-Object).Count
+    if ($LineCount) {
+        return $count + 4
+    }
+    if ($count -gt 0) {
+        #Write-host2 "┃" -NoNewline -ForegroundColor Crimson
         Write-Verbose "Showing Show-GenConfigErrorMessages"
-        Write-Host2 ">>>>>>>>>>>>>>  ERROR: Validation Failures were encountered:`r`n" -ForegroundColor Crimson
-        foreach ($err in $global:GenConfigErrorMessages) {
-            write-redx $err.message
+        Write-Host2 "┍━━━━━━━━━━━━━━━━━━━  ERROR: Validation Failures were encountered:" -ForegroundColor Crimson
+        Write-host2 "│" -ForegroundColor Crimson
+        foreach ($err in $Errors) {
+            Write-host2 "│" -NoNewline -ForegroundColor Crimson
+            write-redx $err.message -ForegroundColor White
         }
+        Write-host2 "│" -ForegroundColor Crimson
         Write-Host
         $global:GenConfigErrorMessages = $null
     }
@@ -372,7 +425,7 @@ function Read-Host2 {
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
         [string] $currentValue = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
+        [Parameter(Mandatory = $false, HelpMessage = "Do not display the help before the prompt")]
         [switch] $HideHelp
     )
     if (-not $HideHelp.IsPresent) {
@@ -402,7 +455,7 @@ function Read-Single {
         [string] $prompt,
         [Parameter(Mandatory = $false, HelpMessage = "shows current value in []")]
         [string] $currentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Dont display the help before the prompt")]
+        [Parameter(Mandatory = $false, HelpMessage = "Do not display the help before the prompt")]
         [switch] $HideHelp,
         [Parameter(Mandatory = $false, HelpMessage = "timeout")]
         [int] $timeout = 0,
@@ -443,6 +496,112 @@ function Read-Single {
     return $response
 }
 
+function select-ChangeDynamicMemory {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [string] $domain,
+        [switch] $enable,
+        [switch] $disable
+    )
+
+    while ($true) {
+        Write-Host
+
+        $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        $CustomOptions = [ordered]@{}
+
+        $vmsname = $vms | Select-Object -ExpandProperty vmName
+
+        $enabled = $vms | Where-Object { ($_.Memory / 1 ) -gt ($_.DynamicMinRam / 1) } | Select-Object -ExpandProperty vmName
+        $disabled = $vms | Where-Object { ($_.Memory / 1 ) -le ($_.DynamicMinRam / 1) } | Select-Object -ExpandProperty vmName
+
+        $vmsname = $enabled
+        $ReturnVal = $null
+        $verb = "Disable"
+        if ($enable) {
+            $verb = "Enable"
+            $vmsname = $disabled
+        }
+        if ($vmsname -and ($vmsname | Measure-Object).count -gt 0) {
+            Write-OrangePoint "$(($vmsname | Measure-Object).count) VM's in '$domain' are in state: $verb"
+        }
+        else {
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' already have Dynamic Memory $($verb)d ***" }
+        }
+        $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VMs" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
+        Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
+
+        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE" -or $ReturnVal -eq "NOITEMS") {
+            return
+        }
+
+        $vmRestartList = @()
+        foreach ($vmName in $ReturnVal) {    
+            $vmNotes = $vms | Where-Object { $_.VmName -eq $vmName }
+            $vm = Get-Vm2 -Name $vmName
+            if (-not $vm) {
+                continue
+            }
+            if ($vm.State -eq "Running") {
+                stop-vm2 -name $vm.VmName
+                $vmRestartList += @($vmName)
+            }
+            $Memory = $vmNotes.Memory
+            if ($enable) {
+                $dynamicMinRam = "1GB"
+                $dynamicRamInBytes = ($dynamicMinRam / 1)
+                $Memory = $vmNotes.Memory
+                if ($dynamicRamInBytes -gt ($Memory / 1)) {
+                    $dynamicMinRam = $Memory
+                    $dynamicRamInBytes = ($Memory / 1)
+                }
+                $priority = 25
+                $buffer = 10
+                $role = $vm.role
+                if ($vm.sqlVersion) {
+                    $role = "SqlServer"
+                }
+                if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
+                    $priority = 50
+                    $buffer = 20
+                }
+                if ($dynamicRamInBytes -gt 40MB) {
+                    Write-log  "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                    try {
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop   
+                    }
+                    catch {
+                        Write-Log "Failed to set Dynamic Memory on $vmName $_"
+                        continue
+                    }
+                    Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $dynamicMinRam            
+                }
+                else {
+                    Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                }
+            }
+            else {
+                Write-log  "$VmName` Disable Dynamic Ram $Memory"
+                try {
+                $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+                catch {
+                    Write-Log "Failed to set Dynamic Memory on $vmName $_"
+                    continue
+                }
+                Update-VMNoteProperty -VmName $vmName -PropertyName "DynamicMinRam" -PropertyValue $Memory
+            }                
+        }
+        if ($vmRestartList -and ($vmRestartList | Measure-Object).count -gt 0) {
+            $crit = Get-CriticalVMs -domain $domain -vmNames $vmRestartList            
+            
+            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$false 
+        }
+        
+    }
+}
+
 function Select-StartDomain {
     [CmdletBinding()]
     param (
@@ -452,6 +611,7 @@ function Select-StartDomain {
         [string] $response = $null
     )
 
+    $preResponse = $null
     if ($response) {
         $preResponse = $response
     }
@@ -460,38 +620,44 @@ function Select-StartDomain {
         Write-Host
 
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
+        $CustomOptions = [ordered]@{}
 
         $notRunning = $vms | Where-Object { $_.State -ne "Running" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
             Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
         }
         else {
-            Write-GreenCheck "All VM's in '$domain' are already Running"
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***" }
             return
+            #Write-GreenCheck "All VM's in '$domain' are already Running"
+            #return
         }
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critial VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
+        #$customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critical VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -CurrentValue "C" -timeout:10
+            $response = $null
+            $ReturnVal = $null
+            $ReturnVal = Get-Menu2 -MenuName "Start VMs in $domain" -Prompt "Select VM to Start" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
+            Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
         }
         else {
-            $response = $preResponse
+            $ReturnVal = $preResponse
             $preResponse = $null
         }
 
 
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "X") {
+        if ([string]::IsNullOrWhiteSpace($ReturnVal) -or $ReturnVal -eq "X" -or $ReturnVal -eq "ESCAPE" -or $ReturnVal -eq "NOITEMS") {
             return
         }
-        if ($response -eq "A" -or $response -eq "C") {
+        if ($ReturnVal -eq "A" -or $ReturnVal -eq "C") {
             $CriticalOnly = $false
-            if ($response -eq "C") {
+            if ($ReturnVal -eq "C") {
                 $CriticalOnly = $true
             }
-            $response = $null
+            $ReturnVal = $null
             $crit = Get-CriticalVMs -domain $domain
 
             $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
@@ -504,12 +670,20 @@ function Select-StartDomain {
 
         }
         else {
-            start-vm2 $response
+            write-Log -Verbose "$($ReturnVal.Count) VMs returned $ReturnVal"
+            $crit = Get-CriticalVMs -domain $domain -vmNames $ReturnVal            
+            
+            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+
+            if ($failures -ne 0) {
+                Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+            }
+            #start-vm2 $response
             #get-job | wait-job | out-null
-            Show-JobsProgress -Activity "Starting VMs"
-            get-job | remove-job | out-null
+            #Show-JobsProgress -Activity "Starting VMs"
+            #get-job | remove-job | out-null
             #get-list -type VM -SmartUpdate | out-null
-            $response = $null
+            $ReturnVal = $null
         }
     }
     get-list -type VM -SmartUpdate | out-null
@@ -522,9 +696,11 @@ function Select-StopDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "Prepopulate response")]
-        [string] $response = $null
+        [string] $response = $null,
+        [switch] $AllSelected
     )
 
+    $customOptions = @{}
     if ($response) {
         $preResponse = $response
     }
@@ -539,37 +715,46 @@ function Select-StopDomain {
         }
         else {
             Write-host "All VM's in '$domain' are already turned off."
-            return
+            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }  
+            return "NOITEMS"
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        $customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
+        #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
-            $response = Get-Menu -Prompt "Select VM to Stop" -OptionArray $vmsname -AdditionalOptions $customOptions -CurrentValue "None" -timeout 10 -test:$false
+            $results = @()
+            $results = Get-Menu2 -MenuName "Select VMs to Stop in $domain" -Prompt "Select VMs to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect -AllSelected:$AllSelected
         }
         else {
-            $response = $preResponse
+            $results = $preResponse
             $preResponse = $null
         }
-
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        write-log -Verbose "StopVMs returned '$results' $($results.Count) $($results.GetType())"
+        if ($results -eq "ESCAPE") {
+            return "ESCAPE"
+        }
+        if ($results -eq "NOITEMS" -or [string]::IsNullOrWhiteSpace($results)) {
+            return "NOITEMS"
+        }
+        if ([string]::IsNullOrWhiteSpace($results) -or $results -eq "None" -or $results -eq "ESCAPE") {
+            write-log -Verbose "StopVMs Escape"
             return
         }
-        if ($response -eq "A" -or $response -eq "C" -or $response -eq "N") {
+        if ($results -eq "A" -or $results -eq "C" -or $results -eq "N") {
 
             $vmList = @()
 
-            if ($response -eq "A") {
+            if ($results -eq "A") {
                 $vmList = $running
             }
             else {
                 $crit = Get-CriticalVMs -domain $domain
 
-                if ($response -eq "N") {
+                if ($results -eq "N") {
                     $vmList = $crit.NONCRIT
 
                 }
-                if ($response -eq "C") {
+                if ($results -eq "C") {
                     $vmList = $crit.ALLCRIT
                 }
             }
@@ -579,8 +764,11 @@ function Select-StopDomain {
             return
         }
         else {
-            stop-vm2 $response
-            get-list -type VM -SmartUpdate | out-null
+            If ($results -and $results.Count -ge 1) {
+                Invoke-StopVMs -domain $domain -vmList $results
+                get-list -type VM -SmartUpdate | out-null
+                return
+            }
         }
 
     }
@@ -589,7 +777,7 @@ function Select-StopDomain {
 function Select-DeleteDomain {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Delete")]
         [string] $domain
     )
 
@@ -598,15 +786,16 @@ function Select-DeleteDomain {
         if (-not $vms) {
             return
         }
-        $customOptions = [ordered]@{"D" = "Delete All VMs" }
-        $response = Get-Menu -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return
+        # $customOptions = [ordered]@{"D" = "Delete All VMs" }
+        $customOptions = $null
+        $response = Get-Menu2 -MenuName "Delete VMs in $domain" -Prompt "Select VM to Delete" -OptionArray $vms -AdditionalOptions $customOptions -Test:$false -return -MultiSelect
 
-        if ([string]::IsNullOrWhiteSpace($response)) {
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE" -or $response -eq "NOITEMS") {
             return
         }
         if ($response -eq "D") {
-            Write-Host "Selecting 'Yes' will permantently delete all VMs and scopes."
-            $response2 = Read-YesorNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
+            Write-Host "Selecting 'Yes' will permanently all VMs and scopes."
+            $response2 = Read-YesOrNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
             if (-not [String]::IsNullOrWhiteSpace($response)) {
                 if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
                     Remove-Domain -DomainName $domain
@@ -615,15 +804,16 @@ function Select-DeleteDomain {
             }
         }
         else {
-            $response2 = Read-YesorNoWithTimeout -Prompt "Delete VM $($response)? (Y/n)" -HideHelp -timeout 180 -Default "y"
+            $response2 = Read-YesOrNoWithTimeout -Prompt "Delete VM(s) $($response -Join ",")? (y/N)" -HideHelp -timeout 180 -Default "n"
 
             if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                 continue
             }
             else {
-                Remove-VirtualMachine -VmName $response
-                Get-List -type VM -SmartUpdate | Out-Null
-                New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                Remove-Domain -DomainName $domain -vmList $response
+                #Remove-VirtualMachine -VmName $response
+                #Get-List -type VM -SmartUpdate | Out-Null
+                #New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
                 continue
             }
         }

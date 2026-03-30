@@ -58,8 +58,8 @@ $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
 # Set Install action as Running
-$Configuration.WaitingForCASFinsihedInstall.Status = 'Running'
-$Configuration.WaitingForCASFinsihedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration.WaitingForCASFinishedInstall.Status = 'Running'
+$Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Read Actions file on CAS
@@ -93,8 +93,8 @@ while ($CSConfiguration.$("UpgradeSCCM").Status -ne "Completed") {
 }
 
 # Write actions file, wait finished
-$Configuration.WaitingForCASFinsihedInstall.Status = 'Completed'
-$Configuration.WaitingForCASFinsihedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration.WaitingForCASFinishedInstall.Status = 'Completed'
+$Configuration.WaitingForCASFinishedInstall.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
@@ -109,7 +109,6 @@ if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.Instal
         New-Item C:\$CM -ItemType directory | Out-Null
     }
 
-    # Set cource path
     Write-DscStatus "Creating HierarchyPS.ini file"
 
     $CMINIPath = "c:\$CM\HierarchyPS.ini"
@@ -184,7 +183,7 @@ CurrentBranch=1
     $cmini = $cmini.Replace('%SiteCode%', $SiteCode)
 
 
-    if (-not [string]::isnullorwhitespace($ThisVM.siteName)) {
+    if (-not [string]::IsNullOrWhiteSpace($ThisVM.siteName)) {
         $cmini = $cmini.Replace('%SiteName%', $ThisVM.siteName)
     }
     else {

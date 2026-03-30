@@ -9,11 +9,12 @@ function Write-JobProgress {
         $latestActivity = $null
         $latestStatus = $null
         #Make sure the first child job exists
-        if ($null -ne $job -and $null -ne $Job.ChildJobs -and $null -ne $Job.ChildJobs[0].Progress) {
+        $childJobs = $Job.ChildJobs
+        if ($null -ne $job -and $null -ne $childJobs -and $null -ne $childJobs.Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
-            $lastProgress = $Job.ChildJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            $lastProgress = $childJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -43,7 +44,7 @@ function Write-JobProgress {
                         $jobName2 = "  $($jobName.PadRight($padding," "))"
                     }
                     else {
-                        $jobName = "[Unknown VM] [Unkown Role]"
+                        $jobName = "[Unknown VM] [Unknown Role]"
                     }
 
                     if ($Common.PS7) {
@@ -125,7 +126,10 @@ function Start-NormalJobs {
     param (
         [object]$machines,
         [object]$scriptBlock,
-        [object]$phase
+        [object]$phase,
+        [Object]$argument1,
+        [Object]$argument2,
+        [Object]$argument3
     )
 
     [System.Collections.ArrayList]$jobs = @()
@@ -146,7 +150,13 @@ function Start-NormalJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
+        if ($argument1) {
+            $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+        } 
+        else {
+            $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
+        }
         if (-not $job) {
             Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
             $job_created_no++
@@ -264,6 +274,9 @@ function Start-PhaseJobs {
 
         # Skip everything for OSDClient, nothing for us to do
         if ($Phase -gt 1 -and $currentItem.role -in ("OSDClient", "Linux")) {
+            if ($currentItem.role -in ("OSDClient")) {
+                stop-vm2 -Name $currentItem.vmName -TurnOff
+            }
             continue
         }
 
@@ -296,7 +309,8 @@ function Start-PhaseJobs {
                 if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
                     continue
                 }       
-                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ErrorAction Stop -ErrorVariable Err
+                # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                     $job_created_no++
@@ -566,7 +580,7 @@ function Get-ConfigurationData {
         "8" {
             $cd = Get-Phase8ConfigurationData -deployConfig $deployConfig
             if ($cd -and -not $global:NoSnapshot) {
-                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $ConfigurationShort
+                $autoSnapshotName = "MemLabs Phase 8 AutoSnapshot " + $Global:ConfigurationShort
                 $snapshot = $null
                 $dc = get-list2 -deployConfig $deployConfig | Where-Object { $_.role -eq "DC" }
                 if ($dc) {
@@ -574,7 +588,7 @@ function Get-ConfigurationData {
                 }
 
                 if (-not $snapshot) {
-                    $response = Read-YesorNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
+                    $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
                         write-log -HostOnly ""
@@ -625,16 +639,46 @@ function Get-ConfigurationData {
             $OriginalProgressPreference = $Global:ProgressPreference
             try {
                 $Global:ProgressPreference = 'SilentlyContinue'
-                $testNet = Test-NetConnection -ComputerName $dc.NodeName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-                $Global:ProgressPreference = $OriginalProgressPreference
-
-                if (-not $testNet) {
-                    Write-Log "[Phase $Phase]: $($dc.NodeName): Could not verify if RDP is enabled. Restarting the computer." -Warning
-                    Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
-                    Start-Sleep -Seconds 20
+    
+                # Test if VM is responsive with multiple checks
+                $isResponsive = Test-VmResponsive -VmName $dc.NodeName -TimeoutSeconds 15
+    
+                if (-not $isResponsive) {
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): VM is not responsive. Performing hard restart." -Warning
+        
+                    # Hard cycle the VM
+                    $restarted = Restart-UnresponsiveVm -VmName $dc.NodeName -WaitTimeSeconds 90
+        
+                    if (-not $restarted) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM failed to become responsive after restart" -Error
+                        # You might want to throw an exception here or handle the failure
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): VM successfully restarted and is responsive"
+                    }
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($dc.NodeName): VM is responsive" -LogOnly
+        
+                    # Your existing RDP-specific test if needed
+                    $job = Start-Job -ScriptBlock {
+                        param($computerName)
+                        Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
+                    } -ArgumentList $dc.NodeName
+        
+                    $testNet = Wait-Job -Job $job -Timeout 10 | Receive-Job
+                    Remove-Job -Job $job -Force
+        
+                    if ($null -eq $testNet -or -not $testNet) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible. Attempting soft restart." -Warning
+                        Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
+                        Start-Sleep -Seconds 20
+                    }
                 }
             }
-            catch {}
+            catch {
+                Write-Log "[Phase $Phase]: Error during VM connectivity test: $_" -Error
+            }
             finally {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log
                 $Global:ProgressPreference = $OriginalProgressPreference
@@ -1008,6 +1052,17 @@ function Get-Phase8ConfigurationData {
                     }
                 }
 
+                #if ($vm.PatchMyPCFileServer) {
+                #    if ($fsVMsAdded -notcontains $vm.PatchMyPCFileServer) {
+                #        $newItem = @{
+                #            NodeName = $vm.PatchMyPCFileServer
+                #            Role     = "FileServer"
+                #        }
+                #        $fsVMsAdded += $vm.PatchMyPCFileServer
+                #        $cd.AllNodes += $newItem
+                #        $NumberOfNodesAdded = $NumberOfNodesAdded + 1
+                #    }
+                #}
 
                 if ($vm.RemoteSQLVM) {
                     $remoteSQL = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $vm.RemoteSQLVM }
@@ -1084,10 +1139,17 @@ function Get-Phase9ConfigurationData {
             $MultiDomain = $true
         }
         if ($MultiDomain) {
+            $role = $vm.role
+            
+            if ($role -eq "DomainMember") {
+                if ($vm.sqlVersion) {
+                    $role = "SqlServer"
+                }
+            }
             $newItem = @{
                 NodeName = "$($vm.vmName).$($vm.domain)"
                 #NodeName = "$($vm.vmName)"
-                Role     = $vm.Role
+                Role     = $role
             }
         }
         #else {

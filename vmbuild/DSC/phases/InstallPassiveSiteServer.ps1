@@ -7,7 +7,7 @@ param(
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
-# Get reguired values from config
+# Get required values from config
 $DomainFullName = $deployConfig.vmOptions.domainName
 #$DomainName = $DomainFullName.Split(".")[0]
 $DomainName = $deployConfig.vmOptions.domainNetBiosName

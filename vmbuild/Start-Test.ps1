@@ -207,4 +207,5 @@ finally {
             Write-GreenCheck $historyitem
         }
     }
+    Write-host "Delete C:\temp\CompletedTests.txt to re-run all tests"
 }

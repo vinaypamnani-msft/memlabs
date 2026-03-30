@@ -70,7 +70,7 @@ function Invoke-SnapshotDomain {
                 Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
                 $complete = $true
                 if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete"
+                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
                 }
             }
             catch {
@@ -99,8 +99,8 @@ function select-DeleteSnapshotDomain {
         Write-OrangePoint "No snapshots found for $domain"
         return
     }
-    $response = get-menu -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false -return
-    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+    $response = get-menu2 -MenuName "VM Snapshot merge" -Prompt "Select Snapshot to merge/delete" -OptionArray $snapshots -additionalOptions @{"A" = "All Snapshots" } -test:$false -return
+    if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
         return
     }
 
@@ -132,9 +132,9 @@ function select-DeleteSnapshotDomain {
                             }
 
                             if (Test-Path $notesFile) {
-                                Remove-Item $notesFile -Force
+                                Remove-Item $notesFile -Force -ProgressAction SilentlyContinue
                             }
-                            Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete"
+                            Write-GreenCheck "Merge of $snapshot into $($vm.VmName) complete                            "
                         }
                     }
                 }
@@ -161,9 +161,14 @@ function select-SnapshotDomain {
         [string] $domain
     )
     Write-Host
-    Write-Host2 -ForegroundColor Orange "It is reccommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    Write-Host2 -ForegroundColor Orange "It is recommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
     #Invoke-StopVMs -domain $domain
-    Select-StopDomain -domain $domain
+    $result = Select-StopDomain -domain $domain -AllSelected
+    write-log "Snapshotting Virtual Machines in '$domain' result: $result"
+    if ($result -eq "ESCAPE") {
+        return
+    }
+    
     get-SnapshotDomain -domain $domain
 
     #$critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
@@ -229,8 +234,8 @@ function select-RestoreSnapshotDomain {
         Write-Log "Auto restoring snapshot $response" -SubActivity
     }
     else {
-        $response = get-menu -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
-        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None") {
+        $response = get-menu2 -MenuName "Snapshot Restore" -Prompt "Select Snapshot to restore" -OptionArray $snapshots -test:$false -return
+        if ([string]::IsNullOrWhiteSpace($response) -or $response -eq "None" -or $response -eq "ESCAPE") {
             return
         }
     }    
@@ -251,7 +256,7 @@ function select-RestoreSnapshotDomain {
         $startAll = "A"
     }
     else {
-        $startAll = Read-YesorNoWithTimeout -Prompt "Start All vms after restore? (Y/n)" -HideHelp -Default "y"
+        $startAll = Read-YesOrNoWithTimeout -Prompt "Start All VMs after restore? (Y/n)" -HideHelp -Default "y"
         if ($startAll -and ($startAll.ToLowerInvariant() -eq "n" -or $startAll.ToLowerInvariant() -eq "no")) {
             $startAll = $null
         }
@@ -286,7 +291,7 @@ function select-RestoreSnapshotDomain {
                         $notes = Get-Content $notesFile
                         set-vm -VMName $vm.vmName -notes $notes
                     }
-                    Write-GreenCheck "Restore Completed for $($vm.VmName)"
+                    Write-GreenCheck "Restore Completed for $($vm.VmName)                      "
                 }
                 $complete = $true
             }

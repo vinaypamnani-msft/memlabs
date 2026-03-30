@@ -53,8 +53,11 @@
     # Wait on machines to join domain
     [System.Collections.ArrayList]$waitOnDomainJoin = @($ThisVM.thisParams.ServersToWaitOn)
 
-    $domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
-    $DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
+
+    $Domain = $deployConfig.vmOptions.domainName
+    $DNName = 'DC=' + $Domain.Replace('.',',DC=')    
+    #$domainNameSplit = ($deployConfig.vmOptions.domainName).Split(".")
+    #$DNName = "DC=$($domainNameSplit[0]),DC=$($domainNameSplit[1])"
 
     $OtherDC = $false
 
@@ -231,10 +234,15 @@
             Status    = "Setting Primary DNS, and DNS Forwarders"
         }
 
+        $IPAddresses = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+        if ($deployConfig.DNSForwarders) {
+            $IPAddresses = $deployConfig.DNSForwarders
+        }
+                
         DnsServerForwarder DnsServerForwarder {
             DependsOn        = "[DefaultGatewayAddress]SetDefaultGateway"
             IsSingleInstance = 'Yes'
-            IPAddresses      = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+            IPAddresses      = $IPAddresses
             UseRootHint      = $true
             EnableReordering = $true
         }
@@ -365,12 +373,12 @@
 
             $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
             $waitOnDependency = "[DnsServerConditionalForwarder]Forwarder1"
-
+            [System.Management.Automation.PSCredential]$RemoteDomainCreds = New-Object System.Management.Automation.PSCredential ("$($OtherDCVM.thisParams.Domain)\$($Admincreds.UserName)", $Admincreds.Password)
             ADDomainTrust 'Trust' {
                 Ensure               = 'Present'
                 SourceDomainName     = $DomainName
                 TargetDomainName     = $($OtherDCVM.thisParams.Domain)
-                TargetCredential     = $Admincreds
+                TargetCredential     = $RemoteDomainCreds
                 TrustDirection       = 'Bidirectional'
                 TrustType            = 'Forest'
                 AllowTrustRecreation = $false
@@ -382,6 +390,27 @@
         }
 
         if ($prePopulate) {
+            ADOrganizationalUnit 'MEMLABS-OSDComputers'
+            {
+                Name                            = "MEMLABS-OSDComputers"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS OSD Computers"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+
+            ADOrganizationalUnit 'MEMLABS-SecurityGroups'
+            {
+                Name                            = "MEMLABS-SecurityGroups"
+                Path                            = $DNName
+                ProtectedFromAccidentalDeletion = $false
+                Description                     = "MEMLABS auto created security groups"
+                Ensure                          = 'Present'
+                DependsOn                       = $nextDepend
+            }
+            $nextDepend2 = "[ADOrganizationalUnit]MEMLABS-SecurityGroups"
+
             ADOrganizationalUnit 'MEMLABS-Users'
             {
                 Name                            = "MEMLABS-Users"
@@ -453,8 +482,8 @@
                     GroupScope  = "Global"
                     Category    = "Security"
                     Description = $GroupName
-                    DependsOn   = $nextDepend
-                    Path        = "OU=MEMLABS-Users,$DNName"
+                    DependsOn   = $nextDepend2
+                    Path        = "OU=MEMLABS-SecurityGroups,$DNName"
                 }
                 $waitOnDependency += "[ADGroup]$Department"
             }
@@ -484,7 +513,7 @@
 
             if ($usePKI) {
                 
-                WriteStatus ImportCertifcateTemplate {
+                WriteStatus ImportCertificateTemplate {
                     DependsOn = $nextDepend
                     Status    = "Importing Template to Domain"
                 }
@@ -492,26 +521,26 @@
                 $waitOnDependency = @($nextDepend)
 
                 if ($iisCount) {
-                    ImportCertifcateTemplate ConfigMgrClientDistributionPointCertificate {
+                    ImportCertificateTemplate ConfigMgrClientDistributionPointCertificate {
                         TemplateName = "ConfigMgrClientDistributionPointCertificate"
                         DNPath       = $DNName
                         DependsOn    = $nextDepend
                     }
-                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientDistributionPointCertificate"
+                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-                    ImportCertifcateTemplate ConfigMgrWebServerCertificate {
+                    ImportCertificateTemplate ConfigMgrWebServerCertificate {
                         TemplateName = "ConfigMgrWebServerCertificate"
                         DNPath       = $DNName
                         DependsOn    = $nextDepend
                     }
-                    $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrWebServerCertificate"
+                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrWebServerCertificate"
                 }
-                ImportCertifcateTemplate ConfigMgrClientCertificate {
+                ImportCertificateTemplate ConfigMgrClientCertificate {
                     TemplateName = "ConfigMgrClientCertificate"
                     DNPath       = $DNName
                     DependsOn    = $nextDepend
                 }
-                $waitOnDependency += "[ImportCertifcateTemplate]ConfigMgrClientCertificate"
+                $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientCertificate"
             }
             else {
                 $waitOnDependency = $nextDepend

@@ -28,7 +28,7 @@ $containsSecondary = $false
 
 if ($CurrentRole -eq "Primary" -and $ThisVM.hidden -and ($ThisVM.domain) -and ($ThisVm.domain -ne $deployConfig.vmOptions.DomainName)) {
     $scenario = "MultiDomain"
-    Write-DscStatus "Multi Domain Scenerio"
+    Write-DscStatus "Multi Domain Scenario"
 }
 else {
     # contains passive?
@@ -116,7 +116,7 @@ if (-not $Configuration) {
         }
         elseif ($CurrentRole -eq "Primary") {
             [hashtable]$Actions = @{
-                WaitingForCASFinsihedInstall = @{
+                WaitingForCASFinishedInstall = @{
                     Status    = 'NotStart'
                     StartTime = ''
                     EndTime   = ''
@@ -179,7 +179,7 @@ if (-not $Configuration.InstallSUP) {
         StartTime = ''
         EndTime   = ''
     }
-    $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item
+    $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item -force
 }
 
 $Configuration.ScriptWorkflow.Status = "Running"
@@ -306,7 +306,6 @@ if ($containsPassive) {
     . $ScriptFile $ConfigFilePath $LogPath
 }
 
-
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
 if ($CurrentRole -eq "CAS") {
     #If we are on the CAS, we can mark this early, to allow the primary to start while we run other tasks.
@@ -339,6 +338,12 @@ if ($TopLevelSiteServer) {
 
 }
 
+  # Install Providers
+  Write-DscStatus "Running InstallProvider.ps1"
+  $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
+  Set-Location $LogPath
+  . $ScriptFile $ConfigFilePath $LogPath
+  
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 $Configuration.ScriptWorkflow.Status = "Completed"

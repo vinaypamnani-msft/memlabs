@@ -48,22 +48,23 @@ function Remove-VirtualMachine {
         }
 
         $cachediskFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".disk.json")
-        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf | Out-Null }
+        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
 
         $cachenetFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".network.json")
-        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf | Out-Null }
+        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
 
-        $vmTest | Remove-VM -Force -WhatIf:$WhatIf
+        #$vmTest | Remove-VM -Force -WhatIf:$WhatIf
         if (-not $Migrate) {
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf
+            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
 
 
             $count = (Get-ChildItem $parent | Measure-Object).Count
             if ($count -eq 0) {
-                Remove-Item -Path $parent
+                Remove-Item -Path $parent -ProgressAction SilentlyContinue
             }
         }
+        $vmTest | Remove-VM -Force -WhatIf:$WhatIf
     }
     else {
         Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
@@ -105,7 +106,7 @@ function Remove-Orphaned {
 
         if (-not $vm.Domain) {
             # Prompt for delete, likely no json object in vm notes
-            $response = Read-YesorNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
+            $response = Read-YesOrNoWithTimeout -Prompt "  VM $($vm.VmName) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
             }
@@ -127,7 +128,7 @@ function Remove-Orphaned {
     foreach ($scope in $scopes) {
         $scopeId = $scope.ScopeId.ToString() # This requires us to replace "Internet" with subnet
         if ($vmNetworksInUse2 -notcontains $scopeId) {
-            $response = Read-YesorNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
+            $response = Read-YesOrNoWithTimeout -Prompt "  DHCP Scope '$($scope.Name) [$($scope.ScopeId)]' may be orphaned. Delete DHCP Scope? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-DhcpScope -ScopeId $scopeId -WhatIf:$WhatIf
             }
@@ -147,7 +148,7 @@ function Remove-Orphaned {
         }
 
         if (-not $inUse) {
-            $response = Read-YesorNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
+            $response = Read-YesOrNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
             }
@@ -279,17 +280,27 @@ function Remove-Domain {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
+        [object]$VMList,
         [Parameter()]
         [switch] $WhatIf
     )
 
+    $all = $false
     Write-Log "Removing virtual machines for '$DomainName' domain." -Activity
-    $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+    if ($VMList) {
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName | Where-Object { $_.vmName -in $VMList }
+    }
+    else {
+        $vmsToDelete = Get-List -Type VM -DomainName $DomainName
+        $all = $true
+    }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" } # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" } # Internet subnet could be shared between multiple domains
 
-    Remove-ForestTrust -DomainName $DomainName
+    if ($DC) {
+        Remove-ForestTrust -DomainName $DomainName
+    }
     $DeleteVMs = {
     
         try {
@@ -298,7 +309,7 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose
+            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase
@@ -320,16 +331,17 @@ function Remove-Domain {
     }
 
 
+    if ($DC) {
+        if ($scopesToDelete) {
+            Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
+            }
 
-    if ($scopesToDelete) {
-        Write-Log "Removing ALL DHCP Scopes for '$DomainName'" -Activity
-        foreach ($scope in $scopesToDelete) {
-            Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
-        }
-
-        Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
-        foreach ($scope in $scopesToDelete) {
-            Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+            Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+            }
         }
     }
 
@@ -338,6 +350,16 @@ function Remove-Domain {
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         Write-Host
     }
+    
+    if ($all) {
+        if (Test-Path "E:\virtualMachines\$DomainName") {
+            Write-Log "Removing $DomainName folder" -SubActivity
+            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+        }
+    }
+
+    Start-Sleep -seconds 3
+    clear-host
 }
 
 function Remove-All {
@@ -370,7 +392,14 @@ function Remove-All {
     }
 
     Remove-Orphaned -WhatIf:$WhatIf
-    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue | Out-Null
+    Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
+
+    # Get all the folders in E:\VirtualMachines and delete them
+    $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory
+    foreach ($folder in $folders) {
+        Write-Log "Removing $($folder.Name) folder" -SubActivity
+        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+    }
 
     Write-Host
 
