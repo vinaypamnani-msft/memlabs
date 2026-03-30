@@ -945,7 +945,7 @@ function Get-RDCManPassword {
         Write-Log "Rdcman.dll was not copied." -Failure
         return $null
     }
-
+ 
     #Write-Host "Get-RDCManPassword: Importing rdcman.dll"
     Import-Module $rdcmandllpath
     $EncryptionSettings = New-Object -TypeName RdcMan.EncryptionSettings

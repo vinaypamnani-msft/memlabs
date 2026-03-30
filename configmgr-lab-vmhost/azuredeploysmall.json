@@ -26,9 +26,10 @@
     },
     "windowsOSVersion": {
       "type": "string",
-      "defaultValue": "2025-datacenter-g2",
+      "defaultValue": "2022-datacenter-g2",
       "allowedValues": [
-        "2025-datacenter-g2"        
+        "2022-datacenter-g2",
+        "2019-datacenter-gensecond"
       ],
       "metadata": {
         "description": "Windows version for the VM."
@@ -51,6 +52,25 @@
       "metadata": {
         "description": "ARM Template Version. Use main unless otherwise instructed."
       }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_E16ds_v5",
+      "allowedValues": [
+        "Standard_E16ds_v5",
+        "Standard_E16ds_v4",
+        "Standard_E8-4ds_v5",
+        "Standard_E8-4ds_v4",
+        "Standard_E16-4ds_v4",
+        "Standard_E16-4ds_v5",
+        "Standard_E16s_v3",
+        "Standard_D16ds_v4",
+        "Standard_D16ds_v5",
+        "Standard_E20ds_v5"
+      ],
+      "metadata": {
+        "description": "ARM Template Version. Use main unless otherwise instructed."
+      }
     }
   },
   "variables": {
@@ -63,7 +83,7 @@
     "nsgId": "[resourceId(resourceGroup().name, 'Microsoft.Network/networkSecurityGroups', variables('networkSecurityGroupName'))]",
     "vnetId": "[resourceId(resourceGroup().name,'Microsoft.Network/virtualNetworks', variables('virtualNetworkName'))]",
     "subnetRef": "[concat(variables('vnetId'), '/subnets/', variables('subnetName'))]",
-    "vmSize": "Standard_E16ds_v6",
+    "vmSize": "[parameters('vmSize')]",
     "addressPrefix": "10.1.0.0/24",
     "subnetPrefix": "10.1.0.0/24",
     "dataDisksCount": 24,
@@ -115,7 +135,20 @@
       "apiVersion": "2019-02-01",
       "location": "[variables('location')]",
       "properties": {
-        "securityRules": [          
+        "securityRules": [
+          {
+            "name": "windows-admin-center",
+            "properties": {
+              "priority": 900,
+              "access": "Allow",
+              "direction": "Inbound",
+              "destinationPortRange": "[variables('windowsAdminCenterPort')]",
+              "protocol": "Tcp",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
           {
             "name": "AllowCorpnet",
             "properties": {
@@ -137,7 +170,7 @@
         ]
       },
       "tags": {
-        "CSSLAB": "[variables('tagName')]"        
+        "CSSLAB": "[variables('tagName')]"
       }
     },
     {
@@ -293,8 +326,7 @@
       },
       "tags": {
         "CSSLAB": "[variables('tagName')]",
-        "Automation": "Ignore",
-        "CostControl" : "Ignore"
+        "Automation": "Ignore"
       }
     },
     {
@@ -313,7 +345,39 @@
       "dependsOn": [
         "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
       ]
-    },    
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "name": "[concat( parameters('virtualMachineName'), '/' , 'AdminCenter' )]",
+      "apiVersion": "2018-10-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publisher": "Microsoft.AdminCenter",
+        "type": "AdminCenter",
+        "typeHandlerVersion": "0.0",
+        "autoUpgradeMinorVersion": true,
+        "settings": {
+          "port": "[variables('windowsAdminCenterPort')]",
+          "salt": "[parameters('virtualMachineName')]",
+          "cspFrameAncestors": [
+            "https://*.hosting.portal.azure.net",
+            "https://localhost:1340",
+            "https://ms.portal.azure.com",
+            "https://portal.azure.com",
+            "https://preview.portal.azure.com"
+          ],
+          "corsOrigins": [
+            "https://ms.portal.azure.com",
+            "https://portal.azure.com",
+            "https://preview.portal.azure.com",
+            "https://waconazure.com"
+          ]
+        }
+      },
+      "dependsOn": [
+        "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'))]"
+      ]
+    },
     {
       "type": "Microsoft.Compute/virtualMachines/extensions",
       "apiVersion": "2020-12-01",

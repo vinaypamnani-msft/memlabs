@@ -39,7 +39,7 @@ if ($cd) {
 Write-HostLog "Creating Storage Pool named $poolName"
 $pool = Get-StoragePool -ErrorAction SilentlyContinue -FriendlyName $poolName
 if (-not $pool) {
-    New-StoragePool -FriendlyName $poolName -StorageSubSystemFriendlyName '*storage*' -PhysicalDisks (Get-PhysicalDisk -CanPool $True)
+    New-StoragePool -FriendlyName $poolName -StorageSubSystemFriendlyName '*storage*' -PhysicalDisks (Get-PhysicalDisk -CanPool $True | Where-Object {$_.Size -eq 128GB})
     $pool = Get-StoragePool -ErrorAction SilentlyContinue -FriendlyName $poolName
     if ($pool.OperationalStatus -eq 'OK') {
         Write-HostLog "Storage Pool created."
