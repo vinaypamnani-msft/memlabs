@@ -320,7 +320,6 @@
       "name": "[concat( parameters('virtualMachineName'), '/configureHost' )]",
       "location": "[variables('location')]",
       "dependsOn": [
-          "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AdminCenter' )]",
           "[concat('Microsoft.Compute/virtualMachines/', parameters('virtualMachineName'), '/extensions/AzurePolicyforWindows' )]"
       ],
       "properties": {
