@@ -170,6 +170,7 @@ try {
         "*53003*"   { Write-Error "Get-StorageToken: Blocked by Conditional Access policy. Ask your admin to exclude the 'Memlabs Data Downloader' service principal from CA policies." }
         default     { Write-Error "Get-StorageToken: Failed to acquire token: $($errorDetail.error_description)" }
     }
+    Write-Error $_.ErrorDetails.Message
     return $null
 } finally {
     # Restore suppressed environment variables
