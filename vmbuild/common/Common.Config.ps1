@@ -2602,6 +2602,12 @@ function Convert-vmNotesToOldFormat {
 }
 
 Function Get-LinuxImages {
+
+    if (-not $Common.AzureFileList.Urls.Linux) {
+        Write-Log "No URL found for Linux images in AzureFileList. Cannot retrieve Linux image list." -Failure -LogOnly
+        return $null
+    }
+    
     $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
 
     if (Test-Path $linuxJson -PathType Leaf) {

@@ -602,7 +602,7 @@ function Get-File {
 
     # Display name for source
     $sourceDisplay = $Source
-    $bearerToken   = $null
+    $bearerToken = $null
 
     # ---- Add auth if source is a storage URL ----
     if ($Source -and $Source -like "$($StorageConfig.StorageLocation)*") {
@@ -627,7 +627,8 @@ function Get-File {
                 Write-Log "Get-File: UseCDN is not supported with bearer auth, ignoring." -LogOnly
             }
 
-        } else {
+        }
+        else {
             # SAS auth — append token as query string
             $Source = "$Source`?$($StorageConfig.StorageToken)"
 
@@ -688,7 +689,7 @@ function Get-File {
     }
 
     $OriginalProgressPreference = $Global:ProgressPreference
-    $Global:ProgressPreference  = 'Continue'
+    $Global:ProgressPreference = 'Continue'
 
     try {
         $timedOut = $false
@@ -725,13 +726,15 @@ function Get-File {
                 # so this block will never run with a bearer token
                 try {
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
-                } catch {
+                }
+                catch {
                     Write-Log "Get-File: Start-BitsTransfer failed: $_" -LogOnly
                     if ($_ -match "the module could not be loaded") {
                         Write-Log "Get-File: Could not invoke Start-BitsTransfer due to load failure. Please close all PowerShell windows and retry." -Failure
                     }
                 }
-            } else {
+            }
+            else {
                 if ($StorageConfig.UseBearerAuth -and $bearerToken) {
                     $HashArguments["BearerToken"] = $bearerToken.AccessToken
                 }
@@ -741,7 +744,8 @@ function Get-File {
                     return $false
                 }
             }
-        } else {
+        }
+        else {
             # Copying — always uses BITS
             Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
         }
@@ -749,16 +753,19 @@ function Get-File {
         # ---- Verify destination exists after transfer ----
         if (Test-Path $Destination) {
             return $true
-        } else {
+        }
+        else {
             Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
             return $false
         }
 
-    } catch {
+    }
+    catch {
         Write-Log "Get-File: $Action '$sourceDisplay' failed. Error: $($_.ToString().Trim())" -Failure
         Write-Log "Get-File: $Action '$sourceDisplay' failed. StackTrace: $($_.ScriptStackTrace)" -LogOnly
         return $false
-    } finally {
+    }
+    finally {
         $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
@@ -951,7 +958,7 @@ function Start-CurlTransfer {
 
     $maxRetries = 10
     $retryCount = 0
-    $success    = $false
+    $success = $false
 
     Write-Host
 
@@ -960,7 +967,8 @@ function Start-CurlTransfer {
 
         if ($Silent) {
             & $curlPath -s -L -C - @authArgs -o $Destination "$Source"
-        } else {
+        }
+        else {
             & $curlPath -L -C - @authArgs -o $Destination "$Source"
         }
 
@@ -4229,7 +4237,9 @@ Function Set-TitleBar {
 ####################
 ### DOT SOURCING ###
 ####################
+
 . $PSScriptRoot\common\Common.StorageToken.ps1
+
 . $PSScriptRoot\common\Common.Colors.ps1
 . $PSScriptRoot\common\Common.BaseImage.ps1
 . $PSScriptRoot\common\Common.Config.ps1
@@ -4376,45 +4386,45 @@ if (-not $Common.Initialized) {
             $breakPrefix = "-----"
         }
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion        = "260331.0"
-            LatestHotfixVersion   = "260331.0"
-            PS7                   = $PS7
-            Initialized           = $true
-            InJob                 = $InJob
-            TempPath              = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
-            ConfigPath            = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
+            MemLabsVersion              = "260331.0"
+            LatestHotfixVersion         = "260331.0"
+            PS7                         = $PS7
+            Initialized                 = $true
+            InJob                       = $InJob
+            TempPath                    = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "temp")             # Path for temporary files
+            ConfigPath                  = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config")           # Path for Config files
             # ConfigSamplesPath     = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "config\reserved")   # Path for Config files
-            CachePath             = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
-            SizeCache             = $null                                                                     # Cache for Memory Assigned, and Disk Usage
-            NetCache              = $null                                                                     # Cache for Get-NetworkAdapter
-            AzureFilesPath        = $storagePath                                                              # Path for downloaded files
-            AzureImagePath        = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
-            AzureIsoPath          = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
-            AzureOSIsoPath        = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
-            AzureToolsPath        = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
-            StagingAnswerFilePath = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
-            StagingInjectPath     = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
-            StagingWimPath        = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
-            StagingImagePath      = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
-            StagingVMPath         = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
-            LogPath               = Join-Path $logsPath "VMBuild.log"                                         # Log File
-            CrashLogsPath         = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
-            RdcManFilePath        = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
-            VerboseEnabled        = $VerboseEnabled.IsPresent                                                 # Verbose Logging
-            DevBranch             = $devBranch                                                                # Git dev branch
-            Supported             = $null                                                                     # Supported Configs
-            AzureFileList         = $null
-            LocalAdmin            = $null
-            FatalError            = $null
-            ActivityHeader        = $header1
-            SubActivityHeader     = $header2
-            BreakPrefix           = $breakPrefix
-            Colors                = $colors
-            IsAzureVM             = $isAzureVM
-            CorpNetInterfaceIndex = $corpNetInterfaceIndex
-            OfflineMode           = $false
-            NewestStorageConfigFileName  = "_storageConfig2026.json"
-            StorageConfigLocation = $null
+            CachePath                   = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")            # Path for Get-List cache files
+            SizeCache                   = $null                                                                     # Cache for Memory Assigned, and Disk Usage
+            NetCache                    = $null                                                                     # Cache for Get-NetworkAdapter
+            AzureFilesPath              = $storagePath                                                              # Path for downloaded files
+            AzureImagePath              = New-Directory -DirectoryPath (Join-Path $storagePath "os")                # Path to store sysprepped gold image after customization
+            AzureIsoPath                = New-Directory -DirectoryPath (Join-Path $storagePath "iso")               # Path for ISO's (typically for SQL)
+            AzureOSIsoPath              = New-Directory -DirectoryPath (Join-Path $storagePath "osiso")             # Path for ISO's (typically for Windows)
+            AzureToolsPath              = New-Directory -DirectoryPath (Join-Path $storagePath "tools")             # Path for downloading tools to inject in the VM
+            StagingAnswerFilePath       = New-Directory -DirectoryPath (Join-Path $staging "unattend")              # Path for Answer files
+            StagingInjectPath           = New-Directory -DirectoryPath (Join-Path $staging "filesToInject")         # Path to files to inject in VHDX
+            StagingWimPath              = New-Directory -DirectoryPath (Join-Path $staging "wim")                   # Path for WIM file imported from ISO
+            StagingImagePath            = New-Directory -DirectoryPath (Join-Path $staging "vhdx-base")             # Path to store base image, before customization
+            StagingVMPath               = New-Directory -DirectoryPath (Join-Path $staging "vm")                    # Path for staging VM for customization
+            LogPath                     = Join-Path $logsPath "VMBuild.log"                                         # Log File
+            CrashLogsPath               = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
+            RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
+            VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+            DevBranch                   = $devBranch                                                                # Git dev branch
+            Supported                   = $null                                                                     # Supported Configs
+            AzureFileList               = $null
+            LocalAdmin                  = $null
+            FatalError                  = $null
+            ActivityHeader              = $header1
+            SubActivityHeader           = $header2
+            BreakPrefix                 = $breakPrefix
+            Colors                      = $colors
+            IsAzureVM                   = $isAzureVM
+            CorpNetInterfaceIndex       = $corpNetInterfaceIndex
+            OfflineMode                 = $false
+            NewestStorageConfigFileName = "_storageConfig2026.json"
+            StorageConfigLocation       = $null
         }
 
         # Storage config
@@ -4432,28 +4442,29 @@ if (-not $Common.Initialized) {
         }
 
         ### Test Storage config and access
-        Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
-        Write-Progress2 "MemLabs initializing" -Status "Checking Storage Config" -PercentComplete 9
-        try {
-            $getresults = Initialize-Storage
-        }
-        catch {
-            #Write-Exception $_         
-            $common.OfflineMode = $true
-            Write-Log "Exception getting storage config. Using Offline Mode" -Warning
-        }
-        if (-not $getresults ) {
-            $common.OfflineMode = $true
-            Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
-        }
+
+            Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
+            Write-Progress2 "MemLabs initializing" -Status "Checking Storage Config" -PercentComplete 9
+            try {
+                $getresults = Initialize-Storage
+            }
+            catch {
+                #Write-Exception $_         
+                $common.OfflineMode = $true
+                Write-Log "Exception getting storage config. Using Offline Mode" -Warning
+            }
+            if (-not $getresults ) {
+                $common.OfflineMode = $true
+                Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
+            }
 
 
-        if (-not $InJob -or $GetLatestHotfixVersion) {
-            Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
-            Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-            $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
-        }
-
+            if (-not $InJob -or $GetLatestHotfixVersion) {
+                Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
+                Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
+                $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+            }
+        
         ### Set supported options
         Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Gathering Supported Options" -PercentComplete 13

@@ -401,6 +401,8 @@ function Remove-Windows2025UpgradeFiles {
         Write-Host "Removing 2025 Upgrade Support files - $supportFile"
         Remove-Item -Path $supportFile -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
     }
+    
+    Write-Log "Success cleaning upgrade to 2025" -LogOnly
 }
 
 function Initialize-Storage {

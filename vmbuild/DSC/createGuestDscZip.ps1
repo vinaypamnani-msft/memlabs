@@ -67,7 +67,7 @@ try {
     if ($Common.Initialized) {
         $Common.Initialized = $false
     }
-    . "..\Common.ps1"
+    . "..\Common.ps1" -InJob:$true
     $ConfirmPreference = $false
 
     # Create dummy file so config doesn't fail
