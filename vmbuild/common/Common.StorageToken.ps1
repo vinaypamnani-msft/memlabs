@@ -133,53 +133,55 @@ To fix:
         return $null
     }
 
-   # ---- Acquire token ----
-# Temporarily clear AAD-related environment variables to prevent
-# ambient user credentials from being picked up by the token request
-try {
-    $savedVars = @{}
-    $varsToSuppress = @(
-        'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID',
-        'AZURE_USERNAME', 'AZURE_PASSWORD', 'MSI_ENDPOINT', 'MSI_SECRET',
-        'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'IMDS_ENDPOINT'
-    )
-    foreach ($var in $varsToSuppress) {
-        $savedVars[$var] = [System.Environment]::GetEnvironmentVariable($var)
-        [System.Environment]::SetEnvironmentVariable($var, $null)
-    }
+    # ---- Acquire token ----
+    # Temporarily clear AAD-related environment variables to prevent
+    # ambient user credentials from being picked up by the token request
+    try {
+        $savedVars = @{}
+        $varsToSuppress = @(
+            'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID',
+            'AZURE_USERNAME', 'AZURE_PASSWORD', 'MSI_ENDPOINT', 'MSI_SECRET',
+            'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'IMDS_ENDPOINT'
+        )
+        foreach ($var in $varsToSuppress) {
+            $savedVars[$var] = [System.Environment]::GetEnvironmentVariable($var)
+            [System.Environment]::SetEnvironmentVariable($var, $null)
+        }
 
-    $tokenResponse = Invoke-RestMethod `
-        -Uri "https://login.microsoftonline.com/$($config.tenantId)/oauth2/v2.0/token" `
-        -Method POST `
-        -ContentType "application/x-www-form-urlencoded" `
-        -UseBasicParsing `
-        -UseDefaultCredentials:$false `
-        -Body @{
+        $tokenResponse = Invoke-RestMethod `
+            -Uri "https://login.microsoftonline.com/$($config.tenantId)/oauth2/v2.0/token" `
+            -Method POST `
+            -ContentType "application/x-www-form-urlencoded" `
+            -UseBasicParsing `
+            -UseDefaultCredentials:$false `
+            -Body @{
             client_id             = $config.clientId
             client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
             client_assertion      = $jwt
             scope                 = "https://storage.azure.com/.default"
             grant_type            = "client_credentials"
         }
-} catch {
-    $errorDetail = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
-    switch -Wildcard ($errorDetail.error_codes) {
-        "*700027*"  { Write-Error "Get-StorageToken: JWT signature invalid. Certificate may not match Azure registration." }
-        "*700016*"  { Write-Error "Get-StorageToken: Application '$($config.clientId)' not found in tenant '$($config.tenantId)'." }
-        "*7000215*" { Write-Error "Get-StorageToken: Invalid certificate. It may have been deleted from the app registration." }
-        "*53003*"   { Write-Error "Get-StorageToken: Blocked by Conditional Access policy. Ask your admin to exclude the 'Memlabs Data Downloader' service principal from CA policies." }
-        default     { Write-Error "Get-StorageToken: Failed to acquire token: $($errorDetail.error_description)" }
     }
-    Write-Error $_.ErrorDetails.Message
-    return $null
-} finally {
-    # Restore suppressed environment variables
-    foreach ($var in $varsToSuppress) {
-        if ($null -ne $savedVars[$var]) {
-            [System.Environment]::SetEnvironmentVariable($var, $savedVars[$var])
+    catch {
+        $errorDetail = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
+        switch -Wildcard ($errorDetail.error_codes) {
+            "*700027*" { Write-Error "Get-StorageToken: JWT signature invalid. Certificate may not match Azure registration." }
+            "*700016*" { Write-Error "Get-StorageToken: Application '$($config.clientId)' not found in tenant '$($config.tenantId)'." }
+            "*7000215*" { Write-Error "Get-StorageToken: Invalid certificate. It may have been deleted from the app registration." }
+            "*53003*" { Write-Error "Get-StorageToken: Blocked by Conditional Access policy. Ask your admin to exclude the 'Memlabs Data Downloader' service principal from CA policies." }
+            default { Write-Error "Get-StorageToken: Failed to acquire token: $($errorDetail.error_description)" }
+        }
+        Write-Error $_.ErrorDetails.Message
+        return $null
+    }
+    finally {
+        # Restore suppressed environment variables
+        foreach ($var in $varsToSuppress) {
+            if ($null -ne $savedVars[$var]) {
+                [System.Environment]::SetEnvironmentVariable($var, $savedVars[$var])
+            }
         }
     }
-}
 
     # ---- Store in global cache and return ----
     $expiresAt = [System.DateTimeOffset]::UtcNow.AddSeconds($tokenResponse.expires_in)
@@ -236,6 +238,14 @@ function Invoke-StorageRequest {
         Write-Log "Invoke-StorageRequest: First attempt failed, retrying in $RetrySeconds seconds..."
         Start-Sleep -Seconds $RetrySeconds
         try {
+            $global:TokenCache = $null  # Clear token cache to force refresh on retry
+            $token = Get-StorageToken
+            if ($null -eq $token) {
+                Write-Log "Invoke-StorageRequest: Failed to get bearer token from Get-StorageToken."
+                return $null
+            }
+            $headers["Authorization"] = "Bearer $($token.AccessToken)"
+            $headers["x-ms-version"] = "2020-04-08"
             return Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -ErrorAction Stop
         }
         catch {
@@ -248,8 +258,8 @@ function Get-StorageConfig {
 
     # ---- Discover all _storageConfigXXXX.json files, try newest first ----
     $configFiles = Get-ChildItem -Path $Common.ConfigPath -Filter "_storageConfig*.json" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "_storageConfig\d{4}\.json" } |
-        Sort-Object Name -Descending
+    Where-Object { $_.Name -match "_storageConfig\d{4}\.json" } |
+    Sort-Object Name -Descending
 
     if (-not $configFiles) {
         $Common.FatalError = "Get-StorageConfig: No _storageConfigXXXX.json files found in '$($Common.ConfigPath)'. Refer to internal documentation."
@@ -260,22 +270,23 @@ function Get-StorageConfig {
     Write-Log "Get-StorageConfig: Found $($configFiles.Count) config file(s): $($configFiles.Name -join ', ')" -LogOnly
 
     # ---- Try each config file in descending order (newest first) ----
-    $config     = $null
+    $config = $null
     $configPath = $null
-    $authSet    = $false
+    $authSet = $false
 
     foreach ($file in $configFiles) {
         Write-Log "Get-StorageConfig: Trying $($file.Name)..." -LogOnly
 
         try {
             $candidate = Get-Content -Path $file.FullName -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        } catch {
+        }
+        catch {
             Write-Log "Get-StorageConfig: Failed to parse $($file.Name), skipping." -Warning
             continue
         }
 
         # ---- Validate storage location fields ----
-        $hasStorageAccount  = -not [string]::IsNullOrWhiteSpace($candidate.storageAccount)
+        $hasStorageAccount = -not [string]::IsNullOrWhiteSpace($candidate.storageAccount)
         $hasStorageLocation = -not [string]::IsNullOrWhiteSpace($candidate.storageLocation)
 
         if (-not $hasStorageAccount -and -not $hasStorageLocation) {
@@ -289,11 +300,11 @@ function Get-StorageConfig {
         }
 
         # ---- Validate auth fields ----
-        $candidateBearerAvailable = (-not [string]::IsNullOrWhiteSpace($candidate.pBase64))   -and
-                                    (-not [string]::IsNullOrWhiteSpace($candidate.pword))     -and
-                                    (-not [string]::IsNullOrWhiteSpace($candidate.xKey))      -and
-                                    (-not [string]::IsNullOrWhiteSpace($candidate.tenantId))  -and
-                                    (-not [string]::IsNullOrWhiteSpace($candidate.clientId))
+        $candidateBearerAvailable = (-not [string]::IsNullOrWhiteSpace($candidate.pBase64)) -and
+        (-not [string]::IsNullOrWhiteSpace($candidate.pword)) -and
+        (-not [string]::IsNullOrWhiteSpace($candidate.xKey)) -and
+        (-not [string]::IsNullOrWhiteSpace($candidate.tenantId)) -and
+        (-not [string]::IsNullOrWhiteSpace($candidate.clientId))
 
         $candidateSasAvailable = -not [string]::IsNullOrWhiteSpace($candidate.storageToken)
 
@@ -305,15 +316,16 @@ function Get-StorageConfig {
         # ---- Derive StorageLocation for this candidate ----
         $candidateStorageLocation = if (-not [string]::IsNullOrWhiteSpace($candidate.storageAccount)) {
             "https://$($candidate.storageAccount).blob.core.windows.net/$($candidate.containerName)"
-        } else {
+        }
+        else {
             $candidate.storageLocation
         }
 
         # ---- Store script-scoped vars ----
         # Set these before auth attempts so URL builders work correctly
         $script:storageConfigName = $file.Name
-        $script:fileListName      = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
-        $script:fileListPath      = Join-Path $Common.AzureFilesPath $script:fileListName
+        $script:fileListName = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
+        $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
 
         Write-Log "Get-StorageConfig: Trying auth for $($file.Name) (Bearer: $candidateBearerAvailable, SAS: $candidateSasAvailable)..." -LogOnly
 
@@ -324,13 +336,14 @@ function Get-StorageConfig {
             $token = Get-StorageToken
             if ($null -ne $token) {
                 $StorageConfig.UseBearerAuth = $true
-                $StorageConfig.StorageToken  = $null
-                $config     = $candidate
+                $StorageConfig.StorageToken = $null
+                $config = $candidate
                 $configPath = $file.FullName
-                $authSet    = $true
+                $authSet = $true
                 Write-Log "Get-StorageConfig: Storage auth mode: Bearer (Service Principal) via $($file.Name)" -LogOnly
                 break
-            } else {
+            }
+            else {
                 $Common.StorageConfigLocation = $null
                 Write-Log "Get-StorageConfig: Bearer auth failed for $($file.Name)." -Warning
             }
@@ -339,24 +352,25 @@ function Get-StorageConfig {
         # ---- Try SAS ----
         if (-not $authSet -and $candidateSasAvailable) {
             $StorageConfig.UseBearerAuth = $false
-            $StorageConfig.StorageToken  = $candidate.storageToken
+            $StorageConfig.StorageToken = $candidate.storageToken
             $StorageConfig.StorageLocation = $candidateStorageLocation
 
             Write-Log "Get-StorageConfig: Testing SAS token for $($file.Name)..." -LogOnly
-            $testUrl      = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
+            $testUrl = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
             $testResponse = Invoke-StorageRequest -Url $testUrl
             if ($null -ne $testResponse) {
                 $StorageConfig.UseBearerAuth = $false
-                $config     = $candidate
+                $config = $candidate
                 $configPath = $file.FullName
-                $authSet    = $true
+                $authSet = $true
                 Write-Log "Get-StorageConfig: Storage auth mode: SAS Token via $($file.Name)" -LogOnly
                 break
-            } else {
+            }
+            else {
                 Write-Log "Get-StorageConfig: SAS token failed for $($file.Name)." -Warning
                 # Reset storage location so next iteration starts clean
                 $StorageConfig.StorageLocation = $null
-                $StorageConfig.StorageToken    = $null
+                $StorageConfig.StorageToken = $null
             }
         }
 
@@ -372,10 +386,10 @@ function Get-StorageConfig {
     # ---- Finalize ----
     Write-Log "Get-StorageConfig: StorageLocation: $($StorageConfig.StorageLocation)" -LogOnly
 
-    $newestConfigFile            = $configFiles[0]
+    $newestConfigFile = $configFiles[0]
     $script:newStorageConfigName = $newestConfigFile.Name
-    $script:newConfigPath        = $newestConfigFile.FullName
-    $script:GetNewStorageConfig  = ($file.Name -ne $configFiles[0].Name)
+    $script:newConfigPath = $newestConfigFile.FullName
+    $script:GetNewStorageConfig = ($file.Name -ne $configFiles[0].Name)
 
     return $true
 }
