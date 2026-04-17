@@ -16,7 +16,7 @@ function Get-StorageToken {
 
     # ---- Load config ----
     if (-not $global:common.StorageConfigLocation ) {
-        Write-Error "Get-StorageToken: `$global:common.ConfigPath is not set."
+        Write-Error "Get-StorageToken: `$global:common.StorageConfigLocation is not set."
         return $null
     }
 
@@ -236,6 +236,7 @@ function Invoke-StorageRequest {
     }
     catch {
         Write-Log "Invoke-StorageRequest: First attempt failed, retrying in $RetrySeconds seconds..."
+        Write-Log "Invoke-StorageRequest: First attempt failed, $_" -logonly
         Start-Sleep -Seconds $RetrySeconds
         try {
             $global:TokenCache = $null  # Clear token cache to force refresh on retry
@@ -257,9 +258,11 @@ function Invoke-StorageRequest {
 function Get-StorageConfig {
 
     # ---- Discover all _storageConfigXXXX.json files, try newest first ----
+  
     $configFiles = Get-ChildItem -Path $Common.ConfigPath -Filter "_storageConfig*.json" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match "_storageConfig\d{4}\.json" } |
+    Where-Object { $_.Name -match "^_storageConfig\d{4}(\.\d+)?\.json$" } |
     Sort-Object Name -Descending
+
 
     if (-not $configFiles) {
         $Common.FatalError = "Get-StorageConfig: No _storageConfigXXXX.json files found in '$($Common.ConfigPath)'. Refer to internal documentation."
@@ -274,7 +277,13 @@ function Get-StorageConfig {
     $configPath = $null
     $authSet = $false
 
-    foreach ($file in $configFiles) {
+    foreach ($file in ($configFiles | Sort-Object @{
+    Expression = {
+        if ($_.Name -match '^_storageConfig(\d+)(?:\.(\d+))?\.json$') {
+            [int]$matches[1] * 100000 + [int]($matches[2] ?? 0)
+        }
+    }
+} -Descending)) {
         Write-Log "Get-StorageConfig: Trying $($file.Name)..." -LogOnly
 
         try {
@@ -329,6 +338,7 @@ function Get-StorageConfig {
 
         Write-Log "Get-StorageConfig: Trying auth for $($file.Name) (Bearer: $candidateBearerAvailable, SAS: $candidateSasAvailable)..." -LogOnly
 
+        $Common.StorageConfigLocation = $file.FullName
         # ---- Try bearer first ----
         if ($candidateBearerAvailable) {
             $Common.StorageConfigLocation = $file.FullName

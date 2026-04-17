@@ -4423,7 +4423,7 @@ if (-not $Common.Initialized) {
             IsAzureVM                   = $isAzureVM
             CorpNetInterfaceIndex       = $corpNetInterfaceIndex
             OfflineMode                 = $false
-            NewestStorageConfigFileName = "_storageConfig2026.json"
+            NewestStorageConfigFileName = "_storageConfig2026.1.json"
             StorageConfigLocation       = $null
         }
 
