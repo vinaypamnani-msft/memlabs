@@ -1177,6 +1177,7 @@ $global:VM_Config = {
 
         # Boot To OOBE?
         $bootToOOBE = $currentItem.role -eq "AADClient"
+        $oobeStarted = $false
         if ($bootToOOBE) {
             # Run Sysprep
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
@@ -1185,7 +1186,7 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
             }
             else {
-                $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 15
+                $ready = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -VmState "Off" -TimeoutMinutes 30
                 if (-not $ready) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Timed out while waiting for sysprep to shut the VM down." -OutputStream -Failure
                 }

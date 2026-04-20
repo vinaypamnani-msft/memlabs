@@ -13,7 +13,75 @@ function Remove-VirtualMachine {
         [Parameter()]
         [bool] $Migrate = $false
     )
-    #{ "network": "10.0.1.0", "ClusterIPAddress": "10.250.250.135", "AGIPAddress": "10.250.250.136",
+
+    # Helper: retry Remove-Item with configurable attempts and delay
+    function Remove-ItemWithRetry {
+        param (
+            [string] $Path,
+            [int]    $MaxAttempts = 3,
+            [int]    $DelaySeconds = 5,
+            [switch] $WhatIf
+        )
+        for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+            try {
+                Remove-Item -Path $Path -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue -ErrorAction Stop | Out-Null
+                return $true
+            }
+            catch {
+                Write-Log "Attempt $attempt/$MaxAttempts`: Failed to remove '$Path': $($_.Exception.Message)" -Warning
+                if ($attempt -lt $MaxAttempts) {
+                    Write-Log "Sleeping $DelaySeconds seconds before retry..." -SubActivity
+                    Start-Sleep -Seconds $DelaySeconds
+                }
+            }
+        }
+        return $false
+    }
+
+    # Helper: ensure VM is fully stopped with timeout
+    function Wait-VMStopped {
+        param (
+            [Microsoft.HyperV.PowerShell.VirtualMachine] $VM,
+            [int] $TimeoutSeconds = 60,
+            [switch] $WhatIf
+        )
+        if ($VM.State -eq "Off") { return $true }
+
+        Write-Log "VM '$($VM.Name)' is in state '$($VM.State)'. Attempting graceful shutdown..." -SubActivity
+        try {
+            $VM | Stop-VM -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
+        }
+        catch {
+            Write-Log "Graceful stop failed: $($_.Exception.Message). Forcing turn off..." -Warning
+            try {
+                $VM | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
+            }
+            catch {
+                Write-Log "TurnOff also failed: $($_.Exception.Message)" -Warning
+            }
+        }
+
+        if ($WhatIf) { return $true }
+
+        # Poll until Off or timeout
+        $elapsed = 0
+        while ($elapsed -lt $TimeoutSeconds) {
+            Start-Sleep -Seconds 2
+            $elapsed += 2
+            $refreshed = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
+            if (-not $refreshed -or $refreshed.State -eq "Off") {
+                Write-Log "VM '$($VM.Name)' is now Off." -SubActivity
+                return $true
+            }
+            Write-Log "Waiting for VM to stop... ($elapsed/$TimeoutSeconds`s)" -SubActivity
+        }
+
+        Write-Log "VM '$($VM.Name)' did not reach Off state within $TimeoutSeconds seconds." -Warning
+        return $false
+    }
+
+    # ── Main logic ────────────────────────────────────────────────────────────
+
     $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
     if ($vmFromList.vmBuild -eq $false) {
         if (-not ($Force.IsPresent)) {
@@ -23,51 +91,88 @@ function Remove-VirtualMachine {
     }
 
     $vmTest = Get-VM2 -Name $VmName -Fallback
-
-    if ($vmTest) {
-        $parent = (get-item $($vmTest.Path)).Parent
-        Write-Log "VM '$VmName' exists. Removing." -SubActivity
-
-        if ($vmFromList.ClusterIPAddress) {
-            Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
-            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-        }
-
-        if ($vmFromList.AGIPAddress) {
-            Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
-            Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress -ErrorAction SilentlyContinue -WhatIf:$WhatIf
-        }
-
-        $adapters = $vmTest | Get-VMNetworkAdapter
-        foreach ($adapter in $adapters) {
-            Remove-DHCPReservation -mac $adapter.MacAddress -vmName $currentItem.vmName                        
-        }
-
-        if ($vmTest.State -ne "Off") {
-            $vmTest | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue
-        }
-
-        $cachediskFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".disk.json")
-        if (Test-Path $cachediskFile) { Remove-Item -path $cachediskFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
-
-        $cachenetFile = Join-Path $global:common.CachePath ($($vmTest.vmID).toString() + ".network.json")
-        if (Test-Path $cachenetFile) { Remove-Item -path $cachenetFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null }
-
-        #$vmTest | Remove-VM -Force -WhatIf:$WhatIf
-        if (-not $Migrate) {
-            Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
-            Remove-Item -Path $($vmTest.Path) -Force -Recurse -WhatIf:$WhatIf -ProgressAction SilentlyContinue| Out-Null
-
-
-            $count = (Get-ChildItem $parent | Measure-Object).Count
-            if ($count -eq 0) {
-                Remove-Item -Path $parent -ProgressAction SilentlyContinue
-            }
-        }
-        $vmTest | Remove-VM -Force -WhatIf:$WhatIf
-    }
-    else {
+    if (-not $vmTest) {
         Write-Log "VM '$VmName' does not exist in Hyper-V." -Warning
+        return
+    }
+
+    $parent = (Get-Item $vmTest.Path -ErrorAction SilentlyContinue)?.Parent
+
+    Write-Log "VM '$VmName' exists. Removing." -SubActivity
+
+    # -- DHCP cleanup --
+    if ($vmFromList.ClusterIPAddress) {
+        Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
+        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
+            -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress `
+            -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
+    if ($vmFromList.AGIPAddress) {
+        Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
+        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
+            -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress `
+            -ErrorAction SilentlyContinue -WhatIf:$WhatIf
+    }
+
+    # -- Network adapter reservations --
+    $adapters = $vmTest | Get-VMNetworkAdapter
+    foreach ($adapter in $adapters) {
+        Remove-DHCPReservation -mac $adapter.MacAddress -vmName $VmName   # fixed: was $currentItem.vmName
+    }
+
+    # -- Ensure VM is stopped before touching files --
+    $stopped = Wait-VMStopped -VM $vmTest -WhatIf:$WhatIf
+    if (-not $stopped -and -not $WhatIf) {
+        Write-Log "Could not confirm VM '$VmName' is stopped. File locks may persist." -Warning
+    }
+
+    # -- Cache file cleanup --
+    foreach ($suffix in @(".disk.json", ".network.json")) {
+        $cacheFile = Join-Path $global:common.CachePath ($vmTest.vmID.ToString() + $suffix)
+        if (Test-Path $cacheFile) {
+            Remove-Item -Path $cacheFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # -- Folder removal (attempt 1: before Remove-VM) --
+    $folderRemoved = $false
+    if (-not $Migrate) {
+        Write-Log "$VmName`: Purging $($vmTest.Path) folder (attempt before Remove-VM)..." -HostOnly
+        $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
+        if (-not $folderRemoved) {
+            Write-Log "$VmName`: Could not fully remove folder before Remove-VM. Will retry after." -Warning
+        }
+    }
+
+    # -- Remove VM from Hyper-V --
+    try {
+        $vmTest | Remove-VM -Force -WhatIf:$WhatIf -ErrorAction Stop
+        Write-Log "VM '$VmName' removed from Hyper-V." -SubActivity
+    }
+    catch {
+        Write-Log "Remove-VM failed for '$VmName': $($_.Exception.Message)" -Warning
+    }
+
+    # -- Folder removal (attempt 2: after Remove-VM releases handles) --
+    if (-not $Migrate -and -not $folderRemoved) {
+        if (Test-Path $vmTest.Path) {
+            Write-Log "$VmName`: Retrying folder removal after Remove-VM..." -HostOnly
+            $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
+            if (-not $folderRemoved) {
+                Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+            }
+        } else {
+            $folderRemoved = $true
+        }
+    }
+
+    # -- Parent folder cleanup (only if now empty) --
+    if ($parent -and (Test-Path $parent.FullName) -and -not $Migrate -and -not $WhatIf) {
+        $remaining = Get-ChildItem $parent.FullName -ErrorAction SilentlyContinue
+        if (-not $remaining -or $remaining.Count -eq 0) {
+            Write-Log "$VmName`: Removing empty parent folder '$($parent.FullName)'..." -SubActivity
+            Remove-Item -Path $parent.FullName -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+        }
     }
 }
 

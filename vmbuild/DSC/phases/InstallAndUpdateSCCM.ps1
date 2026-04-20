@@ -945,7 +945,13 @@ else {
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
                 
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-                    Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    #If the percent is 100, print out the Linkstatus and states for troubleshooting, otherwise print out the percentage
+                    if ($replicationStatus.GlobalInitPercentage -eq 100) {
+                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode LinkStatus: $($replicationStatus.LinkStatus), Site1ToSite2GlobalState: $($replicationStatus.Site1ToSite2GlobalState), Site2ToSite1GlobalState: $($replicationStatus.Site2ToSite1GlobalState), Site2ToSite1SiteState: $($replicationStatus.Site2ToSite1SiteState)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    }
+                    else {
+                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    }
                     $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
                     Start-Sleep -Seconds 30
                 }
