@@ -225,28 +225,18 @@ function Check-OverallHealth {
     
     $today = Get-Date
     $firstDayOfMonth = Get-Date -Year $today.Year -Month $today.Month -Day 1
-    $firstTuesday = $firstDayOfMonth.AddDays((([int][DayOfWeek]::Tuesday) - [int]$firstDayOfMonth.DayOfWeek + 7) % 7)
-    $secondTuesday = $firstTuesday.AddDays(7)
-    
+    $secondTuesday = $firstDayOfMonth.AddDays((([int][DayOfWeek]::Tuesday - [int]$firstDayOfMonth.DayOfWeek + 7) % 7) + 7)
+
     if ($today.Date -eq $secondTuesday.Date) {
+        $hoursSinceReboot = [math]::Round((Get-Uptime).TotalHours, 1)
 
-        $rebootedInLast12Hours = $false
-        $timeSinceLastReboot = (get-uptime).TotalHours
-
-        if ($timeSinceLastReboot -le 12) {
-            $rebootedInLast12Hours = $true
-        }
-   
-        if ($rebootedInLast12Hours) {
-            #$hotfixCount = (Get-HotFix | Where-Object { $_.InstalledOn -eq (Get-Date).Date }).Count           
-            Write-GreenCheck -indent $Indent "It's patch Tuesday, Machine was rebooted $($timeSinceLastReboot) hours ago."           
+        if ($hoursSinceReboot -le 12) {
+            Write-GreenCheck -indent $Indent "It's Patch Tuesday, machine was rebooted $hoursSinceReboot hours ago."
         }
         else {
-            Write-RedX -indent $Indent "It's patch Tuesday, your machine will likely reboot today at 2-3 PM EST."
+            Write-RedX -indent $Indent "It's Patch Tuesday, your machine will likely reboot today at 2-3 PM EST."
         }
-
     }
-
     Write-Host
     $Global:ProgressPreference = $OriginalProgressPreference
 
@@ -7158,7 +7148,7 @@ function Select-VirtualMachines {
 
                         if ($response2 -and ($response2.ToLowerInvariant() -eq "n" -or $response2.ToLowerInvariant() -eq "no")) {
                             if ([string]::IsNullOrEmpty($result)) {
-                            continue VMLoop
+                                continue VMLoop
                             }
                             else {
                                 return
