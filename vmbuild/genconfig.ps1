@@ -3970,8 +3970,16 @@ Function Get-domainUser {
         [Parameter(Mandatory = $false, HelpMessage = "Current value")]
         [Object] $CurrentValue
     )
+    $prefix = $Global:Config.VmOptions.Prefix
+    $users = get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique |
+    ForEach-Object {
+        if ($prefix -and $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $_.Substring($prefix.Length)
+        } else {
+            $_
+        }
+    }
 
-    $users = get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
     $valid = $false
     while ($valid -eq $false) {
         $additionalOptions = @{ "N" = "New User" }
