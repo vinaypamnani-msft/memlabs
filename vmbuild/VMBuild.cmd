@@ -60,35 +60,28 @@ where /q wt
 IF NOT ERRORLEVEL 1 SET WT=1
 
 REM ============================================================
-REM Use short path to avoid spaces in "Program Files"
+REM Use quoted %ProgramFiles% to avoid "C:\Program not found"
 REM ============================================================
-SET PS7=C:\Progra~1\PowerShell\7\pwsh.exe
+SET PS7="%ProgramFiles%\PowerShell\7\pwsh.exe"
 SET PS7_FLAG=%TEMP%\memlabs_ps7_upgrade.flag
+SET CHOCO_ALL_FLAG=%TEMP%\memlabs_choco_all_upgrade.flag
 
 REM ============================================================
-REM Upgrade PowerShell 7 (once per week)
+REM Weekly upgrades (PowerShell 7 and all Chocolatey packages)
 REM ============================================================
-
-REM Check if flag file exists and is less than 7 days old
-
-REM ============================================================
-REM Upgrade PowerShell 7 (once per week)
-REM ============================================================
-SET PS7_FLAG=%TEMP%\memlabs_ps7_upgrade.flag
-SET DO_UPGRADE=1
-
 SETLOCAL ENABLEDELAYEDEXPANSION
 
 REM Get current week number
 FOR /F "tokens=*" %%W IN ('powershell -NoLogo -NonInteractive -Command "Write-Output (Get-Date -UFormat '%%Y-%%V')"') DO SET CURRENT_WEEK=%%W
 
-REM Check if we already upgraded this week
+REM --- Upgrade PowerShell 7 (once per week) ---
+SET DO_PS7_UPGRADE=1
 IF EXIST "%PS7_FLAG%" (
     FOR /F "tokens=*" %%C IN ('type "%PS7_FLAG%"') DO SET LAST_WEEK=%%C
-    IF "!LAST_WEEK!"=="!CURRENT_WEEK!" SET DO_UPGRADE=0
+    IF "!LAST_WEEK!"=="!CURRENT_WEEK!" SET DO_PS7_UPGRADE=0
 )
 
-IF "!DO_UPGRADE!"=="1" (
+IF "!DO_PS7_UPGRADE!"=="1" (
     ECHO Upgrading PowerShell 7 ^(week !CURRENT_WEEK!^)...
     choco upgrade pwsh -y
     IF ERRORLEVEL 1 (
@@ -100,11 +93,31 @@ IF "!DO_UPGRADE!"=="1" (
     ECHO PowerShell 7 upgrade skipped ^(already checked week !CURRENT_WEEK!^).
 )
 
+REM --- Upgrade all Chocolatey packages (once per week) ---
+SET DO_CHOCO_UPGRADE=1
+IF EXIST "%CHOCO_ALL_FLAG%" (
+    FOR /F "tokens=*" %%C IN ('type "%CHOCO_ALL_FLAG%"') DO SET LAST_CHOCO_WEEK=%%C
+    IF "!LAST_CHOCO_WEEK!"=="!CURRENT_WEEK!" SET DO_CHOCO_UPGRADE=0
+)
+
+IF "!DO_CHOCO_UPGRADE!"=="1" (
+    ECHO Upgrading all Chocolatey packages ^(week !CURRENT_WEEK!^)...
+    choco upgrade all -y --ignore-checksums
+    IF ERRORLEVEL 1 (
+        ECHO WARNING: choco upgrade all failed or reported errors.
+    ) ELSE (
+        powershell -NoLogo -NonInteractive -Command "'!CURRENT_WEEK!' | Out-File '!CHOCO_ALL_FLAG!' -Encoding ascii -NoNewline"
+    )
+) ELSE (
+    ECHO Chocolatey upgrade all skipped ^(already checked week !CURRENT_WEEK!^).
+)
+
 ENDLOCAL
 
-
-
-IF NOT EXIST "%PS7%" (
+REM ============================================================
+REM Check PowerShell 7 is available
+REM ============================================================
+IF NOT EXIST %PS7% (
     ECHO WARNING: PowerShell 7 not available, falling back to PowerShell 5.
     GOTO PS5
 )
@@ -113,20 +126,21 @@ REM ============================================================
 REM Launch with PowerShell 7
 REM ============================================================
 :PS7
+timeout 1
 IF "%~1"=="" (
     IF "%WT%"=="1" (
-        wt -w 0 nt -d . "%PS7%" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
+        wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
-        "%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
+        %PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 ) ELSE (
     IF "%WT%"=="1" (
-        wt -w 0 nt -d . "%PS7%" -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
+        wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
-        "%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
+        %PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 )
@@ -150,7 +164,7 @@ REM ============================================================
 :LAUNCHWT_FAILED
 ECHO ERROR: Failed to launch Windows Terminal.
 ECHO Falling back to direct PowerShell 7 launch...
-"%PS7%" -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
+%PS7% -ExecutionPolicy Bypass -NoLogo -NoExit -Command "./New-Lab.ps1"
 GOTO END
 
 :LAUNCHPS7_FAILED

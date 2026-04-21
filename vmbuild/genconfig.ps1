@@ -341,7 +341,14 @@ function Select-ConfigMenu {
        
         #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
         
-        $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete
+        if ($global:GoBack) {
+            $SelectedConfig = Select-DomainMenu -DomainName $global:SavedConfig.VmOptions.DomainName | Out-Null
+            $response = "!"   
+            $global:GoBack = $false        
+        }
+        else {
+            $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete
+        }
 
         write-Verbose "1 response $response"
         if (-not $response) {
@@ -631,7 +638,12 @@ function Select-DomainMenu {
 
             write-Verbose "1 response $response"
             if (-not $response -or $response -eq "ESCAPE") {
-                return
+                if ($global:GoBack) { 
+                    return $global:SavedConfig 
+                }
+                else {
+                    return
+                }
             }
 
             switch ($response.ToLowerInvariant()) {
@@ -646,7 +658,14 @@ function Select-DomainMenu {
                 "x" { select-DeleteSnapshotDomain -domain $domain }
                 "e" { select-ChangeDynamicMemory -domain $domain -Enable }
                 "f" { select-ChangeDynamicMemory -domain $domain -Disable }
-                "m" { return Show-ExistingNetwork2 -domainName $domain }
+                "m" {
+                    if ($global:GoBack) { 
+                        return $global:SavedConfig 
+                    }
+                    else {
+                        return Show-ExistingNetwork2 -domainName $domain 
+                    }
+                }
                 Default {}
             }
         }
@@ -1071,6 +1090,7 @@ function Select-MainMenu {
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
+        $global:GoBack = $false
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
         $global:GenConfigErrorMessages = @()
         $tc = Test-Configuration -InputObject $Global:Config -fast
@@ -1168,7 +1188,12 @@ function Select-MainMenu {
         $response = Get-Menu2 -MenuName $MenuName -Prompt "Select menu option" -OptionArray $optionArray -AdditionalOptions $customOptions -preOptions $preOptions -Test:$false -AcceptsDelete
         write-Verbose "response $response"
         if ($response -eq "ESCAPE") {
-            $response = "!"
+            if (-not $global:existingMachines) {
+                $response = "!"
+            }
+            else {
+                $response = "*"
+            }
         }
         if (-not $response -or $response -eq "ESCAPE") {
             continue
@@ -1230,6 +1255,28 @@ function Select-MainMenu {
                 }
                 if ($response -eq "y") {
                     $global:StartOver = $true
+                    $global:DisableSmartUpdate = $false
+                    Get-List -FlushCache
+                    return $false
+                }                
+            }
+            "*" {                                              
+                $modified = $false
+                foreach ($virtualMachine in $global:existingMachines) {
+                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
+                        $modified = $true
+                    }
+                }
+                $response = "y"
+                if ($modified) {
+                    $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
+                    if ($response -eq "y") {
+                        return
+                    }
+                }
+                if ($response -eq "y") {
+                    $global:GoBack = $true
+                    $global:SavedConfig = $global:Config                              
                     $global:DisableSmartUpdate = $false
                     Get-List -FlushCache
                     return $false
@@ -3971,14 +4018,18 @@ Function Get-domainUser {
         [Object] $CurrentValue
     )
     $prefix = $Global:Config.VmOptions.Prefix
-    $users = get-list2 -DeployConfig $Global:Config | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique |
+    $users = get-list2 -DeployConfig $Global:Config | 
+    Where-Object { $_.domainUser } | 
+    Select-Object -ExpandProperty domainUser -Unique |
     ForEach-Object {
         if ($prefix -and $_.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
             $_.Substring($prefix.Length)
-        } else {
+        }
+        else {
             $_
         }
-    }
+    } |
+    Sort-Object -Unique
 
     $valid = $false
     while ($valid -eq $false) {
@@ -7792,6 +7843,8 @@ $Global:SavedConfig = $null
 do {
     $Global:Config = $null
     $Global:configfile = $null
+    $global:StartOver = $false
+    $global:GoBack = $false
     $Global:Config = Select-ConfigMenu
 
 
@@ -7799,11 +7852,23 @@ do {
 
     $valid = $false
     while ($valid -eq $false) {
-        $global:StartOver = $false
+      
+
         $return.DeployNow = Select-MainMenu
+       
+        if ($Global:GoBack -eq $true) {
+            
+            $Global:SavedConfig = $global:Config
+            $Global:Config = Select-ConfigMenu
+            Write-Host "Configuration restored to previous state."            
+            $Global:GoBack = $false
+            $global:SavedConfig = $null
+            continue
+        }
+
         if ($global:StartOver -eq $true) {
             Write-Host2 -ForegroundColor MediumAquamarine "Saving Configuration... use ""!"" to return."
-            $Global:SavedConfig = $global:config
+            $Global:SavedConfig = $global:Config
             Write-Host
             break
         }
@@ -7854,7 +7919,7 @@ do {
             }
         }
     }
-} while ($null -ne $Global:SavedConfig -and $global:StartOver -eq $true)
+} while ($null -ne $Global:SavedConfig -and (($global:StartOver -eq $true) -or ($global:GoBack -eq $true)))
 
 $return.ConfigFileName = Save-Config $Global:Config
 
