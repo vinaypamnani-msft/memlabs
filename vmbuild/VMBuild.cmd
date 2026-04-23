@@ -4,9 +4,10 @@ pushd "%~dp0"
 
 REM ============================================================
 REM Register file association
+REM (use ^" so embedded quotes are not seen as terminators by cmd /c)
 REM ============================================================
-cmd /c "ftype MemLabs.Run="%~f0" %%1"
-cmd /c "assoc .memlabs=MemLabs.Run"
+cmd /c ftype MemLabs.Run=^"%~f0^" %%1
+cmd /c assoc .memlabs=MemLabs.Run
 cls
 
 REM ============================================================
@@ -39,9 +40,33 @@ git pull
 @ECHO OFF
 IF ERRORLEVEL 1 (
     ECHO.
-    ECHO WARNING: git pull failed. You may be running an outdated version.
-    ECHO Press any key to continue anyway, or Ctrl+C to exit...
+    ECHO ============================================================
+    ECHO  WARNING: git pull failed. You may be running an outdated version.
+    ECHO ============================================================
+    ECHO.
+    ECHO  Run these commands in this directory:
+    ECHO         %CD%
+    ECHO.
+    ECHO  How to fix:
+    ECHO    1. Check your network/VPN connection.
+    ECHO    2. Open a new terminal and cd to the directory above:
+    ECHO         pushd "%CD%"
+    ECHO    3. Resolve any local changes:
+    ECHO         git status
+    ECHO         git stash         ^(to set aside local edits^)
+    ECHO         -- or --
+    ECHO         git reset --hard  ^(WARNING: discards local edits^)
+    ECHO    4. Verify the remote and credentials:
+    ECHO         git remote -v
+    ECHO         git fetch
+    ECHO    5. If the repo is owned by another user, run:
+    ECHO         git config --global --add safe.directory "%CD%"
+    ECHO    6. Re-run:  git pull
+    ECHO.
+    ECHO  Fix the issue in another window, then return here.
+    ECHO  Press any key to RESUME, or Ctrl+C to EXIT...
     PAUSE > NUL
+    ECHO Resuming...
 )
 
 REM ============================================================
@@ -84,10 +109,13 @@ IF EXIST "%PS7_FLAG%" (
 IF "!DO_PS7_UPGRADE!"=="1" (
     ECHO Upgrading PowerShell 7 ^(week !CURRENT_WEEK!^)...
     choco upgrade pwsh -y
-    IF ERRORLEVEL 1 (
-        ECHO WARNING: Failed to upgrade PowerShell 7.
-    ) ELSE (
+    SET CHOCO_RC=!ERRORLEVEL!
+    REM Treat 0, 1641 and 3010 as success ^(reboot codes^)
+    IF "!CHOCO_RC!"=="0" (SET PS7_OK=1) ELSE IF "!CHOCO_RC!"=="1641" (SET PS7_OK=1) ELSE IF "!CHOCO_RC!"=="3010" (SET PS7_OK=1) ELSE (SET PS7_OK=0)
+    IF "!PS7_OK!"=="1" (
         powershell -NoLogo -NonInteractive -Command "'!CURRENT_WEEK!' | Out-File '!PS7_FLAG!' -Encoding ascii -NoNewline"
+    ) ELSE (
+        ECHO WARNING: Failed to upgrade PowerShell 7 ^(exit !CHOCO_RC!^).
     )
 ) ELSE (
     ECHO PowerShell 7 upgrade skipped ^(already checked week !CURRENT_WEEK!^).
@@ -103,10 +131,13 @@ IF EXIST "%CHOCO_ALL_FLAG%" (
 IF "!DO_CHOCO_UPGRADE!"=="1" (
     ECHO Upgrading all Chocolatey packages ^(week !CURRENT_WEEK!^)...
     choco upgrade all -y --ignore-checksums
-    IF ERRORLEVEL 1 (
-        ECHO WARNING: choco upgrade all failed or reported errors.
-    ) ELSE (
+    SET CHOCO_RC=!ERRORLEVEL!
+    REM Treat 0, 1641 and 3010 as success ^(reboot codes^)
+    IF "!CHOCO_RC!"=="0" (SET CHOCO_OK=1) ELSE IF "!CHOCO_RC!"=="1641" (SET CHOCO_OK=1) ELSE IF "!CHOCO_RC!"=="3010" (SET CHOCO_OK=1) ELSE (SET CHOCO_OK=0)
+    IF "!CHOCO_OK!"=="1" (
         powershell -NoLogo -NonInteractive -Command "'!CURRENT_WEEK!' | Out-File '!CHOCO_ALL_FLAG!' -Encoding ascii -NoNewline"
+    ) ELSE (
+        ECHO WARNING: choco upgrade all failed ^(exit !CHOCO_RC!^).
     )
 ) ELSE (
     ECHO Chocolatey upgrade all skipped ^(already checked week !CURRENT_WEEK!^).
