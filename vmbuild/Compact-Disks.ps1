@@ -1145,6 +1145,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 NewSize      = $null
                                 Status       = 'Pending'
                                 Error        = $null
+                                StartTime    = $null
+                                EndTime      = $null
                             }
                             $diskInfoList.Add($diskObj)
                             $diskQueue.Enqueue($diskObj)
@@ -1418,8 +1420,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
                     } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill
-                    $disk.Job    = $job
-                    $disk.Status = 'Running'
+                    $disk.Job       = $job
+                    $disk.Status    = 'Running'
+                    $disk.StartTime = Get-Date
                     [void]$activeJobs.Add($disk)
                 }
                 catch {
@@ -1443,7 +1446,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 } catch {}
 
                 if ($disk.Job.State -eq 'Completed') {
-                    $disk.Status = 'Completed'
+                    $disk.Status  = 'Completed'
+                    $disk.EndTime = Get-Date
                     $NewFileSize = Get-VhdFileSize -Path $disk.Path
                     $disk.NewSize = if ($NewFileSize) { $NewFileSize } else { $disk.OriginalSize }
                     $saved    = $disk.OriginalSize - $disk.NewSize
@@ -1452,7 +1456,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
                 }
                 elseif ($disk.Job.State -eq 'Failed') {
-                    $disk.Status = 'Failed'
+                    $disk.Status  = 'Failed'
+                    $disk.EndTime = Get-Date
                     $reason = $disk.Job.ChildJobs[0].JobStateInfo.Reason
                     $disk.Error = if ($reason) { $reason.Message } else { ($disk.Job.ChildJobs[0].Error | Out-String).Trim() }
                     if (-not $disk.Error) { $disk.Error = 'Unknown error' }
@@ -1633,57 +1638,105 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $successful  = @($diskInfoList | Where-Object { $_.Status -eq 'Completed' })
     $failed      = @($diskInfoList | Where-Object { $_.Status -eq 'Failed' })
     $cancelled   = @($diskInfoList | Where-Object { $_.Status -eq 'Cancelled' })
-    $prepFailed  = @($vmInfoList | Where-Object { $_.Status -eq 'Failed' })
-    $forcedStops = @($vmInfoList | Where-Object { $_.Forced })
+    $prepFailed  = @($vmInfoList   | Where-Object { $_.Status -eq 'Failed' })
+    $forcedStops = @($vmInfoList   | Where-Object { $_.Forced })
+
+    # Helpers for the summary table
+    function _FmtDuration([TimeSpan]$ts) {
+        if ($null -eq $ts -or $ts.TotalSeconds -lt 0) { return '       -' }
+        if ($ts.TotalHours -ge 1) { return ('{0:0}h{1:00}m{2:00}s' -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds) }
+        if ($ts.TotalMinutes -ge 1) { return ('   {0:00}m{1:00}s' -f [int]$ts.TotalMinutes, $ts.Seconds) }
+        return ('      {0:00}s' -f [int]$ts.TotalSeconds)
+    }
 
     Add-UiLog ('')
-    Add-UiLog ('========================================')
-    Add-UiLog ('  Optimization Complete!')
-    Add-UiLog ('========================================')
+    Add-UiLog ('=====================================================================================================')
+    Add-UiLog ('  Optimization Complete')
+    Add-UiLog ('=====================================================================================================')
+    Add-UiLog ("  Domain   : $DomainLabel")
+    Add-UiLog ("  Mode     : $Mode    MaxConcurrent: $MaxConcurrentJobs")
+    Add-UiLog ("  Duration : $($duration.ToString('hh\:mm\:ss'))")
+    Add-UiLog ("  Disks    : $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled")
+    Add-UiLog ("  VMs      : $($vmInfoList.Count) total, $($prepFailed.Count) prep-failed, $($forcedStops.Count) force-stopped")
+    Add-UiLog ('')
 
+    # -------- Per-disk table --------
+    # Column widths chosen so a typical lab fits in the 100-char UI log box.
+    $hdrFmt = '  {0,-18} {1,-32} {2,12} {3,12} {4,12} {5,7} {6,9}  {7}'
+    $rowFmt = $hdrFmt
+    Add-UiLog ('--- Per-disk results -----------------------------------------------------------------------------')
+    Add-UiLog ($hdrFmt -f 'VM', 'Disk', 'Before', 'After', 'Saved', 'Saved%', 'Duration', 'Status')
+    Add-UiLog ($hdrFmt -f ('-'*18), ('-'*32), ('-'*12), ('-'*12), ('-'*12), ('-'*7), ('-'*9), ('-'*8))
+
+    # Sort: completed (largest savings first), then failed, then cancelled.
+    $rankOrder = @{ 'Completed' = 0; 'Failed' = 1; 'Cancelled' = 2 }
+    $rows = $diskInfoList | Sort-Object @{Expression = { $rankOrder[$_.Status] }; Ascending = $true }, `
+                                        @{Expression = { if ($_.Status -eq 'Completed' -and $_.OriginalSize -gt 0) { -($_.OriginalSize - [long]$_.NewSize) } else { 0 } }; Ascending = $true }, `
+                                        VMName, FileName
+
+    foreach ($d in $rows) {
+        $vmName   = if ($d.VMName)   { $d.VMName }   else { '' }
+        $fileName = if ($d.FileName) { $d.FileName } else { '' }
+        if ($vmName.Length   -gt 18) { $vmName   = $vmName.Substring(0,17) + '…' }
+        if ($fileName.Length -gt 32) { $fileName = $fileName.Substring(0,31) + '…' }
+
+        if ($d.Status -eq 'Completed' -and $d.NewSize -ne $null) {
+            $before = Format-Size $d.OriginalSize
+            $after  = Format-Size ([long]$d.NewSize)
+            $saved  = $d.OriginalSize - [long]$d.NewSize
+            $savedStr = Format-Size $saved
+            $pct    = if ($d.OriginalSize -gt 0) { ('{0,5:N1}%' -f (($saved / $d.OriginalSize) * 100)) } else { '    -' }
+        } else {
+            $before = Format-Size $d.OriginalSize
+            $after  = '       -'
+            $savedStr = '       -'
+            $pct    = '     -'
+        }
+
+        $dur = if ($d.StartTime -and $d.EndTime) { _FmtDuration ($d.EndTime - $d.StartTime) } else { '       -' }
+
+        $status = $d.Status
+        if ($d.Status -eq 'Failed' -and $d.Error) {
+            $errShort = ($d.Error -replace "`r?`n", ' ').Trim()
+            if ($errShort.Length -gt 40) { $errShort = $errShort.Substring(0,39) + '…' }
+            $status = "Failed: $errShort"
+        }
+        Add-UiLog ($rowFmt -f $vmName, $fileName, $before, $after, $savedStr, $pct, $dur, $status)
+    }
+
+    # -------- Totals --------
+    if ($successful.Count -gt 0 -or $failed.Count -gt 0) {
+        Add-UiLog ($hdrFmt -f ('-'*18), ('-'*32), ('-'*12), ('-'*12), ('-'*12), ('-'*7), ('-'*9), ('-'*8))
+        $totalOld   = ($diskInfoList | Measure-Object -Property OriginalSize -Sum).Sum
+        $sucOld     = ($successful   | Measure-Object -Property OriginalSize -Sum).Sum
+        $sucNew     = ($successful   | Measure-Object -Property NewSize      -Sum).Sum
+        $totalSaved = $sucOld - $sucNew
+        # Post-compact total = (sum of all original sizes) - savings on the successful ones.
+        $totalAfter = $totalOld - $totalSaved
+        $totalPct   = if ($sucOld -gt 0) { ('{0,5:N1}%' -f (($totalSaved / $sucOld) * 100)) } else { '     -' }
+        Add-UiLog ($rowFmt -f 'TOTAL', "($($diskInfoList.Count) disk(s))",
+            (Format-Size $totalOld), (Format-Size $totalAfter), (Format-Size $totalSaved),
+            $totalPct, (_FmtDuration $duration), '')
+    }
+
+    # -------- VM-level issues --------
     if ($forcedStops.Count -gt 0) {
+        Add-UiLog ('')
         Add-UiLog ('--- Force turned-off (graceful shutdown timed out) ---')
-        foreach ($f in $forcedStops) {
-            Add-UiLog ("  $($f.VMName)")
-        }
+        foreach ($f in $forcedStops) { Add-UiLog ("  $($f.VMName)") }
     }
-
     if ($prepFailed.Count -gt 0) {
+        Add-UiLog ('')
         Add-UiLog ('--- Prep failed (VM was not compacted) ---')
-        foreach ($f in $prepFailed) {
-            Add-UiLog ("  $($f.VMName): $($f.Error)")
-        }
+        foreach ($f in $prepFailed) { Add-UiLog ("  $($f.VMName): $($f.Error)") }
     }
-
-    if ($successful.Count -gt 0) {
-        $totalNewSize = ($successful | Measure-Object -Property NewSize -Sum).Sum
-        $totalOldSize = ($successful | Measure-Object -Property OriginalSize -Sum).Sum
-        $totalSaved   = $totalOldSize - $totalNewSize
-        $totalPct     = if ($totalOldSize -gt 0) { [math]::Round(($totalSaved / $totalOldSize) * 100, 1) } else { 0 }
-
-        foreach ($s in $successful) {
-            $sv = $s.OriginalSize - $s.NewSize
-            $sp = if ($s.OriginalSize -gt 0) { [math]::Round(($sv / $s.OriginalSize) * 100, 1) } else { 0 }
-            Add-UiLog ("  $($s.VMName) - $($s.FileName):  $(Format-Size $s.OriginalSize) -> $(Format-Size $s.NewSize)  (Saved $sp%)")
-        }
-        Add-UiLog ("Total space saved: $(Format-Size $totalSaved) ($totalPct%)")
-    }
-
-    if ($failed.Count -gt 0) {
-        Add-UiLog ('--- Failed ---')
-        foreach ($f in $failed) {
-            Add-UiLog ("  $($f.VMName) - $($f.FileName): $($f.Error)")
-        }
-    }
-
     if ($cancelled.Count -gt 0) {
+        Add-UiLog ('')
         Add-UiLog ('--- Cancelled ---')
-        foreach ($c in $cancelled) {
-            Add-UiLog ("  $($c.VMName) - $($c.FileName)")
-        }
+        foreach ($c in $cancelled) { Add-UiLog ("  $($c.VMName) - $($c.FileName)") }
     }
 
-    Add-UiLog ("Duration: $($duration.ToString('hh\:mm\:ss'))  |  Completed: $($successful.Count)  |  Failed: $($failed.Count)  |  Cancelled: $($cancelled.Count)  |  Forced: $($forcedStops.Count)  |  Prep-failed VMs: $($prepFailed.Count)")
+    Add-UiLog ('=====================================================================================================')
 
     if ($script:CompactLogPath) {
         Add-UiLog ("Log file: $script:CompactLogPath")
