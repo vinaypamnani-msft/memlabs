@@ -81,9 +81,11 @@ function Get-VhdFileSize {
 # this block runs the WPF window and processing loop, then exits.
 if ($env:_COMPACT_DISKS_WORKER) {
     $dataFilePath = $env:_COMPACT_DISKS_DATAFILE
+    $readyFilePath = $env:_COMPACT_DISKS_READYFILE
     # Clear the env vars immediately so they don't leak to child processes
-    Remove-Item Env:\_COMPACT_DISKS_WORKER   -ErrorAction SilentlyContinue
+    Remove-Item Env:\_COMPACT_DISKS_WORKER    -ErrorAction SilentlyContinue
     Remove-Item Env:\_COMPACT_DISKS_DATAFILE  -ErrorAction SilentlyContinue
+    Remove-Item Env:\_COMPACT_DISKS_READYFILE -ErrorAction SilentlyContinue
 
     # Dot-source Common.ps1 so we have $Common.LocalAdmin (used by the
     # per-VM prep jobs for PSDirect online cleanup) and helpers like
@@ -145,6 +147,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
         Close          = $false
         WindowClosed   = $false
         WindowReady    = $false
+        ReadyFile      = $readyFilePath
         Title          = if ($DomainLabel) { "Hyper-V VHD Optimization - $DomainLabel" } else { 'Hyper-V VHD Optimization' }
     })
 
@@ -230,6 +233,15 @@ if ($env:_COMPACT_DISKS_WORKER) {
         $window = [System.Windows.Markup.XamlReader]::Load($reader)
         $window.Title = $UiSync.Title
         $window.Add_Closed({ $UiSync.WindowClosed = $true })
+        $window.Add_Loaded({
+            # Signal the foreground (NORMAL-mode) launcher that the window
+            # is up so it can close its console without looking crashed.
+            if ($UiSync.ReadyFile) {
+                try {
+                    New-Item -Path $UiSync.ReadyFile -ItemType File -Force -ErrorAction SilentlyContinue | Out-Null
+                } catch {}
+            }
+        })
 
         $TitleText       = $window.FindName('TitleText')
         $StatusText      = $window.FindName('StatusText')
@@ -1109,11 +1121,39 @@ if ($SkipOfflineClean) { $argString += ' -SkipOfflineClean' }
 if ($SkipZeroFill)     { $argString += ' -SkipZeroFill' }
 if ($SkipOnlineClean)  { $argString += ' -SkipOnlineClean' }
 
-# Signal background mode via environment variables (invisible to the user)
-$env:_COMPACT_DISKS_WORKER   = '1'
-$env:_COMPACT_DISKS_DATAFILE = $dataFile
-Start-Process -FilePath $psExe -ArgumentList $argString -WindowStyle Hidden -UseNewEnvironment:$false
-Remove-Item Env:\_COMPACT_DISKS_WORKER   -ErrorAction SilentlyContinue
-Remove-Item Env:\_COMPACT_DISKS_DATAFILE  -ErrorAction SilentlyContinue
+# Ready-file: the worker touches this once the WPF window has loaded so
+# this foreground process can stay visible (with status messages) until the
+# UI actually appears. Otherwise the user clicks the menu item and the
+# console window vanishes for ~5-10s while WPF spins up, which looks like
+# a crash.
+$readyFile = [System.IO.Path]::Combine(
+    [System.IO.Path]::GetTempPath(),
+    "CompactDisksReady_$([guid]::NewGuid().ToString('N')).flag"
+)
 
-Write-Host "Optimization is running in the background - progress is shown in the WPF window." -ForegroundColor Green
+# Signal background mode via environment variables (invisible to the user)
+$env:_COMPACT_DISKS_WORKER    = '1'
+$env:_COMPACT_DISKS_DATAFILE  = $dataFile
+$env:_COMPACT_DISKS_READYFILE = $readyFile
+Start-Process -FilePath $psExe -ArgumentList $argString -WindowStyle Hidden -UseNewEnvironment:$false
+Remove-Item Env:\_COMPACT_DISKS_WORKER    -ErrorAction SilentlyContinue
+Remove-Item Env:\_COMPACT_DISKS_DATAFILE  -ErrorAction SilentlyContinue
+Remove-Item Env:\_COMPACT_DISKS_READYFILE -ErrorAction SilentlyContinue
+
+Write-Host ''
+Write-Host 'Starting Compact-Disks worker. Waiting for the WPF progress window to appear...' -ForegroundColor Cyan
+$deadline = (Get-Date).AddSeconds(60)
+while (-not (Test-Path $readyFile) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 250
+    Write-Host '.' -NoNewline -ForegroundColor DarkGray
+}
+Write-Host ''
+if (Test-Path $readyFile) {
+    Remove-Item -Path $readyFile -Force -ErrorAction SilentlyContinue
+    Write-Host 'WPF window is open. This console will close in 2 seconds.' -ForegroundColor Green
+    Start-Sleep -Seconds 2
+}
+else {
+    Write-Host 'Timed out waiting for the WPF window. The worker may still be starting; check Task Manager.' -ForegroundColor Yellow
+    Start-Sleep -Seconds 3
+}
