@@ -769,6 +769,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     'C:\PerfLogs\*',
                                     'C:\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*',
                                     'C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\*',
+                                    # Per-user crash dumps location
+                                    'C:\Users\*\AppData\Local\CrashDumps\*',
                                     # MemLabs install leftovers
                                     'C:\CMCB',
                                     'C:\CMTP',
@@ -794,6 +796,67 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                             if ($before -gt 0) { _Add ("  Purged {0} ({1:N1} MB)" -f $pat, ($before/1MB)) }
                                         }
                                     } catch { _Add "  Purge FAILED $pat : $($_.Exception.Message)" }
+                                }
+
+                                # --- Age-based pruning ---
+                                # Some log dirs we want to TRIM (keep recent
+                                # activity) rather than wipe wholesale. Walk
+                                # these and delete only files older than
+                                # $logAgeDays. Each entry is a directory root
+                                # + optional include pattern.
+                                $logAgeDays = 10
+                                $cutoff = (Get-Date).AddDays(-$logAgeDays)
+                                $ageRoots = @(
+                                    # IIS access logs (W3SVC*, SMTPSVC*, etc.)
+                                    @{ Path = 'C:\inetpub\logs\LogFiles';            Filter = '*' }
+                                    @{ Path = 'C:\inetpub\logs\FailedReqLogFiles';   Filter = '*' }
+                                    @{ Path = 'C:\inetpub\temp\IIS Temporary Compressed Files'; Filter = '*' }
+                                    # Windows / WaaS / Update logs (.etl, .log)
+                                    @{ Path = 'C:\Windows\Logs';                     Filter = '*.log' }
+                                    @{ Path = 'C:\Windows\Logs';                     Filter = '*.etl' }
+                                    @{ Path = 'C:\Windows\Logs\WindowsUpdate';      Filter = '*' }
+                                    @{ Path = 'C:\Windows\Logs\waasmedic';          Filter = '*' }
+                                    @{ Path = 'C:\Windows\Logs\NetSetup';           Filter = '*' }
+                                    @{ Path = 'C:\Windows\Logs\MoSetup';            Filter = '*' }
+                                    @{ Path = 'C:\Windows\System32\LogFiles\HTTPERR'; Filter = '*' }
+                                    @{ Path = 'C:\Windows\System32\LogFiles\W3SVC';   Filter = '*' }
+                                    @{ Path = 'C:\Windows\System32\Winevt\Logs';    Filter = '*Archive*' }
+                                    # Configuration Manager (client + site server)
+                                    @{ Path = 'C:\Windows\CCM\Logs';                 Filter = '*.lo_' }
+                                    @{ Path = 'C:\Windows\CCM\Logs';                 Filter = '*.log' }
+                                    @{ Path = 'C:\Windows\ccmsetup\Logs';           Filter = '*' }
+                                    @{ Path = 'C:\Program Files\Microsoft Configuration Manager\Logs'; Filter = '*.lo_' }
+                                    @{ Path = 'C:\Program Files\Microsoft Configuration Manager\Logs'; Filter = '*.log' }
+                                    @{ Path = 'C:\Program Files\SMS_CCM\Logs';      Filter = '*' }
+                                    @{ Path = 'C:\SMS_CCM\ServiceData';              Filter = '*' }
+                                    # WSUS / SUP
+                                    @{ Path = 'C:\Program Files\Update Services\LogFiles'; Filter = '*.log' }
+                                    # SQL Server error log rollovers (ERRORLOG.1..ERRORLOG.99)
+                                    @{ Path = 'C:\Program Files\Microsoft SQL Server'; Filter = 'ERRORLOG.*'; Recurse = $true }
+                                    @{ Path = 'C:\Program Files\Microsoft SQL Server'; Filter = 'SQLAGENT.*'; Recurse = $true }
+                                    # Per-user crash dumps
+                                    @{ Path = 'C:\Users';                             Filter = '*.dmp'; Recurse = $true }
+                                )
+                                foreach ($r in $ageRoots) {
+                                    try {
+                                        if (-not (Test-Path -LiteralPath $r.Path -ErrorAction SilentlyContinue)) { continue }
+                                        $gciArgs = @{
+                                            Path        = $r.Path
+                                            Filter      = $r.Filter
+                                            Recurse     = $true
+                                            File        = $true
+                                            Force       = $true
+                                            ErrorAction = 'SilentlyContinue'
+                                        }
+                                        $stale = Get-ChildItem @gciArgs | Where-Object { $_.LastWriteTime -lt $cutoff }
+                                        if (-not $stale) { continue }
+                                        $bytes = ($stale | Measure-Object -Sum -Property Length).Sum
+                                        $count = ($stale | Measure-Object).Count
+                                        $stale | Remove-Item -Force -ErrorAction SilentlyContinue
+                                        if ($bytes -gt 0) {
+                                            _Add ("  Pruned >{0}d {1}\{2} : {3} file(s) {4:N1} MB" -f $logAgeDays, $r.Path, $r.Filter, $count, ($bytes/1MB))
+                                        }
+                                    } catch { _Add "  Prune FAILED $($r.Path)\$($r.Filter) : $($_.Exception.Message)" }
                                 }
 
                                 try { Clear-RecycleBin -Force -ErrorAction Stop; _Add "  Clear-RecycleBin: ok" } catch { _Add "  Clear-RecycleBin: $($_.Exception.Message)" }
@@ -1301,6 +1364,51 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         )
                                         foreach ($pat in $purge) {
                                             try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                                        }
+
+                                        # Age-based pruning - trim log dirs
+                                        # rather than wiping wholesale so any
+                                        # recent activity survives. Mirrors
+                                        # the online cleanup list above.
+                                        $offlineLogAgeDays = 10
+                                        $offlineCutoff = (Get-Date).AddDays(-$offlineLogAgeDays)
+                                        $offlineAgeRoots = @(
+                                            @{ Path = "$root\inetpub\logs\LogFiles";          Filter = '*' }
+                                            @{ Path = "$root\inetpub\logs\FailedReqLogFiles"; Filter = '*' }
+                                            @{ Path = "$root\inetpub\temp\IIS Temporary Compressed Files"; Filter = '*' }
+                                            @{ Path = "$root\Windows\Logs";                   Filter = '*.log' }
+                                            @{ Path = "$root\Windows\Logs";                   Filter = '*.etl' }
+                                            @{ Path = "$root\Windows\Logs\WindowsUpdate";     Filter = '*' }
+                                            @{ Path = "$root\Windows\Logs\waasmedic";         Filter = '*' }
+                                            @{ Path = "$root\Windows\Logs\NetSetup";          Filter = '*' }
+                                            @{ Path = "$root\Windows\Logs\MoSetup";           Filter = '*' }
+                                            @{ Path = "$root\Windows\System32\LogFiles\HTTPERR"; Filter = '*' }
+                                            @{ Path = "$root\Windows\System32\LogFiles\W3SVC";   Filter = '*' }
+                                            @{ Path = "$root\Windows\System32\Winevt\Logs";   Filter = '*Archive*' }
+                                            @{ Path = "$root\Windows\CCM\Logs";               Filter = '*.lo_' }
+                                            @{ Path = "$root\Windows\CCM\Logs";               Filter = '*.log' }
+                                            @{ Path = "$root\Windows\ccmsetup\Logs";          Filter = '*' }
+                                            @{ Path = "$root\Program Files\Microsoft Configuration Manager\Logs"; Filter = '*.lo_' }
+                                            @{ Path = "$root\Program Files\Microsoft Configuration Manager\Logs"; Filter = '*.log' }
+                                            @{ Path = "$root\Program Files\SMS_CCM\Logs";     Filter = '*' }
+                                            @{ Path = "$root\Program Files\Update Services\LogFiles"; Filter = '*.log' }
+                                            @{ Path = "$root\Program Files\Microsoft SQL Server"; Filter = 'ERRORLOG.*' }
+                                            @{ Path = "$root\Program Files\Microsoft SQL Server"; Filter = 'SQLAGENT.*' }
+                                            @{ Path = "$root\Users"; Filter = '*.dmp' }
+                                        )
+                                        foreach ($r in $offlineAgeRoots) {
+                                            try {
+                                                if (-not (Test-Path -LiteralPath $r.Path -ErrorAction SilentlyContinue)) { continue }
+                                                $stale = Get-ChildItem -Path $r.Path -Filter $r.Filter -Recurse -File -Force -ErrorAction SilentlyContinue |
+                                                         Where-Object { $_.LastWriteTime -lt $offlineCutoff }
+                                                if (-not $stale) { continue }
+                                                $bytes = ($stale | Measure-Object -Sum -Property Length).Sum
+                                                $count = ($stale | Measure-Object).Count
+                                                $stale | Remove-Item -Force -ErrorAction SilentlyContinue
+                                                if ($bytes -gt 0) {
+                                                    Write-PhaseLog ("Pruned >{0}d {1}\{2} : {3} file(s) {4:N1} MB" -f $offlineLogAgeDays, $r.Path, $r.Filter, $count, ($bytes/1MB))
+                                                }
+                                            } catch {}
                                         }
 
                                         # Offline DISM only makes sense on the system volume
