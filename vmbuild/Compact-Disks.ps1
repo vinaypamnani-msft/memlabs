@@ -798,8 +798,35 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 $mounted = $true
                                 Start-Sleep -Seconds 2
 
-                                $volumes = $mountResult | Get-Disk | Get-Partition | Get-Volume |
-                                    Where-Object { $_.DriveLetter }
+                                # Inside a Start-Job the volume manager often
+                                # does NOT auto-assign drive letters to a
+                                # freshly mounted VHDX, so the defrag /
+                                # cleanup / zero-fill loops would silently
+                                # iterate zero volumes. Force a drive letter
+                                # on each data partition that doesn't have one.
+                                $disk = $mountResult | Get-Disk
+                                foreach ($part in ($disk | Get-Partition)) {
+                                    if ($part.Type -in @('Reserved','Recovery','System')) { continue }
+                                    if ([string]::IsNullOrEmpty($part.DriveLetter)) {
+                                        try {
+                                            Add-PartitionAccessPath -DiskNumber $part.DiskNumber `
+                                                -PartitionNumber $part.PartitionNumber `
+                                                -AssignDriveLetter -ErrorAction Stop
+                                        } catch {
+                                            # best-effort; some partitions just won't take a letter
+                                        }
+                                    }
+                                }
+                                # Re-read partitions/volumes after the
+                                # access-path assignment above.
+                                Start-Sleep -Seconds 1
+                                $volumes = @($disk | Get-Partition | Get-Volume |
+                                    Where-Object { $_.DriveLetter })
+
+                                Write-Progress -Activity "Compact $p" -Status "Mounted - $($volumes.Count) volume(s): $((($volumes | ForEach-Object { $_.DriveLetter + ':' }) -join ' '))" -PercentComplete 3
+                                if ($volumes.Count -eq 0) {
+                                    Write-Warning "No volumes with drive letters found on $p; skipping offline clean / defrag / zero-fill."
+                                }
 
                                 # --- (a) + (b) Offline cleanup pass ---
                                 if ($offlineClean) {
