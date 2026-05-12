@@ -134,101 +134,11 @@ function Select-ConfigMenu {
     # Subsequent redraws (every keystroke) reuse this cache for ~20s.
     try { Get-HealthStats -Force | Out-Null } catch {}
     while ($true) {
-        
-        $customOptions = [ordered]@{}
 
-        $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
-        $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
-        $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
-        $customOptions += [ordered]@{ "*BT" = "" }
-        $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
-        #if ($domainCount -gt 0) {
-        #    $customOptions += [ordered]@{ "C" = "Create New Domain or Edit Existing Domain [$($domainCount) existing domain(s)] %$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-        #    $customOptions += [ordered]@{ "HC" = "This option allows you to create a new domain, or edit one you previously created." }
-  
-        #}
-        #else {
-        $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-        $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
-        #}
+        $built = Build-ConfigMenuOptions
+        $customOptions = $built.Options
+        $domainMap = $built.DomainMap
 
-        $domainMap = @{}
-        $i = 0
-        foreach ($item in (Get-DomainList)) {
-            $i++
-            $stats = Get-DomainStatsLine -DomainName $item
-
-            $domainList += "$($item.PadRight(22," ")) $stats"
-            $customOptions += [ordered]@{"-D$i" = "$($item.PadRight(22," ")) $stats%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
-            $customOptions += [ordered]@{ "H$($i)" = "Manage or edit $item" }
-            $domainMap[$i] = $item
-        }
-
-        if ($null -ne $Global:SavedConfig) {
-            $customOptions += [ordered]@{"!" = "Restore In-Progress configuration [$($Global:SavedConfig.VmOptions.DomainName)]%Yellow" }
-            $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
-        }
-        $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"L" = "Load saved config from file %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HL" = "You can find all your previously saved configuration files here" }
-        if ($Global:common.Devbranch) {
-            $customOptions += [ordered]@{"X" = "Load TEST config from file (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
-            $customOptions += [ordered]@{ "HX" = "Here you can find some pre-configured test configuration files." }
-        }
-
-
-        $customOptions += [ordered]@{"*B3" = ""; }
-       
-        $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
-        #$customOptions += [ordered]@{"D" = "Manage Domains%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        #$customOptions += [ordered]@{ "HD" = "This allows you to manage virtual machines in a domain [Start/Stop/Snapshot/Delete/...]" }
-        $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
-        
-
-
-        $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HV" = "Show stats about currently deployed Virtual Machines" }
-        $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HN" = "Show network subnets currently in use by your VMs" }
-
-        $customOptions += [ordered]@{"P" = "Show Passwords" }
-        $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
-        $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
-        if ($common.DevBranch) {
-            #$customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Dev Branch%$($Global:Common.Colors.GenConfigHeader)" }
-            $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-            $customOptions += [ordered]@{ "H#" = "You are currently on the develop branch. This will exit the script and change back to the official branch" }
-        }
-        else {
-            #$customOptions += [ordered]@{"*B6" = ""; "*BREAK6" = "Currently on Main Branch $breakPrefix%$($Global:Common.Colors.GenConfigHeader)" }
-            $customOptions += [ordered]@{"#" = "[Experimental] Switch to develop branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-            $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new features in the development branch" }
-        }
-        $pendingCount = (Get-HealthStats).PendingCount
-
-        if ($pendingCount -gt 0 ) {
-            $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
-            $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
-        }
-        $customOptions += [ordered]@{"^" = "Exit script" }
-        $customOptions += [ordered]@{ "H^" = "Same as Ctrl-C, Exits the script without saving." }
-        if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
-            #Do nothing as we are on server 2025
-        }
-        else {
-            if ($Global:Common.IsAzureVM) {
-                $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
-                $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
-                $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
-            }
-        }
-       
-        #$pendingCount = (get-list -type VM | Where-Object { $_.InProgress -eq "True" } | Measure-Object).Count
-        
         if ($global:GoBack) {
             $SelectedConfig = Select-DomainMenu -DomainName $global:SavedConfig.VmOptions.DomainName | Out-Null
             $response = "!"   
@@ -353,6 +263,91 @@ function Select-ConfigMenu {
             }
         }
     }
+}
+
+# Builds the MemLabs Main Menu (Select-ConfigMenu's top-level menu): Create
+# New Domain / per-domain entries / Load Config / Manage Lab / List Resources
+# / Other / etc. Returns @{ Options = <ordered hashtable>; DomainMap = <int->name> }.
+# DomainMap is used by the caller's default-case dispatch to translate the
+# numeric domain shortcuts back to domain names.
+function Build-ConfigMenuOptions {
+    $customOptions = [ordered]@{}
+
+    $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
+    $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
+    $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
+    $customOptions += [ordered]@{ "*BT" = "" }
+    $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+    $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }
+
+    $domainMap = @{}
+    $i = 0
+    foreach ($item in (Get-DomainList)) {
+        $i++
+        $stats = Get-DomainStatsLine -DomainName $item
+
+        $customOptions += [ordered]@{"-D$i" = "$($item.PadRight(22," ")) $stats%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" }
+        $customOptions += [ordered]@{ "H$($i)" = "Manage or edit $item" }
+        $domainMap[$i] = $item
+    }
+
+    if ($null -ne $Global:SavedConfig) {
+        $customOptions += [ordered]@{"!" = "Restore In-Progress configuration [$($Global:SavedConfig.VmOptions.DomainName)]%Yellow" }
+        $customOptions += [ordered]@{ "H!" = "You have a configuration in progress. Use this to go back and edit it." }
+    }
+    $customOptions += [ordered]@{"*B" = ""; "*BREAK" = "Load Config ($configDir)%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{"L" = "Load saved config from file %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HL" = "You can find all your previously saved configuration files here" }
+    if ($Global:common.Devbranch) {
+        $customOptions += [ordered]@{"X" = "Load TEST config from file (develop branch only)%$($Global:Common.Colors.GenConfigHidden)%$($Global:Common.Colors.GenConfigHiddenNumber)"; }
+        $customOptions += [ordered]@{ "HX" = "Here you can find some pre-configured test configuration files." }
+    }
+
+    $customOptions += [ordered]@{"*B3" = ""; }
+    $customOptions += [ordered]@{"*BREAK2" = "Manage Lab%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{"T" = "Update Tools or Copy Optional Tools to VMs%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HT" = "Use this to refresh tools on a VM, or add new ones, like Azure Data Studio!" }
+
+    $customOptions += [ordered]@{"*B4" = ""; "*BREAK4" = "List Resources%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{"V" = "Show Virtual Machines%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HV" = "Show stats about currently deployed Virtual Machines" }
+    $customOptions += [ordered]@{"N" = "Show Networks%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HN" = "Show network subnets currently in use by your VMs" }
+
+    $customOptions += [ordered]@{"P" = "Show Passwords" }
+    $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
+    $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
+    if ($common.DevBranch) {
+        $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "H#" = "You are currently on the develop branch. This will exit the script and change back to the official branch" }
+    }
+    else {
+        $customOptions += [ordered]@{"#" = "[Experimental] Switch to develop branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+        $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new features in the development branch" }
+    }
+    $pendingCount = (Get-HealthStats).PendingCount
+
+    if ($pendingCount -gt 0 ) {
+        $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
+        $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
+    }
+    $customOptions += [ordered]@{"^" = "Exit script" }
+    $customOptions += [ordered]@{ "H^" = "Same as Ctrl-C, Exits the script without saving." }
+    if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
+        # No-op: host is already on Server 2025+ so no upgrade option is shown.
+    }
+    else {
+        if ($Global:Common.IsAzureVM) {
+            $customOptions += [ordered]@{"*BU" = ""; "*UBREAK" = "Host machine needs to be on server 2025 to activate Server 2025 VMs" }
+            $customOptions += [ordered]@{ "U" = "Upgrade HOST to server 2025%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
+            $customOptions += [ordered]@{ "HU" = "Your host machine is not 2025.  You should upgrade!" }
+        }
+    }
+
+    return @{ Options = $customOptions; DomainMap = $domainMap }
 }
 
 function Show-Networks {
