@@ -997,23 +997,24 @@ function get-VMOptionsSummary {
     }
 
     # Color-coded tokens (Option C: hybrid — labels only where the value is ambiguous)
+    #   Prefix [PRO-]   -> LightSteelBlue    (identity bracket — most useful, leftmost)
     #   Domain          -> Gold              (the headline)
-    #   Prefix [PRO-]   -> LightSteelBlue    (identity bracket)
     #   Network         -> LightSteelBlue
     #   Admin user      -> Chartreuse
-    #   Path            -> LightSteelBlue
-    #   TZ / Locale     -> Plum
+    #   Locale          -> Plum              (least useful, drops first when truncated)
+    #   TZ              -> Plum
+    #   Path            -> LightSteelBlue    (last — drops first)
     #   Separator       -> DimGray
     $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
 
     $tokens = @(
-        Format-OptionToken -Color "Gold" -Text $options.domainName
         Format-OptionToken -Color "LightSteelBlue" -Text "[$($options.prefix)]"
+        Format-OptionToken -Color "Gold" -Text $options.domainName
         Format-OptionToken -Color "LightSteelBlue" -Text $options.network
         Format-OptionToken -Color "Chartreuse" -Text $options.adminName
-        Format-OptionToken -Color "LightSteelBlue" -Text $options.basePath
-        (Format-OptionToken -Color "DimGray" -Text "TZ ") + (Format-OptionToken -Color "Plum" -Text $options.timeZone)
         (Format-OptionToken -Color "DimGray" -Text "Loc ") + (Format-OptionToken -Color "Plum" -Text $options.locale)
+        (Format-OptionToken -Color "DimGray" -Text "TZ ") + (Format-OptionToken -Color "Plum" -Text $options.timeZone)
+        Format-OptionToken -Color "LightSteelBlue" -Text $options.basePath
     )
     $Output = $tokens -join $sep
 
