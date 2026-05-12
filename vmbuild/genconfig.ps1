@@ -7012,8 +7012,13 @@ function select-PullDPMenu {
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
-            write-Log "Added new DPMP for SiteCode $($currentVM.SiteCode)"
             $result = Add-NewVMForRole -Role "SiteSystem" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true -SiteCode $CurrentVM.SiteCode
+            if ($result) {
+                write-Log "Added new DPMP '$result' for SiteCode $($currentVM.SiteCode)" -Success
+            }
+            else {
+                write-Log "Failed to add new DPMP for SiteCode $($currentVM.SiteCode)" -Failure
+            }
         }
     }
     return $result
