@@ -871,17 +871,18 @@ function Test-URL {
         [string] $name
     )
 
-    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
-    if (-not (Test-Path $curlPath)) {
+    $curlPaths = Get-CurlExecutablePaths
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
         Write-Log "Curl was not found." -Failure
         return $false
     }
 
     try {
         #$output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url
-        $output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url 2>&1
-        $lastexit = $LASTEXITCODE
-        if ($LASTEXITCODE -eq 0) {
+        $result = Invoke-CurlWithFallback -CurlArguments @("--retry", "8", "--retry-delay", "4", "--retry-max-time", "45", "-s", "-L", "--head", "-f", $url) -CaptureOutput
+        $output = $result.Output
+        $lastexit = $result.ExitCode
+        if ($result.Success) {
             if ($output -match 'Location: https://www.bing.com') {
                 Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
                 Write-RedX "[$name] $url (Redirects to bing)"
@@ -892,18 +893,20 @@ function Test-URL {
             return $true
         }
         else {
-            if ($LASTEXITCODE -eq 60) {
+            if ($lastexit -eq 60) {
                 write-log "Curl failed($lastexit): $output"
             }
             #ipconfig /flushdns
             Clear-DnsClientCache
             start-sleep -seconds 30
             write-log "Curl retrying.. Last failure Exit code $lastexit $output" -LogOnly
-            $output = & $curlPath --retry 16 --retry-delay 10 --retry-max-time 160 -s -L --head -f $url 2>&1
+            $result = Invoke-CurlWithFallback -CurlArguments @("--retry", "16", "--retry-delay", "10", "--retry-max-time", "160", "-s", "-L", "--head", "-f", $url) -CaptureOutput
+            $output = $result.Output
+            $lastexit = $result.ExitCode
 
-            if ($LASTEXITCODE -ne 0) {
-                Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE"
-                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output" -Failure
+            if (-not $result.Success) {
+                Write-RedX "[$name] curl -s -L --head $url returned $lastexit"
+                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $lastexit $output" -Failure
                 return $false
             }
         }
@@ -932,17 +935,14 @@ function Start-CurlTransfer {
     )
 
     # ---- Find curl ----
-    $curlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-    if (-not $curlPath) {
-        $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
-    }
-
-    if (-not (Test-Path $curlPath)) {
+    $curlPaths = Get-CurlExecutablePaths
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
         Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
         & choco install curl -y | Out-Null
+        $curlPaths = Get-CurlExecutablePaths
     }
 
-    if (-not (Test-Path $curlPath)) {
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
         Write-Log "Start-CurlTransfer: curl.exe was not found and could not be installed." -Failure
         return $false
     }
@@ -965,14 +965,18 @@ function Start-CurlTransfer {
     do {
         $retryCount++
 
+        $curlArguments = @("-L", "-C", "-")
         if ($Silent) {
-            & $curlPath -s -L -C - @authArgs -o $Destination "$Source"
+            $curlArguments = @("-s") + $curlArguments
         }
-        else {
-            & $curlPath -L -C - @authArgs -o $Destination "$Source"
+        if ($authArgs.Count -gt 0) {
+            $curlArguments += $authArgs
         }
+        $curlArguments += @("-o", $Destination, "$Source")
 
-        switch ($LASTEXITCODE) {
+        $result = Invoke-CurlWithFallback -CurlArguments $curlArguments
+
+        switch ($result.ExitCode) {
             0 {
                 # Success
                 $success = $true
@@ -989,7 +993,7 @@ function Start-CurlTransfer {
             }
             default {
                 Write-Host
-                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $LASTEXITCODE. Will retry $(($maxRetries - $retryCount)) more time(s)."
+                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
                 Write-Host
                 Start-Sleep -Seconds 5
             }
@@ -1002,6 +1006,79 @@ function Start-CurlTransfer {
     }
 
     return $success
+}
+
+function Get-CurlExecutablePaths {
+    [CmdletBinding()]
+    param ()
+
+    $curlPaths = @()
+    $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
+    $resolvedCurlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    $chocoCurlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+
+    foreach ($candidate in @($systemCurlPath, $resolvedCurlPath, $chocoCurlPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate) -and ($candidate -notin $curlPaths)) {
+            $curlPaths += $candidate
+        }
+    }
+
+    return $curlPaths
+}
+
+function Invoke-CurlWithFallback {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]] $CurlArguments,
+        [Parameter(Mandatory = $false)]
+        [switch] $CaptureOutput
+    )
+
+    $curlPaths = Get-CurlExecutablePaths
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Output   = $null
+            Path     = $null
+        }
+    }
+
+    $lastResult = [PSCustomObject]@{
+        Success  = $false
+        ExitCode = $null
+        Output   = $null
+        Path     = $null
+    }
+
+    for ($index = 0; $index -lt $curlPaths.Count; $index++) {
+        $curlPath = $curlPaths[$index]
+        if ($CaptureOutput) {
+            $output = & $curlPath @CurlArguments 2>&1
+        }
+        else {
+            & $curlPath @CurlArguments
+            $output = $null
+        }
+
+        $lastResult = [PSCustomObject]@{
+            Success  = ($LASTEXITCODE -eq 0)
+            ExitCode = $LASTEXITCODE
+            Output   = $output
+            Path     = $curlPath
+        }
+
+        if ($lastResult.Success) {
+            return $lastResult
+        }
+
+        if ($index -lt ($curlPaths.Count - 1)) {
+            Write-Log "Invoke-CurlWithFallback: '$curlPath' failed with exit code $($lastResult.ExitCode). Trying fallback curl path." -LogOnly
+        }
+    }
+
+    return $lastResult
 }
 function New-Directory {
     param(
