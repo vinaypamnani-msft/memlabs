@@ -152,6 +152,19 @@ if ($env:_COMPACT_DISKS_WORKER) {
         Log            = [System.Collections.ArrayList]::new()
         Close          = $false
         WindowClosed   = $false
+        # User-requested-but-deferred shutdown. When the user clicks X mid-run
+        # we set this and refuse to launch new prep / compact work, but we let
+        # in-flight jobs (snapshot merges, Optimize-VHD, mount/dismount steps)
+        # finish naturally. The window's Closing handler enforces this by
+        # cancelling the close until the main loop has drained.
+        StopRequested  = $false
+        # Last-resort hard stop. Only set when the user explicitly chooses
+        # 'force close' in the closing-confirmation prompt. The main loop
+        # treats this like the old WindowClosed=true behaviour: throw, kill
+        # jobs, dismount, exit. Risks: a snapshot merge mid-flight may leave
+        # behind orphaned .avhdx files; the safety-net Dismount-VHD covers
+        # mounted disks.
+        ForceClose     = $false
         WindowReady    = $false
         ReadyFile      = $readyFilePath
         Title          = if ($DomainLabel) { "Hyper-V VHD Optimization - $DomainLabel" } else { 'Hyper-V VHD Optimization' }
@@ -392,6 +405,66 @@ if ($env:_COMPACT_DISKS_WORKER) {
         $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
         $window = [System.Windows.Markup.XamlReader]::Load($reader)
         $window.Title = $UiSync.Title
+        # Intercept close. While work is active we never let the X button kill
+        # the process - that would Stop-Job an in-flight snapshot merge or
+        # Optimize-VHD and risk corrupting the chain or leaving the VHDX
+        # mounted on the host. Instead we offer:
+        #   Yes    - request a safe stop. We cancel the close, set
+        #            StopRequested, and the main loop drains naturally.
+        #            The window stays open until all jobs finish; then the
+        #            existing Add_Closed path takes over.
+        #   No     - cancel; keep working.
+        #   Cancel - force close. Sets ForceClose+WindowClosed; the main
+        #            loop kills jobs and dismounts. Last resort.
+        # Once StopRequested is set (or we're past the work phase), the X
+        # button is a normal close.
+        $window.Add_Closing({
+            param($sender, $e)
+            # If a stop is already in progress, let the close go through only
+            # when the worker has acknowledged it (main loop set WindowClosed
+            # or transitioned out of work). Otherwise wait silently.
+            $busy = (-not $UiSync.WindowClosed) -and (-not $UiSync.ForceClose) -and `
+                    (($UiSync.Jobs -and $UiSync.Jobs.Count -gt 0) -or $UiSync.OverallPercent -lt 100)
+            if (-not $busy) { return }
+
+            if ($UiSync.StopRequested) {
+                # Already asked once - second click means 'I really want out'.
+                $r2 = [System.Windows.MessageBox]::Show(
+                    "A safe stop is already in progress. Active jobs (snapshot merges, Optimize-VHD, mounted VHDs) are being allowed to finish.`n`nForce close NOW anyway? This may leave VHDs mounted on the host or interrupt a snapshot merge in progress (risk of orphaned .avhdx files).",
+                    'Force close?',
+                    [System.Windows.MessageBoxButton]::YesNo,
+                    [System.Windows.MessageBoxImage]::Warning,
+                    [System.Windows.MessageBoxResult]::No)
+                if ($r2 -eq [System.Windows.MessageBoxResult]::Yes) {
+                    $UiSync.ForceClose   = $true
+                    $UiSync.WindowClosed = $true
+                    return
+                }
+                $e.Cancel = $true
+                return
+            }
+
+            $resp = [System.Windows.MessageBox]::Show(
+                "VHD optimization is in progress.`n`nClosing now would Stop-Job snapshot merges and Optimize-VHD calls that are running, which can leave the VHD chain in a half-merged state and/or leave VHDX files mounted on the host.`n`nYes    - Stop accepting new work and wait for the current jobs to finish safely, then close. (Recommended)`nNo     - Keep going.`nCancel - FORCE close now. Risk of corruption / mounted disks.",
+                'Stop optimization?',
+                [System.Windows.MessageBoxButton]::YesNoCancel,
+                [System.Windows.MessageBoxImage]::Warning,
+                [System.Windows.MessageBoxResult]::Yes)
+
+            switch ($resp) {
+                'Yes' {
+                    $UiSync.StopRequested = $true
+                    $e.Cancel = $true
+                }
+                'No' {
+                    $e.Cancel = $true
+                }
+                'Cancel' {
+                    $UiSync.ForceClose   = $true
+                    $UiSync.WindowClosed = $true
+                }
+            }
+        })
         $window.Add_Closed({ $UiSync.WindowClosed = $true })
         $window.Add_Loaded({
             # Signal the foreground (NORMAL-mode) launcher that the window
@@ -739,9 +812,33 @@ if ($env:_COMPACT_DISKS_WORKER) {
     do {
         $shouldRetry = $false
     try {
+        $stopAnnounced = $false
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
-            if ($UiSync.WindowClosed) { throw 'WindowClosed' }
+            # Hard stop (user picked 'force close' in the closing prompt, or
+            # WindowClosed was set by some other path). Throw so the finally
+            # below Stop-Job's everything and Invoke-CompactCleanup runs.
+            if ($UiSync.ForceClose -or ($UiSync.WindowClosed -and -not $UiSync.StopRequested)) {
+                throw 'WindowClosed'
+            }
+
+            # Soft stop: user asked to close but we promised to let in-flight
+            # work finish. Refuse to launch any new prep/compact jobs; just
+            # spin until the active lists drain naturally.
+            if ($UiSync.StopRequested) {
+                if (-not $stopAnnounced) {
+                    Add-UiLog ('[STOP-REQUESTED] User requested close; waiting for active jobs to finish safely before closing...')
+                    $stopAnnounced = $true
+                }
+                $UiSync.StatusText = ('Stop requested - waiting for {0} active job(s) to finish safely...' -f ($activePrepJobs.Count + $activeJobs.Count))
+                # Drain queues so nothing new gets started.
+                while ($prepQueue.Count -gt 0) { [void]$prepQueue.Dequeue() }
+                while ($diskQueue.Count -gt 0) { [void]$diskQueue.Dequeue() }
+                if ($activePrepJobs.Count -eq 0 -and $activeJobs.Count -eq 0) {
+                    break
+                }
+                # Fall through to the bottom of the loop to wait/refresh.
+            }
 
             # ----- Launch prep jobs (one per VM, all in parallel) -----
             while ($prepQueue.Count -gt 0) {
@@ -1688,33 +1785,38 @@ if ($env:_COMPACT_DISKS_WORKER) {
         # interrupted (window closed or error)
     }
     finally {
-        foreach ($vm in $activePrepJobs) {
-            if ($vm.Job) {
-                Stop-Job  -Job $vm.Job -ErrorAction SilentlyContinue
-                Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
-                $vm.Status = 'Cancelled'
+        # Only kill running jobs on a true force-close. On a graceful
+        # StopRequested drain, both lists are already empty - the main loop
+        # waits for activePrepJobs+activeJobs to reach zero before breaking.
+        # Killing snapshot-merge or Optimize-VHD jobs while they're still
+        # running is what we're trying to avoid in the first place.
+        $forceKill = $UiSync.ForceClose -or ($UiSync.WindowClosed -and -not $UiSync.StopRequested)
+        if ($forceKill) {
+            foreach ($vm in $activePrepJobs) {
+                if ($vm.Job) {
+                    Stop-Job  -Job $vm.Job -ErrorAction SilentlyContinue
+                    Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
+                    $vm.Status = 'Cancelled'
+                }
             }
-        }
-        foreach ($disk in $activeJobs) {
-            if ($disk.Job) {
-                Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
-                Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
-                $disk.Status = 'Cancelled'
+            foreach ($disk in $activeJobs) {
+                if ($disk.Job) {
+                    Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
+                    Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
+                    $disk.Status = 'Cancelled'
+                }
             }
-        }
-        # If we landed here because the user closed the WPF window
-        # mid-run, the Stop-Job calls above will have killed prep/compact
-        # jobs that were holding VHDs mounted. Dismount everything before
-        # falling through to the summary phase.
-        if ($UiSync.WindowClosed) {
-            try { Invoke-CompactCleanup -Reason 'WindowClosed' } catch {}
+            # We just killed jobs that may have been holding VHDs mounted
+            # or in the middle of a snapshot merge. Dismount any leftover
+            # mounted VHDs immediately so the host doesn't keep them open.
+            try { Invoke-CompactCleanup -Reason 'ForceClose' } catch {}
         }
     }
 
         # --- Retry pass: deferred VMs may now fit thanks to space freed by Optimize-VHD ---
         $pass++
         $deferred = @($vmInfoList | Where-Object { $_.Status -eq 'Deferred' })
-        if ($deferred.Count -gt 0 -and $pass -le $maxRetryPasses -and -not $UiSync.WindowClosed) {
+        if ($deferred.Count -gt 0 -and $pass -le $maxRetryPasses -and -not $UiSync.WindowClosed -and -not $UiSync.StopRequested) {
             $defNames = @($deferred | ForEach-Object VMName)
             Add-UiLog ('')
             Add-UiLog ("--- Retry pass $pass for $($deferred.Count) deferred VM(s): $($defNames -join ', ') ---")
@@ -1738,7 +1840,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 }
             }
         }
-        elseif ($deferred.Count -gt 0 -and -not $UiSync.WindowClosed) {
+        elseif ($deferred.Count -gt 0 -and -not $UiSync.WindowClosed -and -not $UiSync.StopRequested) {
             # Out of retry budget - requeue the remaining deferred VMs WITHOUT
             # a pre-flight fail. The prep job's per-VM free-space check will
             # still fail, but the job is tolerant of that: it skips the merge
