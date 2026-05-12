@@ -575,58 +575,21 @@ function Get-ExistingVMs {
         }
     }
 
+    # Transient/runtime-only properties that should not appear in the edit-existing-VM
+    # view (they come from get-list but are not part of the saved deployment config).
+    $propsToStrip = @(
+        'memLabsDeployVersion', 'memLabsVersion', 'domainDefaults', 'success',
+        'vmBuild', 'deployedOS', 'switch', 'source', 'memoryGB', 'memoryStartupGB',
+        'inProgress', 'lastUpdate', 'DiskUsedGB'
+    )
     foreach ($evm in $existingMachines) {
-        
-        if ($null -ne $evm.memLabsDeployVersion) {
-            $evm.PsObject.Members.Remove("memLabsDeployVersion")
-        }
-        if ($null -ne $evm.memLabsVersion) {
-            $evm.PsObject.Members.Remove("memLabsVersion")
-        }
-        if ($null -ne $evm.domainDefaults) {
-            $evm.PsObject.Members.Remove("domainDefaults")
-        }
-        if ($null -ne $evm.success) {
-            $evm.PsObject.Members.Remove("success")
-        }
-        if ($null -ne $evm.vmBuild) {
-            $evm.PsObject.Members.Remove("vmBuild")
-        }
-        if ($null -ne $evm.deployedOS) {
-            $evm.PsObject.Members.Remove("deployedOS")
-        }
-        if ($null -ne $evm.switch) {
-            $evm.PsObject.Members.Remove("switch")
-        }
-        if ($null -ne $evm.vmBuild) {
-            $evm.PsObject.Members.Remove("vmBuild")
-        }
-        if ($null -ne $evm.success) {
-            $evm.PsObject.Members.Remove("success")
-        }
-        if ($null -ne $evm.source) {
-            $evm.PsObject.Members.Remove("source")
-        }
-        if ($null -ne $evm.memoryGB) {
-            $evm.PsObject.Members.Remove("memoryGB")
-        }
-        if ($null -ne $evm.memoryStartupGB) {
-            $evm.PsObject.Members.Remove("memoryStartupGB")
-        }
-        if ($null -ne $evm.memLabsDeployVersion) {
-            $evm.PsObject.Members.Remove("memLabsDeployVersion")
-        }
-        if ($null -ne $evm.inProgress) {
-            $evm.PsObject.Members.Remove("inProgress")
-        }
-        if ($null -ne $evm.lastUpdate) {
-            $evm.PsObject.Members.Remove("lastUpdate")
-        }
-        if ($null -ne $evm.DiskUsedGB) {
-            $evm.PsObject.Members.Remove("DiskUsedGB")
+        foreach ($prop in $propsToStrip) {
+            if ($null -ne $evm.$prop) {
+                $evm.PsObject.Members.Remove($prop)
+            }
         }
         if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
-            $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER"  -force
+            $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
         }
     }
 
