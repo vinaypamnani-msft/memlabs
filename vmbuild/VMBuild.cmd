@@ -73,13 +73,35 @@ REM ============================================================
 REM Prefer System32 curl and remove Chocolatey curl when present
 REM ============================================================
 SET SYS32_CURL=%WINDIR%\System32\curl.exe
+SET CHOCO_CURL=C:\ProgramData\chocolatey\bin\curl.exe
 IF EXIST "%SYS32_CURL%" (
     ECHO System32 curl detected at "%SYS32_CURL%".
-    ECHO Removing Chocolatey curl package to avoid non-System32 curl usage...
-    choco uninstall curl -y
-    IF ERRORLEVEL 1 (
-        ECHO INFO: Chocolatey curl package may already be absent.
+    IF EXIST "%CHOCO_CURL%" (
+        ECHO Removing Chocolatey curl package to avoid non-System32 curl usage...
+        choco uninstall curl -y
+        IF ERRORLEVEL 1 (
+            ECHO WARNING: First curl uninstall attempt failed. Retrying...
+            choco uninstall curl -y
+            IF ERRORLEVEL 1 ECHO WARNING: curl uninstall retry failed.
+        )
+    ) ELSE (
+        ECHO Chocolatey curl shim not found at "%CHOCO_CURL%". Skipping uninstall.
     )
+)
+
+REM ============================================================
+REM Remove .NET 6 if installed
+REM ============================================================
+SET DOTNET6_FOUND=0
+FOR /F "tokens=*" %%A IN ('dotnet --list-runtimes 2^>NUL ^| findstr /R /C:" 6\.[0-9]"') DO SET DOTNET6_FOUND=1
+FOR /F "tokens=*" %%A IN ('dotnet --list-sdks 2^>NUL ^| findstr /R /C:"^6\.[0-9]"') DO SET DOTNET6_FOUND=1
+
+IF "%DOTNET6_FOUND%"=="1" (
+    ECHO .NET 6 detected. Attempting uninstall using registered Windows uninstall entries...
+    powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -Command "$paths=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'); $items=Get-ItemProperty -Path $paths -ErrorAction SilentlyContinue ^| Where-Object { $_.DisplayName -and $_.DisplayVersion -and $_.DisplayVersion -like '6.*' -and ( $_.DisplayName -match '^Microsoft \.NET' -or $_.DisplayName -match '^Microsoft ASP\.NET Core' -or $_.DisplayName -match '^Microsoft Windows Desktop Runtime' ) }; foreach($i in $items){ $u=$i.QuietUninstallString; if(-not $u){$u=$i.UninstallString}; if([string]::IsNullOrWhiteSpace($u)){continue}; if($u -match 'msiexec'){ if($u -notmatch '(/qn|/quiet)'){ $u+=' /qn' }; if($u -notmatch '/norestart'){ $u+=' /norestart' } } else { if($u -notmatch '(/qn|/quiet)'){ $u+=' /quiet' }; if($u -notmatch '/norestart'){ $u+=' /norestart' } }; Start-Process -FilePath 'cmd.exe' -ArgumentList '/c',$u -Wait -NoNewWindow }"
+    IF ERRORLEVEL 1 ECHO WARNING: One or more .NET 6 uninstall operations failed.
+) ELSE (
+    ECHO .NET 6 not detected. Skipping .NET 6 removal.
 )
 
 REM ============================================================
