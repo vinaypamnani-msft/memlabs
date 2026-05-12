@@ -2191,13 +2191,40 @@ function Set-VMNote {
     $vmNoteJson = ($vmNote | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
     $vm = Get-VM2 $VmName -Fallback
     if ($vm) {
+        # Skip the Set-VM -Notes round trip when nothing meaningful changed.
+        # Set-VM is a CIM call into vmms.exe and serializes behind whatever the
+        # VMMS is doing for this VM (state transitions, integration services
+        # handshakes, checkpoint merges, replication, etc.). On a healthy host
+        # it's cheap, but if vmms is stalled on one VM, every Set-VMNote in the
+        # init-time Update-VMInformation loop will block for seconds-to-minutes
+        # each. Most callers just want the in-memory note refreshed; only
+        # lastUpdate differs between successive calls, so compare the JSON with
+        # lastUpdate stripped and skip the write when it matches.
+        $stripLastUpdate = { param($s) if ($s) { ($s -replace '"lastUpdate"\s*:\s*"[^"]*"\s*,?\s*', '') } else { $s } }
+        $newNoteForCompare = & $stripLastUpdate $vmNoteJson
+        $existingNoteForCompare = & $stripLastUpdate $vm.Notes
+        if ($newNoteForCompare -eq $existingNoteForCompare -and -not $vmVersionUpdated) {
+            Write-Log "Skipping Set-VM -Notes for $vmName; notes unchanged." -LogOnly
+            return
+        }
+
         if ($vmVersionUpdated) {
             Write-Log "Setting VM Note for $vmName (version $vmVersion)" -LogOnly
         }
         else {
             Write-Log "Setting VM Note for $vmName to $vmNoteJson" -LogOnly
         }
-        $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            $vm | Set-VM -Notes $vmNoteJson -ErrorAction Stop
+        }
+        finally {
+            $sw.Stop()
+            if ($sw.Elapsed.TotalSeconds -ge 5) {
+                Write-Log "Set-VM -Notes for $vmName took $([Math]::Round($sw.Elapsed.TotalSeconds,1))s (vmms may be busy)." -Warning
+            }
+        }
     }
     else {
         Write-Log "Failed to get VM from Hyper-V. Cannot set VM Note for $vmName" -Verbose
