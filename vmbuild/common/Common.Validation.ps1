@@ -957,6 +957,127 @@ function Test-SingleRole {
     return $true
 }
 
+function Test-ValidDiskSpace {
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$ConfigObject,
+        [Parameter(Mandatory = $true)]
+        [object]$ReturnObject
+    )
+
+    try {
+        $basePath = $ConfigObject.vmOptions.basePath
+        if ([string]::IsNullOrWhiteSpace($basePath) -or -not $basePath.Contains(":\")) {
+            # Already covered by Test-ValidVmOptions
+            return
+        }
+
+        $driveLetter = $basePath.Substring(0, 1)
+        $rootPath = "$driveLetter`:\"
+        if (-not (Test-Path $rootPath)) {
+            return
+        }
+
+        # Collect VMs that will actually have an OS VHDX copied (new, non-hidden, non-OSDClient)
+        $vmsToCreate = @($ConfigObject.virtualMachines | Where-Object {
+                (-not $_.Hidden) -and ($_.Role -ne "OSDClient")
+            })
+
+        if ($vmsToCreate.Count -eq 0) {
+            return
+        }
+
+        $linuxImageNames = $null
+        try {
+            $linuxImageNames = @((Get-LinuxImages).Name)
+        }
+        catch {
+            $linuxImageNames = @()
+        }
+
+        $totalRequiredBytes = [int64]0
+        $unknownSizeVms = @()
+        $perVmDetails = @()
+
+        foreach ($vm in $vmsToCreate) {
+            $os = $vm.operatingSystem
+            if ([string]::IsNullOrWhiteSpace($os)) { continue }
+
+            $sourcePath = $null
+            $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $os } | Select-Object -First 1
+            if ($imageFile -and $imageFile.filename) {
+                $sourcePath = Join-Path $Common.AzureFilesPath $imageFile.filename
+            }
+            elseif ($linuxImageNames -contains $os) {
+                $sourcePath = Join-Path $Common.AzureImagePath ($os + ".vhdx")
+            }
+
+            if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                # Source VHDX not yet downloaded — can't pre-calculate. Record for advisory message.
+                $unknownSizeVms += $vm.vmName
+                continue
+            }
+
+            try {
+                $size = [int64](Get-Item -LiteralPath $sourcePath -ErrorAction Stop).Length
+            }
+            catch {
+                $unknownSizeVms += $vm.vmName
+                continue
+            }
+
+            $totalRequiredBytes += $size
+            $perVmDetails += [PSCustomObject]@{
+                VmName = $vm.vmName
+                OS     = $os
+                Bytes  = $size
+            }
+        }
+
+        if ($totalRequiredBytes -le 0) {
+            if ($unknownSizeVms.Count -gt 0) {
+                Add-ValidationMessage -Message "Disk Space Validation: Source VHDX files for the following VM(s) are not present locally yet, cannot pre-validate required space: $($unknownSizeVms -join ', '). Ensure files have been downloaded." -ReturnObject $ReturnObject -Warning
+            }
+            return
+        }
+
+        $reserveBytes = [int64]8GB
+        $requiredWithReserve = $totalRequiredBytes + $reserveBytes
+
+        # Get free space on the target drive
+        $freeBytes = $null
+        try {
+            $psDrive = Get-PSDrive -Name $driveLetter -ErrorAction Stop
+            $freeBytes = [int64]$psDrive.Free
+        }
+        catch {
+            Add-ValidationMessage -Message "Disk Space Validation: Failed to query free space on drive '$driveLetter`:'. $_" -ReturnObject $ReturnObject -Warning
+            return
+        }
+
+        $requiredGb = [Math]::Round($totalRequiredBytes / 1GB, 2)
+        $reserveGb = [Math]::Round($reserveBytes / 1GB, 2)
+        $totalRequiredGb = [Math]::Round($requiredWithReserve / 1GB, 2)
+        $freeGb = [Math]::Round($freeBytes / 1GB, 2)
+
+        if ($freeBytes -lt $requiredWithReserve) {
+            $shortfallGb = [Math]::Round((($requiredWithReserve - $freeBytes) / 1GB), 2)
+            $vmListText = ($perVmDetails | ForEach-Object { "$($_.VmName) [$([Math]::Round($_.Bytes / 1GB, 2))GB]" }) -join ', '
+            Add-ValidationMessage -Message "Disk Space Validation: Not enough free space on drive '$driveLetter`:' to copy VHDX files for $($perVmDetails.Count) VM(s). Required ${requiredGb}GB + ${reserveGb}GB reserve = ${totalRequiredGb}GB. Available: ${freeGb}GB. Short by ${shortfallGb}GB. VMs: $vmListText." -ReturnObject $ReturnObject -Failure
+        }
+        else {
+            Write-Log -Verbose "Disk Space Validation: Drive '$driveLetter`:' has ${freeGb}GB free; deployment requires ${totalRequiredGb}GB (${requiredGb}GB for VHDX copies + ${reserveGb}GB reserve)."
+        }
+
+        if ($unknownSizeVms.Count -gt 0) {
+            Add-ValidationMessage -Message "Disk Space Validation: Source VHDX files for the following VM(s) are not present locally yet, so they were excluded from the space calculation: $($unknownSizeVms -join ', '). Actual space required may be higher." -ReturnObject $ReturnObject -Warning
+        }
+    }
+    catch {
+        Write-Log "Test-ValidDiskSpace: Unexpected error: $_" -LogOnly
+    }
+}
+
 function Test-Configuration {
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "ConfigFile", HelpMessage = "Configuration File")]
@@ -1503,6 +1624,10 @@ function Test-Configuration {
         else {
             $return.DeployConfig = $deployConfig
         }
+
+        # Disk space validation for VHDX copies
+        Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
+        Test-ValidDiskSpace -ConfigObject $deployConfig -ReturnObject $return
 
 
         if ($global:SkipValidation) {
