@@ -206,6 +206,102 @@ if ($env:_COMPACT_DISKS_WORKER) {
         }
     }
 
+    # ------------------------------------------------------------------
+    # Invoke-CompactCleanup - safety-net cleanup for early exit.
+    #
+    # If the user closes the WPF window mid-run (or the worker dies for
+    # any other reason), the per-VM prep/compact jobs that were Stop-Job'd
+    # may have died holding mounted VHDs open. This function is the last
+    # line of defense: it stops/removes any leftover jobs we own, then
+    # walks $diskInfoList and dismounts any VHDX that's still attached to
+    # the host. Safe to call multiple times; runs from both the main-loop
+    # finally and a PowerShell.Exiting engine event.
+    # ------------------------------------------------------------------
+    $script:CleanupDone = $false
+    function Invoke-CompactCleanup {
+        param([string]$Reason = 'Exit')
+        if ($script:CleanupDone) { return }
+        $script:CleanupDone = $true
+
+        try { Add-UiLog ("[CLEANUP] Starting safety cleanup (reason: $Reason)") } catch {}
+
+        # 1. Kill any of our jobs that are still running. Match by name
+        #    prefix so we don't touch unrelated jobs in this session.
+        try {
+            $leftoverJobs = @(Get-Job -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name -like 'Prep_*' -or $_.Name -like 'Compact_*'
+            })
+            foreach ($j in $leftoverJobs) {
+                try { Stop-Job  -Job $j -ErrorAction SilentlyContinue } catch {}
+                try { Remove-Job -Job $j -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            if ($leftoverJobs.Count -gt 0) {
+                try { Add-UiLog ("[CLEANUP] Stopped/removed $($leftoverJobs.Count) leftover job(s)") } catch {}
+            }
+        } catch {}
+
+        # 2. Dismount any VHDX from our queue that's still attached.
+        #    Get-VHD is authoritative (a job that died mid-mount won't have
+        #    cleared its $mounted flag, so we can't rely on local state).
+        $dismounted = 0
+        try {
+            if ($diskInfoList -and $diskInfoList.Count -gt 0) {
+                foreach ($d in $diskInfoList) {
+                    if (-not $d.Path) { continue }
+                    if (-not (Test-Path -LiteralPath $d.Path)) { continue }
+                    try {
+                        $vhd = Get-VHD -Path $d.Path -ErrorAction SilentlyContinue
+                        if ($vhd -and $vhd.Attached) {
+                            # Only dismount if the VHD isn't attached to a
+                            # running VM (i.e. it was mounted to the host
+                            # by our offline-clean step, not by Hyper-V
+                            # because the guest is running).
+                            $ownedByVm = $false
+                            try {
+                                $ownedByVm = [bool](Get-VM -ErrorAction SilentlyContinue |
+                                    Get-VMHardDiskDrive -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.Path -ieq $d.Path } |
+                                    ForEach-Object { (Get-VM -Id $_.VMId -ErrorAction SilentlyContinue).State -eq 'Running' } |
+                                    Where-Object { $_ })
+                            } catch {}
+                            if (-not $ownedByVm) {
+                                try {
+                                    Dismount-VHD -Path $d.Path -ErrorAction Stop
+                                    $dismounted++
+                                    try { Add-UiLog ("[CLEANUP] Dismounted $($d.Path)") } catch {}
+                                } catch {
+                                    try { Add-UiLog ("[CLEANUP] Dismount failed for $($d.Path): $($_.Exception.Message)") } catch {}
+                                }
+                            }
+                        }
+                    } catch {
+                        # Get-VHD can throw if the file is gone or locked; ignore.
+                    }
+                }
+            }
+        } catch {}
+        if ($dismounted -gt 0) {
+            try { Add-UiLog ("[CLEANUP] Dismounted $dismounted VHD(s) left attached by interrupted jobs") } catch {}
+        }
+
+        # 3. Best-effort: clear any stale zero-fill temp file the
+        #    interrupted job might have left inside a mounted volume.
+        #    (After dismount the file is gone with the volume, so nothing
+        #    to do here - kept as a comment for future maintainers.)
+
+        try { Add-UiLog ("[CLEANUP] Safety cleanup complete") } catch {}
+    }
+
+    # Engine-exit safety net: even if the script throws or the user kills
+    # the window, this fires on normal PowerShell shutdown so we don't
+    # leave mounted VHDs behind. (Won't fire on process-kill, but the
+    # in-loop finally + Window-Closed branch cover the common cases.)
+    try {
+        Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+            try { Invoke-CompactCleanup -Reason 'PowerShell.Exiting' } catch {}
+        } | Out-Null
+    } catch {}
+
     # --- WPF window in a dedicated STA runspace ---
     $uiRunspace = [runspacefactory]::CreateRunspace()
     $uiRunspace.ApartmentState = 'STA'
@@ -1606,6 +1702,13 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 $disk.Status = 'Cancelled'
             }
         }
+        # If we landed here because the user closed the WPF window
+        # mid-run, the Stop-Job calls above will have killed prep/compact
+        # jobs that were holding VHDs mounted. Dismount everything before
+        # falling through to the summary phase.
+        if ($UiSync.WindowClosed) {
+            try { Invoke-CompactCleanup -Reason 'WindowClosed' } catch {}
+        }
     }
 
         # --- Retry pass: deferred VMs may now fit thanks to space freed by Optimize-VHD ---
@@ -1856,6 +1959,13 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
     # Window stays open for log review - wait until the user closes it, then clean up
     while (-not $UiSync.WindowClosed) { Start-Sleep -Milliseconds 500 }
+
+    # Final safety net: by this point everything *should* be dismounted
+    # (either the jobs finished cleanly and ran their own dismount, or
+    # the main-loop finally ran Invoke-CompactCleanup). Re-run it anyway -
+    # it's idempotent and cheap, and it guarantees no VHDX is left
+    # attached to the host once this script exits.
+    try { Invoke-CompactCleanup -Reason 'WorkerExit' } catch {}
 
     try { $uiPipeline.EndInvoke($uiHandle) } catch {}
     $uiPipeline.Dispose()
