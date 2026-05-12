@@ -918,6 +918,70 @@ function Select-DeletePending {
         }
     }
 }
+# --- Helpers for color-coded, truncatable single-line option summaries ---
+function Get-AnsiColorCached {
+    param([string]$ColorName)
+    if (-not $script:_ansiColorCache) { $script:_ansiColorCache = @{} }
+    if (-not $script:_ansiColorCache.ContainsKey($ColorName)) {
+        try {
+            $script:_ansiColorCache[$ColorName] = (Get-RGB $ColorName | Convert-RGBtoAnsi)
+        }
+        catch {
+            $script:_ansiColorCache[$ColorName] = ""
+        }
+    }
+    return $script:_ansiColorCache[$ColorName]
+}
+
+function Format-OptionToken {
+    # Returns "<ANSI><text>" — no trailing reset, since the next token will set its own color
+    # (or Write-Host2 will append PSStyle.Reset at the end).
+    param(
+        [Parameter(Mandatory)] [string]$Color,
+        [Parameter(Mandatory, AllowEmptyString = $true)] [string]$Text
+    )
+    return "$(Get-AnsiColorCached $Color)$Text"
+}
+
+function Get-VisibleLengthAnsi {
+    param([string]$Text)
+    if (-not $Text) { return 0 }
+    return ($Text -replace "`e\[[0-9;]*m", "").Length
+}
+
+function Limit-AnsiString {
+    # Truncate an ANSI-tagged string to a max VISIBLE length, preserving embedded color codes.
+    param(
+        [string]$Text,
+        [int]$MaxVisible
+    )
+    if (-not $Text -or $MaxVisible -le 0) { return $Text }
+    $visibleLen = Get-VisibleLengthAnsi $Text
+    if ($visibleLen -le $MaxVisible) { return $Text }
+
+    $reset = if ($Global:Common.PS7) { $PSStyle.Reset } else { "$([char]27)[0m" }
+    $sb = New-Object System.Text.StringBuilder
+    $visible = 0
+    $i = 0
+    $limit = [Math]::Max(1, $MaxVisible - 3)   # leave room for "..."
+    while ($i -lt $Text.Length -and $visible -lt $limit) {
+        $ch = $Text[$i]
+        if ($ch -eq [char]27) {
+            $end = $Text.IndexOf('m', $i)
+            if ($end -lt 0) { break }
+            [void]$sb.Append($Text.Substring($i, $end - $i + 1))
+            $i = $end + 1
+        }
+        else {
+            [void]$sb.Append($ch)
+            $visible++
+            $i++
+        }
+    }
+    [void]$sb.Append("$reset...")
+    return $sb.ToString()
+}
+
 function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
@@ -928,44 +992,86 @@ function get-VMOptionsSummary {
     if ($null -eq $options.locale) {
         $options | Add-Member -MemberType NoteProperty -Name "locale" -Value "en-US" -Force
     }
-    $domainName = "[$($options.domainName)]".PadRight(21)
-    $Output = "$domainName [Prefix $($options.prefix)] [Network $($options.network)] [Username $($options.adminName)] [Location $($options.basePath)] [TZ $($options.timeZone)] [Locale $($options.locale)]"
+
+    # Color-coded tokens (Option C: hybrid — labels only where the value is ambiguous)
+    #   Domain          -> Gold              (the headline)
+    #   Prefix [PRO-]   -> LightSteelBlue    (identity bracket)
+    #   Network         -> LightSteelBlue
+    #   Admin user      -> Chartreuse
+    #   Path            -> LightSteelBlue
+    #   TZ / Locale     -> Plum
+    #   Separator       -> DimGray
+    $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
+
+    $tokens = @(
+        Format-OptionToken -Color "Gold" -Text $options.domainName
+        Format-OptionToken -Color "LightSteelBlue" -Text "[$($options.prefix)]"
+        Format-OptionToken -Color "LightSteelBlue" -Text $options.network
+        Format-OptionToken -Color "Chartreuse" -Text $options.adminName
+        Format-OptionToken -Color "LightSteelBlue" -Text $options.basePath
+        (Format-OptionToken -Color "DimGray" -Text "TZ ") + (Format-OptionToken -Color "Plum" -Text $options.timeZone)
+        (Format-OptionToken -Color "DimGray" -Text "Loc ") + (Format-OptionToken -Color "Plum" -Text $options.locale)
+    )
+    $Output = $tokens -join $sep
+
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 38)
-    if ($Output.Length -ge $MaxWidth) {
-        $Output = $Output.Substring(0, $MaxWidth - 3) + "..."
-    }
-    return $Output
+    return (Limit-AnsiString -Text $Output -MaxVisible $MaxWidth)
 }
 
 function get-CMOptionsSummary {
     $fixedConfig = $Global:Config.virtualMachines | Where-Object { -not $_.hidden }
     $options = $Global:Config.cmOptions
-    $ver = "[$($options.version)]".PadRight(21)
-    $license = "[Licensed]"
-    if ($options.EVALVersion -or $options.version -eq "tech-preview") {
-        $license = "[EVAL]"
-    }
-    $pki = "[EHTTP]"
-    if ($options.UsePKI) {
-        $pki = "[PKI]"
-    }
+
+    # Version (red if tech-preview, otherwise green). Use baseline number when SCP is Offline.
+    $verText = $options.version
     if ($options.OfflineSCP) {
-        $scp = "Offline"
-        $baselineVersion = (Get-CMBaselineVersion -CMVersion $options.version).baselineVersion
-        $ver = "[$($baselineVersion )]".PadRight(21)
+        $baseline = (Get-CMBaselineVersion -CMVersion $options.version).baselineVersion
+        if ($baseline) { $verText = $baseline }
     }
-    else {
-        $scp = "Online"
-    }
-    $offlineSUP = ""
+    $verColor = if ($options.version -eq "tech-preview") { "Tomato" } else { "ForestGreen" }
+
+    # License: green if Licensed, red if EVAL
+    $isEval = ($options.EVALVersion -or $options.version -eq "tech-preview")
+    $licenseText = if ($isEval) { "EVAL" } else { "Licensed" }
+    $licenseColor = if ($isEval) { "Tomato" } else { "ForestGreen" }
+
+    # Install — green ✓ or red ✗
+    $installColor = if ($options.install) { "ForestGreen" } else { "Tomato" }
+    $installMark = if ($options.install) { "✓" } else { "✗" }
+
+    # Push Clients — green ✓ when on, tan ✗ when off (intentional, not error)
+    $pushColor = if ($options.pushClientToDomainMembers) { "ForestGreen" } else { "Tan" }
+    $pushMark = if ($options.pushClientToDomainMembers) { "✓" } else { "✗" }
+
+    # Auth — PKI is the more secure choice (green); EHTTP is the default (khaki/yellow)
+    $authText = if ($options.UsePKI) { "PKI" } else { "EHTTP" }
+    $authColor = if ($options.UsePKI) { "ForestGreen" } else { "Khaki" }
+
+    # SCP — Online cyan, Offline tan
+    $scpText = if ($options.OfflineSCP) { "Offline" } else { "Online" }
+    $scpColor = if ($options.OfflineSCP) { "Tan" } else { "PaleTurquoise" }
+
+    $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
+
+    $tokens = @(
+        (Format-OptionToken -Color "DimGray" -Text "CM ") + (Format-OptionToken -Color $verColor -Text $verText)
+        Format-OptionToken -Color $licenseColor -Text $licenseText
+        (Format-OptionToken -Color "DimGray" -Text "Install ") + (Format-OptionToken -Color $installColor -Text $installMark)
+        (Format-OptionToken -Color "DimGray" -Text "Push ") + (Format-OptionToken -Color $pushColor -Text $pushMark)
+        (Format-OptionToken -Color "DimGray" -Text "Auth ") + (Format-OptionToken -Color $authColor -Text $authText)
+        (Format-OptionToken -Color "DimGray" -Text "SCP ") + (Format-OptionToken -Color $scpColor -Text $scpText)
+    )
+
+    # SUP Offline badge — only shown when a SUP is present AND OfflineSUP is set (non-default)
     $testSystem = $fixedConfig | Where-Object { $_.installSUP }
-    if ($testSystem) {
-        if ($options.OfflineSUP) {
-            $offlineSUP = "[SUP: Offline]"
-        }
+    if ($testSystem -and $options.OfflineSUP) {
+        $tokens += (Format-OptionToken -Color "DimGray" -Text "SUP ") + (Format-OptionToken -Color "Tan" -Text "Offline")
     }
-    $Output = "$ver [Install $($options.install)] [Push Clients $($options.pushClientToDomainMembers)] $license $pki [SCP: $scp] $offlineSUP"
-    return $Output
+
+    $Output = $tokens -join $sep
+
+    $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 38)
+    return (Limit-AnsiString -Text $Output -MaxVisible $MaxWidth)
 }
 
 function get-VMSummary {
