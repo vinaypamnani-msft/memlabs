@@ -1197,90 +1197,156 @@ function Get-VMFixes {
     return $fixesToPerform
 }
 
-function Optimize-VHDX {
+function Start-CompactDisksUI {
+    <#
+    .SYNOPSIS
+        Launches the WPF VHD-compaction worker as a detached process.
+
+    .DESCRIPTION
+        Spawns Compact-Disks.ps1 in a separate hidden PowerShell process. The
+        worker shows a WPF progress window and runs Optimize-VHD in parallel
+        for every VHD owned by the given VMs. Returns immediately so the
+        caller (genconfig) stays interactive.
+    #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
-        [object] $VMs
+        [Parameter(Mandatory = $true)]
+        [string[]] $VMNames,
+
+        [ValidateSet('Quick', 'Full', 'Retrim', 'Prezeroed')]
+        [string] $Mode = 'Full',
+
+        [ValidateRange(1, 16)]
+        [int] $MaxConcurrentJobs = 8,
+
+        [string] $DomainLabel
     )
 
-    foreach ($vm in $VMs) {
-        $restart = $false
-        if ($vm.State -ne "Off") {
-            stop-vm2 -name $vm.VmName
-            $restart = $true
-        }
+    $scriptPath = Join-Path $PSScriptRoot '..\Compact-Disks.ps1'
+    if (-not (Test-Path $scriptPath)) {
+        Write-RedX "Compact-Disks.ps1 not found at $scriptPath"
+        return
+    }
+    $scriptPath = (Resolve-Path $scriptPath).Path
 
-        foreach ($hd in Get-VHD -VMId $vm.VmId) {
-            #    Mount-VHD -Path $hd.Path
-            $mounted = $false
-            Write-WhiteI -indent 0 "Starting optimization of $($vm.vmName) $($hd.Path)"
+    # Wrap the script call so we can also forward -VMNames (the interactive
+    # entry point in Compact-Disks.ps1 builds the disk list, then launches its
+    # own hidden worker process for the WPF UI).
+    $vmListQuoted = ($VMNames | ForEach-Object { "'{0}'" -f ($_ -replace "'", "''") }) -join ','
+    $command = "& '$scriptPath' -Mode $Mode -MaxConcurrentJobs $MaxConcurrentJobs -VMNames @($vmListQuoted)"
+
+    $psExe = (Get-Process -Id $PID).Path
+    if (-not $psExe) { $psExe = 'powershell.exe' }
+
+    $argList = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-Command', $command
+    )
+
+    Write-WhiteI -indent 0 "Launching Compact-Disks UI for $($VMNames.Count) VM(s)..."
+    try {
+        Start-Process -FilePath $psExe -ArgumentList $argList -WindowStyle Normal | Out-Null
+        Write-GreenCheck "Compact-Disks worker launched. A WPF progress window will appear shortly."
+    }
+    catch {
+        Write-RedX "Failed to launch Compact-Disks.ps1: $($_.Exception.Message)"
+    }
+}
+
+function Merge-VMCheckpointsForCompact {
+    <#
+    .SYNOPSIS
+        Deletes (and waits for the merge of) every checkpoint on the given VMs.
+
+    .DESCRIPTION
+        Compacting a differencing AVHDX rarely saves space, and a VM with
+        checkpoints presents its top-most AVHDX as its hard-disk path. Before
+        we run Optimize-VHD we delete every snapshot/checkpoint, which causes
+        Hyper-V to merge each AVHDX chain back into the parent VHDX.
+
+        We then poll each VM until none of its hard disks point at an .avhdx
+        file (or any deleted snapshot still appears in Get-VMCheckpoint), so
+        Optimize-VHD runs against the merged parent.
+
+        Also removes the matching MemLabs.Notes.json / <snapshot>.json sidecar
+        files that select-DeleteSnapshotDomain maintains.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object[]] $VMs
+    )
+
+    $vmsWithSnapshots = @()
+    foreach ($vm in $VMs) {
+        $snapshots = @(Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue)
+        if ($snapshots.Count -gt 0) {
+            $vmsWithSnapshots += [PSCustomObject]@{ VM = $vm; Snapshots = $snapshots }
+        }
+    }
+
+    if ($vmsWithSnapshots.Count -eq 0) {
+        return
+    }
+
+    $total = ($vmsWithSnapshots | ForEach-Object { $_.Snapshots.Count } | Measure-Object -Sum).Sum
+    Write-WhiteI -indent 0 "Merging $total checkpoint(s) across $($vmsWithSnapshots.Count) VM(s) before compaction..."
+
+    foreach ($entry in $vmsWithSnapshots) {
+        $vm = $entry.VM
+        $vmPath = (Get-VM2 -Name $vm.vmName).Path
+        foreach ($snapshot in $entry.Snapshots) {
+            $snapName = $snapshot.Name
+            Show-StatusEraseLine "Removing checkpoint '$snapName' on $($vm.vmName)" -indent
             try {
-                $drive = Mount-VHD -Path $hd.Path -ErrorAction SilentlyContinue -PassThru | Get-Disk | Get-Partition | Get-Volume
-                if ($drive) {
-                    $mounted = $true
-                }
-                else {
-                    stop-vm2 -name $vm.VmName -TurnOff
-                    start-sleep -seconds 30
-                    $drive = Mount-VHD -Path $hd.Path -ErrorAction continue -PassThru | Get-Disk | Get-Partition | Get-Volume
-                    if ($drive) {
-                        $mounted = $true
-                    }
-                    else {
-                        Write-RedX "Failed to mount $($hd.Path) again"
-                        $mounted = $false
-                        continue
-                    }                   
-                }
-                $driveLetterOnly = ($drive | Where-Object { $null -ne $_.driveLetter } | Select-Object -First 1).DriveLetter
-                $driveLetter = $driveLetterOnly + ":"
-                Write-GreenCheck "Mounted $($hd.Path) to $driveLetter"
-                Start-Sleep -seconds 5
-                defrag $driveLetter /h /x
-                defrag $driveLetter /h /k /l
-                defrag $driveLetter /h /x
-                defrag $driveLetter /h /k 
-                $global:progressPreference = "SilentlyContinue"                
-                try {
-                    Optimize-Volume -DriveLetter $driveLetterOnly -Defrag -ErrorAction Stop | Out-Null
-                }
-                catch {}
-                try {
-                    Optimize-Volume -DriveLetter $driveLetterOnly -SlabConsolidate -ErrorAction Stop | Out-Null
-                }
-                catch {}
-                try {
-                    Optimize-Volume -DriveLetter $driveLetterOnly -ReTrim -ErrorAction Stop | Out-Null
-                }
-                catch {}
-                $global:progressPreference = "Continue"
-                Write-GreenCheck "Defragmented $driveLetter"
-                try {
-                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Stop
-                }
-                catch {}
-                Write-GreenCheck "Optimized $($hd.Path)"
+                Remove-VMCheckpoint2 -VMName $vm.vmName -Name $snapName | Out-Null
             }
-            finally {
-                if ($mounted) {
-                    Dismount-VHD -Path $hd.Path
-                    Start-Sleep -seconds 5
-                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
-                }
-                if ($restart) {
-                    Start-VM2 -retryseconds 30 -Name $vm.VmName
-                    Write-GreenCheck "Restarted $($vm.VmName)"
+            catch {
+                Write-RedX "Failed to remove '$snapName' on $($vm.vmName): $($_.Exception.Message)"
+                continue
+            }
+
+            # Remove sidecar notes file maintained by select-DeleteSnapshotDomain
+            if ($vmPath) {
+                if ($snapName -eq "MemLabs Snapshot") {
+                    $notesFile = Join-Path $vmPath 'MemLabs.Notes.json'
                 }
                 else {
-                    Write-GreenCheck "Dismounted $($hd.Path)"
+                    $notesFile = Join-Path $vmPath ($snapName + '.json')
+                }
+                if (Test-Path $notesFile) {
+                    Remove-Item $notesFile -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
                 }
             }
         }
     }
+
+    # Wait for the AVHDX merges to complete. With the VMs stopped Hyper-V
+    # merges synchronously most of the time, but vmms can still finish writing
+    # behind the scenes - poll until no VM hard disk references an .avhdx and
+    # no MemLabs checkpoints remain.
+    $deadline = (Get-Date).AddMinutes(15)
+    while ((Get-Date) -lt $deadline) {
+        $pending = $false
+        foreach ($vm in $VMs) {
+            $hds = @(Get-VMHardDiskDrive -VMName $vm.vmName -ErrorAction SilentlyContinue)
+            if ($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' }) {
+                $pending = $true
+                break
+            }
+            if (Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue) {
+                $pending = $true
+                break
+            }
+        }
+        if (-not $pending) { break }
+        Show-StatusEraseLine "Waiting for checkpoint merges to finish..." -indent
+        Start-Sleep -Seconds 5
+    }
+
+    Write-GreenCheck "Checkpoint merge complete                                              "
 }
-
-
 
 function select-OptimizeDomain {
     [CmdletBinding()]
@@ -1293,27 +1359,41 @@ function select-OptimizeDomain {
     $vms = get-list -type vm -DomainName $domain -SmartUpdate
 
     $vmsname = $vms | Select-Object -ExpandProperty vmName
-    #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
-    
-    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
-        
+
+    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VMs to Compact" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
+
     if ($response -eq "ESCAPE" -or $response -eq "NOITEMS") {
         return "ESCAPE"
     }
-    $sizeBefore = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
-    write-Host "Total size of VMs in $domain before optimize: $([math]::Round($sizeBefore,2))GB"
-    $VmList = $vms | Where-Object { $_.VmName -in $response }
-    Optimize-VHDX -VMs $VmList
-    
-    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse -ProgressAction SilentlyContinue
-    get-list -type VM -SmartUpdate -ResetCache | out-null
-    $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
-    write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
-    write-Host "Total Savings: $([math]::Round($sizeBefore - $sizeAfter,2))GB"
-    Start-Sleep -seconds 10
-    write-host
-    Write-Host "$domain has been stopped and optimized. Make sure to restart the domain if necessary."
 
+    $selectedVMs = @($vms | Where-Object { $_.VmName -in $response })
+    if (-not $selectedVMs -or $selectedVMs.Count -eq 0) {
+        Write-RedX "No VMs selected."
+        return
+    }
+
+    # Stop any selected VMs that are running; the WPF worker skips running VMs.
+    $running = @($selectedVMs | Where-Object { $_.State -ne 'Off' })
+    if ($running.Count -gt 0) {
+        Write-WhiteI -indent 0 "Stopping $($running.Count) running VM(s) before optimization..."
+        foreach ($vm in $running) {
+            stop-vm2 -name $vm.VmName
+            Write-GreenCheck "Stopped $($vm.VmName)"
+        }
+    }
+
+    # Merge any existing checkpoints so Optimize-VHD operates on the parent
+    # VHDX (compacting a differencing AVHDX gives near-zero savings, and after
+    # we delete a checkpoint Hyper-V also automatically merges its AVHDX back
+    # into the parent).
+    Merge-VMCheckpointsForCompact -VMs $selectedVMs
+
+    Start-CompactDisksUI -VMNames ($selectedVMs | Select-Object -ExpandProperty VmName) -DomainLabel $domain
+
+    Write-Host
+    Write-Host "VHD compaction is running in a separate WPF window." -ForegroundColor Green
+    Write-Host "VMs were stopped before launch and will NOT be auto-restarted - use the domain Start menu when compaction finishes." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 3
 }
 
 
