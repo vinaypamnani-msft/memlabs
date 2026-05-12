@@ -8,7 +8,21 @@ param (
     [Parameter()]
     [switch]$DevBranch,
     [Parameter()]
-    [switch]$GetLatestHotfixVersion
+    [switch]$GetLatestHotfixVersion,
+    [Parameter()]
+    [switch]$FastInit,
+    [Parameter()]
+    [switch]$SkipStorageInit,
+    [Parameter()]
+    [switch]$SkipMaintenanceRefresh,
+    [Parameter()]
+    [switch]$SkipVmCacheRefresh,
+    [Parameter()]
+    [switch]$SkipEnvironmentDetection,
+    [Parameter()]
+    [switch]$SkipHostPreparation,
+    [Parameter()]
+    [switch]$WarmVmCacheInBackground
 )
 
 ########################
@@ -871,17 +885,18 @@ function Test-URL {
         [string] $name
     )
 
-    $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
-    if (-not (Test-Path $curlPath)) {
+    $curlPaths = @(Get-CurlExecutablePaths)
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
         Write-Log "Curl was not found." -Failure
         return $false
     }
 
     try {
         #$output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url
-        $output = & $curlPath --retry 8 --retry-delay 4 --retry-max-time 45 -s -L --head -f $url 2>&1
-        $lastexit = $LASTEXITCODE
-        if ($LASTEXITCODE -eq 0) {
+        $result = Invoke-CurlWithFallback -CurlArguments @("--retry", "8", "--retry-delay", "4", "--retry-max-time", "45", "-s", "-L", "--head", "-f", $url) -CaptureOutput
+        $output = $result.Output
+        $lastexit = $result.ExitCode
+        if ($result.Success) {
             if ($output -match 'Location: https://www.bing.com') {
                 Write-Log -LogOnly "[$name] $url (Redirects to bing)" -Failure
                 Write-RedX "[$name] $url (Redirects to bing)"
@@ -892,18 +907,20 @@ function Test-URL {
             return $true
         }
         else {
-            if ($LASTEXITCODE -eq 60) {
+            if ($lastexit -eq 60) {
                 write-log "Curl failed($lastexit): $output"
             }
             #ipconfig /flushdns
             Clear-DnsClientCache
             start-sleep -seconds 30
             write-log "Curl retrying.. Last failure Exit code $lastexit $output" -LogOnly
-            $output = & $curlPath --retry 16 --retry-delay 10 --retry-max-time 160 -s -L --head -f $url 2>&1
+            $result = Invoke-CurlWithFallback -CurlArguments @("--retry", "16", "--retry-delay", "10", "--retry-max-time", "160", "-s", "-L", "--head", "-f", $url) -CaptureOutput
+            $output = $result.Output
+            $lastexit = $result.ExitCode
 
-            if ($LASTEXITCODE -ne 0) {
-                Write-RedX "[$name] curl -s -L --head $url returned $LASTEXITCODE"
-                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $LASTEXITCODE $output" -Failure
+            if (-not $result.Success) {
+                Write-RedX "[$name] curl -s -L --head $url returned $lastexit"
+                Write-Log -LogOnly "[$name] curl -s -L --head $url returned $lastexit $output" -Failure
                 return $false
             }
         }
@@ -932,17 +949,20 @@ function Start-CurlTransfer {
     )
 
     # ---- Find curl ----
-    $curlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-    if (-not $curlPath) {
-        $curlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+    $curlPaths = @(Get-CurlExecutablePaths)
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
+        $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
+        if (Test-Path $systemCurlPath) {
+            Write-Log "Start-CurlTransfer: System32 curl exists at '$systemCurlPath'. Skipping chocolatey curl install." -LogOnly
+        }
+        else {
+            Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
+            & choco install curl -y | Out-Null
+        }
+        $curlPaths = @(Get-CurlExecutablePaths)
     }
 
-    if (-not (Test-Path $curlPath)) {
-        Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
-        & choco install curl -y | Out-Null
-    }
-
-    if (-not (Test-Path $curlPath)) {
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
         Write-Log "Start-CurlTransfer: curl.exe was not found and could not be installed." -Failure
         return $false
     }
@@ -965,14 +985,18 @@ function Start-CurlTransfer {
     do {
         $retryCount++
 
+        $curlArguments = @("-L", "-C", "-")
         if ($Silent) {
-            & $curlPath -s -L -C - @authArgs -o $Destination "$Source"
+            $curlArguments = @("-s") + $curlArguments
         }
-        else {
-            & $curlPath -L -C - @authArgs -o $Destination "$Source"
+        if ($authArgs.Count -gt 0) {
+            $curlArguments += $authArgs
         }
+        $curlArguments += @("-o", $Destination, "$Source")
 
-        switch ($LASTEXITCODE) {
+        $result = Invoke-CurlWithFallback -CurlArguments $curlArguments
+
+        switch ($result.ExitCode) {
             0 {
                 # Success
                 $success = $true
@@ -989,7 +1013,7 @@ function Start-CurlTransfer {
             }
             default {
                 Write-Host
-                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $LASTEXITCODE. Will retry $(($maxRetries - $retryCount)) more time(s)."
+                Write-Log "Start-CurlTransfer: Download '$Source' failed with exit code $($result.ExitCode). Will retry $(($maxRetries - $retryCount)) more time(s)."
                 Write-Host
                 Start-Sleep -Seconds 5
             }
@@ -1002,6 +1026,79 @@ function Start-CurlTransfer {
     }
 
     return $success
+}
+
+function Get-CurlExecutablePaths {
+    [CmdletBinding()]
+    param ()
+
+    $curlPaths = @()
+    $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
+    $resolvedCurlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    $chocoCurlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+
+    foreach ($candidate in @($systemCurlPath, $resolvedCurlPath, $chocoCurlPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate) -and ($candidate -notin $curlPaths)) {
+            $curlPaths += $candidate
+        }
+    }
+
+    return $curlPaths
+}
+
+function Invoke-CurlWithFallback {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]] $CurlArguments,
+        [Parameter(Mandatory = $false)]
+        [switch] $CaptureOutput
+    )
+
+    $curlPaths = @(Get-CurlExecutablePaths)
+    if (-not $curlPaths -or $curlPaths.Count -eq 0) {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Output   = $null
+            Path     = $null
+        }
+    }
+
+    $lastResult = [PSCustomObject]@{
+        Success  = $false
+        ExitCode = $null
+        Output   = $null
+        Path     = $null
+    }
+
+    for ($index = 0; $index -lt $curlPaths.Count; $index++) {
+        $curlPath = $curlPaths[$index]
+        if ($CaptureOutput) {
+            $output = & $curlPath @CurlArguments 2>&1
+        }
+        else {
+            & $curlPath @CurlArguments
+            $output = $null
+        }
+
+        $lastResult = [PSCustomObject]@{
+            Success  = ($LASTEXITCODE -eq 0)
+            ExitCode = $LASTEXITCODE
+            Output   = $output
+            Path     = $curlPath
+        }
+
+        if ($lastResult.Success) {
+            return $lastResult
+        }
+
+        if ($index -lt ($curlPaths.Count - 1)) {
+            Write-Log "Invoke-CurlWithFallback: '$curlPath' failed with exit code $($lastResult.ExitCode). Trying fallback curl path." -LogOnly
+        }
+    }
+
+    return $lastResult
 }
 function New-Directory {
     param(
@@ -4271,13 +4368,22 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
 
 if (-not $Common.Initialized) {
 
+    $effectiveSkipStorageInit = $FastInit.IsPresent -or $SkipStorageInit.IsPresent
+    $effectiveSkipMaintenanceRefresh = $FastInit.IsPresent -or $SkipMaintenanceRefresh.IsPresent
+    $effectiveSkipVmCacheRefresh = $FastInit.IsPresent -or $SkipVmCacheRefresh.IsPresent
+    $effectiveSkipEnvironmentDetection = $FastInit.IsPresent -or $SkipEnvironmentDetection.IsPresent
+    $effectiveSkipHostPreparation = $FastInit.IsPresent -or $SkipHostPreparation.IsPresent
+
     try {
         Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
         $Global:ProgressPreference = 'SilentlyContinue'
-        if ($true) {
-            $handle = (Get-CimInstance win32_process -Filter "ProcessID=$PID").Handle
-            ([wmi]"win32_process.handle='$handle'").setPriority(128) | out-null
+        try {
+            $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+            if ($currentProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::High) {
+                $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+            }
         }
+        catch {}
     }
     catch {}
     finally {
@@ -4365,13 +4471,18 @@ if (-not $Common.Initialized) {
         $isAzureVM = $false
         if (-not $InJob) {
             $colors = Get-Colors
-            if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
-            if (-not $isAzureVM) {
-                try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
-                catch {}
-                if ($meta -and $meta.compute -and $meta.compute.azEnvironment -ne $null) {
-                    $isAzureVM = $true
+            if (-not $effectiveSkipEnvironmentDetection) {
+                if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                if (-not $isAzureVM) {
+                    try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                    catch {}
+                    if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
+                        $isAzureVM = $true
+                    }
                 }
+            }
+            else {
+                Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
             }
         }
 
@@ -4445,13 +4556,20 @@ if (-not $Common.Initialized) {
 
             Set-BackgroundImage $image "right" (50 - 9) "uniform" -InJob:$InJob
             Write-Progress2 "MemLabs initializing" -Status "Checking Storage Config" -PercentComplete 9
-            try {
-                $getresults = Initialize-Storage
+            if (-not $effectiveSkipStorageInit) {
+                try {
+                    $getresults = Initialize-Storage
+                }
+                catch {
+                    #Write-Exception $_         
+                    $common.OfflineMode = $true
+                    Write-Log "Exception getting storage config. Using Offline Mode" -Warning
+                }
             }
-            catch {
-                #Write-Exception $_         
+            else {
                 $common.OfflineMode = $true
-                Write-Log "Exception getting storage config. Using Offline Mode" -Warning
+                $getresults = $false
+                Write-Log "Skipping storage initialization due to startup switches. Using Offline Mode." -LogOnly
             }
             if (-not $getresults ) {
                 $common.OfflineMode = $true
@@ -4459,10 +4577,19 @@ if (-not $Common.Initialized) {
             }
 
 
-            if (-not $InJob -or $GetLatestHotfixVersion) {
+            if ((-not $InJob -or $GetLatestHotfixVersion) -and -not $effectiveSkipMaintenanceRefresh -and -not $common.OfflineMode) {
                 Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-                $global:Common.latestHotfixVersion = Get-VMFixes -ReturnDummyList | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+                $vmFixes = Get-VMFixes -ReturnDummyList
+                if ($vmFixes) {
+                    $latestHotfixVersion = $vmFixes | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+                    if ($latestHotfixVersion) {
+                        $global:Common.latestHotfixVersion = $latestHotfixVersion
+                    }
+                }
+            }
+            else {
+                Write-Log "Skipping maintenance refresh during initialization." -LogOnly
             }
         
         ### Set supported options
@@ -4474,11 +4601,22 @@ if (-not $Common.Initialized) {
         $i = 14
         if (-not $InJob.IsPresent) {
 
-            Start-DHCP | out-null
-            #disable Sticky Keys
-            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
-            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
-            Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
+            if (-not $effectiveSkipHostPreparation) {
+                try {
+                    Start-DHCP | out-null
+                }
+                catch {
+                    Write-Log "Skipping DHCP startup preparation due to error: $_" -Warning
+                }
+
+                #disable Sticky Keys
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Type String -Value "506"
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\ToggleKeys" -Name "Flags" -Type String -Value "58"
+                Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Type String -Value "122"
+            }
+            else {
+                Write-Log "Skipping host preparation during initialization." -LogOnly
+            }
 
             try {
                 if ($global:common.CachePath) {
@@ -4497,17 +4635,37 @@ if (-not $Common.Initialized) {
             Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
 
             if (-not $InJob) {
-                Write-Progress2 "MemLabs initializing" -Status "Reset Cache" -PercentComplete $i
-                $list = Get-List -Type VM -ResetCache
-                foreach ($vm in $list) {
-                    $i++
-                    if ($i -ge 98) {
-                        $i = 98
+                if (-not $effectiveSkipVmCacheRefresh) {
+                    if ($WarmVmCacheInBackground) {
+                        Write-Progress2 "MemLabs initializing" -Status "Starting Background VM Cache Warmup" -PercentComplete $i
+                        Start-Job -Name "MemLabs-VMCacheWarmup" -ScriptBlock {
+                            param($scriptRoot, $devBranch)
+                            Set-Location $scriptRoot
+                            . (Join-Path $scriptRoot "Common.ps1") -InJob -DevBranch:$devBranch -SkipStorageInit -SkipMaintenanceRefresh -SkipEnvironmentDetection -SkipVmCacheRefresh
+                            $list = Get-List -Type VM -ResetCache
+                            foreach ($vm in $list) {
+                                $vm2 = Get-VM -Id $vm.vmId
+                                Update-VMInformation -vm $vm2
+                            }
+                        } -ArgumentList $PSScriptRoot, $devBranch | Out-Null
                     }
-                    Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
-                    Write-Progress2 "MemLabs initializing" -Status "Updating VM Cache" -PercentComplete $i
-                    $vm2 = Get-VM -id $vm.vmId
-                    Update-VMInformation -vm $vm2
+                    else {
+                        Write-Progress2 "MemLabs initializing" -Status "Reset Cache" -PercentComplete $i
+                        $list = Get-List -Type VM -ResetCache
+                        foreach ($vm in $list) {
+                            $i++
+                            if ($i -ge 98) {
+                                $i = 98
+                            }
+                            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
+                            Write-Progress2 "MemLabs initializing" -Status "Updating VM Cache" -PercentComplete $i
+                            $vm2 = Get-VM -id $vm.vmId
+                            Update-VMInformation -vm $vm2
+                        }
+                    }
+                }
+                else {
+                    Write-Log "Skipping VM cache refresh during initialization." -LogOnly
                 }
                 $i++
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob

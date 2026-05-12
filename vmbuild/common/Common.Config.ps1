@@ -2610,15 +2610,53 @@ Function Get-LinuxImages {
     
     $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
 
+    $downloadLinuxList = {
+        $curlPaths = @()
+        $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
+        if (Test-Path $systemCurlPath) {
+            $curlPaths += $systemCurlPath
+        }
+
+        $resolvedCurlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+        if (-not [string]::IsNullOrWhiteSpace($resolvedCurlPath) -and ($resolvedCurlPath -notin $curlPaths) -and (Test-Path $resolvedCurlPath)) {
+            $curlPaths += $resolvedCurlPath
+        }
+
+        $chocoCurlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
+        if (($chocoCurlPath -notin $curlPaths) -and (Test-Path $chocoCurlPath)) {
+            $curlPaths += $chocoCurlPath
+        }
+
+        if ($curlPaths.Count -eq 0) {
+            Write-Log "Get-LinuxImages: curl.exe not found." -Failure
+            return
+        }
+
+        $downloaded = $false
+        foreach ($curlPath in $curlPaths) {
+            & $curlPath -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
+            if ($LASTEXITCODE -eq 0) {
+                $downloaded = $true
+                break
+            }
+
+            Write-Log "Get-LinuxImages: '$curlPath' failed with exit code $LASTEXITCODE. Trying fallback curl path." -LogOnly
+        }
+
+        if (-not $downloaded) {
+            Write-Log "Get-LinuxImages: Failed to download Linux gallery JSON using all curl paths." -Failure
+        }
+    }
+
     if (Test-Path $linuxJson -PathType Leaf) {
         #Get a new copy if the existing one is over 5 hours old
         if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
-            & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
+            & $downloadLinuxList
         }
     }
     else {
         # Get a copy if the file doesn't exist
-        & curl -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
+        & $downloadLinuxList
     }
     $linux = Get-Content $linuxJson | convertfrom-json
     return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
