@@ -5027,15 +5027,24 @@ if (-not $Common.Initialized) {
                             Set-Location $scriptRoot
                             . (Join-Path $scriptRoot "Common.ps1") -InJob -DevBranch:$devBranch -SkipStorageInit -SkipMaintenanceRefresh -SkipEnvironmentDetection -SkipVmCacheRefresh
                             $list = Get-List -Type VM -ResetCache
+                            # Batch fetch all Hyper-V VMs once instead of one Get-VM call per VM.
+                            $allVMs = @{}
+                            foreach ($hv in (Get-VM)) { $allVMs[$hv.Id.Guid] = $hv }
                             foreach ($vm in $list) {
-                                $vm2 = Get-VM -Id $vm.vmId
-                                Update-VMInformation -vm $vm2
+                                $vm2 = $allVMs[$vm.vmId.Guid]
+                                if (-not $vm2) { $vm2 = Get-VM -Id $vm.vmId -ErrorAction SilentlyContinue }
+                                if ($vm2) { Update-VMInformation -vm $vm2 }
                             }
                         } -ArgumentList $PSScriptRoot, $devBranch | Out-Null
                     }
                     else {
                         Write-Progress2 "MemLabs initializing" -Status "Reset Cache" -PercentComplete $i
                         $list = Get-List -Type VM -ResetCache
+                        # Batch fetch all Hyper-V VMs once instead of one Get-VM call per VM.
+                        # Get-VM is an expensive WMI round trip; doing it N times in a loop is the
+                        # dominant cost of VM cache update on hosts with many VMs.
+                        $allVMs = @{}
+                        foreach ($hv in (Get-VM)) { $allVMs[$hv.Id.Guid] = $hv }
                         foreach ($vm in $list) {
                             $i++
                             if ($i -ge 98) {
@@ -5043,8 +5052,9 @@ if (-not $Common.Initialized) {
                             }
                             Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
                             Write-Progress2 "MemLabs initializing" -Status "Updating VM Cache" -PercentComplete $i
-                            $vm2 = Get-VM -id $vm.vmId
-                            Update-VMInformation -vm $vm2
+                            $vm2 = $allVMs[$vm.vmId.Guid]
+                            if (-not $vm2) { $vm2 = Get-VM -id $vm.vmId -ErrorAction SilentlyContinue }
+                            if ($vm2) { Update-VMInformation -vm $vm2 }
                         }
                     }
                 }
