@@ -152,6 +152,52 @@ if ($env:_COMPACT_DISKS_WORKER) {
         Title          = if ($DomainLabel) { "Hyper-V VHD Optimization - $DomainLabel" } else { 'Hyper-V VHD Optimization' }
     })
 
+    # --- Dedicated log file for this Compact-Disks run ---
+    # logs\Compact-Disks-<domain>-<yyyyMMdd-HHmmss>.log
+    # Captures everything that goes into the UI log box plus details that
+    # don't fit there (per-VHD start banner, defrag stdout, etc.)
+    $script:CompactLogPath = $null
+    try {
+        $logsDir = Join-Path $PSScriptRoot 'logs'
+        if (-not (Test-Path $logsDir)) {
+            New-Item -Path $logsDir -ItemType Directory -Force | Out-Null
+        }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $domTag = if ($DomainLabel) {
+            ($DomainLabel -replace '[^A-Za-z0-9._-]', '_')
+        } else { 'all' }
+        $script:CompactLogPath = Join-Path $logsDir "Compact-Disks-$domTag-$stamp.log"
+        $banner = @(
+            "==========================================================="
+            "Compact-Disks run started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+            "  Domain           : $DomainLabel"
+            "  Mode             : $Mode"
+            "  MaxConcurrentJobs: $MaxConcurrentJobs"
+            "  SkipOnlineClean  : $SkipOnlineClean"
+            "  SkipOfflineClean : $SkipOfflineClean"
+            "  SkipDefrag       : $SkipDefrag"
+            "  SkipZeroFill     : $SkipZeroFill"
+            "  VMs              : $(($importedData.VMs | ForEach-Object VMName) -join ', ')"
+            "==========================================================="
+        )
+        Set-Content -LiteralPath $script:CompactLogPath -Value $banner -Encoding utf8 -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Could not initialize Compact-Disks log file: $($_.Exception.Message)"
+        $script:CompactLogPath = $null
+    }
+
+    function Add-UiLog {
+        param([string]$Message)
+        Add-UiLog ($Message)
+        if ($script:CompactLogPath) {
+            try {
+                $line = '{0} {1}' -f (Get-Date -Format 'HH:mm:ss.fff'), $Message
+                Add-Content -LiteralPath $script:CompactLogPath -Value $line -Encoding utf8 -ErrorAction SilentlyContinue
+            } catch {}
+        }
+    }
+
     # --- WPF window in a dedicated STA runspace ---
     $uiRunspace = [runspacefactory]::CreateRunspace()
     $uiRunspace.ApartmentState = 'STA'
@@ -482,6 +528,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $activeJobs     = [System.Collections.Generic.List[PSCustomObject]]::new()
     $startTime      = Get-Date
 
+    if ($script:CompactLogPath) {
+        Add-UiLog ("Logging to: $script:CompactLogPath")
+    }
+
     try {
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
@@ -490,7 +540,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
             # ----- Launch prep jobs (one per VM, all in parallel) -----
             while ($prepQueue.Count -gt 0) {
                 $vm = $prepQueue.Dequeue()
-                [void]$UiSync.Log.Add("[PREP-START] $($vm.VMName)")
+                Add-UiLog ("[PREP-START] $($vm.VMName)")
                 try {
                     $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
                         param($n, $timeoutSec, $commonPath, $doOnlineClean)
@@ -744,7 +794,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 catch {
                     $vm.Status = 'Failed'
                     $vm.Error  = $_.Exception.Message
-                    [void]$UiSync.Log.Add("[PREP-ERR] $($vm.VMName): $($_.Exception.Message)")
+                    Add-UiLog ("[PREP-ERR] $($vm.VMName): $($_.Exception.Message)")
                 }
             }
 
@@ -759,13 +809,13 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $vm.Forced = [bool]$result.Forced
                         $vm.WasRunning = [bool]$result.WasRunning
                         if ($result.OnlineCleaned) {
-                            [void]$UiSync.Log.Add("[PREP-INFO] $($vm.VMName): online cleanup ran")
+                            Add-UiLog ("[PREP-INFO] $($vm.VMName): online cleanup ran")
                         }
                         if ($vm.Forced) {
-                            [void]$UiSync.Log.Add("[PREP-WARN] $($vm.VMName): force turned-off (graceful timeout)")
+                            Add-UiLog ("[PREP-WARN] $($vm.VMName): force turned-off (graceful timeout)")
                         }
                         $diskCount = if ($result.Disks) { $result.Disks.Count } else { 0 }
-                        [void]$UiSync.Log.Add("[PREP-DONE] $($vm.VMName) - $diskCount VHD(s) found")
+                        Add-UiLog ("[PREP-DONE] $($vm.VMName) - $diskCount VHD(s) found")
                         # Sort this VM's disks largest first locally; the queue is FIFO
                         # but interleaving by VM means largest-first per-VM is fine.
                         $sorted = @($result.Disks | Sort-Object { [long]$_.OriginalSize } -Descending)
@@ -787,14 +837,14 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     else {
                         $vm.Status = 'Failed'
                         $vm.Error  = 'Prep job returned no result'
-                        [void]$UiSync.Log.Add("[PREP-FAIL] $($vm.VMName)")
+                        Add-UiLog ("[PREP-FAIL] $($vm.VMName)")
                     }
                 }
                 elseif ($vm.Job.State -eq 'Failed') {
                     $vm.Status = 'Failed'
                     $reason = $vm.Job.ChildJobs[0].JobStateInfo.Reason
                     $vm.Error = if ($reason) { $reason.Message } else { 'Unknown prep error' }
-                    [void]$UiSync.Log.Add("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
+                    Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
                     Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
                 }
                 else {
@@ -806,7 +856,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
             # ----- Launch compact jobs -----
             while ($activeJobs.Count -lt $MaxConcurrentJobs -and $diskQueue.Count -gt 0) {
                 $disk = $diskQueue.Dequeue()
-                [void]$UiSync.Log.Add("[START] $($disk.VMName) - $($disk.FileName)")
+                Add-UiLog ("[START] $($disk.VMName) - $($disk.FileName)")
                 try {
                     $VhdPath      = $disk.Path
                     $OptMode      = $Mode
@@ -951,13 +1001,27 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         $letter = $vol.DriveLetter
                                         Write-PhaseLog "Defrag ${letter}: starting"
                                         Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (8 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
-                                        & defrag "${letter}:" /h /x  | Out-Null
-                                        & defrag "${letter}:" /h /k /l | Out-Null
-                                        & defrag "${letter}:" /h /x  | Out-Null
-                                        & defrag "${letter}:" /h /k  | Out-Null
-                                        try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null } catch {}
-                                        try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null } catch {}
-                                        try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null } catch {}
+                                        foreach ($defragArgs in @('/h /x', '/h /k /l', '/h /x', '/h /k')) {
+                                            Write-PhaseLog "defrag ${letter}: $defragArgs"
+                                            $argList = $defragArgs -split '\s+'
+                                            try {
+                                                $out = & defrag.exe "${letter}:" @argList 2>&1
+                                                foreach ($ln in @($out)) {
+                                                    $t = ($ln | Out-String).Trim()
+                                                    if ($t) {
+                                                        foreach ($sub in ($t -split "`r?`n")) {
+                                                            $sub = $sub.Trim()
+                                                            if ($sub) { Write-PhaseLog "  defrag> $sub" }
+                                                        }
+                                                    }
+                                                }
+                                            } catch {
+                                                Write-PhaseLog "  defrag ERROR: $($_.Exception.Message)"
+                                            }
+                                        }
+                                        try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: Defrag ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: Defrag failed: $($_.Exception.Message)" }
+                                        try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: SlabConsolidate ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: SlabConsolidate failed: $($_.Exception.Message)" }
+                                        try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: ReTrim ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: ReTrim failed: $($_.Exception.Message)" }
                                         Write-PhaseLog "Defrag ${letter}: complete"
                                     }
                                 }
@@ -1031,7 +1095,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 catch {
                     $disk.Status = 'Failed'
                     $disk.Error  = $_.Exception.Message
-                    [void]$UiSync.Log.Add("[ERROR] $($disk.FileName): $($_.Exception.Message)")
+                    Add-UiLog ("[ERROR] $($disk.FileName): $($_.Exception.Message)")
                 }
             }
 
@@ -1043,7 +1107,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $out = Receive-Job -Job $disk.Job -Keep:$false -ErrorAction SilentlyContinue
                     foreach ($line in @($out)) {
                         if ($line -is [string] -and $line.StartsWith('::LOG::')) {
-                            [void]$UiSync.Log.Add("[PHASE] $($disk.VMName) - $($line.Substring(7))")
+                            Add-UiLog ("[PHASE] $($disk.VMName) - $($line.Substring(7))")
                         }
                     }
                 } catch {}
@@ -1054,7 +1118,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $disk.NewSize = if ($NewFileSize) { $NewFileSize } else { $disk.OriginalSize }
                     $saved    = $disk.OriginalSize - $disk.NewSize
                     $savedPct = if ($disk.OriginalSize -gt 0) { [math]::Round(($saved / $disk.OriginalSize) * 100, 1) } else { 0 }
-                    [void]$UiSync.Log.Add("[DONE]  $($disk.VMName) - $($disk.FileName): $(Format-Size $disk.OriginalSize) -> $(Format-Size $disk.NewSize) (Saved: $(Format-Size $saved), $savedPct%)")
+                    Add-UiLog ("[DONE]  $($disk.VMName) - $($disk.FileName): $(Format-Size $disk.OriginalSize) -> $(Format-Size $disk.NewSize) (Saved: $(Format-Size $saved), $savedPct%)")
                     Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
                 }
                 elseif ($disk.Job.State -eq 'Failed') {
@@ -1062,7 +1126,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $reason = $disk.Job.ChildJobs[0].JobStateInfo.Reason
                     $disk.Error = if ($reason) { $reason.Message } else { ($disk.Job.ChildJobs[0].Error | Out-String).Trim() }
                     if (-not $disk.Error) { $disk.Error = 'Unknown error' }
-                    [void]$UiSync.Log.Add("[FAIL]  $($disk.VMName) - $($disk.FileName): $($disk.Error)")
+                    Add-UiLog ("[FAIL]  $($disk.VMName) - $($disk.FileName): $($disk.Error)")
                     Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
                 }
                 else {
@@ -1110,8 +1174,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $toRestart = @($vmInfoList | Where-Object { $_.WasRunning -and $_.Status -eq 'Completed' })
     if ($toRestart.Count -gt 0) {
         $UiSync.StatusText = "Restarting $($toRestart.Count) VM(s) in critical-order..."
-        [void]$UiSync.Log.Add('')
-        [void]$UiSync.Log.Add("--- Restarting $($toRestart.Count) VM(s) (DC -> FS -> SQL -> CAS -> PRI -> others) ---")
+        Add-UiLog ('')
+        Add-UiLog ("--- Restarting $($toRestart.Count) VM(s) (DC -> FS -> SQL -> CAS -> PRI -> others) ---")
 
         # Group VMs by domain so a multi-domain compaction still gets
         # domain-aware ordering. In the common (single-domain) case this
@@ -1130,20 +1194,20 @@ if ($env:_COMPACT_DISKS_WORKER) {
             foreach ($dom in $byDomain.Keys) {
                 $names = $byDomain[$dom]
                 if ($dom -eq '<unknown>') {
-                    [void]$UiSync.Log.Add("[RESTART-WARN] No domain info for: $($names -join ', '); falling back to Start-VM")
+                    Add-UiLog ("[RESTART-WARN] No domain info for: $($names -join ', '); falling back to Start-VM")
                     continue
                 }
                 try {
-                    [void]$UiSync.Log.Add("[RESTART] Domain '$dom' - sequencing $($names.Count) VM(s)")
+                    Add-UiLog ("[RESTART] Domain '$dom' - sequencing $($names.Count) VM(s)")
                     $critList = Get-CriticalVMs -domain $dom -vmNames $names
                     Invoke-SmartStartVMs -CritList $critList -quiet $true
                     $smartStartOk = $true
                     foreach ($n in $names) {
-                        [void]$UiSync.Log.Add("[RESTART] $n - start sequenced")
+                        Add-UiLog ("[RESTART] $n - start sequenced")
                     }
                 }
                 catch {
-                    [void]$UiSync.Log.Add("[RESTART-ERR] Domain '$dom' smart-start failed: $($_.Exception.Message)")
+                    Add-UiLog ("[RESTART-ERR] Domain '$dom' smart-start failed: $($_.Exception.Message)")
                 }
             }
         }
@@ -1159,10 +1223,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
             foreach ($r in $toRestart) {
                 try {
                     Start-VM -Name $r.VMName -ErrorAction Stop
-                    [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued (fallback)")
+                    Add-UiLog ("[RESTART] $($r.VMName) - start command issued (fallback)")
                 }
                 catch {
-                    [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
+                    Add-UiLog ("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
                 }
             }
         }
@@ -1170,10 +1234,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
             foreach ($r in $unhandled) {
                 try {
                     Start-VM -Name $r.VMName -ErrorAction Stop
-                    [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued (no domain)")
+                    Add-UiLog ("[RESTART] $($r.VMName) - start command issued (no domain)")
                 }
                 catch {
-                    [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
+                    Add-UiLog ("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
                 }
             }
         }
@@ -1187,22 +1251,22 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $prepFailed  = @($vmInfoList | Where-Object { $_.Status -eq 'Failed' })
     $forcedStops = @($vmInfoList | Where-Object { $_.Forced })
 
-    [void]$UiSync.Log.Add('')
-    [void]$UiSync.Log.Add('========================================')
-    [void]$UiSync.Log.Add('  Optimization Complete!')
-    [void]$UiSync.Log.Add('========================================')
+    Add-UiLog ('')
+    Add-UiLog ('========================================')
+    Add-UiLog ('  Optimization Complete!')
+    Add-UiLog ('========================================')
 
     if ($forcedStops.Count -gt 0) {
-        [void]$UiSync.Log.Add('--- Force turned-off (graceful shutdown timed out) ---')
+        Add-UiLog ('--- Force turned-off (graceful shutdown timed out) ---')
         foreach ($f in $forcedStops) {
-            [void]$UiSync.Log.Add("  $($f.VMName)")
+            Add-UiLog ("  $($f.VMName)")
         }
     }
 
     if ($prepFailed.Count -gt 0) {
-        [void]$UiSync.Log.Add('--- Prep failed (VM was not compacted) ---')
+        Add-UiLog ('--- Prep failed (VM was not compacted) ---')
         foreach ($f in $prepFailed) {
-            [void]$UiSync.Log.Add("  $($f.VMName): $($f.Error)")
+            Add-UiLog ("  $($f.VMName): $($f.Error)")
         }
     }
 
@@ -1215,26 +1279,30 @@ if ($env:_COMPACT_DISKS_WORKER) {
         foreach ($s in $successful) {
             $sv = $s.OriginalSize - $s.NewSize
             $sp = if ($s.OriginalSize -gt 0) { [math]::Round(($sv / $s.OriginalSize) * 100, 1) } else { 0 }
-            [void]$UiSync.Log.Add("  $($s.VMName) - $($s.FileName):  $(Format-Size $s.OriginalSize) -> $(Format-Size $s.NewSize)  (Saved $sp%)")
+            Add-UiLog ("  $($s.VMName) - $($s.FileName):  $(Format-Size $s.OriginalSize) -> $(Format-Size $s.NewSize)  (Saved $sp%)")
         }
-        [void]$UiSync.Log.Add("Total space saved: $(Format-Size $totalSaved) ($totalPct%)")
+        Add-UiLog ("Total space saved: $(Format-Size $totalSaved) ($totalPct%)")
     }
 
     if ($failed.Count -gt 0) {
-        [void]$UiSync.Log.Add('--- Failed ---')
+        Add-UiLog ('--- Failed ---')
         foreach ($f in $failed) {
-            [void]$UiSync.Log.Add("  $($f.VMName) - $($f.FileName): $($f.Error)")
+            Add-UiLog ("  $($f.VMName) - $($f.FileName): $($f.Error)")
         }
     }
 
     if ($cancelled.Count -gt 0) {
-        [void]$UiSync.Log.Add('--- Cancelled ---')
+        Add-UiLog ('--- Cancelled ---')
         foreach ($c in $cancelled) {
-            [void]$UiSync.Log.Add("  $($c.VMName) - $($c.FileName)")
+            Add-UiLog ("  $($c.VMName) - $($c.FileName)")
         }
     }
 
-    [void]$UiSync.Log.Add("Duration: $($duration.ToString('hh\:mm\:ss'))  |  Completed: $($successful.Count)  |  Failed: $($failed.Count)  |  Cancelled: $($cancelled.Count)  |  Forced: $($forcedStops.Count)  |  Prep-failed VMs: $($prepFailed.Count)")
+    Add-UiLog ("Duration: $($duration.ToString('hh\:mm\:ss'))  |  Completed: $($successful.Count)  |  Failed: $($failed.Count)  |  Cancelled: $($cancelled.Count)  |  Forced: $($forcedStops.Count)  |  Prep-failed VMs: $($prepFailed.Count)")
+
+    if ($script:CompactLogPath) {
+        Add-UiLog ("Log file: $script:CompactLogPath")
+    }
 
     $UiSync.OverallPercent = 100
     $UiSync.StatusText     = "All done - $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced"
