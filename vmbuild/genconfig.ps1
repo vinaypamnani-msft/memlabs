@@ -414,7 +414,6 @@ function Select-DomainMenu {
         [string] $DomainName
     )
 
-   
     while ($true) {
         if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
@@ -452,81 +451,16 @@ function Select-DomainMenu {
         Write-Verbose "2 Select-DomainMenu"
         while ($true) {
 
-       
             $vms = get-list -type vm -DomainName $domain -SmartUpdate
             if (-not $vms) { break }
-            $CustomOptions = [ordered]@{}
 
-            $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
-            $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
-
-
-            $checkPoint = $null
-            $DC = $vms | Where-Object { $_.role -eq "DC" }
-            if ($DC) {
-                $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
-            }
-       
-
-            $customOptions = [ordered]@{
-                "*F1"   = "Get-LabVMs -DomainName $domain"     
-                "*BZ"   = "";       
-                "*HELP" = "Update-HelpText"
-                "*B0"   = "";
-                "*B1"   = "VM Management%$($Global:Common.Colors.GenConfigHeader)";
-                "M"     = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
-                "HM"    = "Use this option to modify the domain, adding new roles, or new VMs"
-                "1"     = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H1"    = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
-                "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
-                "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)";
-                "H3"    = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
-                "*S"    = ""
-                "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-                "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                "HS"    = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
-            }
-              
-            if ($checkPoint) {
-                $customOptions += [ordered]@{ 
-                    "R"  = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                    "HR" = "Restore a domain checkpoint/snapshot taken by this script. All VMs in the snapshot will be restored"
-                    "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)" 
-                    "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
-                }
-            }
-            $enabled = ($vms | Where-Object { ($_.Memory / 1 ) -gt ($_.DynamicMinRam / 1) }).Count
-            $disabled = ($vms | Where-Object { ($_.Memory / 1 ) -le ($_.DynamicMinRam / 1) }).Count
-
-            $CustomOptions += [ordered]@{
-                "*E"  = ""
-                "*B4" = "Dynamic Memory%$($Global:Common.Colors.GenConfigHeader)"
-            }
-            if ($disabled -ge 1) {
-                $CustomOptions += [ordered]@{   
-                    "E"  = "Enable Dynamic Memory  [$disabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                    "HE" = "Select VMs to enable dynamic memory on"
-                }
-            }
-            if ($enabled -ge 1) {
-                $CustomOptions += [ordered]@{
-                    "F"  = "Disable Dynamic Memory [$enabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-                    "HF" = "Select VMs to disable dynamic memory on"
-                }
-            }
-            $customOptions += [ordered]@{
-                "*Z"  = ""
-                "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
-                "D"   = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" 
-                "HD"  = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs" 
-            }
+            $customOptions = Build-DomainSubMenuOptions -domain $domain -vms $vms
             $response = Get-Menu2 -MenuName "$domain Management Menu" -Prompt "Select domain options" -AdditionalOptions $customOptions -test:$false -return
 
             write-Verbose "1 response $response"
             if (-not $response -or $response -eq "ESCAPE") {
-                if ($global:GoBack) { 
-                    return $global:SavedConfig 
+                if ($global:GoBack) {
+                    return $global:SavedConfig
                 }
                 else {
                     return
@@ -537,26 +471,100 @@ function Select-DomainMenu {
                 "2" { Select-StopDomain -domain $domain }
                 "1" { Select-StartDomain -domain $domain }
                 "3" { select-OptimizeDomain -domain $domain }
-                "d" {
-                    Select-DeleteDomain -domain $domain                
-                }
+                "d" { Select-DeleteDomain -domain $domain }
                 "s" { select-SnapshotDomain -domain $domain }
                 "r" { select-RestoreSnapshotDomain -domain $domain }
                 "x" { select-DeleteSnapshotDomain -domain $domain }
                 "e" { select-ChangeDynamicMemory -domain $domain -Enable }
                 "f" { select-ChangeDynamicMemory -domain $domain -Disable }
                 "m" {
-                    if ($global:GoBack) { 
-                        return $global:SavedConfig 
+                    if ($global:GoBack) {
+                        return $global:SavedConfig
                     }
                     else {
-                        return Show-ExistingNetwork2 -domainName $domain 
+                        return Show-ExistingNetwork2 -domainName $domain
                     }
                 }
                 Default {}
             }
         }
     }
+}
+
+# Builds the per-domain submenu (VM start/stop, snapshots, dynamic memory,
+# danger zone) for Select-DomainMenu. Option visibility depends on current
+# VM state and whether any MemLabs snapshots exist.
+function Build-DomainSubMenuOptions {
+    param(
+        [Parameter(Mandatory = $true)] [string] $domain,
+        [Parameter(Mandatory = $true)] $vms
+    )
+
+    $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
+    $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
+
+    $checkPoint = $null
+    $DC = $vms | Where-Object { $_.role -eq "DC" }
+    if ($DC) {
+        $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
+    }
+
+    $customOptions = [ordered]@{
+        "*F1"   = "Get-LabVMs -DomainName $domain"
+        "*BZ"   = ""
+        "*HELP" = "Update-HelpText"
+        "*B0"   = ""
+        "*B1"   = "VM Management%$($Global:Common.Colors.GenConfigHeader)"
+        "M"     = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
+        "HM"    = "Use this option to modify the domain, adding new roles, or new VMs"
+        "1"     = "Start VMs in domain [$notRunning VMs are not started]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "H1"    = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
+        "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
+        "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "H3"    = "Select any VMs to optimize. This will run Optimize-VHD, and will stop the VM"
+        "*S"    = ""
+        "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
+        "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "HS"    = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
+    }
+
+    if ($checkPoint) {
+        $customOptions += [ordered]@{
+            "R"  = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "HR" = "Restore a domain checkpoint/snapshot taken by this script. All VMs in the snapshot will be restored"
+            "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
+        }
+    }
+
+    $enabled = ($vms | Where-Object { ($_.Memory / 1 ) -gt ($_.DynamicMinRam / 1) }).Count
+    $disabled = ($vms | Where-Object { ($_.Memory / 1 ) -le ($_.DynamicMinRam / 1) }).Count
+
+    $customOptions += [ordered]@{
+        "*E"  = ""
+        "*B4" = "Dynamic Memory%$($Global:Common.Colors.GenConfigHeader)"
+    }
+    if ($disabled -ge 1) {
+        $customOptions += [ordered]@{
+            "E"  = "Enable Dynamic Memory  [$disabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "HE" = "Select VMs to enable dynamic memory on"
+        }
+    }
+    if ($enabled -ge 1) {
+        $customOptions += [ordered]@{
+            "F"  = "Disable Dynamic Memory [$enabled VMs eligible]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "HF" = "Select VMs to disable dynamic memory on"
+        }
+    }
+    $customOptions += [ordered]@{
+        "*Z"  = ""
+        "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
+        "D"   = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)"
+        "HD"  = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs"
+    }
+
+    return $customOptions
 }
 
 
