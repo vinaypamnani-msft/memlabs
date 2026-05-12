@@ -470,9 +470,32 @@ if ($env:_COMPACT_DISKS_WORKER) {
         if ($Job -and $Job.ChildJobs.Count -gt 0) {
             $progressRecords = $Job.ChildJobs[0].Progress
             if ($progressRecords -and $progressRecords.Count -gt 0) {
+                # Two kinds of records flow in:
+                #   (a) our own Write-Progress entries with Activity
+                #       "Compact <path>" or "Prep <name>" - linear 0..100
+                #       across the whole job.
+                #   (b) Optimize-VHD's native progress records emitted by
+                #       the cmdlet itself - those go 0..100 for just the
+                #       final compact step. We squash them into the
+                #       30..95 band so the bar doesn't snap back to 0
+                #       when Optimize-VHD starts streaming.
                 $latest = $progressRecords[$progressRecords.Count - 1]
-                if ($latest.PercentComplete -ge 0) { $result.Percent = $latest.PercentComplete }
-                if ($latest.StatusDescription) { $result.Status = $latest.StatusDescription }
+                $act = "$($latest.Activity)"
+                $isOurs = $act.StartsWith('Compact ', [System.StringComparison]::OrdinalIgnoreCase) -or
+                          $act.StartsWith('Prep ',    [System.StringComparison]::OrdinalIgnoreCase)
+                if ($isOurs) {
+                    if ($latest.PercentComplete -ge 0) { $result.Percent = $latest.PercentComplete }
+                    if ($latest.StatusDescription)    { $result.Status  = $latest.StatusDescription }
+                } else {
+                    # Native cmdlet progress (Optimize-VHD). Scale into 30..95.
+                    $raw = if ($latest.PercentComplete -ge 0) { $latest.PercentComplete } else { 0 }
+                    $result.Percent = [int](30 + ($raw * 0.65))
+                    $result.Status  = if ($latest.StatusDescription) {
+                        "Optimize-VHD: $($latest.StatusDescription) ($raw%)"
+                    } else {
+                        "Optimize-VHD ($raw%)"
+                    }
+                }
             }
         }
         return $result
@@ -1023,7 +1046,12 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $DoZeroFill   = -not $SkipZeroFill
                     $job = Start-Job -ScriptBlock {
                         param($p, $m, $defrag, $offlineClean, $zeroFill)
-                        $ProgressPreference = 'SilentlyContinue'
+                        # Do NOT set $ProgressPreference = 'SilentlyContinue'
+                        # here - it suppresses Write-Progress records (both
+                        # ours and Optimize-VHD's native progress) so the
+                        # parent UI's Get-JobProgress always reads 0%. We
+                        # want those records to flow into
+                        # $Job.ChildJobs[0].Progress so the UI bar moves.
                         $vhdName = [System.IO.Path]::GetFileName($p)
                         function Write-PhaseLog($msg) { Write-Output "::LOG::$vhdName : $msg" }
 
