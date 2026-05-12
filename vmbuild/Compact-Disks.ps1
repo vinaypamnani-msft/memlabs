@@ -816,6 +816,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $job = Start-Job -ScriptBlock {
                         param($p, $m, $defrag, $offlineClean, $zeroFill)
                         $ProgressPreference = 'SilentlyContinue'
+                        $vhdName = [System.IO.Path]::GetFileName($p)
+                        function Write-PhaseLog($msg) { Write-Output "::LOG::$vhdName : $msg" }
 
                         # --- Mount-once for offline-clean + defrag + zero-fill ---
                         # Optimize-VHD only reclaims blocks that contain zeros.
@@ -829,6 +831,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $mounted = $false
                         if ($needMount) {
                             try {
+                                Write-PhaseLog 'Mounting VHDX'
                                 Write-Progress -Activity "Compact $p" -Status 'Mounting' -PercentComplete 2
                                 $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
                                 $mounted = $true
@@ -860,6 +863,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     Where-Object { $_.DriveLetter })
 
                                 Write-Progress -Activity "Compact $p" -Status "Mounted - $($volumes.Count) volume(s): $((($volumes | ForEach-Object { $_.DriveLetter + ':' }) -join ' '))" -PercentComplete 3
+                                Write-PhaseLog ("Mounted - {0} volume(s): {1}" -f $volumes.Count, ((($volumes | ForEach-Object { $_.DriveLetter + ':' }) -join ' ')))
                                 if ($volumes.Count -eq 0) {
                                     Write-Warning "No volumes with drive letters found on $p; skipping offline clean / defrag / zero-fill."
                                 }
@@ -871,6 +875,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         $vi++
                                         $letter = $vol.DriveLetter
                                         $root   = "${letter}:"
+                                        Write-PhaseLog "Offline clean ${letter}:"
                                         Write-Progress -Activity "Compact $p" -Status "Offline clean ${letter}:" -PercentComplete (3 + (4 * $vi / [Math]::Max($volumes.Count, 1)))
 
                                         $purge = @(
@@ -927,6 +932,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                                         # Offline DISM only makes sense on the system volume
                                         if (Test-Path "$root\Windows\System32") {
+                                            Write-PhaseLog "DISM /Cleanup-Image ${letter}:"
                                             try {
                                                 & dism.exe /Image:"$root\" /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null
                                             } catch {}
@@ -943,6 +949,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     foreach ($vol in $volumes) {
                                         $vi++
                                         $letter = $vol.DriveLetter
+                                        Write-PhaseLog "Defrag ${letter}: starting"
                                         Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (8 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
                                         & defrag "${letter}:" /h /x  | Out-Null
                                         & defrag "${letter}:" /h /k /l | Out-Null
@@ -951,6 +958,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null } catch {}
                                         try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null } catch {}
                                         try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null } catch {}
+                                        Write-PhaseLog "Defrag ${letter}: complete"
                                     }
                                 }
 
@@ -965,6 +973,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         $vi++
                                         $letter = $vol.DriveLetter
                                         $zfPath = "${letter}:\zero.tmp"
+                                        Write-PhaseLog "Zero-fill ${letter}:"
                                         Write-Progress -Activity "Compact $p" -Status "Zero-fill ${letter}:" -PercentComplete (20 + (5 * $vi / [Math]::Max($volumes.Count, 1)))
                                         try {
                                             $stream = [System.IO.File]::Create($zfPath)
@@ -1000,6 +1009,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             }
                             finally {
                                 if ($mounted) {
+                                    Write-PhaseLog 'Dismounting'
                                     Write-Progress -Activity "Compact $p" -Status 'Dismounting' -PercentComplete 27
                                     Dismount-VHD -Path $p -ErrorAction SilentlyContinue
                                     Start-Sleep -Seconds 3
@@ -1008,8 +1018,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
 
                         # --- Final Optimize-VHD on the parent (no longer mounted) ---
+                        Write-PhaseLog "Optimize-VHD ($m) starting"
                         Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
                         Optimize-VHD -Path $p -Mode $m
+                        Write-PhaseLog "Optimize-VHD complete"
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
                     } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill
                     $disk.Job    = $job
@@ -1026,6 +1038,16 @@ if ($env:_COMPACT_DISKS_WORKER) {
             # ----- Reap completed compact jobs -----
             $stillRunning = [System.Collections.Generic.List[PSCustomObject]]::new()
             foreach ($disk in $activeJobs) {
+                # Drain any phase log lines emitted via Write-Output "::LOG::..."
+                try {
+                    $out = Receive-Job -Job $disk.Job -Keep:$false -ErrorAction SilentlyContinue
+                    foreach ($line in @($out)) {
+                        if ($line -is [string] -and $line.StartsWith('::LOG::')) {
+                            [void]$UiSync.Log.Add("[PHASE] $($disk.VMName) - $($line.Substring(7))")
+                        }
+                    }
+                } catch {}
+
                 if ($disk.Job.State -eq 'Completed') {
                     $disk.Status = 'Completed'
                     $NewFileSize = Get-VhdFileSize -Path $disk.Path
