@@ -151,6 +151,53 @@ function Get-PendingVMs {
     return $actualPending
 }
 
+# Cache for Quick Stats / Check-OverallHealth and related per-menu-redraw queries.
+# These values are queried on every menu redraw (every keystroke), so caching them
+# for a short TTL eliminates the visible lag on the Main Menu.
+$Global:HealthStatsCache = $null
+$Global:HealthStatsCacheTTLSeconds = 20
+
+function Clear-HealthStatsCache {
+    $Global:HealthStatsCache = $null
+}
+
+function Get-HealthStats {
+    [CmdletBinding()]
+    param(
+        [switch] $Force
+    )
+
+    if (-not $Force -and $Global:HealthStatsCache) {
+        $age = (Get-Date) - $Global:HealthStatsCache.Timestamp
+        if ($age.TotalSeconds -lt $Global:HealthStatsCacheTTLSeconds) {
+            return $Global:HealthStatsCache
+        }
+    }
+
+    $disk = Get-Volume -DriveLetter E -ErrorAction SilentlyContinue
+    $os = Get-Ciminstance Win32_OperatingSystem |
+        Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } },
+                      @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+    $uptimeHours = $null
+    try { $uptimeHours = [math]::Round((Get-Uptime).TotalHours, 1) } catch {}
+
+    $vmList = Get-List -Type VM
+    $pendingCount = (Get-PendingVMs | Measure-Object).Count
+
+    $Global:HealthStatsCache = [PSCustomObject]@{
+        Timestamp    = Get-Date
+        DiskTotalGB  = if ($disk) { [math]::Round($disk.Size / 1GB, 0) } else { 0 }
+        DiskFreeGB   = if ($disk) { [math]::Round($disk.SizeRemaining / 1GB, 0) } else { 0 }
+        FreeMemGB    = $os.FreeGB
+        TotalMemGB   = $os.TotalGB
+        UptimeHours  = $uptimeHours
+        VmsRunning   = ($vmList | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
+        VmsTotal     = ($vmList | Measure-Object).Count
+        PendingCount = $pendingCount
+    }
+
+    return $Global:HealthStatsCache
+}
 
 function Check-OverallHealth {
 
@@ -166,13 +213,11 @@ function Check-OverallHealth {
     $Global:ProgressPreference = 'Continue'
 
     $Indent = 3
-    $disk = Get-Volume -DriveLetter E
-    $diskTotalGB = $([math]::Round($($disk.Size / 1GB), 0))
-    $diskFreeGB = $([math]::Round($($disk.SizeRemaining / 1GB), 0))
-
-    $vmList = Get-List -Type VM
-    $vmsRunning = ($vmList | Where-Object { $_.State -eq "Running" } | Measure-Object).Count
-    $vmsTotal = ($vmList | Measure-Object).Count
+    $stats = Get-HealthStats
+    $diskTotalGB = $stats.DiskTotalGB
+    $diskFreeGB = $stats.DiskFreeGB
+    $vmsRunning = $stats.VmsRunning
+    $vmsTotal = $stats.VmsTotal
     
     # Running VMs
     if ($vmsTotal -eq 0) {
@@ -208,7 +253,7 @@ function Check-OverallHealth {
 
     #Available Memory
 
-    $os = Get-Ciminstance Win32_OperatingSystem | Select-Object @{Name = "FreeGB"; Expression = { [math]::Round($_.FreePhysicalMemory / 1mb, 0) } }, @{Name = "TotalGB"; Expression = { [int]($_.TotalVisibleMemorySize / 1mb) } }
+    $os = [PSCustomObject]@{ FreeGB = $stats.FreeMemGB; TotalGB = $stats.TotalMemGB }
     $availableMemory = $os.FreeGB
 
     if ($availableMemory -ge 40) {
@@ -228,9 +273,9 @@ function Check-OverallHealth {
     $secondTuesday = $firstDayOfMonth.AddDays((([int][DayOfWeek]::Tuesday - [int]$firstDayOfMonth.DayOfWeek + 7) % 7) + 7)
 
     if ($today.Date -eq $secondTuesday.Date) {
-        $hoursSinceReboot = [math]::Round((Get-Uptime).TotalHours, 1)
+        $hoursSinceReboot = $stats.UptimeHours
 
-        if ($hoursSinceReboot -le 12) {
+        if ($null -ne $hoursSinceReboot -and $hoursSinceReboot -le 12) {
             Write-GreenCheck -indent $Indent "It's Patch Tuesday, machine was rebooted $hoursSinceReboot hours ago."
         }
         else {
@@ -245,6 +290,9 @@ function Check-OverallHealth {
 function Select-ConfigMenu {
     $Global:EnterKey = $true
     clear-host
+    # Pre-populate Quick Stats cache so the first menu render is instant.
+    # Subsequent redraws (every keystroke) reuse this cache for ~20s.
+    try { Get-HealthStats -Force | Out-Null } catch {}
     while ($true) {
         
         $customOptions = [ordered]@{}
@@ -320,7 +368,7 @@ function Select-ConfigMenu {
             $customOptions += [ordered]@{"#" = "[Experimental] Switch to develop branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
             $customOptions += [ordered]@{ "H#" = "Like the bleeding edge? Try testing out the new features in the development branch" }
         }
-        $pendingCount = (Get-PendingVMs | Measure-Object).Count
+        $pendingCount = (Get-HealthStats).PendingCount
 
         if ($pendingCount -gt 0 ) {
             $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
@@ -399,7 +447,7 @@ function Select-ConfigMenu {
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
                 }               
             }
-            "f" { Select-DeletePending }
+            "f" { Select-DeletePending; Clear-HealthStatsCache }
             "d" { 
                 $SelectedConfig = Select-DomainMenu
                 if (-not $SelectedConfig) {
@@ -438,6 +486,7 @@ function Select-ConfigMenu {
                             if (-not [String]::IsNullOrWhiteSpace($response)) {
                                 if ($response2.ToLowerInvariant() -eq "y" -or $response2.ToLowerInvariant() -eq "yes") {
                                     Remove-Domain -DomainName $domain
+                                    Clear-HealthStatsCache
                                     continue
                                 }
                             }
