@@ -132,7 +132,9 @@ $global:VM_Create = {
         $createVM = $true
         if ($currentItem.hidden -eq $true) { $createVM = $false }
 
-        # Change log location
+        # Change log location. Flush any buffered lines targeting the previous
+        # path so they aren't lost or written to the new file out of order.
+        try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
@@ -897,7 +899,8 @@ $global:VM_Config = {
             $skipStartDsc = $true
         }
 
-        # Change log location
+        # Change log location. Flush buffered lines to the previous path first.
+        try { Flush-LogBuffer -All } catch { }
         $domainNameForLogging = $deployConfig.vmOptions.domainName
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 

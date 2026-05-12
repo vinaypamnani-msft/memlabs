@@ -299,6 +299,127 @@ Function Write-Progress2Impl {
 
     }
 }
+
+# ---------------------------------------------------------------------------
+# Buffered logging + rotation
+# ---------------------------------------------------------------------------
+# Write-Log historically opened/closed a file handle on every call (Out-File
+# -Append). With the genconfig menu redraw loop firing dozens of Write-Log
+# calls per refresh, that's the dominant cost. We now batch lines per-process
+# into an in-memory StringBuilder and flush them in larger chunks via
+# [System.IO.File]::AppendAllText. Rotation keeps a bounded history so the
+# file doesn't grow without bound between sessions.
+#
+# Tunables (chosen to keep menu work in-memory while still surfacing useful
+# data quickly when something goes wrong):
+$Script:LogBufferMaxBytes      = 16KB    # flush after this much pending text
+$Script:LogBufferMaxAgeSeconds = 2       # flush at least this often
+$Script:LogRotateMaxBytes      = 2MB     # rotate when log exceeds this size
+$Script:LogRotateKeep          = 3       # number of historical .1/.2/.3 files
+$Script:LogRotateCheckEverySec = 5       # don't stat the file more than this
+$Script:LogRotateExitRegistered = $false
+# Buffer state lives in $global: so the engine-exit Action scriptblock (which
+# runs in its own scope) can still see and flush it.
+if (-not $global:LogBuffers) { $global:LogBuffers = @{} }
+
+function Get-LogBufferEntry {
+    param([string]$Path)
+    if (-not $global:LogBuffers.ContainsKey($Path)) {
+        $global:LogBuffers[$Path] = [PSCustomObject]@{
+            Builder      = [System.Text.StringBuilder]::new()
+            LastFlushUtc = [DateTime]::UtcNow
+            LastRotateCheckUtc = [DateTime]::MinValue
+        }
+    }
+    return $global:LogBuffers[$Path]
+}
+
+function Invoke-LogRotateIfNeeded {
+    param([string]$Path)
+    try {
+        $entry = $global:LogBuffers[$Path]
+        if ($entry) {
+            $age = ([DateTime]::UtcNow - $entry.LastRotateCheckUtc).TotalSeconds
+            if ($age -lt $Script:LogRotateCheckEverySec) { return }
+            $entry.LastRotateCheckUtc = [DateTime]::UtcNow
+        }
+        $fi = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+        if (-not $fi -or $fi.Length -lt $Script:LogRotateMaxBytes) { return }
+        $keep = $Script:LogRotateKeep
+        $oldest = "$Path.$keep"
+        if (Test-Path -LiteralPath $oldest) {
+            Remove-Item -LiteralPath $oldest -Force -ErrorAction SilentlyContinue
+        }
+        for ($i = $keep - 1; $i -ge 1; $i--) {
+            $src = "$Path.$i"
+            $dst = "$Path.$($i + 1)"
+            if (Test-Path -LiteralPath $src) {
+                Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Move-Item -LiteralPath $Path -Destination "$Path.1" -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        # Concurrent writers from background jobs may race here; ignore.
+    }
+}
+
+function Flush-LogBuffer {
+    [CmdletBinding(DefaultParameterSetName = 'Path')]
+    param(
+        [Parameter(ParameterSetName = 'Path')]
+        [string]$Path,
+        [Parameter(ParameterSetName = 'All')]
+        [switch]$All
+    )
+    if ($All.IsPresent) {
+        foreach ($p in @($global:LogBuffers.Keys)) {
+            Flush-LogBuffer -Path $p
+        }
+        return
+    }
+    if ([string]::IsNullOrEmpty($Path)) { return }
+    if (-not $global:LogBuffers.ContainsKey($Path)) { return }
+    $entry = $global:LogBuffers[$Path]
+    if ($entry.Builder.Length -eq 0) { return }
+    $text = $entry.Builder.ToString()
+    $entry.Builder.Length = 0
+    $entry.LastFlushUtc = [DateTime]::UtcNow
+    try {
+        Invoke-LogRotateIfNeeded -Path $Path
+        [System.IO.File]::AppendAllText($Path, $text, [System.Text.Encoding]::UTF8)
+    }
+    catch {
+        # Best-effort retry once with PowerShell's Out-File so transient
+        # sharing-violation paths still get a chance to land.
+        try { $text | Out-File -LiteralPath $Path -Append -Encoding utf8 -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+function Register-LogBufferExitFlush {
+    if ($Script:LogRotateExitRegistered) { return }
+    try {
+        Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
+            try {
+                foreach ($p in @($global:LogBuffers.Keys)) {
+                    $entry = $global:LogBuffers[$p]
+                    if ($entry -and $entry.Builder.Length -gt 0) {
+                        try {
+                            [System.IO.File]::AppendAllText($p, $entry.Builder.ToString(), [System.Text.Encoding]::UTF8)
+                            $entry.Builder.Length = 0
+                        } catch { }
+                    }
+                }
+            } catch { }
+        } | Out-Null
+        $Script:LogRotateExitRegistered = $true
+    }
+    catch {
+        # Non-fatal; we still flush at size/age thresholds and on important
+        # messages, so worst case is a few buffered lines lost on abrupt exit.
+    }
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -518,12 +639,34 @@ function Write-Log {
             $time = Get-Date -Format 'HH:mm:ss.fff'
 
             $logText = "<![LOG[$Text]LOG]!><time=""$time"" date=""$date"" component=""$caller"" context=""$context"" type=""$logLevel"" thread=""$tid"" file=""$file"">"
-            $logText | Out-File $Common.LogPath -Append -Encoding utf8
+
+            # Buffer instead of opening the file per-call. The buffer is flushed
+            # on size/age thresholds, on important messages (Warning/Failure/
+            # Activity/SubActivity/Highlight) so users see them promptly even
+            # before a crash, and on engine exit.
+            $logPath = $Common.LogPath
+            if ($logPath) {
+                $entry = Get-LogBufferEntry -Path $logPath
+                [void]$entry.Builder.AppendLine($logText)
+
+                $forceFlush = $Warning.IsPresent -or $Failure.IsPresent `
+                    -or $Activity.IsPresent -or $SubActivity.IsPresent `
+                    -or $Highlight.IsPresent
+                $sizeFlush = $entry.Builder.Length -ge $Script:LogBufferMaxBytes
+                $ageFlush = ([DateTime]::UtcNow - $entry.LastFlushUtc).TotalSeconds `
+                    -ge $Script:LogBufferMaxAgeSeconds
+
+                if ($forceFlush -or $sizeFlush -or $ageFlush) {
+                    Flush-LogBuffer -Path $logPath
+                }
+            }
         }
         catch {
             try {
-                # Retry once and ignore if failed
-                $logText | Out-File $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                # Last-resort direct append; ignore failure.
+                if ($logText -and $Common -and $Common.LogPath) {
+                    $logText | Out-File -LiteralPath $Common.LogPath -Append -ErrorAction SilentlyContinue -Encoding utf8
+                }
             }
             catch {
                 # ignore
@@ -4902,6 +5045,11 @@ if (-not $Common.Initialized) {
             UseBearerAuth   = $false
         }
         $global:DSC_Copied = @()
+
+        # Register a one-time engine-exit handler so any buffered log lines
+        # are flushed before the process terminates. Safe no-op when called
+        # multiple times.
+        Register-LogBufferExitFlush
 
         if (-not $InJob) {
             Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly

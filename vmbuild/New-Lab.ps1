@@ -416,6 +416,7 @@ try {
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
     Write-Log "Starting deployment. Review VMBuild.$domainName.log"
+    try { Flush-LogBuffer -All } catch { }
     $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
 
     #Rename the old log.
