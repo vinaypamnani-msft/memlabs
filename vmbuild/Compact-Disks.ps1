@@ -39,7 +39,31 @@ param(
     # dismount) before Optimize-VHD. By default we run defrag because it
     # massively improves the space reclaimed by Optimize-VHD - the guest has
     # to release the blocks first.
-    [switch]$SkipDefrag
+    [switch]$SkipDefrag,
+
+    # Skip the offline filesystem cleanup pass (delete WSUS cache, temp,
+    # dumps, prefetch, recycle bin) + offline DISM /Cleanup-Image while the
+    # VHDX is mounted. Default is to run it.
+    [switch]$SkipOfflineClean,
+
+    # Skip the zero-fill of free space before Optimize-VHD. Zero-filling
+    # massively improves space reclaim because Optimize-VHD only reclaims
+    # blocks that contain zeros. Default is to run it.
+    [switch]$SkipZeroFill,
+
+    # Skip the in-guest (online) cleanup that runs against still-running VMs
+    # via PSDirect BEFORE shutting them down. Default is to run it. Requires
+    # -AdminCredentialFile.
+    [switch]$SkipOnlineClean,
+
+    # Path to a clixml file containing a serialized PSCredential (typically
+    # $Common.LocalAdmin) used to open PSDirect sessions into running VMs
+    # for the online cleanup phase.
+    [string]$AdminCredentialFile,
+
+    # FQDN of the domain these VMs are joined to. Used as the first attempt
+    # for PSDirect username; falls back to local <VMNAME>\<admin>.
+    [string]$DomainFqdn
 )
 
 function Format-Size {
@@ -78,6 +102,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $AttachedCount = $importedData.AttachedCount
     $DomainLabel   = $importedData.DomainLabel
     $ShutdownTimeoutSec = if ($importedData.ShutdownTimeoutSec) { [int]$importedData.ShutdownTimeoutSec } else { 300 }
+    $WorkerDomainFqdn = $importedData.DomainFqdn
+    $WorkerAdminCred  = $importedData.AdminCred
 
     # Per-VM prep records (stop + checkpoint merge) - one entry per VM.
     # When prep completes its disks are pushed onto $diskQueue.
@@ -444,9 +470,118 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 [void]$UiSync.Log.Add("[PREP-START] $($vm.VMName)")
                 try {
                     $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
-                        param($n, $timeoutSec)
+                        param($n, $timeoutSec, $adminCred, $domainFqdn, $doOnlineClean)
                         $startedAt = Get-Date
                         $forced = $false
+                        $onlineCleanRan = $false
+
+                        # --- 0) Online cleanup (only if VM is currently Running) ---
+                        # We open a PSDirect session and run an in-guest cleanup
+                        # script. This frees up gigabytes from WSUS cache,
+                        # SoftwareDistribution, temp, dumps, prefetch, recycle
+                        # bin, and triggers offline component-store cleanup
+                        # (DISM /Cleanup-Image /StartComponentCleanup /ResetBase)
+                        # so the post-shutdown defrag + Optimize-VHD can
+                        # actually reclaim the space.
+                        $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
+                        if ($doOnlineClean -and $adminCred -and $cur -and $cur.State -eq 'Running') {
+                            Write-Progress -Activity "Prep $n" -Status 'Online cleanup (in-guest)' -PercentComplete 2
+                            $sess = $null
+                            try {
+                                # Try domain account first, then local fallback
+                                $userBase = $adminCred.GetNetworkCredential().UserName
+                                $tryUsers = @()
+                                if ($domainFqdn) {
+                                    $netBios = ($domainFqdn -split '\.')[0]
+                                    $tryUsers += "$netBios\$userBase"
+                                }
+                                $tryUsers += "$n\$userBase"
+                                foreach ($u in $tryUsers) {
+                                    $tryCred = New-Object System.Management.Automation.PSCredential($u, $adminCred.Password)
+                                    try {
+                                        $sess = New-PSSession -VMName $n -Credential $tryCred -ErrorAction Stop
+                                        break
+                                    }
+                                    catch {
+                                        $sess = $null
+                                    }
+                                }
+                                if ($sess) {
+                                    Invoke-Command -Session $sess -ScriptBlock {
+                                        $ProgressPreference = 'SilentlyContinue'
+                                        $ErrorActionPreference = 'SilentlyContinue'
+
+                                        # Stop services that lock the caches we want to nuke
+                                        $svcs = @('wuauserv','bits','cryptsvc','WSUSService','UsoSvc','TrustedInstaller')
+                                        foreach ($s in $svcs) {
+                                            try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue } catch {}
+                                        }
+
+                                        $purge = @(
+                                            'C:\Windows\SoftwareDistribution\Download\*',
+                                            'C:\Windows\Temp\*',
+                                            'C:\Windows\Logs\CBS\*',
+                                            'C:\Windows\Logs\DISM\*',
+                                            'C:\Windows\Prefetch\*',
+                                            'C:\Windows\Minidump\*',
+                                            'C:\Windows\Memory.dmp',
+                                            'C:\inetpub\logs\LogFiles\*',
+                                            'C:\ProgramData\Microsoft\Windows\WER\*',
+                                            'C:\ProgramData\Microsoft\Windows\WindowsUpdate\Log\*',
+                                            'C:\ProgramData\USOShared\Logs\*',
+                                            'C:\Users\*\AppData\Local\Temp\*',
+                                            'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*',
+                                            'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*',
+                                            'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*'
+                                        )
+                                        foreach ($pat in $purge) {
+                                            try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                                        }
+
+                                        # Empty recycle bins on every drive
+                                        try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+
+                                        # Offline-style component store cleanup against the running system.
+                                        # /ResetBase makes all currently-installed updates permanent
+                                        # (cannot uninstall) and lets DISM purge superseded payloads.
+                                        try {
+                                            & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null
+                                        } catch {}
+                                        try {
+                                            & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null
+                                        } catch {}
+
+                                        # WSUS server content cleanup, if WSUS is installed
+                                        try {
+                                            if (Get-Module -ListAvailable -Name UpdateServices) {
+                                                Import-Module UpdateServices -ErrorAction SilentlyContinue
+                                                $wsus = Get-WsusServer -ErrorAction SilentlyContinue
+                                                if ($wsus) {
+                                                    Invoke-WsusServerCleanup -CleanupObsoleteComputers `
+                                                        -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
+                                                        -CompressUpdates -DeclineSupersededUpdates `
+                                                        -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
+                                                }
+                                            }
+                                        } catch {}
+
+                                        # Restart the services we stopped (best-effort)
+                                        foreach ($s in @('wuauserv','bits','cryptsvc')) {
+                                            try { Start-Service -Name $s -ErrorAction SilentlyContinue } catch {}
+                                        }
+                                    } -ErrorAction SilentlyContinue
+                                    $onlineCleanRan = $true
+                                }
+                            }
+                            catch {
+                                # Online cleanup is best-effort; never block compaction
+                            }
+                            finally {
+                                if ($sess) {
+                                    try { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue } catch {}
+                                }
+                            }
+                        }
 
                         # --- 1) Graceful shutdown (if running) ---
                         $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
@@ -528,8 +663,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             }
                         }
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
-                        return @{ Ok = $true; Forced = $forced; Disks = $disks.ToArray() }
-                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec
+                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; Disks = $disks.ToArray() }
+                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerAdminCred, $WorkerDomainFqdn, (-not $SkipOnlineClean)
                     $vm.Job    = $job
                     $vm.Status = 'Running'
                     [void]$activePrepJobs.Add($vm)
@@ -550,6 +685,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     if ($result -and $result.Ok) {
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
+                        if ($result.OnlineCleaned) {
+                            [void]$UiSync.Log.Add("[PREP-INFO] $($vm.VMName): online cleanup ran")
+                        }
                         if ($vm.Forced) {
                             [void]$UiSync.Log.Add("[PREP-WARN] $($vm.VMName): force turned-off (graceful timeout)")
                         }
@@ -597,21 +735,26 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 $disk = $diskQueue.Dequeue()
                 [void]$UiSync.Log.Add("[START] $($disk.VMName) - $($disk.FileName)")
                 try {
-                    $VhdPath  = $disk.Path
-                    $OptMode  = $Mode
-                    $DoDefrag = -not $SkipDefrag
+                    $VhdPath      = $disk.Path
+                    $OptMode      = $Mode
+                    $DoDefrag     = -not $SkipDefrag
+                    $DoOfflineClean = -not $SkipOfflineClean
+                    $DoZeroFill   = -not $SkipZeroFill
                     $job = Start-Job -ScriptBlock {
-                        param($p, $m, $defrag)
+                        param($p, $m, $defrag, $offlineClean, $zeroFill)
                         $ProgressPreference = 'SilentlyContinue'
 
-                        # --- Optional in-guest defrag pass ---
-                        # Mount the VHDX read-write, defrag every volume that
-                        # has a drive letter, then Optimize-Volume (Defrag /
-                        # SlabConsolidate / ReTrim) so the guest releases
-                        # unused blocks. Without this Optimize-VHD only
-                        # reclaims blocks the guest has already zeroed.
-                        if ($defrag) {
-                            $mounted = $false
+                        # --- Mount-once for offline-clean + defrag + zero-fill ---
+                        # Optimize-VHD only reclaims blocks that contain zeros.
+                        # So while the VHDX is mounted we:
+                        #   a) delete known junk dirs (offline)
+                        #   b) run DISM /Image:<letter>:\ /Cleanup-Image
+                        #   c) defrag + Optimize-Volume (Defrag/SlabConsolidate/ReTrim)
+                        #   d) zero-fill remaining free space
+                        # then dismount and Optimize-VHD against the parent.
+                        $needMount = $offlineClean -or $defrag -or $zeroFill
+                        $mounted = $false
+                        if ($needMount) {
                             try {
                                 Write-Progress -Activity "Compact $p" -Status 'Mounting' -PercentComplete 2
                                 $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
@@ -620,26 +763,114 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                                 $volumes = $mountResult | Get-Disk | Get-Partition | Get-Volume |
                                     Where-Object { $_.DriveLetter }
-                                $vi = 0
-                                foreach ($vol in $volumes) {
-                                    $vi++
-                                    $letter = $vol.DriveLetter
-                                    Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (5 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
-                                    & defrag "${letter}:" /h /x  | Out-Null
-                                    & defrag "${letter}:" /h /k /l | Out-Null
-                                    & defrag "${letter}:" /h /x  | Out-Null
-                                    & defrag "${letter}:" /h /k  | Out-Null
-                                    try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null } catch {}
-                                    try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null } catch {}
-                                    try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null } catch {}
+
+                                # --- (a) + (b) Offline cleanup pass ---
+                                if ($offlineClean) {
+                                    $vi = 0
+                                    foreach ($vol in $volumes) {
+                                        $vi++
+                                        $letter = $vol.DriveLetter
+                                        $root   = "${letter}:"
+                                        Write-Progress -Activity "Compact $p" -Status "Offline clean ${letter}:" -PercentComplete (3 + (4 * $vi / [Math]::Max($volumes.Count, 1)))
+
+                                        $purge = @(
+                                            "$root\Windows\SoftwareDistribution\Download\*",
+                                            "$root\Windows\Temp\*",
+                                            "$root\Windows\Logs\CBS\*",
+                                            "$root\Windows\Logs\DISM\*",
+                                            "$root\Windows\Prefetch\*",
+                                            "$root\Windows\Minidump\*",
+                                            "$root\Windows\Memory.dmp",
+                                            "$root\inetpub\logs\LogFiles\*",
+                                            "$root\ProgramData\Microsoft\Windows\WER\*",
+                                            "$root\ProgramData\Microsoft\Windows\WindowsUpdate\Log\*",
+                                            "$root\ProgramData\USOShared\Logs\*",
+                                            "$root\Users\*\AppData\Local\Temp\*",
+                                            "$root\Users\*\AppData\Local\Microsoft\Windows\WER\*",
+                                            "$root\Users\*\AppData\Local\Microsoft\Windows\INetCache\*",
+                                            "$root\Users\*\AppData\Local\Microsoft\Windows\WebCache\*",
+                                            "$root\`$Recycle.Bin\*"
+                                        )
+                                        foreach ($pat in $purge) {
+                                            try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                                        }
+
+                                        # Offline DISM only makes sense on the system volume
+                                        if (Test-Path "$root\Windows\System32") {
+                                            try {
+                                                & dism.exe /Image:"$root\" /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null
+                                            } catch {}
+                                            try {
+                                                & dism.exe /Image:"$root\" /Cleanup-Image /SPSuperseded /Quiet | Out-Null
+                                            } catch {}
+                                        }
+                                    }
+                                }
+
+                                # --- (c) Defrag pass ---
+                                if ($defrag) {
+                                    $vi = 0
+                                    foreach ($vol in $volumes) {
+                                        $vi++
+                                        $letter = $vol.DriveLetter
+                                        Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (8 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
+                                        & defrag "${letter}:" /h /x  | Out-Null
+                                        & defrag "${letter}:" /h /k /l | Out-Null
+                                        & defrag "${letter}:" /h /x  | Out-Null
+                                        & defrag "${letter}:" /h /k  | Out-Null
+                                        try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null } catch {}
+                                        try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null } catch {}
+                                        try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null } catch {}
+                                    }
+                                }
+
+                                # --- (d) Zero-fill free space ---
+                                # Optimize-VHD only reclaims zeroed blocks. Without
+                                # this, deletes above won't actually shrink the VHDX.
+                                # Native fallback: write a temp file of zeros until
+                                # the disk fills, then delete it.
+                                if ($zeroFill) {
+                                    $vi = 0
+                                    foreach ($vol in $volumes) {
+                                        $vi++
+                                        $letter = $vol.DriveLetter
+                                        $zfPath = "${letter}:\zero.tmp"
+                                        Write-Progress -Activity "Compact $p" -Status "Zero-fill ${letter}:" -PercentComplete (20 + (5 * $vi / [Math]::Max($volumes.Count, 1)))
+                                        try {
+                                            $stream = [System.IO.File]::Create($zfPath)
+                                            try {
+                                                $buf = New-Object byte[] (8MB)
+                                                while ($true) {
+                                                    try {
+                                                        $stream.Write($buf, 0, $buf.Length)
+                                                    }
+                                                    catch [System.IO.IOException] {
+                                                        # disk full - expected
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                            finally {
+                                                $stream.Dispose()
+                                            }
+                                        }
+                                        catch {
+                                            # best-effort; ignore
+                                        }
+                                        finally {
+                                            if (Test-Path $zfPath) {
+                                                Remove-Item -Path $zfPath -Force -ErrorAction SilentlyContinue
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             catch {
-                                Write-Warning "Defrag step failed for ${p}: $($_.Exception.Message)"
+                                Write-Warning "Mount/clean step failed for ${p}: $($_.Exception.Message)"
                             }
                             finally {
                                 if ($mounted) {
-                                    Write-Progress -Activity "Compact $p" -Status 'Dismounting' -PercentComplete 25
+                                    Write-Progress -Activity "Compact $p" -Status 'Dismounting' -PercentComplete 27
                                     Dismount-VHD -Path $p -ErrorAction SilentlyContinue
                                     Start-Sleep -Seconds 3
                                 }
@@ -650,7 +881,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
                         Optimize-VHD -Path $p -Mode $m
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
-                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag
+                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill
                     $disk.Job    = $job
                     $disk.Status = 'Running'
                     [void]$activeJobs.Add($disk)
@@ -829,17 +1060,37 @@ if ($VMNames -and $VMNames.Count -gt 0) {
     $domainLabel = "$($VMNames.Count) VM(s)"
 }
 
+# Pre-read the admin credential here (in the foreground process, same user
+# context as caller) so we can re-serialize it into the worker data file.
+$adminCred = $null
+if ($AdminCredentialFile -and (Test-Path $AdminCredentialFile)) {
+    try {
+        $adminCred = Import-Clixml -Path $AdminCredentialFile
+    }
+    catch {
+        Write-Warning "Failed to import admin credential from '$AdminCredentialFile': $($_.Exception.Message)"
+    }
+    # Clean up the source file - the worker only needs the in-memory copy
+    # which we re-serialize below.
+    Remove-Item -Path $AdminCredentialFile -Force -ErrorAction SilentlyContinue
+}
+
 @{
-    VMs = @($vms | ForEach-Object { @{ VMName = $_.Name } })
+    VMs                 = @($vms | ForEach-Object { @{ VMName = $_.Name } })
     AttachedCount       = 0   # legacy field, kept for backward compat in the worker
     DomainLabel         = $domainLabel
+    DomainFqdn          = $DomainFqdn
+    AdminCred           = $adminCred
     ShutdownTimeoutSec  = 300
 } | Export-Clixml -Path $dataFile
 
 $psExe      = (Get-Process -Id $PID).Path
 $scriptPath = $MyInvocation.MyCommand.Path
 $argString  = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode {1} -MaxConcurrentJobs {2}' -f $scriptPath, $Mode, $MaxConcurrentJobs
-if ($SkipDefrag) { $argString += ' -SkipDefrag' }
+if ($SkipDefrag)       { $argString += ' -SkipDefrag' }
+if ($SkipOfflineClean) { $argString += ' -SkipOfflineClean' }
+if ($SkipZeroFill)     { $argString += ' -SkipZeroFill' }
+if ($SkipOnlineClean)  { $argString += ' -SkipOnlineClean' }
 
 # Signal background mode via environment variables (invisible to the user)
 $env:_COMPACT_DISKS_WORKER   = '1'

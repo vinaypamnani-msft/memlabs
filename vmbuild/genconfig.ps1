@@ -517,7 +517,7 @@ function Build-DomainSubMenuOptions {
         "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
         "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-        "H3"    = "Select VMs to optimize. Selected VMs are stopped, then Optimize-VHD runs in parallel in a WPF progress window. VMs are not auto-restarted."
+        "H3"    = "Select VMs to optimize. Running VMs are cleaned in-guest, then all selected VMs are stopped, checkpoints merged, VHDX free-space zeroed, and Optimize-VHD runs in parallel in a WPF window. VMs are not auto-restarted."
         "*S"    = ""
         "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
         "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
