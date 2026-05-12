@@ -3,6 +3,38 @@ param ()
 
 $ErrorActionPreference = 'Continue'
 
+$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$logsPath = Join-Path $scriptPath 'logs'
+$logFile = Join-Path $logsPath "Maintenance_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+
+if (-not (Test-Path $logsPath)) {
+    New-Item -ItemType Directory -Path $logsPath -Force | Out-Null
+}
+
+# Clean up old maintenance logs (keep only the 3 most recent)
+$maintenanceLogs = Get-ChildItem -Path $logsPath -Filter 'Maintenance_*.log' -ErrorAction SilentlyContinue | Sort-Object -Property CreationTime -Descending
+if ($maintenanceLogs.Count -gt 3) {
+    $logsToDelete = $maintenanceLogs | Select-Object -Skip 3
+    foreach ($logToDelete in $logsToDelete) {
+        Remove-Item -Path $logToDelete.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-LogMessage {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [ValidateSet('INFO', 'WARNING', 'ERROR')]
+        [string]$Level = 'INFO'
+    )
+
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logEntry = "[$timestamp] [$Level] $Message"
+
+    Write-Host $logEntry
+    Add-Content -Path $logFile -Value $logEntry -ErrorAction SilentlyContinue
+}
+
 function Test-ChocoSuccessCode {
     param (
         [int]$Code
@@ -12,76 +44,120 @@ function Test-ChocoSuccessCode {
 }
 
 function Invoke-System32CurlMaintenance {
+    Write-LogMessage 'Starting System32 curl maintenance...'
+
     $system32Curl = Join-Path $env:WINDIR 'System32\curl.exe'
     $chocoCurlShim = 'C:\ProgramData\chocolatey\bin\curl.exe'
 
     if (-not (Test-Path $system32Curl)) {
+        Write-LogMessage 'System32 curl not found. Skipping curl maintenance.'
         return
     }
 
-    Write-Host "System32 curl detected at '$system32Curl'."
+    Write-LogMessage "System32 curl detected at '$system32Curl'."
 
     if (-not (Test-Path $chocoCurlShim)) {
-        Write-Host "Chocolatey curl shim not found at '$chocoCurlShim'. Skipping uninstall."
+        Write-LogMessage "Chocolatey curl shim not found at '$chocoCurlShim'. Skipping uninstall."
         return
     }
 
-    Write-Host 'Removing Chocolatey curl package to avoid non-System32 curl usage...'
+    Write-LogMessage 'Removing Chocolatey curl package to avoid non-System32 curl usage...'
     & choco uninstall curl -y | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host 'WARNING: First curl uninstall attempt failed. Retrying...'
+    $exitCode = $LASTEXITCODE
+    Write-LogMessage "choco uninstall curl returned exit code: $exitCode"
+
+    if ($exitCode -ne 0) {
+        Write-LogMessage 'First curl uninstall attempt failed. Retrying...' -Level 'WARNING'
         & choco uninstall curl -y | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host 'WARNING: curl uninstall retry failed.'
+        $retryExitCode = $LASTEXITCODE
+        Write-LogMessage "choco uninstall curl (retry) returned exit code: $retryExitCode"
+
+        if ($retryExitCode -ne 0) {
+            Write-LogMessage 'curl uninstall retry failed.' -Level 'WARNING'
+        }
+        else {
+            Write-LogMessage 'Chocolatey curl successfully uninstalled on retry.'
         }
     }
+    else {
+        Write-LogMessage 'Chocolatey curl successfully uninstalled.'
+    }
+
+    Write-LogMessage 'System32 curl maintenance completed.'
 }
 
 function Invoke-DotNet6Maintenance {
+    Write-LogMessage 'Starting .NET 6 maintenance...'
+
     $dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
     if (-not $dotnetCommand) {
-        Write-Host '.NET CLI not found. Skipping .NET 6 detection/removal.'
+        Write-LogMessage '.NET CLI not found. Skipping .NET 6 detection/removal.'
         return
     }
 
-    $dotnet6Found = $false
-    $runtimeMatches = & $dotnetCommand.Source --list-runtimes 2>$null | Select-String -Pattern ' 6\.[0-9]'
-    $sdkMatches = & $dotnetCommand.Source --list-sdks 2>$null | Select-String -Pattern '^6\.[0-9]'
+    Write-LogMessage "dotnet CLI found at: $($dotnetCommand.Source)"
 
-    if ($runtimeMatches -or $sdkMatches) {
+    $dotnet6Found = $false
+    Write-LogMessage 'Checking for .NET 6 runtimes...'
+    $runtimeMatches = & $dotnetCommand.Source --list-runtimes 2>$null | Select-String -Pattern ' 6\.[0-9]'
+    if ($runtimeMatches) {
+        Write-LogMessage "Found .NET 6 runtimes: $($runtimeMatches -join ', ')"
+        $dotnet6Found = $true
+    }
+
+    Write-LogMessage 'Checking for .NET 6 SDKs...'
+    $sdkMatches = & $dotnetCommand.Source --list-sdks 2>$null | Select-String -Pattern '^6\.[0-9]'
+    if ($sdkMatches) {
+        Write-LogMessage "Found .NET 6 SDKs: $($sdkMatches -join ', ')"
         $dotnet6Found = $true
     }
 
     if (-not $dotnet6Found) {
-        Write-Host '.NET 6 not detected. Skipping .NET 6 removal.'
+        Write-LogMessage '.NET 6 not detected. Skipping .NET 6 removal.'
         return
     }
 
-    Write-Host '.NET 6 detected. Attempting uninstall using registered Windows uninstall entries...'
+    Write-LogMessage '.NET 6 detected. Attempting uninstall using registered Windows uninstall entries...'
 
     $paths = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
     )
 
+    Write-LogMessage "Scanning registry uninstall paths: $($paths -join '; ')"
+
     $items = @()
     foreach ($path in $paths) {
         $items += @(Get-ItemProperty -Path $path -ErrorAction SilentlyContinue)
     }
 
-    $targets = foreach ($item in $items) {
+    Write-LogMessage "Total registry entries scanned: $($items.Count)"
+
+    $targets = @()
+    foreach ($item in $items) {
         if ($item.DisplayName -and $item.DisplayVersion -and $item.DisplayVersion -like '6.*') {
             if (
                 $item.DisplayName -like 'Microsoft .NET*' -or
                 $item.DisplayName -like 'Microsoft ASP.NET Core*' -or
                 $item.DisplayName -like 'Microsoft Windows Desktop Runtime*'
             ) {
-                $item
+                $targets += $item
+                Write-LogMessage "Identified .NET 6 component for uninstall: '$($item.DisplayName)' (Version: $($item.DisplayVersion))"
             }
         }
     }
 
+    if ($targets.Count -eq 0) {
+        Write-LogMessage '.NET 6 components detected via dotnet CLI, but no matching uninstall entries found in registry.' -Level 'WARNING'
+        return
+    }
+
+    Write-LogMessage "Found $($targets.Count) .NET 6 component(s) to uninstall."
+
     $hadFailure = $false
+    $uninstallCount = 0
+    $successCount = 0
+
     foreach ($target in $targets) {
         $uninstall = $target.QuietUninstallString
         if (-not $uninstall) {
@@ -89,112 +165,183 @@ function Invoke-DotNet6Maintenance {
         }
 
         if ([string]::IsNullOrWhiteSpace($uninstall)) {
+            Write-LogMessage "No uninstall string found for '$($target.DisplayName)'. Skipping." -Level 'WARNING'
             continue
         }
 
+        Write-LogMessage "Processing uninstall for: '$($target.DisplayName)' (Version: $($target.DisplayVersion))"
+        Write-LogMessage "Original uninstall string: $uninstall"
+
         if ($uninstall -match 'msiexec') {
+            Write-LogMessage 'Detected MSI-based uninstall.'
+
             if ($uninstall -match '(/i|/I)') {
+                Write-LogMessage 'Converting /I to /X for MSI uninstall...'
                 $uninstall = $uninstall -replace '(/i|/I)', '/x'
             }
+
             if ($uninstall -notmatch '(/qn|/quiet)') {
+                Write-LogMessage 'Adding /qn flag for quiet uninstall.'
                 $uninstall += ' /qn'
             }
+
             if ($uninstall -notmatch '/norestart') {
+                Write-LogMessage 'Adding /norestart flag.'
                 $uninstall += ' /norestart'
             }
         }
         else {
+            Write-LogMessage 'Detected non-MSI uninstall.'
+
             if ($uninstall -notmatch '(/qn|/quiet)') {
+                Write-LogMessage 'Adding /quiet flag.'
                 $uninstall += ' /quiet'
             }
+
             if ($uninstall -notmatch '/norestart') {
+                Write-LogMessage 'Adding /norestart flag.'
                 $uninstall += ' /norestart'
             }
         }
 
+        Write-LogMessage "Final uninstall command: $uninstall"
+
         $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $uninstall -Wait -PassThru -WindowStyle Hidden
-        if ($proc.ExitCode -ne 0) {
+        $uninstallCount++
+
+        Write-LogMessage "Uninstall process exited with code: $($proc.ExitCode)"
+
+        if ($proc.ExitCode -eq 0) {
+            Write-LogMessage "Successfully uninstalled: '$($target.DisplayName)'"
+            $successCount++
+        }
+        else {
+            Write-LogMessage "Uninstall failed for '$($target.DisplayName)' (Exit code: $($proc.ExitCode))" -Level 'ERROR'
             $hadFailure = $true
         }
     }
 
+    Write-LogMessage ".NET 6 uninstall summary: $successCount/$uninstallCount successful"
+
     if ($hadFailure) {
-        Write-Host 'WARNING: One or more .NET 6 uninstall operations failed.'
+        Write-LogMessage 'One or more .NET 6 uninstall operations failed.' -Level 'WARNING'
     }
+    else {
+        Write-LogMessage 'All .NET 6 components successfully uninstalled.'
+    }
+
+    Write-LogMessage '.NET 6 maintenance completed.'
 }
 
 function Invoke-WindowsTerminalMaintenance {
+    Write-LogMessage 'Starting Windows Terminal maintenance...'
+
     $wtFound = $null -ne (Get-Command wt.exe -ErrorAction SilentlyContinue)
 
     if ($wtFound) {
+        Write-LogMessage 'Windows Terminal already installed. Skipping installation.'
         return
     }
 
-    Write-Host 'Windows Terminal not installed, attempting to install...'
+    Write-LogMessage 'Windows Terminal not installed, attempting to install...'
+
     & choco install microsoft-ui-xaml -y | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host 'WARNING: Failed to install microsoft-ui-xaml.'
+        Write-LogMessage 'Failed to install microsoft-ui-xaml.' -Level 'WARNING'
+    }
+    else {
+        Write-LogMessage 'microsoft-ui-xaml successfully installed.'
     }
 
     & choco install microsoft-windows-terminal -y | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host 'WARNING: Failed to install Windows Terminal.'
+        Write-LogMessage 'Failed to install Windows Terminal.' -Level 'WARNING'
     }
+    else {
+        Write-LogMessage 'Windows Terminal successfully installed.'
+    }
+
+    Write-LogMessage 'Windows Terminal maintenance completed.'
 }
 
 function Invoke-WeeklyUpgrades {
+    Write-LogMessage 'Starting weekly upgrades...'
+
     $ps7Flag = Join-Path $env:TEMP 'memlabs_ps7_upgrade.flag'
     $chocoAllFlag = Join-Path $env:TEMP 'memlabs_choco_all_upgrade.flag'
     $currentWeek = Get-Date -UFormat '%Y-%V'
 
+    Write-LogMessage "Current week: $currentWeek"
+
     $doPs7Upgrade = $true
     if (Test-Path $ps7Flag) {
         $lastWeek = Get-Content $ps7Flag -ErrorAction SilentlyContinue
+        Write-LogMessage "Last PowerShell 7 upgrade week: $lastWeek"
         if ($lastWeek -eq $currentWeek) {
             $doPs7Upgrade = $false
         }
     }
 
     if ($doPs7Upgrade) {
-        Write-Host "Upgrading PowerShell 7 (week $currentWeek)..."
+        Write-LogMessage "Upgrading PowerShell 7 (week $currentWeek)..."
         & choco upgrade pwsh -y
         $chocoRc = $LASTEXITCODE
+        Write-LogMessage "choco upgrade pwsh returned exit code: $chocoRc"
+
         if (Test-ChocoSuccessCode -Code $chocoRc) {
             $currentWeek | Out-File $ps7Flag -Encoding ascii -NoNewline
+            Write-LogMessage 'PowerShell 7 upgrade completed successfully.'
         }
         else {
-            Write-Host "WARNING: Failed to upgrade PowerShell 7 (exit $chocoRc)."
+            Write-LogMessage "PowerShell 7 upgrade failed (exit code: $chocoRc)." -Level 'WARNING'
         }
     }
     else {
-        Write-Host "PowerShell 7 upgrade skipped (already checked week $currentWeek)."
+        Write-LogMessage "PowerShell 7 upgrade skipped (already checked week $currentWeek)."
     }
 
     $doChocoUpgrade = $true
     if (Test-Path $chocoAllFlag) {
         $lastChocoWeek = Get-Content $chocoAllFlag -ErrorAction SilentlyContinue
+        Write-LogMessage "Last Chocolatey upgrade week: $lastChocoWeek"
         if ($lastChocoWeek -eq $currentWeek) {
             $doChocoUpgrade = $false
         }
     }
 
     if ($doChocoUpgrade) {
-        Write-Host "Upgrading all Chocolatey packages (week $currentWeek)..."
+        Write-LogMessage "Upgrading all Chocolatey packages (week $currentWeek)..."
         & choco upgrade all -y --ignore-checksums
         $chocoRc = $LASTEXITCODE
+        Write-LogMessage "choco upgrade all returned exit code: $chocoRc"
+
         if (Test-ChocoSuccessCode -Code $chocoRc) {
             $currentWeek | Out-File $chocoAllFlag -Encoding ascii -NoNewline
+            Write-LogMessage 'Chocolatey package upgrade completed successfully.'
         }
         else {
-            Write-Host "WARNING: choco upgrade all failed (exit $chocoRc)."
+            Write-LogMessage "Chocolatey package upgrade failed (exit code: $chocoRc)." -Level 'WARNING'
         }
     }
     else {
-        Write-Host "Chocolatey upgrade all skipped (already checked week $currentWeek)."
+        Write-LogMessage "Chocolatey upgrade all skipped (already checked week $currentWeek)."
     }
+
+    Write-LogMessage 'Weekly upgrades maintenance completed.'
 }
+
+Write-LogMessage '========================================' 
+Write-LogMessage 'Maintenance script started'
+Write-LogMessage "Script path: $scriptPath"
+Write-LogMessage "Log file: $logFile"
+Write-LogMessage '========================================' 
 
 Invoke-System32CurlMaintenance
 Invoke-DotNet6Maintenance
 Invoke-WindowsTerminalMaintenance
 Invoke-WeeklyUpgrades
+
+Write-LogMessage '========================================' 
+Write-LogMessage 'Maintenance script completed'
+Write-LogMessage "Log file: $logFile"
+Write-LogMessage '========================================' 

@@ -698,6 +698,10 @@ function Get-File {
 
     # ---- Build transfer arguments ----
     $destinationFile = Split-Path $Destination -Leaf
+    $isVhdxCopy = ($Action -eq "Copying") -and (
+        ($Source -is [string] -and $Source.ToLower().EndsWith(".vhdx")) -or
+        ($Destination -is [string] -and $Destination.ToLower().EndsWith(".vhdx"))
+    )
 
     $HashArguments = @{
         Source      = $Source
@@ -782,7 +786,54 @@ function Get-File {
         }
         else {
             # Copying — always uses BITS
-            Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+            # For VHDX files, verify we have enough free space on the destination drive.
+            if ($isVhdxCopy) {
+                if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                    Write-Log "Get-File: Source VHDX '$Source' was not found." -Failure
+                    return $false
+                }
+
+                try {
+                    $requiredBytes = [int64](Get-Item -LiteralPath $Source -ErrorAction Stop).Length
+                    $destinationDrive = Get-PSDrive -Name (Get-Item -LiteralPath $destinationDirectory -ErrorAction Stop).PSDrive.Name -ErrorAction Stop
+                    $freeBytes = [int64]$destinationDrive.Free
+
+                    if ($freeBytes -lt $requiredBytes) {
+                        $requiredGb = [Math]::Round(($requiredBytes / 1GB), 2)
+                        $freeGb = [Math]::Round(($freeBytes / 1GB), 2)
+                        Write-Log "Get-File: Not enough disk space to copy '$sourceDisplay'. Required ${requiredGb}GB, available ${freeGb}GB on drive '$($destinationDrive.Name):'." -Failure
+                        return $false
+                    }
+                }
+                catch {
+                    Write-Log "Get-File: Failed to validate free space for '$Destination'. $_" -Failure
+                    return $false
+                }
+            }
+
+            $copyAttempts = if ($isVhdxCopy) { 2 } else { 1 }
+            for ($copyAttempt = 1; $copyAttempt -le $copyAttempts; $copyAttempt++) {
+                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+
+                if (Test-Path $Destination) {
+                    return $true
+                }
+
+                if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
+                    Write-Log "Get-File: Transfer reported success but '$Destination' is missing. Waiting 30 seconds before retry ($copyAttempt/$copyAttempts)." -Warning
+                    Start-Sleep -Seconds 30
+
+                    if (Test-Path $Destination) {
+                        return $true
+                    }
+
+                    Write-Log "Get-File: '$Destination' still missing after 30 seconds. Retrying copy." -Warning
+                    continue
+                }
+
+                Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
+                return $false
+            }
         }
 
         # ---- Verify destination exists after transfer ----
