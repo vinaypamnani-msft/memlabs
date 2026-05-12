@@ -538,7 +538,23 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     'C:\Users\*\AppData\Local\Temp\*',
                                     'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*',
                                     'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*',
-                                    'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*'
+                                    'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*',
+                                    # MemLabs install leftovers
+                                    'C:\CMCB',
+                                    'C:\CMTP',
+                                    'C:\temp\Upgrade2025',
+                                    'C:\temp\*.msi',
+                                    'C:\temp\*.exe',
+                                    'C:\temp\*.cab',
+                                    'C:\temp\*.zip',
+                                    'C:\temp\*.iso',
+                                    'C:\temp\adksetup*',
+                                    'C:\temp\WinPE*',
+                                    'C:\temp\sql',
+                                    'C:\temp\sql_CU',
+                                    'C:\temp\SQLServer*',
+                                    'C:\temp\DSC',
+                                    'C:\temp\staging'
                                 )
                                 foreach ($pat in $purge) {
                                     try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
@@ -791,7 +807,23 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                             "$root\Users\*\AppData\Local\Microsoft\Windows\WER\*",
                                             "$root\Users\*\AppData\Local\Microsoft\Windows\INetCache\*",
                                             "$root\Users\*\AppData\Local\Microsoft\Windows\WebCache\*",
-                                            "$root\`$Recycle.Bin\*"
+                                            "$root\`$Recycle.Bin\*",
+                                            # MemLabs install leftovers
+                                            "$root\CMCB",
+                                            "$root\CMTP",
+                                            "$root\temp\Upgrade2025",
+                                            "$root\temp\*.msi",
+                                            "$root\temp\*.exe",
+                                            "$root\temp\*.cab",
+                                            "$root\temp\*.zip",
+                                            "$root\temp\*.iso",
+                                            "$root\temp\adksetup*",
+                                            "$root\temp\WinPE*",
+                                            "$root\temp\sql",
+                                            "$root\temp\sql_CU",
+                                            "$root\temp\SQLServer*",
+                                            "$root\temp\DSC",
+                                            "$root\temp\staging"
                                         )
                                         foreach ($pat in $purge) {
                                             try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
