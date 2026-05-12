@@ -1275,7 +1275,10 @@ function Test-Configuration {
                 $passiveSite = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "PassiveSite" -and $_.siteCode -eq $vm.SiteCode }
                 if ($passiveSite) {
                     write-log -verbose "Checking Passive Site Server has DP in sitecode"
-                    $DPsForSiteCode = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true }
+                    # Include existing VMs so an existing DP in the site satisfies the remote contentlib
+                    # requirement when adding a new Passive to an existing Primary.
+                    $list2ForDP = Get-List2 -deployConfig $deployConfig
+                    $DPsForSiteCode = $list2ForDP | Where-Object { $_.Role -eq "SiteSystem" -and $_.siteCode -eq $vm.SiteCode -and $_.installDP -eq $true }
                     if (-not $DPsForSiteCode) {
                         Add-ValidationMessage -Message "Passive Validation: [$($vm.vmName)] SiteCode $($vm.SiteCode) does not contain a DP which is needed with remote contentlib." -ReturnObject $return -Failure
                     }
@@ -1355,12 +1358,16 @@ function Test-Configuration {
                                 }
                             }
                             else {
-                                if ($vm.role -eq "CAS") {                     
+                                if ($vm.role -eq "CAS") {
+                                    # Include existing VMs (Get-List2) so that when modifying a config,
+                                    # a SUP already deployed on the child Primary still counts.
+                                    $list2 = Get-List2 -deployConfig $deployConfig
+
                                     #Get a list of child site codes
-                                    $childSiteCodes = @($deployConfig.virtualMachines | Where-Object { $_.ParentSiteCode -eq $vm.sitecode } | Select-Object -ExpandProperty SiteCode -Unique)
+                                    $childSiteCodes = @($list2 | Where-Object { $_.ParentSiteCode -eq $vm.sitecode } | Select-Object -ExpandProperty SiteCode -Unique)
 
                                     # This is the Top Level Site, Child sites should have a SUP role. Validate that.
-                                    $childSites = @($deployConfig.virtualMachines | Where-Object { ($_.SiteCode -in $childSiteCodes) -and $_.InstallSUP })
+                                    $childSites = @($list2 | Where-Object { ($_.SiteCode -in $childSiteCodes) -and $_.InstallSUP })
 
                                     if ($childSites.Count -eq 0) {
                                         #Add-ValidationMessage -Message "$vmName SUP role can not be installed on the CAS site ($($sitecode)) without a Primary ($($childSiteCodes -join ',')) site having a SUP role." -ReturnObject $return -Failure
