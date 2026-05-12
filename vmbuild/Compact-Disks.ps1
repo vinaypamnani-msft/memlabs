@@ -557,6 +557,15 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*',
                                     'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*',
                                     'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*',
+                                    # Additional Windows caches and logs
+                                    'C:\Windows\Installer\$PatchCache$\*',
+                                    'C:\Windows\ccmcache\*',
+                                    'C:\Windows\ccmsetup\Logs\*',
+                                    'C:\Windows\System32\LogFiles\*',
+                                    'C:\Windows\Panther\*',
+                                    'C:\PerfLogs\*',
+                                    'C:\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*',
+                                    'C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\*',
                                     # MemLabs install leftovers
                                     'C:\CMCB',
                                     'C:\CMTP',
@@ -580,11 +589,38 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                                 try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
 
+                                # Disable hibernation -> removes C:\hiberfil.sys
+                                # (typically ~RAM size, often multi-GB).
+                                try { & powercfg.exe /h off 2>$null | Out-Null } catch {}
+
+                                # Delete all VSS shadow copies / system
+                                # restore points. They can hold many GB.
+                                try { & vssadmin.exe delete shadows /all /quiet 2>$null | Out-Null } catch {}
+
                                 # Component-store cleanup. /ResetBase makes
                                 # installed updates permanent (can't uninstall)
                                 # and lets DISM purge superseded payloads.
                                 try { & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null } catch {}
                                 try { & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null } catch {}
+
+                                # Silent disk cleanup (cleanmgr /sagerun) -
+                                # pre-set StateFlags so every category is
+                                # enabled, then trigger. Best-effort and may
+                                # not complete in a PSDirect session, but
+                                # what does run is pure gravy.
+                                try {
+                                    $vcRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
+                                    if (Test-Path $vcRoot) {
+                                        Get-ChildItem $vcRoot -ErrorAction SilentlyContinue | ForEach-Object {
+                                            try {
+                                                New-ItemProperty -Path $_.PSPath -Name 'StateFlags9999' `
+                                                    -PropertyType DWord -Value 2 -Force -ErrorAction SilentlyContinue | Out-Null
+                                            } catch {}
+                                        }
+                                        Start-Process -FilePath 'cleanmgr.exe' -ArgumentList '/sagerun:9999','/d C:' `
+                                            -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+                                    }
+                                } catch {}
 
                                 # WSUS server content cleanup (if WSUS role present)
                                 try {
@@ -854,6 +890,20 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                             "$root\Users\*\AppData\Local\Microsoft\Windows\INetCache\*",
                                             "$root\Users\*\AppData\Local\Microsoft\Windows\WebCache\*",
                                             "$root\`$Recycle.Bin\*",
+                                            # Additional Windows caches and logs
+                                            "$root\Windows\Installer\`$PatchCache`$\*",
+                                            "$root\Windows\ccmcache\*",
+                                            "$root\Windows\ccmsetup\Logs\*",
+                                            "$root\Windows\System32\LogFiles\*",
+                                            "$root\Windows\Panther\*",
+                                            "$root\PerfLogs\*",
+                                            "$root\ProgramData\Microsoft\Windows\DeliveryOptimization\Cache\*",
+                                            "$root\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\*",
+                                            # hiberfil.sys (often multi-GB)
+                                            "$root\hiberfil.sys",
+                                            # pagefile.sys can also be large; OS recreates on boot
+                                            "$root\pagefile.sys",
+                                            "$root\swapfile.sys",
                                             # MemLabs install leftovers
                                             "$root\CMCB",
                                             "$root\CMTP",
