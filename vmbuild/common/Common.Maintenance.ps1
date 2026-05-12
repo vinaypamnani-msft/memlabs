@@ -1373,12 +1373,34 @@ function select-OptimizeDomain {
     }
 
     # Stop any selected VMs that are running; the WPF worker skips running VMs.
+    # Run the stops in parallel - we don't need a graceful guest shutdown
+    # since the VMs will be compacted immediately and aren't auto-restarted.
     $running = @($selectedVMs | Where-Object { $_.State -ne 'Off' })
     if ($running.Count -gt 0) {
-        Write-WhiteI -indent 0 "Stopping $($running.Count) running VM(s) before optimization..."
-        foreach ($vm in $running) {
-            stop-vm2 -name $vm.VmName
-            Write-GreenCheck "Stopped $($vm.VmName)"
+        Write-WhiteI -indent 0 "Stopping $($running.Count) running VM(s) in parallel before optimization..."
+        $runningNames = @($running | Select-Object -ExpandProperty VmName)
+        $stopJobs = foreach ($vmName in $runningNames) {
+            Start-Job -Name "StopVM_$vmName" -ScriptBlock {
+                param($n)
+                try {
+                    Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                    return @{ Name = $n; Ok = $true }
+                }
+                catch {
+                    return @{ Name = $n; Ok = $false; Error = $_.Exception.Message }
+                }
+            } -ArgumentList $vmName
+        }
+        $stopJobs | Wait-Job | Out-Null
+        foreach ($j in $stopJobs) {
+            $r = Receive-Job -Job $j
+            if ($r.Ok) {
+                Write-GreenCheck "Stopped $($r.Name)"
+            }
+            else {
+                Write-RedX "Failed to stop $($r.Name): $($r.Error)"
+            }
+            Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
         }
     }
 
