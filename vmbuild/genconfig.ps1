@@ -75,49 +75,53 @@ Function Select-ToolsMenu {
         }
 
         switch ($response.ToLowerInvariant()) {
-            "1" {
-                while ($true) {
-                    #$customOptions2 = [ordered]@{"A" = "All Tools" }
-                    $toolList = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $false -and (-not $_.NoUpdate) } | Select-Object -ExpandProperty Name | Sort-Object
-                    $tool = Get-Menu2 -MenuName "Tool Selection" -Prompt "Select tool to Install" -OptionArray $toolList -NoNewLine -test:$false -return -MultiSelect
-                    if (-not $tool -or $tool -eq "ESCAPE" -or $tool -eq "NOITEMS") {
-                        break
-                    }
-                    while ($true) {
-                        #$customOptions2 = [ordered]@{"A" = "All VMs" }
-                        $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
-                        $vmName = Get-Menu2 -MenuName "$($tool -join ",") deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return -MultiSelect
-                        if (-not $vmName -or $vmName -eq "ESCAPE" -or $vmName -eq "NOITEMS") {
-                            break
-                        }
-
-                        Get-Tools -Inject -vmName $vmName -ToolName $tool                       
-                    }            
-                }
-
-            }
-            "2" {
-                while ($true) {
-                    $opt = $Common.AzureFileList.Tools | Where-Object { $_.Optional -eq $true } | Select-Object -ExpandProperty Name | Sort-Object
-                    $tool = Get-Menu2 -MenuName "Optional Tool Selection" -Prompt "Select Optional tool to Copy" -OptionArray $opt -NoNewLine -test:$false -return -MultiSelect
-                    if (-not $tool -or $tool -eq "ESCAPE" -or $tool -eq "NOITEMS") {
-                        break
-                    }
-                    while ($true) {
-                        #$customOptions2 = [ordered]@{"A" = "All VMs listed above" }
-                        $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
-                        $vmName = Get-Menu2 -MenuName  "$($tool -join ",") Optional deployment VM Selection" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -MultiSelect
-                        if (-not $vmName -or $vmName -eq "ESCAPE" -or $vmName -eq "NOITEMS") {
-                            break
-                        }
-                        
-                        Get-Tools -Inject -ToolName $tool -vmName $vmName
-                        
-                    }
-                }
-
-            }
+            "1" { Invoke-ToolDeployment -Optional:$false }
+            "2" { Invoke-ToolDeployment -Optional:$true }
             default { continue }
+        }
+    }
+}
+
+# Inner loop for Select-ToolsMenu option "1" (default tools) and "2" (optional
+# tools). Both repeatedly prompt for a tool, then a target VM, then call
+# Get-Tools -Inject. The only differences captured by -Optional are:
+#   - which tools the user can pick from (Optional eq $true/$false; default
+#     also filters out NoUpdate-marked entries).
+#   - menu titles / prompt text.
+function Invoke-ToolDeployment {
+    param(
+        [switch] $Optional
+    )
+
+    if ($Optional) {
+        $toolFilter      = { $_.Optional -eq $true }
+        $toolMenuName    = "Optional Tool Selection"
+        $toolPrompt      = "Select Optional tool to Copy"
+        $vmMenuSuffix    = "Optional deployment VM Selection"
+        $vmMenuReturn    = $false
+    }
+    else {
+        $toolFilter      = { $_.Optional -eq $false -and (-not $_.NoUpdate) }
+        $toolMenuName    = "Tool Selection"
+        $toolPrompt      = "Select tool to Install"
+        $vmMenuSuffix    = "deployment VM Selection"
+        $vmMenuReturn    = $true
+    }
+
+    while ($true) {
+        $toolList = $Common.AzureFileList.Tools | Where-Object $toolFilter | Select-Object -ExpandProperty Name | Sort-Object
+        $tool = Get-Menu2 -MenuName $toolMenuName -Prompt $toolPrompt -OptionArray $toolList -NoNewLine -test:$false -return -MultiSelect
+        if (-not $tool -or $tool -eq "ESCAPE" -or $tool -eq "NOITEMS") {
+            break
+        }
+        while ($true) {
+            $runningVMs = get-list -type vm | Where-Object { $_.State -eq "Running" } | Select-Object -ExpandProperty vmName | Sort-Object
+            $vmName = Get-Menu2 -MenuName "$($tool -join ',') $vmMenuSuffix" -Prompt "Select VM to deploy '$tool' to" -OptionArray $runningVMs -AdditionalOptions $customOptions2 -NoNewLine -test:$false -return:$vmMenuReturn -MultiSelect
+            if (-not $vmName -or $vmName -eq "ESCAPE" -or $vmName -eq "NOITEMS") {
+                break
+            }
+
+            Get-Tools -Inject -vmName $vmName -ToolName $tool
         }
     }
 }
