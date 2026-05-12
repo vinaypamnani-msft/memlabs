@@ -666,11 +666,15 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $startedAt = Get-Date
                         $forced = $false
                         $onlineCleanRan = $false
+                        function Write-PrepLog($msg) { Write-Output "::LOG::$msg" }
+
+                        Write-PrepLog "--- Prep started for $n ---"
 
                         # Capture initial state so we can auto-restart at the
                         # end if the VM was running when this script began.
                         $initial = Get-VM -Name $n -ErrorAction SilentlyContinue
                         $wasRunning = ($initial -and $initial.State -eq 'Running')
+                        Write-PrepLog ("Initial state: {0}" -f ($initial.State))
 
                         # Dot-source Common.ps1 so we have Invoke-VmCommand /
                         # Get-VmSession / $Common.LocalAdmin, plus the
@@ -680,12 +684,16 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         if ($commonPath -and (Test-Path $commonPath)) {
                             try {
                                 if ($Common -and $Common.Initialized) { $Common.Initialized = $false }
+                                Write-PrepLog "Dot-sourcing Common.ps1 (worker mode)"
                                 . $commonPath -InJob:$true
                                 $commonLoaded = $true
+                                Write-PrepLog "Common.ps1 loaded"
                             }
                             catch {
-                                # Online cleanup is best-effort; never block compaction
+                                Write-PrepLog "Common.ps1 load FAILED: $($_.Exception.Message)"
                             }
+                        } else {
+                            Write-PrepLog "Common.ps1 not found at: $commonPath (online cleanup will be skipped)"
                         }
 
                         # --- 0) Online cleanup (only if VM is currently Running) ---
@@ -693,22 +701,47 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         # (domain account first, then local fallback via VM
                         # note) and PSSession caching for us.
                         $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
-                        if ($commonLoaded -and $cur -and $cur.State -eq 'Running' -and $Common.LocalAdmin) {
+                        if (-not $doOnlineClean) {
+                            Write-PrepLog "Online cleanup: SKIPPED (-SkipOnlineClean)"
+                        }
+                        elseif (-not $commonLoaded) {
+                            Write-PrepLog "Online cleanup: SKIPPED (Common.ps1 not loaded)"
+                        }
+                        elseif (-not $cur -or $cur.State -ne 'Running') {
+                            Write-PrepLog ("Online cleanup: SKIPPED (VM state is {0}, must be Running)" -f ($cur.State))
+                        }
+                        elseif (-not $Common.LocalAdmin) {
+                            Write-PrepLog "Online cleanup: SKIPPED (no LocalAdmin credentials available)"
+                        }
+                        else {
                             Write-Progress -Activity "Prep $n" -Status 'Online cleanup (in-guest)' -PercentComplete 2
+                            Write-PrepLog "[ONLINE-CLEAN] Starting in-guest cleanup via PSDirect..."
 
                             # Discover the VM's domain via the VM note so
                             # Invoke-VmCommand picks the right credentials.
                             $note = Get-VMNote -VMName $n -ErrorAction SilentlyContinue
                             $vmDomain = if ($note -and $note.domain) { $note.domain } else { 'WORKGROUP' }
+                            Write-PrepLog "[ONLINE-CLEAN] VM domain (from note): $vmDomain"
 
                             $cleanupScript = {
                                 $ProgressPreference = 'SilentlyContinue'
                                 $ErrorActionPreference = 'SilentlyContinue'
+                                $report = [System.Collections.Generic.List[string]]::new()
+                                function _Add($m) { $report.Add(('{0} {1}' -f (Get-Date -Format 'HH:mm:ss.fff'), $m)) }
+                                function _GetFree { try { (Get-PSDrive -Name C).Free } catch { 0 } }
+                                $freeStart = _GetFree
+                                _Add ("START in-guest cleanup on $env:COMPUTERNAME ; C: free = {0:N1} GB" -f ($freeStart/1GB))
 
                                 # Stop services that lock the caches we want to nuke
                                 $svcs = @('wuauserv','bits','cryptsvc','WSUSService','UsoSvc','TrustedInstaller')
                                 foreach ($s in $svcs) {
-                                    try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue } catch {}
+                                    try {
+                                        $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+                                        if ($svc) {
+                                            Stop-Service -Name $s -Force -ErrorAction Stop
+                                            _Add "  Stop-Service $s : ok"
+                                        }
+                                    } catch { _Add "  Stop-Service $s : FAILED $($_.Exception.Message)" }
                                 }
 
                                 $purge = @(
@@ -754,24 +787,33 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     'C:\temp\staging'
                                 )
                                 foreach ($pat in $purge) {
-                                    try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                                    try {
+                                        if (Test-Path -LiteralPath $pat -ErrorAction SilentlyContinue) {
+                                            $before = (Get-ChildItem -Path $pat -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Sum -Property Length).Sum
+                                            Remove-Item -Path $pat -Recurse -Force -ErrorAction Stop
+                                            if ($before -gt 0) { _Add ("  Purged {0} ({1:N1} MB)" -f $pat, ($before/1MB)) }
+                                        }
+                                    } catch { _Add "  Purge FAILED $pat : $($_.Exception.Message)" }
                                 }
 
-                                try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+                                try { Clear-RecycleBin -Force -ErrorAction Stop; _Add "  Clear-RecycleBin: ok" } catch { _Add "  Clear-RecycleBin: $($_.Exception.Message)" }
 
                                 # Disable hibernation -> removes C:\hiberfil.sys
                                 # (typically ~RAM size, often multi-GB).
-                                try { & powercfg.exe /h off 2>$null | Out-Null } catch {}
+                                try { & powercfg.exe /h off 2>$null | Out-Null; _Add "  powercfg /h off: ok" } catch { _Add "  powercfg /h off: FAILED" }
 
                                 # Delete all VSS shadow copies / system
                                 # restore points. They can hold many GB.
-                                try { & vssadmin.exe delete shadows /all /quiet 2>$null | Out-Null } catch {}
+                                try {
+                                    $vssOut = & vssadmin.exe delete shadows /all /quiet 2>&1
+                                    _Add ("  vssadmin delete shadows /all: {0}" -f (($vssOut | Out-String).Trim() -replace "`r?`n",' | '))
+                                } catch { _Add "  vssadmin: FAILED $($_.Exception.Message)" }
 
                                 # Component-store cleanup. /ResetBase makes
                                 # installed updates permanent (can't uninstall)
                                 # and lets DISM purge superseded payloads.
-                                try { & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null } catch {}
-                                try { & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null } catch {}
+                                try { & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null; _Add "  DISM StartComponentCleanup /ResetBase: ok" } catch { _Add "  DISM StartComponentCleanup: FAILED" }
+                                try { & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null; _Add "  DISM SPSuperseded: ok" } catch { _Add "  DISM SPSuperseded: FAILED" }
 
                                 # Silent disk cleanup (cleanmgr /sagerun) -
                                 # pre-set StateFlags so every category is
@@ -789,8 +831,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                         }
                                         Start-Process -FilePath 'cleanmgr.exe' -ArgumentList '/sagerun:9999','/d C:' `
                                             -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+                                        _Add "  cleanmgr /sagerun:9999 launched"
                                     }
-                                } catch {}
+                                } catch { _Add "  cleanmgr: FAILED $($_.Exception.Message)" }
 
                                 # WSUS server content cleanup (if WSUS role present)
                                 try {
@@ -802,14 +845,19 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                                 -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
                                                 -CompressUpdates -DeclineSupersededUpdates `
                                                 -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
+                                            _Add "  WSUS server cleanup: ran"
                                         }
                                     }
-                                } catch {}
+                                } catch { _Add "  WSUS cleanup: FAILED $($_.Exception.Message)" }
 
                                 # Restart the services we stopped (best-effort)
                                 foreach ($s in @('wuauserv','bits','cryptsvc')) {
                                     try { Start-Service -Name $s -ErrorAction SilentlyContinue } catch {}
                                 }
+
+                                $freeEnd = _GetFree
+                                _Add ("END in-guest cleanup ; C: free = {0:N1} GB (reclaimed {1:N1} GB)" -f ($freeEnd/1GB), (($freeEnd-$freeStart)/1GB))
+                                return ,$report
                             }
 
                             try {
@@ -818,25 +866,36 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     -SuppressLog
                                 if ($result -and -not $result.ScriptBlockFailed) {
                                     $onlineCleanRan = $true
+                                    Write-PrepLog "[ONLINE-CLEAN] Completed successfully"
+                                    if ($result.ScriptBlockOutput) {
+                                        foreach ($line in @($result.ScriptBlockOutput)) {
+                                            if ($line) { Write-PrepLog "[ONLINE-CLEAN] $line" }
+                                        }
+                                    }
+                                } else {
+                                    $errMsg = if ($result) { $result.ScriptBlockFailed } else { 'no result' }
+                                    Write-PrepLog "[ONLINE-CLEAN] FAILED: $errMsg"
                                 }
                             }
                             catch {
-                                # best-effort; never block compaction
+                                Write-PrepLog "[ONLINE-CLEAN] FAILED with exception: $($_.Exception.Message)"
                             }
                         }
 
                         # --- 1) Graceful shutdown (if running) ---
                         $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
                         if ($cur -and $cur.State -ne 'Off') {
+                            Write-PrepLog "[STOP] Requesting graceful shutdown (current state: $($cur.State); timeout: ${timeoutSec}s)"
                             Write-Progress -Activity "Prep $n" -Status 'Stopping (graceful)' -PercentComplete 5
                             try {
                                 Stop-VM -Name $n -Force -WarningAction SilentlyContinue -ErrorAction Stop
                             }
                             catch {
-                                # Guest didn't accept the request; we'll fall through to the timeout/turn-off below
+                                Write-PrepLog "[STOP] Stop-VM request failed: $($_.Exception.Message) - waiting for guest anyway"
                             }
                             while ((Get-VM -Name $n -ErrorAction SilentlyContinue).State -ne 'Off') {
                                 if (((Get-Date) - $startedAt).TotalSeconds -gt $timeoutSec) {
+                                    Write-PrepLog "[STOP] Graceful shutdown timeout exceeded; forcing TurnOff"
                                     Write-Progress -Activity "Prep $n" -Status 'Force turn-off (timeout)' -PercentComplete 30
                                     Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                                     $forced = $true
@@ -846,6 +905,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 Write-Progress -Activity "Prep $n" -Status 'Stopping (graceful)' -PercentComplete 20
                                 Start-Sleep -Seconds 2
                             }
+                            Write-PrepLog ("[STOP] VM stopped (forced={0}, elapsed={1:N0}s)" -f $forced, ((Get-Date)-$startedAt).TotalSeconds)
+                        } else {
+                            Write-PrepLog "[STOP] VM already Off; no shutdown needed"
                         }
 
                         # --- 2) Merge every checkpoint ---
@@ -918,17 +980,26 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             try {
 
                             if (-not $mergeSkipped) {
+                            Write-PrepLog "[MERGE] Merging $($snapshots.Count) checkpoint(s)..."
+                            $mergeStart = Get-Date
                             $i = 0
                             $vmPath = (Get-VM -Name $n -ErrorAction SilentlyContinue).Path
                             foreach ($snap in $snapshots) {
                                 $i++
                                 Write-Progress -Activity "Prep $n" -Status "Merging $i/$($snapshots.Count): $($snap.Name)" -PercentComplete (40 + (50 * $i / $snapshots.Count))
+                                Write-PrepLog "[MERGE] $i/$($snapshots.Count): Remove-VMCheckpoint '$($snap.Name)'"
                                 try {
                                     Remove-VMCheckpoint -VM $snap.VM -Name $snap.Name -ErrorAction Stop
+                                    Write-PrepLog "[MERGE]   ok"
                                 }
                                 catch {
-                                    # Try via VMSnapshot object directly
-                                    Remove-VMSnapshot -VMSnapshot $snap -ErrorAction SilentlyContinue
+                                    Write-PrepLog "[MERGE]   Remove-VMCheckpoint failed ($($_.Exception.Message)); trying Remove-VMSnapshot"
+                                    try {
+                                        Remove-VMSnapshot -VMSnapshot $snap -ErrorAction Stop
+                                        Write-PrepLog "[MERGE]   Remove-VMSnapshot ok"
+                                    } catch {
+                                        Write-PrepLog "[MERGE]   Remove-VMSnapshot also failed: $($_.Exception.Message)"
+                                    }
                                 }
                                 # Sidecar notes file maintained by select-DeleteSnapshotDomain
                                 if ($vmPath) {
@@ -945,15 +1016,22 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                             # Wait for AVHDX merges to settle: no VHD path should still
                             # reference .avhdx and no checkpoints should remain.
+                            Write-PrepLog "[MERGE] Waiting for AVHDX merges to settle (max 15 min)..."
                             $mergeDeadline = (Get-Date).AddMinutes(15)
+                            $lastSettleLog = Get-Date
                             while ((Get-Date) -lt $mergeDeadline) {
                                 $hds = @(Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)
-                                $pendingAvhdx = $hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' }
+                                $pendingAvhdx = @($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' })
                                 $pendingChk   = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue).Count
-                                if (-not $pendingAvhdx -and $pendingChk -eq 0) { break }
+                                if ($pendingAvhdx.Count -eq 0 -and $pendingChk -eq 0) { break }
+                                if (((Get-Date) - $lastSettleLog).TotalSeconds -ge 30) {
+                                    Write-PrepLog ("[MERGE]   still settling: {0} pending AVHDX, {1} pending checkpoint(s)" -f $pendingAvhdx.Count, $pendingChk)
+                                    $lastSettleLog = Get-Date
+                                }
                                 Write-Progress -Activity "Prep $n" -Status 'Waiting for merge to finish' -PercentComplete 92
                                 Start-Sleep -Seconds 3
                             }
+                            Write-PrepLog ("[MERGE] Settled in {0:N0}s" -f ((Get-Date)-$mergeStart).TotalSeconds)
                             } # if (-not $mergeSkipped)
 
                             }
@@ -970,11 +1048,13 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                         # --- 3) Enumerate VHDs to compact ---
                         Write-Progress -Activity "Prep $n" -Status 'Enumerating VHDs' -PercentComplete 97
+                        Write-PrepLog "[ENUMERATE] Listing VHDs attached to VM"
                         $seen  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                         $disks = [System.Collections.Generic.List[hashtable]]::new()
                         foreach ($hd in (Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
                             if ($hd.Path -and $seen.Add($hd.Path) -and (Test-Path $hd.Path)) {
                                 $fi = [System.IO.FileInfo]::new($hd.Path)
+                                Write-PrepLog ("[ENUMERATE]   {0}  ({1:N1} GB)" -f $hd.Path, ($fi.Length/1GB))
                                 $disks.Add(@{
                                     VMName       = $n
                                     Path         = $hd.Path
@@ -983,6 +1063,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 })
                             }
                         }
+                        Write-PrepLog ("--- Prep done for $n ({0} disk(s), {1:N0}s elapsed) ---" -f $disks.Count, ((Get-Date)-$startedAt).TotalSeconds)
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
                         return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; Disks = $disks.ToArray() }
                     } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean), $SerializeDrives
@@ -1000,12 +1081,33 @@ if ($env:_COMPACT_DISKS_WORKER) {
             # ----- Reap completed prep jobs -----
             $stillPrep = [System.Collections.Generic.List[PSCustomObject]]::new()
             foreach ($vm in $activePrepJobs) {
+                # Drain any phase log lines emitted via Write-Output "::LOG::..."
+                # while the job is still running so the UI/log file see them
+                # in real time instead of only when the job completes.
+                try {
+                    $partial = Receive-Job -Job $vm.Job -Keep:$false -ErrorAction SilentlyContinue
+                    foreach ($item in @($partial)) {
+                        if ($item -is [string] -and $item.StartsWith('::LOG::')) {
+                            Add-UiLog ("[PREP] $($vm.VMName) - $($item.Substring(7))")
+                        }
+                        elseif ($item -is [hashtable] -or $item -is [System.Collections.IDictionary]) {
+                            # The job's final result hashtable - stash for the completion branch below.
+                            $vm | Add-Member -NotePropertyName _pendingResult -NotePropertyValue $item -Force
+                        }
+                    }
+                } catch {}
+
                 if ($vm.Job.State -eq 'Completed') {
+                    # Whatever's still buffered after the Completed transition.
                     try { $rawOut = Receive-Job -Job $vm.Job -ErrorAction Stop } catch { $rawOut = $null }
                     Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
                     # The prep job may emit "::LOG::..." strings via Write-Output
                     # alongside the final hashtable. Separate them.
                     $result = $null
+                    if ($vm.PSObject.Properties['_pendingResult']) {
+                        $result = $vm._pendingResult
+                        $vm.PSObject.Properties.Remove('_pendingResult')
+                    }
                     foreach ($item in @($rawOut)) {
                         if ($item -is [string] -and $item.StartsWith('::LOG::')) {
                             Add-UiLog ("[PREP] $($vm.VMName) - $($item.Substring(7))")
@@ -1301,10 +1403,19 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
 
                         # --- Final Optimize-VHD on the parent (no longer mounted) ---
-                        Write-PhaseLog "Optimize-VHD ($m) starting"
+                        $preOptSize = try { (Get-Item -LiteralPath $p -ErrorAction Stop).Length } catch { 0 }
+                        Write-PhaseLog ("Optimize-VHD ($m) starting (current size: {0:N1} GB)" -f ($preOptSize/1GB))
                         Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
-                        Optimize-VHD -Path $p -Mode $m
-                        Write-PhaseLog "Optimize-VHD complete"
+                        $optStart = Get-Date
+                        try {
+                            Optimize-VHD -Path $p -Mode $m -ErrorAction Stop
+                            $postOptSize = try { (Get-Item -LiteralPath $p -ErrorAction Stop).Length } catch { 0 }
+                            $reclaimed = $preOptSize - $postOptSize
+                            Write-PhaseLog ("Optimize-VHD complete in {0:N0}s; size {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB)" -f ((Get-Date)-$optStart).TotalSeconds, ($preOptSize/1GB), ($postOptSize/1GB), ($reclaimed/1GB))
+                        } catch {
+                            Write-PhaseLog "Optimize-VHD FAILED: $($_.Exception.Message)"
+                            throw
+                        }
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
                     } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill
                     $disk.Job    = $job
