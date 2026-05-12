@@ -996,6 +996,7 @@ function Test-ValidDiskSpace {
         }
 
         $totalRequiredBytes = [int64]0
+        $assumedSizeBytes = [int64]16GB
         $unknownSizeVms = @()
         $perVmDetails = @()
 
@@ -1012,32 +1013,32 @@ function Test-ValidDiskSpace {
                 $sourcePath = Join-Path $Common.AzureImagePath ($os + ".vhdx")
             }
 
-            if (-not $sourcePath -or -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-                # Source VHDX not yet downloaded — can't pre-calculate. Record for advisory message.
-                $unknownSizeVms += $vm.vmName
-                continue
+            $size = $null
+            if ($sourcePath -and (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                try {
+                    $size = [int64](Get-Item -LiteralPath $sourcePath -ErrorAction Stop).Length
+                }
+                catch {
+                    $size = $null
+                }
             }
 
-            try {
-                $size = [int64](Get-Item -LiteralPath $sourcePath -ErrorAction Stop).Length
-            }
-            catch {
+            if ($null -eq $size) {
+                # Source VHDX not yet downloaded — assume 16GB
+                $size = $assumedSizeBytes
                 $unknownSizeVms += $vm.vmName
-                continue
             }
 
             $totalRequiredBytes += $size
             $perVmDetails += [PSCustomObject]@{
-                VmName = $vm.vmName
-                OS     = $os
-                Bytes  = $size
+                VmName  = $vm.vmName
+                OS      = $os
+                Bytes   = $size
+                Assumed = ($unknownSizeVms -contains $vm.vmName)
             }
         }
 
         if ($totalRequiredBytes -le 0) {
-            if ($unknownSizeVms.Count -gt 0) {
-                Add-ValidationMessage -Message "Disk Space Validation: Source VHDX files for the following VM(s) are not present locally yet, cannot pre-validate required space: $($unknownSizeVms -join ', '). Ensure files have been downloaded." -ReturnObject $ReturnObject -Warning
-            }
             return
         }
 
@@ -1062,7 +1063,10 @@ function Test-ValidDiskSpace {
 
         if ($freeBytes -lt $requiredWithReserve) {
             $shortfallGb = [Math]::Round((($requiredWithReserve - $freeBytes) / 1GB), 2)
-            $vmListText = ($perVmDetails | ForEach-Object { "$($_.VmName) [$([Math]::Round($_.Bytes / 1GB, 2))GB]" }) -join ', '
+            $vmListText = ($perVmDetails | ForEach-Object {
+                    $sizeGb = [Math]::Round($_.Bytes / 1GB, 2)
+                    if ($_.Assumed) { "$($_.VmName) [~${sizeGb}GB assumed]" } else { "$($_.VmName) [${sizeGb}GB]" }
+                }) -join ', '
             Add-ValidationMessage -Message "Disk Space Validation: Not enough free space on drive '$driveLetter`:' to copy VHDX files for $($perVmDetails.Count) VM(s). Required ${requiredGb}GB + ${reserveGb}GB reserve = ${totalRequiredGb}GB. Available: ${freeGb}GB. Short by ${shortfallGb}GB. VMs: $vmListText." -ReturnObject $ReturnObject -Failure
         }
         else {
@@ -1070,7 +1074,7 @@ function Test-ValidDiskSpace {
         }
 
         if ($unknownSizeVms.Count -gt 0) {
-            Add-ValidationMessage -Message "Disk Space Validation: Source VHDX files for the following VM(s) are not present locally yet, so they were excluded from the space calculation: $($unknownSizeVms -join ', '). Actual space required may be higher." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "Disk Space Validation: Source VHDX file(s) not yet downloaded for: $($unknownSizeVms -join ', '). Assumed 16GB each for space calculation; actual size may differ." -ReturnObject $ReturnObject -Warning
         }
     }
     catch {
