@@ -150,6 +150,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
         WindowReady    = $false
         ReadyFile      = $readyFilePath
         Title          = if ($DomainLabel) { "Hyper-V VHD Optimization - $DomainLabel" } else { 'Hyper-V VHD Optimization' }
+        HeaderText     = if ($DomainLabel) { "Hyper-V VHD Optimization - $DomainLabel" } else { 'Hyper-V VHD Optimization' }
+        LogPath        = $null
     })
 
     # --- Dedicated log file for this Compact-Disks run ---
@@ -167,6 +169,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
             ($DomainLabel -replace '[^A-Za-z0-9._-]', '_')
         } else { 'all' }
         $script:CompactLogPath = Join-Path $logsDir "Compact-Disks-$domTag-$stamp.log"
+        $UiSync.LogPath = $script:CompactLogPath
         $banner = @(
             "==========================================================="
             "Compact-Disks run started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
@@ -189,7 +192,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
     function Add-UiLog {
         param([string]$Message)
-        Add-UiLog ($Message)
+        [void]$UiSync.Log.Add($Message)
         if ($script:CompactLogPath) {
             try {
                 $line = '{0} {1}' -f (Get-Date -Format 'HH:mm:ss.fff'), $Message
@@ -249,8 +252,16 @@ if ($env:_COMPACT_DISKS_WORKER) {
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock x:Name="TitleText" Grid.Row="0" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,10"
-                   Text="Hyper-V VHD Optimization" Foreground="#89B4FA"/>
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock x:Name="TitleText" FontSize="20" FontWeight="SemiBold"
+                       Text="Hyper-V VHD Optimization" Foreground="#89B4FA"/>
+            <TextBlock x:Name="LogPathLine" FontSize="11" Margin="0,2,0,0" Foreground="#7F849C"
+                       TextTrimming="CharacterEllipsis">
+                <Run Text="Log: "/><Hyperlink x:Name="LogPathLink" Foreground="#89DCEB"
+                                               TextDecorations="None"
+                                               ToolTip="Click to open in Notepad. Right-click to open containing folder."><Run x:Name="LogPathRun" Text="(initializing)"/></Hyperlink>
+            </TextBlock>
+        </StackPanel>
         <StackPanel Grid.Row="1" Margin="0,0,0,10">
             <TextBlock x:Name="StatusText" FontSize="15" Margin="0,0,0,6"/>
             <Grid>
@@ -298,7 +309,24 @@ if ($env:_COMPACT_DISKS_WORKER) {
         $ElapsedText     = $window.FindName('ElapsedText')
         $JobPanel        = $window.FindName('JobPanel')
         $LogText         = $window.FindName('LogText')
-        $TitleText.Text  = $UiSync.Title
+        $LogPathRun      = $window.FindName('LogPathRun')
+        $LogPathLink     = $window.FindName('LogPathLink')
+        $TitleText.Text  = $UiSync.HeaderText
+        if ($UiSync.LogPath) {
+            $LogPathRun.Text = $UiSync.LogPath
+            $logPathLocal = $UiSync.LogPath
+            $LogPathLink.Add_Click({
+                try { Start-Process -FilePath 'notepad.exe' -ArgumentList $logPathLocal } catch {}
+            }.GetNewClosure())
+            $LogPathLink.Add_MouseRightButtonUp({
+                try {
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList "/select,`"$logPathLocal`""
+                } catch {}
+            }.GetNewClosure())
+        } else {
+            $LogPathRun.Text = '(no log file)'
+            $LogPathLink.IsEnabled = $false
+        }
 
         $bc       = [System.Windows.Media.BrushConverter]::new()
         $fgBrush  = $bc.ConvertFrom('#CDD6F4')
