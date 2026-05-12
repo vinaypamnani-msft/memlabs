@@ -937,8 +937,14 @@ function Start-CurlTransfer {
     # ---- Find curl ----
     $curlPaths = Get-CurlExecutablePaths
     if (-not $curlPaths -or $curlPaths.Count -eq 0) {
-        Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
-        & choco install curl -y | Out-Null
+        $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
+        if (Test-Path $systemCurlPath) {
+            Write-Log "Start-CurlTransfer: System32 curl exists at '$systemCurlPath'. Skipping chocolatey curl install." -LogOnly
+        }
+        else {
+            Write-Log "Start-CurlTransfer: curl.exe not found, attempting to install via chocolatey..." -Warning
+            & choco install curl -y | Out-Null
+        }
         $curlPaths = Get-CurlExecutablePaths
     }
 

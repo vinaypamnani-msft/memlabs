@@ -70,6 +70,19 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
+REM Prefer System32 curl and remove Chocolatey curl when present
+REM ============================================================
+SET SYS32_CURL=%WINDIR%\System32\curl.exe
+IF EXIST "%SYS32_CURL%" (
+    ECHO System32 curl detected at "%SYS32_CURL%".
+    ECHO Removing Chocolatey curl package to avoid non-System32 curl usage...
+    choco uninstall curl -y
+    IF ERRORLEVEL 1 (
+        ECHO INFO: Chocolatey curl package may already be absent.
+    )
+)
+
+REM ============================================================
 REM Check/install Windows Terminal
 REM ============================================================
 SET WT=0
