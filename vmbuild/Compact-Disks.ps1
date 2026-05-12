@@ -793,6 +793,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
 
                         # --- 2) Merge every checkpoint ---
+                        $mergeSkipped = $false
                         $snapshots = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue)
                         if ($snapshots.Count -gt 0) {
                             # Pre-flight: confirm we have enough free disk on
@@ -806,6 +807,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                     if (-not $chk.Ok) {
                                         $freeOk = $false
                                         Write-Output "::LOG::[MERGE-SKIP] Insufficient free disk space: $($chk.Reason)"
+                                        Write-Output "::LOG::[MERGE-SKIP] Continuing with compact-only cleanup (no merge); AVHDX leaf will be optimized in place."
                                     }
                                     else {
                                         foreach ($d in $chk.Details) {
@@ -817,9 +819,14 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 }
                             }
                             if (-not $freeOk) {
-                                # Bail out before merging - return Ok=$false so the
-                                # parent reports the VM as prep-failed and skips it.
-                                return @{ Ok = $false; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = @(); Error = ($chk.Reason) }
+                                # Don't bail - we can still run the rest of the
+                                # cleanup (delete files, defrag, zero-fill,
+                                # Optimize-VHD) against the AVHDX leaf. That
+                                # reclaims space inside the differencing disk
+                                # even though the merge can't run, and shrinks
+                                # the AVHDX so a future run may be able to
+                                # merge. Just skip the merge block.
+                                $mergeSkipped = $true
                             }
 
                             # Acquire a cross-process named mutex per drive that
@@ -829,7 +836,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             # AVHDX size from exceeding free disk space.
                             $heldMutexes = @()
                             $vmMergeDrives = @()
-                            if ($serializeDrives -and $serializeDrives.Count -gt 0 -and `
+                            if (-not $mergeSkipped -and $serializeDrives -and $serializeDrives.Count -gt 0 -and `
                                 $chk -and $chk.Details) {
                                 foreach ($det in $chk.Details) {
                                     if ($serializeDrives -contains $det.Drive) {
@@ -854,6 +861,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
                             try {
 
+                            if (-not $mergeSkipped) {
                             $i = 0
                             $vmPath = (Get-VM -Name $n -ErrorAction SilentlyContinue).Path
                             foreach ($snap in $snapshots) {
@@ -890,6 +898,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 Write-Progress -Activity "Prep $n" -Status 'Waiting for merge to finish' -PercentComplete 92
                                 Start-Sleep -Seconds 3
                             }
+                            } # if (-not $mergeSkipped)
 
                             }
                             finally {
@@ -919,7 +928,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             }
                         }
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
-                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = $disks.ToArray() }
+                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; Disks = $disks.ToArray() }
                     } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean), $SerializeDrives
                     $vm.Job    = $job
                     $vm.Status = 'Running'
@@ -953,6 +962,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
                         $vm.WasRunning = [bool]$result.WasRunning
+                        if ($result.MergeSkipped) {
+                            $vm.MergeSkipped = $true
+                            Add-UiLog ("[PREP-WARN] $($vm.VMName): merge skipped (insufficient free space) - compacting AVHDX leaf only")
+                        }
                         if ($result.OnlineCleaned) {
                             Add-UiLog ("[PREP-INFO] $($vm.VMName): online cleanup ran")
                         }
@@ -1337,11 +1350,30 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 }
             }
         }
+        elseif ($deferred.Count -gt 0 -and -not $UiSync.WindowClosed) {
+            # Out of retry budget - requeue the remaining deferred VMs WITHOUT
+            # a pre-flight fail. The prep job's per-VM free-space check will
+            # still fail, but the job is tolerant of that: it skips the merge
+            # block and falls through to enumerate the AVHDX leaves so the
+            # compact phase can still run defrag/zero-fill/Optimize-VHD against
+            # them. That reclaims slack space inside the AVHDX even though
+            # the merge can't happen, and shrinks the leaf so a future
+            # invocation has a better chance of merging.
+            foreach ($vm in $deferred) {
+                $vm.PreFlightFail = $false
+                $vm.Status = 'Pending'
+                $vm.Error  = $null
+                $vm.Job    = $null
+                $prepQueue.Enqueue($vm)
+                $shouldRetry = $true
+                Add-UiLog ("[PREP-RETRY-NOMERGE] $($vm.VMName) requeued without merge (retry budget exhausted; compact-only pass)")
+            }
+        }
         elseif ($deferred.Count -gt 0) {
-            # Out of retry budget or window closed - mark deferred VMs failed.
+            # Window closed mid-retry - mark deferred VMs failed.
             foreach ($vm in $deferred) {
                 $vm.Status = 'Failed'
-                Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error) (retry budget exhausted)")
+                Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error) (cancelled)")
             }
         }
     } while ($shouldRetry)
