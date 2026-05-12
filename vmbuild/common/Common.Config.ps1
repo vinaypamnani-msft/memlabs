@@ -1665,7 +1665,21 @@ function Get-VMSizeCached {
     #write-host "Making new Entry for $($vm.vmName)"
     # if we didn't return the cache entry, get new data, and add it to cache
     if (-not $Common.InJob) {
-        $diskSize = (Get-ChildItem $vm.Path -Recurse | Measure-Object length -sum).sum
+        # Sum the actual VHDX file sizes via Get-VM's HardDrives instead of a recursive
+        # Get-ChildItem on $vm.Path. Recursing the VM folder is dramatically slower because
+        # it walks snapshots, paging files, and per-file metadata for every file.
+        $diskSize = 0
+        try {
+            foreach ($hd in $vm.HardDrives) {
+                if ($hd.Path -and (Test-Path -LiteralPath $hd.Path -PathType Leaf)) {
+                    $diskSize += [int64](Get-Item -LiteralPath $hd.Path -ErrorAction Stop).Length
+                }
+            }
+        }
+        catch {
+            # Fall back to the recursive scan if HardDrives enumeration fails for any reason.
+            $diskSize = (Get-ChildItem $vm.Path -Recurse -ErrorAction SilentlyContinue | Measure-Object length -sum).sum
+        }
         $MemoryStartup = $vm.MemoryStartup
     }
     else {
@@ -1769,7 +1783,11 @@ function Update-VMInformation {
     if (-not [string]::IsNullOrWhiteSpace($vmNoteObject)) {
         $LastUpdateTime = [Datetime]::ParseExact($vmNoteObject.LastUpdate, 'MM/dd/yyyy HH:mm', $null)
         $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-        if (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP) {
+        # Skip the expensive Get-VMNetworkAdapter call when the VM isn't Running — a stopped
+        # VM will never report an IP, and this call dominates init time when many VMs are off
+        # (and is the source of the "sometimes fast / sometimes slow" variability).
+        $vmIsRunning = ($vm.State -eq 'Running')
+        if ($vmIsRunning -and (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP)) {
             $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                 if ($null -eq $vmNoteObject.LastKnownIP) {
