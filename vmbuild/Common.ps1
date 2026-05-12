@@ -839,9 +839,13 @@ function Get-File {
                 Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
                 return $false
             }
+
+            # All retry attempts exhausted without returning — should not reach here
+            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $copyAttempts attempt(s)." -Failure
+            return $false
         }
 
-        # ---- Verify destination exists after transfer ----
+        # ---- Verify destination exists after transfer (downloads) ----
         if (Test-Path $Destination) {
             return $true
         }
