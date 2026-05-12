@@ -713,6 +713,48 @@ function Test-AnyExistingVMModified {
     return $false
 }
 
+# Shared exit handler for the '!' (return-to-main-menu) and '*' (go-back) paths
+# in Select-MainMenu. Both prompt to confirm losing unsaved edits to existing
+# VMs, flush the VM cache, and signal the outer loop via a global flag.
+#   Mode = 'StartOver' -> sets $global:StartOver (used by '!')
+#   Mode = 'GoBack'    -> sets $global:GoBack and stashes $global:SavedConfig (used by '*')
+# Returns:
+#   $null  - caller should not return; just continue the menu loop
+#   $false - caller should "return $false" to leave the menu
+function Invoke-MainMenuExit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('StartOver', 'GoBack')]
+        [string] $Mode
+    )
+
+    if (Test-AnyExistingVMModified) {
+        $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
+        # NOTE: the existing semantics are inverted vs. what the prompt suggests:
+        # answering "y" cancels the exit (caller returns from Select-MainMenu),
+        # and answering anything else (incl. "n") *also* cancels but falls back
+        # to the menu loop. Either way, when modified, we do NOT proceed to the
+        # flag-setting exit path below. We preserve that here.
+        if ($response -eq "y") {
+            # Signal caller to plain-return (exits Select-MainMenu entirely).
+            return 'PlainReturn'
+        }
+        # Non-"y" -> caller should continue the menu loop without setting flags.
+        return $null
+    }
+
+    if ($Mode -eq 'StartOver') {
+        $global:StartOver = $true
+    }
+    else {
+        $global:GoBack = $true
+        $global:SavedConfig = $global:Config
+    }
+    $global:DisableSmartUpdate = $false
+    Get-List -FlushCache
+    return $false
+}
+
 function Select-MainMenu {
     if (-not $global:existingMachines) {   
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $false 
@@ -863,37 +905,14 @@ function Select-MainMenu {
                 return $global:DebugConfig
             }
             "!" {
-                $modified = Test-AnyExistingVMModified
-                $response = "y"
-                if ($modified) {
-                    $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
-                    if ($response -eq "y") {
-                        return
-                    }
-                }
-                if ($response -eq "y") {
-                    $global:StartOver = $true
-                    $global:DisableSmartUpdate = $false
-                    Get-List -FlushCache
-                    return $false
-                }                
+                $r = Invoke-MainMenuExit -Mode StartOver
+                if ($r -eq 'PlainReturn') { return }
+                if ($r -eq $false) { return $false }
             }
-            "*" {                                              
-                $modified = Test-AnyExistingVMModified
-                $response = "y"
-                if ($modified) {
-                    $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
-                    if ($response -eq "y") {
-                        return
-                    }
-                }
-                if ($response -eq "y") {
-                    $global:GoBack = $true
-                    $global:SavedConfig = $global:Config                              
-                    $global:DisableSmartUpdate = $false
-                    Get-List -FlushCache
-                    return $false
-                }                
+            "*" {
+                $r = Invoke-MainMenuExit -Mode GoBack
+                if ($r -eq 'PlainReturn') { return }
+                if ($r -eq $false) { return $false }
             }
             "z" {
                 $i = 0
