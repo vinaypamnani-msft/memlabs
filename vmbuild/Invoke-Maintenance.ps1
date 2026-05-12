@@ -168,6 +168,7 @@ function Invoke-DotNet6Maintenance {
     $hadFailure = $false
     $uninstallCount = 0
     $successCount = 0
+    $alreadyAbsentCount = 0
 
     foreach ($target in $targets) {
         $uninstall = $target.QuietUninstallString
@@ -226,13 +227,17 @@ function Invoke-DotNet6Maintenance {
             Write-LogMessage "Successfully uninstalled: '$($target.DisplayName)'"
             $successCount++
         }
+        elseif ($proc.ExitCode -eq 1605 -or $proc.ExitCode -eq 1614) {
+            Write-LogMessage "Component already removed or not present: '$($target.DisplayName)' (Exit code: $($proc.ExitCode))" -Level 'WARNING'
+            $alreadyAbsentCount++
+        }
         else {
             Write-LogMessage "Uninstall failed for '$($target.DisplayName)' (Exit code: $($proc.ExitCode))" -Level 'ERROR'
             $hadFailure = $true
         }
     }
 
-    Write-LogMessage ".NET 6 uninstall summary: $successCount/$uninstallCount successful"
+    Write-LogMessage ".NET 6 uninstall summary: $successCount successful, $alreadyAbsentCount already absent, $($uninstallCount - $successCount - $alreadyAbsentCount) failed (total: $uninstallCount)"
 
     if ($hadFailure) {
         Write-LogMessage 'One or more .NET 6 uninstall operations failed.' -Level 'WARNING'
