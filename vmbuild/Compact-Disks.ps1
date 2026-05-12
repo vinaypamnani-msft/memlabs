@@ -1030,21 +1030,79 @@ if ($env:_COMPACT_DISKS_WORKER) {
     }
 
     # --- Auto-restart VMs that were Running at the start ---
-    # We only restart VMs whose prep completed successfully (we don't want
-    # to "restart" a VM we never actually stopped). Restarts are fired in
-    # parallel as Hyper-V queues them.
+    # Order matters: DCs first (other VMs need AD), then file servers (some
+    # SQL/CM roles depend on remote storage), then SQL, then CAS, then PRI,
+    # then everything else. We reuse Get-CriticalVMs + Invoke-SmartStartVMs
+    # from Common.GenConfig.ps1 (dot-sourced by Common.ps1 in this worker)
+    # which is the same machinery used elsewhere for clean starts.
     $toRestart = @($vmInfoList | Where-Object { $_.WasRunning -and $_.Status -eq 'Completed' })
     if ($toRestart.Count -gt 0) {
-        $UiSync.StatusText = "Restarting $($toRestart.Count) VM(s)..."
+        $UiSync.StatusText = "Restarting $($toRestart.Count) VM(s) in critical-order..."
         [void]$UiSync.Log.Add('')
-        [void]$UiSync.Log.Add("--- Restarting $($toRestart.Count) VM(s) that were running at start ---")
+        [void]$UiSync.Log.Add("--- Restarting $($toRestart.Count) VM(s) (DC -> FS -> SQL -> CAS -> PRI -> others) ---")
+
+        # Group VMs by domain so a multi-domain compaction still gets
+        # domain-aware ordering. In the common (single-domain) case this
+        # loops exactly once.
+        $byDomain = @{}
         foreach ($r in $toRestart) {
-            try {
-                Start-VM -Name $r.VMName -ErrorAction Stop
-                [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued")
+            $note = $null
+            try { $note = Get-VMNote -VMName $r.VMName -ErrorAction SilentlyContinue } catch {}
+            $dom = if ($note -and $note.domain) { $note.domain } else { '<unknown>' }
+            if (-not $byDomain.ContainsKey($dom)) { $byDomain[$dom] = @() }
+            $byDomain[$dom] += $r.VMName
+        }
+
+        $smartStartOk = $false
+        if (Get-Command Get-CriticalVMs -ErrorAction SilentlyContinue) {
+            foreach ($dom in $byDomain.Keys) {
+                $names = $byDomain[$dom]
+                if ($dom -eq '<unknown>') {
+                    [void]$UiSync.Log.Add("[RESTART-WARN] No domain info for: $($names -join ', '); falling back to Start-VM")
+                    continue
+                }
+                try {
+                    [void]$UiSync.Log.Add("[RESTART] Domain '$dom' - sequencing $($names.Count) VM(s)")
+                    $critList = Get-CriticalVMs -domain $dom -vmNames $names
+                    Invoke-SmartStartVMs -CritList $critList -quiet $true
+                    $smartStartOk = $true
+                    foreach ($n in $names) {
+                        [void]$UiSync.Log.Add("[RESTART] $n - start sequenced")
+                    }
+                }
+                catch {
+                    [void]$UiSync.Log.Add("[RESTART-ERR] Domain '$dom' smart-start failed: $($_.Exception.Message)")
+                }
             }
-            catch {
-                [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
+        }
+
+        # Fallback: any VMs we couldn't sequence (no domain info, or
+        # Get-CriticalVMs not available) get a plain Start-VM.
+        $unhandled = $toRestart | Where-Object {
+            $note = $null
+            try { $note = Get-VMNote -VMName $_.VMName -ErrorAction SilentlyContinue } catch {}
+            -not ($note -and $note.domain) -or -not $smartStartOk
+        }
+        if (-not $smartStartOk) {
+            foreach ($r in $toRestart) {
+                try {
+                    Start-VM -Name $r.VMName -ErrorAction Stop
+                    [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued (fallback)")
+                }
+                catch {
+                    [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
+                }
+            }
+        }
+        elseif ($unhandled) {
+            foreach ($r in $unhandled) {
+                try {
+                    Start-VM -Name $r.VMName -ErrorAction Stop
+                    [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued (no domain)")
+                }
+                catch {
+                    [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
+                }
             }
         }
     }
