@@ -10,6 +10,9 @@ param (
     [Parameter()]
     [switch]$GetLatestHotfixVersion,
     [Parameter()]
+    [ValidateSet("Default", "Fast", "Full")]
+    [string]$StartupProfile = "Default",
+    [Parameter()]
     [switch]$FastInit,
     [Parameter()]
     [switch]$SkipStorageInit,
@@ -22,7 +25,25 @@ param (
     [Parameter()]
     [switch]$SkipHostPreparation,
     [Parameter()]
-    [switch]$WarmVmCacheInBackground
+    [switch]$WarmVmCacheInBackground,
+    [Parameter()]
+    [switch]$DisableInitContextCache,
+    [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int]$InitContextCacheMinutes = 30,
+    [Parameter()]
+    [switch]$DisableHotfixCache,
+    [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int]$HotfixCacheMinutes = 60,
+    [Parameter()]
+    [switch]$DisableGitBranchCache,
+    [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int]$GitBranchCacheMinutes = 5
+    ,
+    [Parameter()]
+    [switch]$DisableSupportedOptionsCache
 )
 
 ########################
@@ -1426,9 +1447,27 @@ function Test-NoRRAS {
     }
 
     $router = (Get-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
-    if ((Get-WindowsFeature Routing).Installed -or $router -eq 0) {
+    $routingFeatureInstalled = $false
+    if (Get-Command -Name "Get-WindowsFeature" -ErrorAction SilentlyContinue) {
+        try {
+            $routingFeatureInstalled = [bool](Get-WindowsFeature Routing).Installed
+        }
+        catch {
+            Write-Log "Test-NoRRAS: Get-WindowsFeature failed; continuing with router-state checks only. $_" -Warning
+        }
+    }
+    else {
+        Write-Log "Test-NoRRAS: Get-WindowsFeature is unavailable; continuing with router-state checks only." -Warning
+    }
+
+    if ($routingFeatureInstalled -or $router -eq 0) {
         Set-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters -Name IpEnableRouter -Value 1
-        Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools
+        if (Get-Command -Name "Uninstall-WindowsFeature" -ErrorAction SilentlyContinue) {
+            Uninstall-WindowsFeature 'Routing', 'DirectAccess-VPN' -Confirm:$false -IncludeManagementTools -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Log "Test-NoRRAS: Uninstall-WindowsFeature is unavailable; skipping RRAS feature removal." -Warning
+        }
         try {
             Remove-VMSwitch2 -NetworkName "External"
         }
@@ -1523,37 +1562,66 @@ function Start-DHCP {
         [switch]$Restart
     )
 
+    if (-not (Get-Command -Name "Get-Service" -ErrorAction SilentlyContinue)) {
+        Write-Log "Start-DHCP: Get-Service cmdlet is unavailable; skipping DHCP initialization." -Warning
+        return $false
+    }
+
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
     if (-not $dhcp) {
         Write-OrangePoint "DHCP is not installed. Installing..."
+
+        if (-not (Get-Command -Name "Install-WindowsFeature" -ErrorAction SilentlyContinue)) {
+            Write-Log "Start-DHCP: Install-WindowsFeature is unavailable on this host. DHCP will not be installed automatically." -Warning
+            return $false
+        }
+
         $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
 
-        if (-not $installed.Success) {
-            Write-RedX "DHCP Installation failed $($installed.ExitCode). Install DHCP windows feature manually, and try again." -Failure
+        if (-not $installed -or -not $installed.Success) {
+            $exitCode = $null
+            if ($installed) {
+                $exitCode = $installed.ExitCode
+            }
+            Write-RedX "DHCP Installation failed $exitCode. Install DHCP windows feature manually, and try again." -Failure
+            return $false
+        }
+
+        $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+        if (-not $dhcp) {
+            Write-Log "Start-DHCP: DHCP service is still unavailable after installation attempt." -Warning
             return $false
         }
     }
 
     if ($dhcp.Status -ne 'Running') {
-        start-service "DHCPServer"
-        start-sleep -seconds 5
+        Start-Service "DHCPServer" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
     }
     else {
         if ($Restart) {
-            restart-service "DHCPServer"
-            start-sleep -seconds 5
+            Restart-Service "DHCPServer" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
         }
     }
+
     $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+    if (-not $dhcp) {
+        Write-Log "Start-DHCP: DHCP service is unavailable after start/restart attempt." -Warning
+        return $false
+    }
+
     if ($dhcp.Status -ne 'Running') {
         Start-Sleep -Seconds 10
-        start-service "DHCPServer"
-        start-sleep -seconds 30
+        Start-Service "DHCPServer" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 30
         $dhcp = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
-        if ($dhcp.Status -ne 'Running') {
+        if (-not $dhcp -or $dhcp.Status -ne 'Running') {
+            Write-Log "Start-DHCP: DHCP service failed to reach Running state." -Warning
             return $false
         }
     }
+
     return $true
 }
 
@@ -4047,7 +4115,87 @@ function Set-QuickEdit() {
     }
 }
 
+function Get-SupportedOptionsCacheSignature {
+
+    $fileListPath = Join-Path $Common.AzureFilesPath ($(if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }))
+    $azureFilesPathLastWriteUtc = $null
+    $isoPathLastWriteUtc = $null
+    $osIsoPathLastWriteUtc = $null
+    $fileListLastWriteUtc = $null
+
+    try {
+        if (Test-Path $Common.AzureFilesPath) {
+            $azureFilesPathLastWriteUtc = (Get-Item $Common.AzureFilesPath).LastWriteTimeUtc.ToString("o")
+        }
+    }
+    catch {}
+
+    try {
+        $isoPath = Join-Path $Common.AzureFilesPath "ISO"
+        if (Test-Path $isoPath) {
+            $isoPathLastWriteUtc = (Get-Item $isoPath).LastWriteTimeUtc.ToString("o")
+        }
+    }
+    catch {}
+
+    try {
+        $osIsoPath = Join-Path $Common.AzureFilesPath "ISO\OS"
+        if (Test-Path $osIsoPath) {
+            $osIsoPathLastWriteUtc = (Get-Item $osIsoPath).LastWriteTimeUtc.ToString("o")
+        }
+    }
+    catch {}
+
+    try {
+        if (Test-Path $fileListPath) {
+            $fileListLastWriteUtc = (Get-Item $fileListPath).LastWriteTimeUtc.ToString("o")
+        }
+    }
+    catch {}
+
+    $signatureObject = [PSCustomObject]@{
+        OfflineMode             = [bool]$Common.OfflineMode
+        DevBranch               = [bool]$Common.DevBranch
+        FileListPath            = $fileListPath
+        FileListLastWriteUtc    = $fileListLastWriteUtc
+        AzureFilesPath          = $Common.AzureFilesPath
+        AzureFilesLastWriteUtc  = $azureFilesPathLastWriteUtc
+        IsoPathLastWriteUtc     = $isoPathLastWriteUtc
+        OsIsoPathLastWriteUtc   = $osIsoPathLastWriteUtc
+        OsSignature             = @($Common.AzureFileList.OS | ForEach-Object { "$($_.id)|$($_.filename)" }) -join ';'
+        SqlSignature            = @($Common.AzureFileList.ISO | ForEach-Object { "$($_.id)|$($_.filename)" }) -join ';'
+        CmSignature             = @($Common.AzureFileList.CMVersions | ForEach-Object { "$($_.filename)|$($_.versions -join ',')" }) -join ';'
+    }
+
+    return ($signatureObject | ConvertTo-Json -Compress)
+}
+
 function Set-SupportedOptions {
+
+    $supportedOptionsCacheFile = $null
+    if ($Common.CachePath) {
+        $supportedOptionsCacheFile = Join-Path $Common.CachePath "supported-options.json"
+    }
+
+    if (-not $DisableSupportedOptionsCache -and $supportedOptionsCacheFile -and $Common.AzureFileList) {
+        try {
+            $currentSupportedOptionsSignature = Get-SupportedOptionsCacheSignature
+            if (Test-Path $supportedOptionsCacheFile) {
+                $cachedSupportedOptionsRaw = Get-Content $supportedOptionsCacheFile -ErrorAction SilentlyContinue
+                if (-not [string]::IsNullOrWhiteSpace($cachedSupportedOptionsRaw)) {
+                    $cachedSupportedOptions = $cachedSupportedOptionsRaw | ConvertFrom-Json
+                    if ($cachedSupportedOptions -and $cachedSupportedOptions.Signature -eq $currentSupportedOptionsSignature -and $cachedSupportedOptions.Supported) {
+                        $Common.Supported = $cachedSupportedOptions.Supported
+                        Write-Log "Loaded supported options from cache." -LogOnly
+                        return
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "Failed reading supported options cache: $_" -LogOnly
+        }
+    }
 
     $roles = @(
         "DomainMember",
@@ -4106,6 +4254,23 @@ function Set-SupportedOptions {
     }
 
     $Common.Supported = $supported
+
+    if (-not $DisableSupportedOptionsCache -and $supportedOptionsCacheFile -and $Common.AzureFileList) {
+        try {
+            if (-not $currentSupportedOptionsSignature) {
+                $currentSupportedOptionsSignature = Get-SupportedOptionsCacheSignature
+            }
+
+            [PSCustomObject]@{
+                GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString("o")
+                Signature      = $currentSupportedOptionsSignature
+                Supported      = $supported
+            } | ConvertTo-Json -Depth 6 | Set-Content -Path $supportedOptionsCacheFile -Encoding UTF8
+        }
+        catch {
+            Write-Log "Failed writing supported options cache: $_" -LogOnly
+        }
+    }
 
 }
 
@@ -4368,11 +4533,29 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
 
 if (-not $Common.Initialized) {
 
-    $effectiveSkipStorageInit = $FastInit.IsPresent -or $SkipStorageInit.IsPresent
-    $effectiveSkipMaintenanceRefresh = $FastInit.IsPresent -or $SkipMaintenanceRefresh.IsPresent
-    $effectiveSkipVmCacheRefresh = $FastInit.IsPresent -or $SkipVmCacheRefresh.IsPresent
-    $effectiveSkipEnvironmentDetection = $FastInit.IsPresent -or $SkipEnvironmentDetection.IsPresent
-    $effectiveSkipHostPreparation = $FastInit.IsPresent -or $SkipHostPreparation.IsPresent
+    if (-not $PSBoundParameters.ContainsKey('StartupProfile') -and $FastInit.IsPresent) {
+        $StartupProfile = "Fast"
+    }
+
+    $profileSkipStorageInit = $false
+    $profileSkipMaintenanceRefresh = $false
+    $profileSkipVmCacheRefresh = $false
+    $profileSkipEnvironmentDetection = $false
+    $profileSkipHostPreparation = $false
+
+    if ($StartupProfile -eq "Fast") {
+        $profileSkipStorageInit = $true
+        $profileSkipMaintenanceRefresh = $true
+        $profileSkipVmCacheRefresh = $true
+        $profileSkipEnvironmentDetection = $true
+        $profileSkipHostPreparation = $true
+    }
+
+    $effectiveSkipStorageInit = $profileSkipStorageInit -or $SkipStorageInit.IsPresent
+    $effectiveSkipMaintenanceRefresh = $profileSkipMaintenanceRefresh -or $SkipMaintenanceRefresh.IsPresent
+    $effectiveSkipVmCacheRefresh = $profileSkipVmCacheRefresh -or $SkipVmCacheRefresh.IsPresent
+    $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
+    $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
     try {
         Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
@@ -4404,24 +4587,80 @@ if (-not $Common.Initialized) {
         ### GIT BRANCH  ###
         ###################
 
+        $startupCachePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "cache")
+        $gitBranchCacheFile = Join-Path $startupCachePath "git-branch-context.json"
+
         $image = (Join-Path $PSScriptRoot "MemLabs.png")
         if (-not $PSBoundParameters.ContainsKey('DevBranch')) {
             Write-Progress2 "MemLabs initializing" -Status "Checking Git Status" -PercentComplete 2
             write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
             $devBranch = $false
-            try {
-                if ($pwd.Path -like '*memlabs*') {
-                    $currentBranch = Get-BranchName
+            $currentBranch = $null
+
+            if (-not $DisableGitBranchCache) {
+                try {
+                    if (Test-Path $gitBranchCacheFile) {
+                        $cachedGitBranchContextRaw = Get-Content $gitBranchCacheFile -ErrorAction SilentlyContinue
+                        if (-not [string]::IsNullOrWhiteSpace($cachedGitBranchContextRaw)) {
+                            $cachedGitBranchContext = $cachedGitBranchContextRaw | ConvertFrom-Json
+                            if ($cachedGitBranchContext -and $cachedGitBranchContext.GeneratedOnUtc -and $cachedGitBranchContext.CurrentBranch) {
+                                $cachedGitGeneratedOnUtc = [DateTime]::Parse($cachedGitBranchContext.GeneratedOnUtc)
+                                $gitCacheAgeMinutes = [Math]::Abs(((Get-Date).ToUniversalTime() - $cachedGitGeneratedOnUtc).TotalMinutes)
+                                if ($gitCacheAgeMinutes -le $GitBranchCacheMinutes) {
+                                    $currentBranch = $cachedGitBranchContext.CurrentBranch
+                                    $cachedIsDevBranch = $false
+                                    if ($null -ne $cachedGitBranchContext.IsDevBranch) {
+                                        if ($cachedGitBranchContext.IsDevBranch -is [bool]) {
+                                            $cachedIsDevBranch = $cachedGitBranchContext.IsDevBranch
+                                        }
+                                        elseif ($cachedGitBranchContext.IsDevBranch.PSObject.Properties.Name -contains "IsPresent") {
+                                            $cachedIsDevBranch = [bool]$cachedGitBranchContext.IsDevBranch.IsPresent
+                                        }
+                                        else {
+                                            $cachedIsDevBranch = [bool]$cachedGitBranchContext.IsDevBranch
+                                        }
+                                    }
+                                    $devBranch = $cachedIsDevBranch
+                                    Write-Log "Loaded git branch context from cache (age: $([Math]::Round($gitCacheAgeMinutes, 1)) minutes)." -LogOnly
+                                }
+                            }
+                        }
+                    }
                 }
-                else {
-                    #Set the current location to the script root
-                    Set-Location -Path $PSScriptRoot
-                    $currentBranch = Get-BranchName
+                catch {
+                    Write-Log "Failed reading git branch cache: $_" -LogOnly
+                }
+            }
+
+            try {
+                if (-not $currentBranch) {
+                    if ($pwd.Path -like '*memlabs*') {
+                        $currentBranch = Get-BranchName
+                    }
+                    else {
+                        #Set the current location to the script root
+                        Set-Location -Path $PSScriptRoot
+                        $currentBranch = Get-BranchName
+                    }
                 }
             }
             catch {}
+
             if ($currentBranch -and $currentBranch -notmatch "main") {
                 $devBranch = $true
+            }
+
+            if (-not $DisableGitBranchCache -and $currentBranch) {
+                try {
+                    [PSCustomObject]@{
+                        GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString("o")
+                        CurrentBranch  = $currentBranch
+                        IsDevBranch    = [bool]$devBranch
+                    } | ConvertTo-Json | Set-Content -Path $gitBranchCacheFile -Encoding UTF8
+                }
+                catch {
+                    Write-Log "Failed writing git branch cache: $_" -LogOnly
+                }
             }
 
             if ($devBranch) {
@@ -4453,6 +4692,9 @@ if (-not $Common.Initialized) {
         $staging = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "baseimagestaging")           # Path where staged files for base image creation go
         $storagePath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "azureFiles")             # Path for downloaded files
         $logsPath = New-Directory -DirectoryPath (Join-Path $PSScriptRoot "logs")                      # Path for log files
+        $initCachePath = $startupCachePath                                                                 # Path for init-time cache files
+        $initContextCacheFile = Join-Path $initCachePath "init-context.json"
+        $hotfixVersionCacheFile = Join-Path $initCachePath "latest-hotfix-version.json"
         $desktopPath = [Environment]::GetFolderPath("Desktop")
 
         # Get latest hotfix version
@@ -4462,27 +4704,70 @@ if (-not $Common.Initialized) {
         # Common global props
 
         # Is CorpNet Host?
-        $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
         $corpNetInterfaceIndex = $null
-        if ($dnsClient) {
-            $corpNetInterfaceIndex = $dnsClient.InterfaceIndex
+        $isAzureVM = $false
+        $loadedInitContextCache = $false
+        if (-not $DisableInitContextCache) {
+            try {
+                if (Test-Path $initContextCacheFile) {
+                    $cachedInitContextRaw = Get-Content $initContextCacheFile -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($cachedInitContextRaw)) {
+                        $cachedInitContext = $cachedInitContextRaw | ConvertFrom-Json
+                        if ($cachedInitContext -and $cachedInitContext.GeneratedOnUtc) {
+                            $cachedGeneratedOnUtc = [DateTime]::Parse($cachedInitContext.GeneratedOnUtc)
+                            $cacheAgeMinutes = [Math]::Abs(((Get-Date).ToUniversalTime() - $cachedGeneratedOnUtc).TotalMinutes)
+                            if ($cacheAgeMinutes -le $InitContextCacheMinutes) {
+                                $corpNetInterfaceIndex = $cachedInitContext.CorpNetInterfaceIndex
+                                $isAzureVM = [bool]$cachedInitContext.IsAzureVM
+                                $loadedInitContextCache = $true
+                                Write-Log "Loaded initialization context from cache (age: $([Math]::Round($cacheAgeMinutes, 1)) minutes)." -LogOnly
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Log "Failed reading initialization context cache: $_" -LogOnly
+            }
         }
 
-        $isAzureVM = $false
         if (-not $InJob) {
             $colors = Get-Colors
-            if (-not $effectiveSkipEnvironmentDetection) {
-                if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
-                if (-not $isAzureVM) {
-                    try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
-                    catch {}
-                    if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
-                        $isAzureVM = $true
+            if (-not $loadedInitContextCache) {
+                $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
+                if ($dnsClient) {
+                    $corpNetInterfaceIndex = $dnsClient.InterfaceIndex
+                }
+
+                if (-not $effectiveSkipEnvironmentDetection) {
+                    if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                    if (-not $isAzureVM) {
+                        try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                        catch {}
+                        if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
+                            $isAzureVM = $true
+                        }
+                    }
+                }
+                else {
+                    Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
+                }
+
+                if (-not $DisableInitContextCache) {
+                    try {
+                        [PSCustomObject]@{
+                            GeneratedOnUtc       = (Get-Date).ToUniversalTime().ToString("o")
+                            CorpNetInterfaceIndex = $corpNetInterfaceIndex
+                            IsAzureVM            = $isAzureVM
+                        } | ConvertTo-Json | Set-Content -Path $initContextCacheFile -Encoding UTF8
+                    }
+                    catch {
+                        Write-Log "Failed writing initialization context cache: $_" -LogOnly
                     }
                 }
             }
             else {
-                Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
+                Write-Log "Skipping environment probes because initialization context cache is fresh." -LogOnly
             }
         }
 
@@ -4580,11 +4865,50 @@ if (-not $Common.Initialized) {
             if ((-not $InJob -or $GetLatestHotfixVersion) -and -not $effectiveSkipMaintenanceRefresh -and -not $common.OfflineMode) {
                 Set-BackgroundImage $image "right" (50 - 11) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Gathering VM Maintenance Tasks" -PercentComplete 11
-                $vmFixes = Get-VMFixes -ReturnDummyList
-                if ($vmFixes) {
-                    $latestHotfixVersion = $vmFixes | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
-                    if ($latestHotfixVersion) {
-                        $global:Common.latestHotfixVersion = $latestHotfixVersion
+
+                $loadedHotfixCache = $false
+                if (-not $DisableHotfixCache) {
+                    try {
+                        if (Test-Path $hotfixVersionCacheFile) {
+                            $cachedHotfixRaw = Get-Content $hotfixVersionCacheFile -ErrorAction SilentlyContinue
+                            if (-not [string]::IsNullOrWhiteSpace($cachedHotfixRaw)) {
+                                $cachedHotfix = $cachedHotfixRaw | ConvertFrom-Json
+                                if ($cachedHotfix -and $cachedHotfix.GeneratedOnUtc -and $cachedHotfix.LatestHotfixVersion) {
+                                    $cachedHotfixGeneratedOnUtc = [DateTime]::Parse($cachedHotfix.GeneratedOnUtc)
+                                    $hotfixCacheAgeMinutes = [Math]::Abs(((Get-Date).ToUniversalTime() - $cachedHotfixGeneratedOnUtc).TotalMinutes)
+                                    if ($hotfixCacheAgeMinutes -le $HotfixCacheMinutes) {
+                                        $global:Common.latestHotfixVersion = $cachedHotfix.LatestHotfixVersion
+                                        $loadedHotfixCache = $true
+                                        Write-Log "Loaded latest hotfix version from cache (age: $([Math]::Round($hotfixCacheAgeMinutes, 1)) minutes)." -LogOnly
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Log "Failed reading hotfix cache: $_" -LogOnly
+                    }
+                }
+
+                if (-not $loadedHotfixCache) {
+                    $vmFixes = Get-VMFixes -ReturnDummyList
+                    if ($vmFixes) {
+                        $latestHotfixVersion = $vmFixes | Sort-Object FixVersion -Descending | Select-Object -First 1 -ExpandProperty FixVersion
+                        if ($latestHotfixVersion) {
+                            $global:Common.latestHotfixVersion = $latestHotfixVersion
+
+                            if (-not $DisableHotfixCache) {
+                                try {
+                                    [PSCustomObject]@{
+                                        GeneratedOnUtc      = (Get-Date).ToUniversalTime().ToString("o")
+                                        LatestHotfixVersion = $latestHotfixVersion
+                                    } | ConvertTo-Json | Set-Content -Path $hotfixVersionCacheFile -Encoding UTF8
+                                }
+                                catch {
+                                    Write-Log "Failed writing hotfix cache: $_" -LogOnly
+                                }
+                            }
+                        }
                     }
                 }
             }
