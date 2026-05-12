@@ -107,6 +107,35 @@ function select-DeleteSnapshotDomain {
     Write-Log "Removing previous snapshots of Virtual Machines in '$domain'" -Activity
     $vms = get-list -type vm -DomainName $domain
 
+    # --- Pre-flight: confirm every VM has enough free disk on the parent VHDX's
+    # drive(s) to absorb its AVHDX chain. If any VM fails the check, abort
+    # before we kick off Remove-VMCheckpoint - running out of space mid-merge
+    # leaves the VHDX chain in a state the VM cannot boot from.
+    Write-Log "Checking free disk space for snapshot merge..." -SubActivity
+    $insufficient = @()
+    foreach ($vm in $vms) {
+        try {
+            $chk = Test-VMCheckpointMergeFreeSpace -VMName $vm.vmName
+        } catch {
+            Write-Log "Free-space check for $($vm.vmName) failed: $($_.Exception.Message)" -Warning
+            continue
+        }
+        if (-not $chk.Ok) {
+            $insufficient += [PSCustomObject]@{ VMName = $vm.vmName; Reason = $chk.Reason }
+            Write-Log "  $($vm.vmName): $($chk.Reason)" -Failure
+        }
+    }
+    if ($insufficient.Count -gt 0) {
+        Write-Host
+        Write-Host2 -ForegroundColor Red "Aborting merge: $($insufficient.Count) VM(s) do not have enough free disk space."
+        Write-Host2 -ForegroundColor Red "Free up space (or compact the parent VHDX) and try again. Merging without enough space will hang and may leave the VM unbootable."
+        foreach ($i in $insufficient) {
+            Write-Host2 -ForegroundColor Yellow "  $($i.VMName): $($i.Reason)"
+        }
+        return
+    }
+    Write-Log "  Free-space check passed for $($vms.Count) VM(s)." -Success
+
     foreach ($vm in $vms) {
         $complete = $false
         $tries = 0

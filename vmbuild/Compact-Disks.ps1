@@ -554,10 +554,11 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $wasRunning = ($initial -and $initial.State -eq 'Running')
 
                         # Dot-source Common.ps1 so we have Invoke-VmCommand /
-                        # Get-VmSession / $Common.LocalAdmin. -InJob suppresses
-                        # the UI/background-image init bits.
+                        # Get-VmSession / $Common.LocalAdmin, plus the
+                        # Test-VMCheckpointMergeFreeSpace pre-merge check.
+                        # -InJob suppresses the UI/background-image init bits.
                         $commonLoaded = $false
-                        if ($doOnlineClean -and $commonPath -and (Test-Path $commonPath)) {
+                        if ($commonPath -and (Test-Path $commonPath)) {
                             try {
                                 if ($Common -and $Common.Initialized) { $Common.Initialized = $false }
                                 . $commonPath -InJob:$true
@@ -731,6 +732,33 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         # --- 2) Merge every checkpoint ---
                         $snapshots = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue)
                         if ($snapshots.Count -gt 0) {
+                            # Pre-flight: confirm we have enough free disk on
+                            # the parent VHDX's drive(s) to absorb the AVHDX
+                            # chain. Running out mid-merge hangs the merge and
+                            # can leave the VHDX chain unbootable.
+                            $freeOk = $true
+                            if ($commonLoaded -and (Get-Command Test-VMCheckpointMergeFreeSpace -ErrorAction SilentlyContinue)) {
+                                try {
+                                    $chk = Test-VMCheckpointMergeFreeSpace -VMName $n
+                                    if (-not $chk.Ok) {
+                                        $freeOk = $false
+                                        Write-Output "::LOG::[MERGE-SKIP] Insufficient free disk space: $($chk.Reason)"
+                                    }
+                                    else {
+                                        foreach ($d in $chk.Details) {
+                                            Write-Output ("::LOG::[MERGE-CHECK] {0} need={1:N1}GB avail={2:N1}GB" -f $d.Drive, ($d.Required/1GB), ($d.Available/1GB))
+                                        }
+                                    }
+                                } catch {
+                                    Write-Output "::LOG::[MERGE-WARN] Free-space check failed: $($_.Exception.Message)"
+                                }
+                            }
+                            if (-not $freeOk) {
+                                # Bail out before merging - return Ok=$false so the
+                                # parent reports the VM as prep-failed and skips it.
+                                return @{ Ok = $false; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = @(); Error = ($chk.Reason) }
+                            }
+
                             $i = 0
                             $vmPath = (Get-VM -Name $n -ErrorAction SilentlyContinue).Path
                             foreach ($snap in $snapshots) {
@@ -802,8 +830,19 @@ if ($env:_COMPACT_DISKS_WORKER) {
             $stillPrep = [System.Collections.Generic.List[PSCustomObject]]::new()
             foreach ($vm in $activePrepJobs) {
                 if ($vm.Job.State -eq 'Completed') {
-                    try { $result = Receive-Job -Job $vm.Job -ErrorAction Stop } catch { $result = $null }
+                    try { $rawOut = Receive-Job -Job $vm.Job -ErrorAction Stop } catch { $rawOut = $null }
                     Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
+                    # The prep job may emit "::LOG::..." strings via Write-Output
+                    # alongside the final hashtable. Separate them.
+                    $result = $null
+                    foreach ($item in @($rawOut)) {
+                        if ($item -is [string] -and $item.StartsWith('::LOG::')) {
+                            Add-UiLog ("[PREP] $($vm.VMName) - $($item.Substring(7))")
+                        }
+                        elseif ($item -is [hashtable] -or $item -is [System.Collections.IDictionary]) {
+                            $result = $item
+                        }
+                    }
                     if ($result -and $result.Ok) {
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
@@ -836,8 +875,8 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     }
                     else {
                         $vm.Status = 'Failed'
-                        $vm.Error  = 'Prep job returned no result'
-                        Add-UiLog ("[PREP-FAIL] $($vm.VMName)")
+                        $vm.Error  = if ($result -and $result.Error) { $result.Error } else { 'Prep job returned no result' }
+                        Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
                     }
                 }
                 elseif ($vm.Job.State -eq 'Failed') {

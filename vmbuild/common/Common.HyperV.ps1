@@ -413,6 +413,129 @@ function Remove-VMCheckpoint2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Test-VMCheckpointMergeFreeSpace {
+    <#
+    .SYNOPSIS
+        Confirms the host has enough free disk space to merge a VM's checkpoint
+        chain into its parent VHDX(s) without hanging / corrupting the VM.
+
+    .DESCRIPTION
+        Hyper-V merges by writing the differencing AVHDX blocks back into the
+        parent VHDX. If the destination volume runs out of space mid-merge, the
+        operation stalls indefinitely and the VHDX chain can be left in a state
+        the VM cannot boot from.
+
+        Per attached drive, this groups every AVHDX in the chain by the volume
+        their parent VHDX lives on, sums the AVHDX file sizes (incl. nested
+        differencing chains), and confirms that drive has at least
+        (sum * SafetyFactor) bytes free.
+
+    .OUTPUTS
+        PSCustomObject with: Ok (bool), VMName, Details (per-drive results),
+        Reason (string, populated on Ok=$false).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VMName,
+        # Margin above the raw AVHDX bytes. Merge typically inflates the parent
+        # by approximately the AVHDX size, but the parent can also grow
+        # towards its MaxInternalSize. 1.2x covers metadata + small headroom.
+        [double]$SafetyFactor = 1.20,
+        # Absolute minimum free space we require on any involved drive, even
+        # if the AVHDX chain is tiny. Defaults to 5 GB.
+        [long]$MinFreeBytes = 5GB
+    )
+
+    $result = [PSCustomObject]@{
+        Ok      = $true
+        VMName  = $VMName
+        Reason  = $null
+        Details = @()
+    }
+
+    try {
+        $hds = @(Get-VMHardDiskDrive -VMName $VMName -ErrorAction Stop)
+    }
+    catch {
+        $result.Ok = $false
+        $result.Reason = "Get-VMHardDiskDrive failed: $($_.Exception.Message)"
+        return $result
+    }
+    if ($hds.Count -eq 0) { return $result }  # nothing to merge
+
+    # Walk every AVHDX from each attached disk back to its root VHDX. Group
+    # AVHDX bytes by the drive letter their *root parent* lives on (that's
+    # where the merge writes).
+    $byDrive = @{}  # drive letter -> @{ AvhdxBytes; ParentPath; ParentMax; AvhdxFiles }
+    foreach ($hd in $hds) {
+        if (-not $hd.Path) { continue }
+        $cur = $null
+        try { $cur = Get-VHD -Path $hd.Path -ErrorAction Stop } catch { continue }
+        $avhdxBytes = 0L
+        $avhdxFiles = @()
+        # Walk parent chain - $cur could be the AVHDX leaf or already the VHDX
+        while ($cur -and $cur.ParentPath) {
+            if ($cur.Path -match '\.avhdx?$') {
+                try { $avhdxBytes += ([System.IO.FileInfo]::new($cur.Path)).Length } catch {}
+                $avhdxFiles += $cur.Path
+            }
+            try { $cur = Get-VHD -Path $cur.ParentPath -ErrorAction Stop } catch { $cur = $null }
+        }
+        if (-not $cur) { continue }
+        $parentPath = $cur.Path
+        $parentMax  = [long]$cur.Size
+        if ($avhdxBytes -le 0) { continue }   # no checkpoints on this disk
+
+        $drive = $null
+        try { $drive = [System.IO.Path]::GetPathRoot($parentPath).TrimEnd('\') } catch {}
+        if (-not $drive) { continue }
+        if (-not $byDrive.ContainsKey($drive)) {
+            $byDrive[$drive] = @{ AvhdxBytes = 0L; Files = @(); Parents = @() }
+        }
+        $byDrive[$drive].AvhdxBytes += $avhdxBytes
+        $byDrive[$drive].Files      += $avhdxFiles
+        $byDrive[$drive].Parents    += @{ Path = $parentPath; Max = $parentMax }
+    }
+
+    foreach ($drive in $byDrive.Keys) {
+        $needRaw = [long]$byDrive[$drive].AvhdxBytes
+        $needed  = [long][Math]::Max($MinFreeBytes, [Math]::Ceiling($needRaw * $SafetyFactor))
+        $free    = 0L
+        try {
+            $vol = Get-Volume -DriveLetter $drive[0] -ErrorAction Stop
+            $free = [long]$vol.SizeRemaining
+        }
+        catch {
+            try {
+                $di = New-Object System.IO.DriveInfo($drive + '\')
+                $free = [long]$di.AvailableFreeSpace
+            } catch {}
+        }
+        $detail = [PSCustomObject]@{
+            Drive     = $drive
+            Required  = $needed
+            RawAvhdx  = $needRaw
+            Available = $free
+            Ok        = ($free -ge $needed)
+            AvhdxFiles = $byDrive[$drive].Files
+        }
+        $result.Details += $detail
+        if (-not $detail.Ok) {
+            $result.Ok = $false
+        }
+    }
+
+    if (-not $result.Ok) {
+        $msgs = foreach ($d in $result.Details | Where-Object { -not $_.Ok }) {
+            '{0} needs {1:N1} GB free (AVHDX={2:N1} GB, factor={3}), only {4:N1} GB available' -f `
+                $d.Drive, ($d.Required / 1GB), ($d.RawAvhdx / 1GB), $SafetyFactor, ($d.Available / 1GB)
+        }
+        $result.Reason = ($msgs -join '; ')
+    }
+
+    return $result
+}
+
 function Checkpoint-VM2 {
     [CmdletBinding()]
     param (
