@@ -4770,6 +4770,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.GenConfig.CmMenus.ps1
 . $PSScriptRoot\common\Common.GenConfig.Existing.ps1
 . $PSScriptRoot\common\Common.GenConfig.ConfigFiles.ps1
+. $PSScriptRoot\common\Common.GenConfig.Summary.ps1
 . $PSScriptRoot\common\Common.Health.ps1
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
