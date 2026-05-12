@@ -344,3 +344,69 @@ Function Get-DrawingColor {
     }
     Write-Verbose "Ending $($MyInvocation.MyCommand)"
 }
+# --- Helpers for color-coded, truncatable single-line option summaries ---
+function Get-AnsiColorCached {
+    param([string]$ColorName)
+    if (-not $script:_ansiColorCache) { $script:_ansiColorCache = @{} }
+    if (-not $script:_ansiColorCache.ContainsKey($ColorName)) {
+        try {
+            $script:_ansiColorCache[$ColorName] = (Get-RGB $ColorName | Convert-RGBtoAnsi)
+        }
+        catch {
+            $script:_ansiColorCache[$ColorName] = ""
+        }
+    }
+    return $script:_ansiColorCache[$ColorName]
+}
+
+function Format-OptionToken {
+    # Returns "<ANSI><text>" — no trailing reset, since the next token will set its own color
+    # (or Write-Host2 will append PSStyle.Reset at the end).
+    param(
+        [Parameter(Mandatory)]
+        [string]$Color,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    return "$(Get-AnsiColorCached $Color)$Text"
+}
+
+function Get-VisibleLengthAnsi {
+    param([string]$Text)
+    if (-not $Text) { return 0 }
+    return ($Text -replace "`e\[[0-9;]*m", "").Length
+}
+
+function Limit-AnsiString {
+    # Truncate an ANSI-tagged string to a max VISIBLE length, preserving embedded color codes.
+    param(
+        [string]$Text,
+        [int]$MaxVisible
+    )
+    if (-not $Text -or $MaxVisible -le 0) { return $Text }
+    $visibleLen = Get-VisibleLengthAnsi $Text
+    if ($visibleLen -le $MaxVisible) { return $Text }
+
+    $reset = if ($Global:Common.PS7) { $PSStyle.Reset } else { "$([char]27)[0m" }
+    $sb = New-Object System.Text.StringBuilder
+    $visible = 0
+    $i = 0
+    $limit = [Math]::Max(1, $MaxVisible - 3)   # leave room for "..."
+    while ($i -lt $Text.Length -and $visible -lt $limit) {
+        $ch = $Text[$i]
+        if ($ch -eq [char]27) {
+            $end = $Text.IndexOf('m', $i)
+            if ($end -lt 0) { break }
+            [void]$sb.Append($Text.Substring($i, $end - $i + 1))
+            $i = $end + 1
+        }
+        else {
+            [void]$sb.Append($ch)
+            $visible++
+            $i++
+        }
+    }
+    [void]$sb.Append("$reset...")
+    return $sb.ToString()
+}

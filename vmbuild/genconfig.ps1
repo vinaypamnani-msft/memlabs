@@ -54,7 +54,7 @@ Function Show-Passwords {
 
 Function Select-PasswordMenu {
     $customOptions = [ordered]@{"*F" = "Show-Passwords" }
-    [void](Get-Menu2 -MenuName "Show Passwords" -AdditionalOptions $customOptions -Prompt "Press Enter" -HideHelp:$true -test:$false)
+    $response = Get-Menu2 -MenuName "Show Passwords" -AdditionalOptions $customOptions -Prompt "Press Enter" -HideHelp:$true -test:$false               
 }
 Function Select-ToolsMenu {
 
@@ -144,7 +144,7 @@ function Get-PendingVMs {
     return $actualPending
 }
 
-# Cache for Quick Stats / Show-OverallHealth and related per-menu-redraw queries.
+# Cache for Quick Stats / Check-OverallHealth and related per-menu-redraw queries.
 # These values are queried on every menu redraw (every keystroke), so caching them
 # for a short TTL eliminates the visible lag on the Main Menu.
 $Global:HealthStatsCache = $null
@@ -252,7 +252,7 @@ function Write-HealthStatusIcon {
     Write-Host ']' -NoNewline
 }
 
-function Show-OverallHealth {
+function Check-OverallHealth {
 
     param (
         [Parameter(Mandatory = $false)]
@@ -346,7 +346,7 @@ function Select-ConfigMenu {
         $customOptions = [ordered]@{}
 
         $customOptions += [ordered]@{ "*C9" = "   ┌─────────       Quick Stats      ────────┒%MediumPurple" }
-        $customOptions += [ordered]@{ "*F0" = "Show-OverallHealth" }
+        $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
         $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
         $customOptions += [ordered]@{ "*BT" = "" }
         $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
@@ -908,72 +908,6 @@ function Select-DeletePending {
             Get-List -type VM -SmartUpdate | Out-Null
         }
     }
-}
-# --- Helpers for color-coded, truncatable single-line option summaries ---
-function Get-AnsiColorCached {
-    param([string]$ColorName)
-    if (-not $script:_ansiColorCache) { $script:_ansiColorCache = @{} }
-    if (-not $script:_ansiColorCache.ContainsKey($ColorName)) {
-        try {
-            $script:_ansiColorCache[$ColorName] = (Get-RGB $ColorName | Convert-RGBtoAnsi)
-        }
-        catch {
-            $script:_ansiColorCache[$ColorName] = ""
-        }
-    }
-    return $script:_ansiColorCache[$ColorName]
-}
-
-function Format-OptionToken {
-    # Returns "<ANSI><text>" — no trailing reset, since the next token will set its own color
-    # (or Write-Host2 will append PSStyle.Reset at the end).
-    param(
-        [Parameter(Mandatory)]
-        [string]$Color,
-        [Parameter(Mandatory)]
-        [AllowEmptyString()]
-        [string]$Text
-    )
-    return "$(Get-AnsiColorCached $Color)$Text"
-}
-
-function Get-VisibleLengthAnsi {
-    param([string]$Text)
-    if (-not $Text) { return 0 }
-    return ($Text -replace "`e\[[0-9;]*m", "").Length
-}
-
-function Limit-AnsiString {
-    # Truncate an ANSI-tagged string to a max VISIBLE length, preserving embedded color codes.
-    param(
-        [string]$Text,
-        [int]$MaxVisible
-    )
-    if (-not $Text -or $MaxVisible -le 0) { return $Text }
-    $visibleLen = Get-VisibleLengthAnsi $Text
-    if ($visibleLen -le $MaxVisible) { return $Text }
-
-    $reset = if ($Global:Common.PS7) { $PSStyle.Reset } else { "$([char]27)[0m" }
-    $sb = New-Object System.Text.StringBuilder
-    $visible = 0
-    $i = 0
-    $limit = [Math]::Max(1, $MaxVisible - 3)   # leave room for "..."
-    while ($i -lt $Text.Length -and $visible -lt $limit) {
-        $ch = $Text[$i]
-        if ($ch -eq [char]27) {
-            $end = $Text.IndexOf('m', $i)
-            if ($end -lt 0) { break }
-            [void]$sb.Append($Text.Substring($i, $end - $i + 1))
-            $i = $end + 1
-        }
-        else {
-            [void]$sb.Append($ch)
-            $visible++
-            $i++
-        }
-    }
-    [void]$sb.Append("$reset...")
-    return $sb.ToString()
 }
 
 function get-VMOptionsSummary {
@@ -5541,7 +5475,7 @@ function Select-Options {
             }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
-                [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction)
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
                 continue
 
@@ -5554,7 +5488,7 @@ function Select-Options {
                 $fakeNetwork = $i
                 $network = Get-EnhancedSubnetList -SubnetList $global:Config.vmOptions.Network -ConfigToCheck $global:Config
                 #Write-Option $i "$($("network").PadRight($padding," "")) = <Default - $($global:Config.vmOptions.Network)>"
-                [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true -HelpFunction $HelpFunction)
+                $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($("network").PadRight($padding," "")) = $network" -selectable $true -HelpFunction $HelpFunction
                 #Write-Option $i "$($("network").PadRight($padding," "")) = $network"
                 write-log -verbose "Adding $network as element $i in itemmap"
                 $itemMap[$i] = "network"
@@ -5565,7 +5499,7 @@ function Select-Options {
             $color = $null
             $TextToDisplay = Get-AdditionalInformation -item $item -data $value
             $color = Get-AdditionalInformationColor -item $item -data $value
-            [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable)
+            $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
             $itemMap[$i] = $item
             #Write-Option $i "$($($item).PadRight($padding," "")) = $TextToDisplay" -Color $color
@@ -5585,9 +5519,9 @@ function Select-Options {
         #else {
         #    $response = get-ValidResponse $prompt $i $null $additionalOptions -return:$true
         #}
-        [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader)
-        [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray")
-        [void](Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction)
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
+        $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction
         $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false  
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
@@ -7335,6 +7269,7 @@ function Select-VirtualMachines {
                 if (($i -eq $response) -or ($machineName -and $machineName -eq $virtualMachine.vmName) ) {
                     $machineName = $virtualMachine.vmName
                     $response = $null
+                    $existingVM = $true
                     $customOptions = [ordered] @{}
                     $customOptions += [ordered]@{
                         "Z"  = "Delete this VM from Hyper-V"
@@ -7755,7 +7690,7 @@ function Select-VirtualMachines {
                                     }
                                 }
 
-                                [void](Rename-VirtualMachine -vm $virtualMachine)
+                                $newName = Rename-VirtualMachine -vm $virtualMachine
 
                             }
                         }
@@ -7769,7 +7704,7 @@ function Select-VirtualMachines {
                             if ($global:Config.domainDefaults.IncludeSSMSOnNONSQL -eq $false) {
                                 $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSSMS' -Value $false -force
                             }
-                            [void](Rename-VirtualMachine -vm $virtualMachine)
+                            $newName = Rename-VirtualMachine -vm $virtualMachine
                         }
                         if ($newValue -eq "A") {
                             if ($null -eq $virtualMachine.additionalDisks) {
