@@ -221,10 +221,11 @@ if ($env:_COMPACT_DISKS_WORKER) {
             <StackPanel x:Name="JobPanel"/>
         </ScrollViewer>
         <Border Grid.Row="4" Background="#181825" CornerRadius="4" Padding="10" MaxHeight="140">
-            <ScrollViewer x:Name="LogScroll" VerticalScrollBarVisibility="Auto">
-                <TextBlock x:Name="LogText" FontSize="12" FontFamily="Consolas"
-                           TextWrapping="Wrap" Foreground="#A6ADC8"/>
-            </ScrollViewer>
+            <TextBox x:Name="LogText" FontSize="12" FontFamily="Consolas"
+                     TextWrapping="Wrap" Foreground="#A6ADC8" Background="Transparent"
+                     BorderThickness="0" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                     AcceptsReturn="True"/>
         </Border>
     </Grid>
 </Window>
@@ -251,7 +252,6 @@ if ($env:_COMPACT_DISKS_WORKER) {
         $ElapsedText     = $window.FindName('ElapsedText')
         $JobPanel        = $window.FindName('JobPanel')
         $LogText         = $window.FindName('LogText')
-        $LogScroll       = $window.FindName('LogScroll')
         $TitleText.Text  = $UiSync.Title
 
         $bc       = [System.Windows.Media.BrushConverter]::new()
@@ -399,7 +399,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 if ($existing) { $existing += "`n" }
                 $LogText.Text = $existing + ($newLines -join "`n")
                 $ui.LogCount = $logEntries.Count
-                $LogScroll.ScrollToEnd()
+                $LogText.ScrollToEnd()
             }
         })
         $timer.Start()
