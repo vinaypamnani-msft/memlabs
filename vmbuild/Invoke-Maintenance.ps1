@@ -38,9 +38,15 @@ function Invoke-System32CurlMaintenance {
 }
 
 function Invoke-DotNet6Maintenance {
+    $dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
+    if (-not $dotnetCommand) {
+        Write-Host '.NET CLI not found. Skipping .NET 6 detection/removal.'
+        return
+    }
+
     $dotnet6Found = $false
-    $runtimeMatches = & dotnet --list-runtimes 2>$null | Select-String -Pattern ' 6\.[0-9]'
-    $sdkMatches = & dotnet --list-sdks 2>$null | Select-String -Pattern '^6\.[0-9]'
+    $runtimeMatches = & $dotnetCommand.Source --list-runtimes 2>$null | Select-String -Pattern ' 6\.[0-9]'
+    $sdkMatches = & $dotnetCommand.Source --list-sdks 2>$null | Select-String -Pattern '^6\.[0-9]'
 
     if ($runtimeMatches -or $sdkMatches) {
         $dotnet6Found = $true
