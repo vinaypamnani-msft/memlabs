@@ -33,7 +33,13 @@ param(
     [string]$Mode = 'Full',
 
     [ValidateRange(1, 16)]
-    [int]$MaxConcurrentJobs = 8
+    [int]$MaxConcurrentJobs = 8,
+
+    # Skip the in-guest defrag step (mount VHDX, defrag, Optimize-Volume,
+    # dismount) before Optimize-VHD. By default we run defrag because it
+    # massively improves the space reclaimed by Optimize-VHD - the guest has
+    # to release the blocks first.
+    [switch]$SkipDefrag
 )
 
 function Format-Size {
@@ -591,12 +597,60 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 $disk = $diskQueue.Dequeue()
                 [void]$UiSync.Log.Add("[START] $($disk.VMName) - $($disk.FileName)")
                 try {
-                    $VhdPath = $disk.Path
-                    $OptMode = $Mode
+                    $VhdPath  = $disk.Path
+                    $OptMode  = $Mode
+                    $DoDefrag = -not $SkipDefrag
                     $job = Start-Job -ScriptBlock {
-                        param($p, $m)
+                        param($p, $m, $defrag)
+                        $ProgressPreference = 'SilentlyContinue'
+
+                        # --- Optional in-guest defrag pass ---
+                        # Mount the VHDX read-write, defrag every volume that
+                        # has a drive letter, then Optimize-Volume (Defrag /
+                        # SlabConsolidate / ReTrim) so the guest releases
+                        # unused blocks. Without this Optimize-VHD only
+                        # reclaims blocks the guest has already zeroed.
+                        if ($defrag) {
+                            $mounted = $false
+                            try {
+                                Write-Progress -Activity "Compact $p" -Status 'Mounting' -PercentComplete 2
+                                $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
+                                $mounted = $true
+                                Start-Sleep -Seconds 2
+
+                                $volumes = $mountResult | Get-Disk | Get-Partition | Get-Volume |
+                                    Where-Object { $_.DriveLetter }
+                                $vi = 0
+                                foreach ($vol in $volumes) {
+                                    $vi++
+                                    $letter = $vol.DriveLetter
+                                    Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (5 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
+                                    & defrag "${letter}:" /h /x  | Out-Null
+                                    & defrag "${letter}:" /h /k /l | Out-Null
+                                    & defrag "${letter}:" /h /x  | Out-Null
+                                    & defrag "${letter}:" /h /k  | Out-Null
+                                    try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null } catch {}
+                                    try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null } catch {}
+                                    try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null } catch {}
+                                }
+                            }
+                            catch {
+                                Write-Warning "Defrag step failed for ${p}: $($_.Exception.Message)"
+                            }
+                            finally {
+                                if ($mounted) {
+                                    Write-Progress -Activity "Compact $p" -Status 'Dismounting' -PercentComplete 25
+                                    Dismount-VHD -Path $p -ErrorAction SilentlyContinue
+                                    Start-Sleep -Seconds 3
+                                }
+                            }
+                        }
+
+                        # --- Final Optimize-VHD on the parent (no longer mounted) ---
+                        Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
                         Optimize-VHD -Path $p -Mode $m
-                    } -ArgumentList $VhdPath, $OptMode
+                        Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
+                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag
                     $disk.Job    = $job
                     $disk.Status = 'Running'
                     [void]$activeJobs.Add($disk)
@@ -785,6 +839,7 @@ if ($VMNames -and $VMNames.Count -gt 0) {
 $psExe      = (Get-Process -Id $PID).Path
 $scriptPath = $MyInvocation.MyCommand.Path
 $argString  = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode {1} -MaxConcurrentJobs {2}' -f $scriptPath, $Mode, $MaxConcurrentJobs
+if ($SkipDefrag) { $argString += ' -SkipDefrag' }
 
 # Signal background mode via environment variables (invisible to the user)
 $env:_COMPACT_DISKS_WORKER   = '1'
