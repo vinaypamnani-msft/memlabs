@@ -302,7 +302,9 @@ function Test-ValidVmSupported {
     param (
         [object] $VM,
         [object] $ConfigObject,
-        [object] $ReturnObject
+        [object] $ReturnObject,
+        [Parameter(Mandatory = $false)]
+        [object] $LinuxImageNames
     )
 
     if (-not $VM) {
@@ -373,7 +375,11 @@ function Test-ValidVmSupported {
     # Supported OS
     if ($VM.role -ne "OSDClient") {
         if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            if ((Get-LinuxImages).Name -notcontains $vm.operatingSystem) {
+            # Only consult Linux image list if needed; expensive (disk read of JSON)
+            if ($null -eq $LinuxImageNames) {
+                $LinuxImageNames = (Get-LinuxImages).Name
+            }
+            if ($LinuxImageNames -notcontains $vm.operatingSystem) {
                 Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
             }
         }
@@ -1197,6 +1203,15 @@ function Test-Configuration {
 
         # VM Validations
         # ==============
+        # Cache Linux image names once for the entire validation pass — Get-LinuxImages reads JSON from disk.
+        $linuxImageNamesCache = $null
+        try {
+            $linuxImageNamesCache = @((Get-LinuxImages).Name)
+        }
+        catch {
+            $linuxImageNamesCache = @()
+        }
+
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
             $vmName = $vm.VmName
@@ -1206,7 +1221,7 @@ function Test-Configuration {
             }
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
             # Supported values
-            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return
+            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return -LinuxImageNames $linuxImageNamesCache
 
             # Valid Memory
             Test-ValidVmMemory -VM $vm -ReturnObject $return
@@ -1376,6 +1391,9 @@ function Test-Configuration {
             # Validate Primary role
             $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" }
 
+            # Cache CAS site codes once — same for every Primary in this deployment.
+            $cachedCasSiteCodes = $null
+
             # if (Test-SingleRole -VM $PSVM -ReturnObject $return) {
 
             foreach ($PSVM in $PSVMs) {
@@ -1387,9 +1405,11 @@ function Test-Configuration {
 
                 # Valid parent Site Code
                 if ($psParentSiteCode) {
-                    $casSiteCodes = Get-ValidCASSiteCodes -Config $deployConfig -Domain $deployConfig.vmOptions.domainName
-                    $parentCodes = $casSiteCodes -join ","
-                    if ($psParentSiteCode -notin $casSiteCodes) {
+                    if ($null -eq $cachedCasSiteCodes) {
+                        $cachedCasSiteCodes = @(Get-ValidCASSiteCodes -Config $deployConfig -Domain $deployConfig.vmOptions.domainName)
+                    }
+                    $parentCodes = $cachedCasSiteCodes -join ","
+                    if ($psParentSiteCode -notin $cachedCasSiteCodes) {
                         Add-ValidationMessage -Message "$vmRole Validation: Primary [$vmName] contains parentSiteCode [$psParentSiteCode] which is invalid. Valid Parent Site Codes: $parentCodes" -ReturnObject $return -Warning
                     }
                 }
@@ -1472,17 +1492,22 @@ function Test-Configuration {
 
         # Primary site without CAS
         $PSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Primary" -and $_.parentSiteCode }
+        $SSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
+        # Cache Get-List2 result once for both loops below — same expensive call.
+        $existingList2 = $null
+        if ($PSVMs -or $SSVMs) {
+            $existingList2 = @(Get-List2 -DeployConfig $deployConfig)
+        }
         foreach ($PSVM in $PSVMs) {
-            $existingCS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
+            $existingCS = $existingList2 | Where-Object { $_.role -eq "CAS" -and $_.siteCode -eq $PSVM.parentSiteCode }
             if (-not $existingCS) {
                 Add-ValidationMessage -Message "Role Conflict: $($PSVM.vmName) with parentSiteCode $($PSVM.parentSiteCode) requires a CAS, which was not found." -ReturnObject $return -Warning
             }
         }
 
         # Secondary site without parent
-        $SSVMs = $deployConfig.virtualMachines | Where-Object { $_.role -eq "Secondary" }
         foreach ($SSVM in $SSVMs) {
-            $existingPS = Get-List2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $SSVM.parentSiteCode }
+            $existingPS = $existingList2 | Where-Object { $_.role -eq "Primary" -and $_.siteCode -eq $SSVM.parentSiteCode }
             if (-not $existingPS) {
                 Add-ValidationMessage -Message "Role Conflict: $($SSVM.vmName) with parentSiteCode [$($SSVM.parentSiteCode)] requires a Primary, which was not found." -ReturnObject $return -Warning
             }
@@ -1624,14 +1649,14 @@ function Test-Configuration {
             # Add thisParams
             $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
             $return.DeployConfig = $deployConfigEx
+
+            # Disk space validation for VHDX copies (slow: hits Get-LinuxImages cache, disk I/O for file sizes, drive query)
+            Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
+            Test-ValidDiskSpace -ConfigObject $deployConfig -ReturnObject $return
         }
         else {
             $return.DeployConfig = $deployConfig
         }
-
-        # Disk space validation for VHDX copies
-        Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
-        Test-ValidDiskSpace -ConfigObject $deployConfig -ReturnObject $return
 
 
         if ($global:SkipValidation) {
