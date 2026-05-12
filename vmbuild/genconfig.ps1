@@ -156,9 +156,28 @@ function Get-PendingVMs {
 # for a short TTL eliminates the visible lag on the Main Menu.
 $Global:HealthStatsCache = $null
 $Global:HealthStatsCacheTTLSeconds = 20
+$Global:HealthStatsHistoryMax = 8
+# Rolling history of recent samples (one entry per refresh) — used to draw sparklines.
+$Global:HealthStatsHistory = [PSCustomObject]@{
+    VmsRunning = @()
+    VmsTotal   = @()
+    DiskFreeGB = @()
+    FreeMemGB  = @()
+}
 
 function Clear-HealthStatsCache {
     $Global:HealthStatsCache = $null
+}
+
+function Add-HealthStatsHistorySample {
+    param([object]$Sample)
+    $h = $Global:HealthStatsHistory
+    $max = $Global:HealthStatsHistoryMax
+    foreach ($key in 'VmsRunning', 'VmsTotal', 'DiskFreeGB', 'FreeMemGB') {
+        $arr = @($h.$key) + @($Sample.$key)
+        if ($arr.Count -gt $max) { $arr = $arr[-$max..-1] }
+        $h.$key = $arr
+    }
 }
 
 function Get-HealthStats {
@@ -196,7 +215,78 @@ function Get-HealthStats {
         PendingCount = $pendingCount
     }
 
+    Add-HealthStatsHistorySample -Sample $Global:HealthStatsCache
+
     return $Global:HealthStatsCache
+}
+
+# Return a color name for a "free" percentage (higher = better).
+function Get-HealthThresholdColor {
+    param(
+        [double] $Percent,
+        [double] $GreenAt = 30,
+        [double] $YellowAt = 15
+    )
+    if ($Percent -ge $GreenAt)  { return 'LimeGreen' }
+    if ($Percent -ge $YellowAt) { return 'Gold' }
+    return 'Red'
+}
+
+# Draw an 8-cell unicode sparkline; each cell colored per-cell using the threshold rules.
+function Write-Sparkline {
+    [CmdletBinding()]
+    param(
+        [double[]] $Values,         # oldest -> newest
+        [double]   $Max,            # absolute max (e.g. total disk/total ram/total vms)
+        [int]      $Width = 8,
+        [double]   $GreenAt = 30,
+        [double]   $YellowAt = 15
+    )
+    $glyphs = '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'
+    $vals = @($Values)
+    if ($vals.Count -gt $Width) { $vals = $vals[-$Width..-1] }
+    $pad = $Width - $vals.Count
+    for ($i = 0; $i -lt $Width; $i++) {
+        if ($i -lt $pad) {
+            Write-Host ' ' -NoNewline
+            continue
+        }
+        $v = [double]$vals[$i - $pad]
+        if ($Max -le 0) { $pct = 0 } else {
+            $pct = ($v / $Max) * 100
+            if ($pct -lt 0)   { $pct = 0 }
+            if ($pct -gt 100) { $pct = 100 }
+        }
+        if ($pct -le 0) {
+            Write-Host ' ' -NoNewline
+            continue
+        }
+        $idx = [int][math]::Floor(($pct / 100) * 7)
+        if ($idx -lt 0) { $idx = 0 } elseif ($idx -gt 7) { $idx = 7 }
+        $color = Get-HealthThresholdColor -Percent $pct -GreenAt $GreenAt -YellowAt $YellowAt
+        Write-Host2 -ForegroundColor $color $glyphs[$idx] -NoNewline
+    }
+}
+
+# Write a status icon ([√] / [!] / [x]) chosen from a free-percentage value.
+function Write-HealthStatusIcon {
+    param(
+        [double] $Percent,
+        [double] $GreenAt = 30,
+        [double] $YellowAt = 15
+    )
+    $CHECKMARK = ([char]8730)
+    Write-Host '[' -NoNewline
+    if ($Percent -ge $GreenAt) {
+        Write-Host2 -ForegroundColor LimeGreen $CHECKMARK -NoNewline
+    }
+    elseif ($Percent -ge $YellowAt) {
+        Write-Host2 -ForegroundColor Gold '!' -NoNewline
+    }
+    else {
+        Write-Host2 -ForegroundColor Red 'x' -NoNewline
+    }
+    Write-Host ']' -NoNewline
 }
 
 function Check-OverallHealth {
@@ -213,75 +303,79 @@ function Check-OverallHealth {
     $Global:ProgressPreference = 'Continue'
 
     $Indent = 3
+    $pad = ' ' * $Indent
     $stats = Get-HealthStats
-    $diskTotalGB = $stats.DiskTotalGB
-    $diskFreeGB = $stats.DiskFreeGB
-    $vmsRunning = $stats.VmsRunning
-    $vmsTotal = $stats.VmsTotal
-    
-    # Running VMs
-    if ($vmsTotal -eq 0) {
-        Write-OrangePoint2 -indent $Indent "No VMs are currently deployed"
-    }
-    else {
+    $hist = $Global:HealthStatsHistory
 
-        if ($vmsRunning -eq 0) {
-            Write-RedX -indent $Indent "No VMs are currently running. $vmsRunning/$vmsTotal total"
-        }
-        else {
-            if ($vmsRunning -eq $vmsTotal) {
-                Write-GreenCheck -indent $Indent "All $vmsTotal VMs are running"
-            }
-            else {
-                Write-OrangePoint2 -indent $Indent "$vmsRunning/$vmsTotal VMs are running"
-            }    
-        }
-    }
-    # Available Disk
+    # ---- Percent helpers ---------------------------------------------------
+    $vmsPct  = if ($stats.VmsTotal  -gt 0) { ($stats.VmsRunning / $stats.VmsTotal) * 100 } else { 0 }
+    $diskPct = if ($stats.DiskTotalGB -gt 0) { ($stats.DiskFreeGB / $stats.DiskTotalGB) * 100 } else { 0 }
+    $memPct  = if ($stats.TotalMemGB  -gt 0) { ($stats.FreeMemGB  / $stats.TotalMemGB)  * 100 } else { 0 }
 
-    if ($diskFreeGB -ge 700) {
-        Write-GreenCheck -indent $Indent "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
-    }
-    else {
-        if ($diskFreeGB -ge 300) {
-            Write-OrangePoint2 -indent $Indent "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+    # Thresholds (free%): green / yellow / (else red)
+    $vmThresh   = @{ GreenAt = 100; YellowAt = 50 }   # VMs running
+    $diskThresh = @{ GreenAt = 20;  YellowAt = 10 }   # disk free
+    $memThresh  = @{ GreenAt = 30;  YellowAt = 15 }   # memory free
+
+    # ---- Row renderer ------------------------------------------------------
+    # Layout (~43 chars wide to fit inside the existing Quick Stats box):
+    #   <indent>Label  Value            Sparkline  Icon
+    #          1234     16 chars            8       3
+    $labelWidth = 5
+    $valueWidth = 16
+
+    $rows = @(
+        [PSCustomObject]@{
+            Label   = 'VMs'
+            Value   = if ($stats.VmsTotal -eq 0) { 'none deployed' } else { "$($stats.VmsRunning)/$($stats.VmsTotal) running" }
+            History = $hist.VmsRunning
+            Max     = if ($stats.VmsTotal -gt 0) { [double]$stats.VmsTotal } else { 1 }
+            Percent = $vmsPct
+            Thresh  = $vmThresh
         }
-        else {
-            Write-RedX -indent $Indent "Drive E: free space is $($diskFreeGB)GB/$($diskTotalGB)GB"
+        [PSCustomObject]@{
+            Label   = 'Disk'
+            Value   = "$($stats.DiskFreeGB)/$($stats.DiskTotalGB)GB free"
+            History = $hist.DiskFreeGB
+            Max     = if ($stats.DiskTotalGB -gt 0) { [double]$stats.DiskTotalGB } else { 1 }
+            Percent = $diskPct
+            Thresh  = $diskThresh
         }
+        [PSCustomObject]@{
+            Label   = 'RAM'
+            Value   = "$($stats.FreeMemGB)/$($stats.TotalMemGB)GB free"
+            History = $hist.FreeMemGB
+            Max     = if ($stats.TotalMemGB -gt 0) { [double]$stats.TotalMemGB } else { 1 }
+            Percent = $memPct
+            Thresh  = $memThresh
+        }
+    )
+
+    foreach ($r in $rows) {
+        Write-Host $pad -NoNewline
+        Write-Host ($r.Label.PadRight($labelWidth)) -NoNewline -ForegroundColor White
+        Write-Host ($r.Value.PadRight($valueWidth)) -NoNewline
+        Write-Sparkline -Values $r.History -Max $r.Max -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        Write-Host '  ' -NoNewline
+        Write-HealthStatusIcon -Percent $r.Percent -GreenAt $r.Thresh.GreenAt -YellowAt $r.Thresh.YellowAt
+        Write-Host
     }
 
-    #Available Memory
-
-    $os = [PSCustomObject]@{ FreeGB = $stats.FreeMemGB; TotalGB = $stats.TotalMemGB }
-    $availableMemory = $os.FreeGB
-
-    if ($availableMemory -ge 40) {
-        Write-GreenCheck -indent $Indent "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-    }
-    else {
-        if ($availableMemory -ge 20) {
-            Write-OrangePoint2 -indent $Indent "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-        }
-        else {
-            Write-RedX -indent $Indent "Available memory: $($availableMemory)GB/$($os.TotalGB)GB"
-        }
-    }
-    
+    # ---- Patch Tuesday footer ---------------------------------------------
     $today = Get-Date
     $firstDayOfMonth = Get-Date -Year $today.Year -Month $today.Month -Day 1
     $secondTuesday = $firstDayOfMonth.AddDays((([int][DayOfWeek]::Tuesday - [int]$firstDayOfMonth.DayOfWeek + 7) % 7) + 7)
 
     if ($today.Date -eq $secondTuesday.Date) {
         $hoursSinceReboot = $stats.UptimeHours
-
         if ($null -ne $hoursSinceReboot -and $hoursSinceReboot -le 12) {
-            Write-GreenCheck -indent $Indent "It's Patch Tuesday, machine was rebooted $hoursSinceReboot hours ago."
+            Write-GreenCheck -indent $Indent "Patch Tuesday: machine was rebooted $hoursSinceReboot hours ago."
         }
         else {
-            Write-RedX -indent $Indent "It's Patch Tuesday, your machine will likely reboot today at 2-3 PM EST."
+            Write-RedX -indent $Indent "Patch Tuesday: your machine will likely reboot today at 2-3 PM EST."
         }
     }
+
     Write-Host
     $Global:ProgressPreference = $OriginalProgressPreference
 
