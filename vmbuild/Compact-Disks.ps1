@@ -123,11 +123,12 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $prepQueue  = [System.Collections.Generic.Queue[PSCustomObject]]::new()
     foreach ($v in $importedData.VMs) {
         $obj = [PSCustomObject]@{
-            VMName = $v.VMName
-            Job    = $null
-            Status = 'Pending'        # Pending / Running / Completed / Failed
-            Error  = $null
-            Forced = $false           # true if graceful shutdown timed out and we hard-stopped
+            VMName     = $v.VMName
+            Job        = $null
+            Status     = 'Pending'        # Pending / Running / Completed / Failed
+            Error      = $null
+            Forced     = $false           # true if graceful shutdown timed out and we hard-stopped
+            WasRunning = $false           # true if VM was Running when prep started; restart it at the end
         }
         $vmInfoList.Add($obj)
         $prepQueue.Enqueue($obj)
@@ -497,6 +498,11 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         $forced = $false
                         $onlineCleanRan = $false
 
+                        # Capture initial state so we can auto-restart at the
+                        # end if the VM was running when this script began.
+                        $initial = Get-VM -Name $n -ErrorAction SilentlyContinue
+                        $wasRunning = ($initial -and $initial.State -eq 'Running')
+
                         # Dot-source Common.ps1 so we have Invoke-VmCommand /
                         # Get-VmSession / $Common.LocalAdmin. -InJob suppresses
                         # the UI/background-image init bits.
@@ -693,7 +699,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                             }
                         }
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
-                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; Disks = $disks.ToArray() }
+                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = $disks.ToArray() }
                     } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean)
                     $vm.Job    = $job
                     $vm.Status = 'Running'
@@ -715,6 +721,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     if ($result -and $result.Ok) {
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
+                        $vm.WasRunning = [bool]$result.WasRunning
                         if ($result.OnlineCleaned) {
                             [void]$UiSync.Log.Add("[PREP-INFO] $($vm.VMName): online cleanup ran")
                         }
@@ -991,6 +998,26 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
                 Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
                 $disk.Status = 'Cancelled'
+            }
+        }
+    }
+
+    # --- Auto-restart VMs that were Running at the start ---
+    # We only restart VMs whose prep completed successfully (we don't want
+    # to "restart" a VM we never actually stopped). Restarts are fired in
+    # parallel as Hyper-V queues them.
+    $toRestart = @($vmInfoList | Where-Object { $_.WasRunning -and $_.Status -eq 'Completed' })
+    if ($toRestart.Count -gt 0) {
+        $UiSync.StatusText = "Restarting $($toRestart.Count) VM(s)..."
+        [void]$UiSync.Log.Add('')
+        [void]$UiSync.Log.Add("--- Restarting $($toRestart.Count) VM(s) that were running at start ---")
+        foreach ($r in $toRestart) {
+            try {
+                Start-VM -Name $r.VMName -ErrorAction Stop
+                [void]$UiSync.Log.Add("[RESTART] $($r.VMName) - start command issued")
+            }
+            catch {
+                [void]$UiSync.Log.Add("[RESTART-FAIL] $($r.VMName): $($_.Exception.Message)")
             }
         }
     }

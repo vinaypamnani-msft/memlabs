@@ -1298,7 +1298,7 @@ function select-OptimizeDomain {
 
     Write-Host
     Write-Host "VHD compaction is running in a separate WPF window." -ForegroundColor Green
-    Write-Host "The worker will stop, merge checkpoints, and compact each VM in parallel. VMs will NOT be auto-restarted." -ForegroundColor DarkGray
+    Write-Host "The worker will stop, merge checkpoints, and compact each VM in parallel. VMs that were running at start will be auto-restarted when compaction finishes." -ForegroundColor DarkGray
     Start-Sleep -Seconds 3
 }
 
