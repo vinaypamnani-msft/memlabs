@@ -1071,8 +1071,13 @@ $btnXaml
                                     # SQL Server error log rollovers (ERRORLOG.1..ERRORLOG.99)
                                     @{ Path = 'C:\Program Files\Microsoft SQL Server'; Filter = 'ERRORLOG.*'; Recurse = $true }
                                     @{ Path = 'C:\Program Files\Microsoft SQL Server'; Filter = 'SQLAGENT.*'; Recurse = $true }
-                                    # Per-user crash dumps
-                                    @{ Path = 'C:\Users';                             Filter = '*.dmp'; Recurse = $true }
+                                    # NOTE: deliberately NOT pruning C:\Users\**\*.dmp here.
+                                    # WER-collected dumps already get nuked above (per-user
+                                    # AppData\Local\Microsoft\Windows\WER\* and
+                                    # AppData\Local\CrashDumps\* are in the wholesale-purge
+                                    # list). Any other .dmp under C:\Users is likely a
+                                    # user-collected debug capture (procdump, WinDbg, etc.)
+                                    # that we shouldn't touch.
                                 )
                                 foreach ($r in $ageRoots) {
                                     try {
@@ -1631,7 +1636,10 @@ $btnXaml
                                             @{ Path = "$root\Program Files\Update Services\LogFiles"; Filter = '*.log' }
                                             @{ Path = "$root\Program Files\Microsoft SQL Server"; Filter = 'ERRORLOG.*' }
                                             @{ Path = "$root\Program Files\Microsoft SQL Server"; Filter = 'SQLAGENT.*' }
-                                            @{ Path = "$root\Users"; Filter = '*.dmp' }
+                                            # NOTE: deliberately NOT pruning $root\Users\**\*.dmp
+                                            # here - WER dumps already get wiped wholesale above;
+                                            # everything else is presumed to be a user-collected
+                                            # debug capture worth keeping.
                                         )
                                         foreach ($r in $offlineAgeRoots) {
                                             try {
