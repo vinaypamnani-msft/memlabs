@@ -1174,11 +1174,14 @@ function Test-Configuration {
         $virtualMachinesNoExisting = $deployConfig.virtualMachines | Where-Object { -not $_.Hidden }
         # Contains roles
         if ($deployConfig.virtualMachines) {
-            $containsCS = $virtualMachinesNoExisting -contains "CAS"
-            $containsPS = $virtualMachinesNoExisting -contains "Primary"
-            $containsSiteSystem = $virtualMachinesNoExisting -contains "SiteSystem"
-            $containsPassive = $virtualMachinesNoExisting -contains "PassiveSite"
-            $containsSecondary = $virtualMachinesNoExisting -contains "Secondary"
+            # Note: $virtualMachinesNoExisting is an array of VM *objects*. Use .role to extract the
+            # role string from each object before testing membership.
+            $rolesInDeployment = @($virtualMachinesNoExisting | ForEach-Object { $_.role })
+            $containsCS = $rolesInDeployment -contains "CAS"
+            $containsPS = $rolesInDeployment -contains "Primary"
+            $containsSiteSystem = $rolesInDeployment -contains "SiteSystem"
+            $containsPassive = $rolesInDeployment -contains "PassiveSite"
+            $containsSecondary = $rolesInDeployment -contains "Secondary"
         }
         else {
             $containsCS = $containsPS = $containsSiteSystem = $containsPassive = $containsSecondary = $false
@@ -1427,7 +1430,8 @@ function Test-Configuration {
                 # CAS with Primary, without parentSiteCode
                 if ($containsCS) {
                     if ($psParentSiteCode -notin $CSVMs.siteCode) {
-                        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match CAS Site Code [$($CSVM.siteCode)]." -ReturnObject $return -Warning
+                        $casSiteCodesList = ($CSVMs.siteCode -join ",")
+                        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match any CAS Site Code [$casSiteCodesList]." -ReturnObject $return -Warning
                     }
                 }
 
