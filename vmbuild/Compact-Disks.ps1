@@ -71,24 +71,27 @@ if ($env:_COMPACT_DISKS_WORKER) {
 
     $AttachedCount = $importedData.AttachedCount
     $DomainLabel   = $importedData.DomainLabel
+    $ShutdownTimeoutSec = if ($importedData.ShutdownTimeoutSec) { [int]$importedData.ShutdownTimeoutSec } else { 300 }
 
-    # Rebuild disk objects
+    # Per-VM prep records (stop + checkpoint merge) - one entry per VM.
+    # When prep completes its disks are pushed onto $diskQueue.
+    $vmInfoList = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $prepQueue  = [System.Collections.Generic.Queue[PSCustomObject]]::new()
+    foreach ($v in $importedData.VMs) {
+        $obj = [PSCustomObject]@{
+            VMName = $v.VMName
+            Job    = $null
+            Status = 'Pending'        # Pending / Running / Completed / Failed
+            Error  = $null
+            Forced = $false           # true if graceful shutdown timed out and we hard-stopped
+        }
+        $vmInfoList.Add($obj)
+        $prepQueue.Enqueue($obj)
+    }
+
+    # Compact queue starts empty; populated as prep jobs finish.
     $diskInfoList = [System.Collections.Generic.List[PSCustomObject]]::new()
     $diskQueue    = [System.Collections.Generic.Queue[PSCustomObject]]::new()
-    foreach ($d in $importedData.Disks) {
-        $obj = [PSCustomObject]@{
-            VMName       = $d.VMName
-            Path         = $d.Path
-            FileName     = $d.FileName
-            OriginalSize = [long]$d.OriginalSize
-            Job          = $null
-            NewSize      = $null
-            Status       = 'Pending'
-            Error        = $null
-        }
-        $diskInfoList.Add($obj)
-        $diskQueue.Enqueue($obj)
-    }
 
     # Shared state between UI thread and main processing thread
     $UiSync = [hashtable]::Synchronized(@{
@@ -360,51 +363,230 @@ if ($env:_COMPACT_DISKS_WORKER) {
     }
 
     # --- Helper functions ---
-    function Get-JobPercent {
+    function Get-JobProgress {
         param($Job)
+        $result = [PSCustomObject]@{ Percent = 0; Status = '' }
         if ($Job -and $Job.ChildJobs.Count -gt 0) {
             $progressRecords = $Job.ChildJobs[0].Progress
             if ($progressRecords -and $progressRecords.Count -gt 0) {
                 $latest = $progressRecords[$progressRecords.Count - 1]
-                if ($latest.PercentComplete -ge 0) { return $latest.PercentComplete }
+                if ($latest.PercentComplete -ge 0) { $result.Percent = $latest.PercentComplete }
+                if ($latest.StatusDescription) { $result.Status = $latest.StatusDescription }
             }
         }
-        return 0
+        return $result
     }
 
     function Update-Progress {
-        param($DiskList, $ActiveJobs, $Total, $StartTime)
+        param($DiskList, $ActiveJobs, $ActivePrepJobs, $StartTime)
         $elapsed = (Get-Date) - $StartTime
-        $running = @($DiskList | Where-Object { $_.Status -eq 'Running' }).Count
-        $pending = @($DiskList | Where-Object { $_.Status -eq 'Pending' }).Count
+        $total   = $DiskList.Count
         $done    = @($DiskList | Where-Object { $_.Status -in 'Completed', 'Failed' }).Count
-        $pct = if ($Total -gt 0) { [math]::Round(($done / $Total) * 100) } else { 0 }
+        $running = $ActiveJobs.Count
+        $prep    = $ActivePrepJobs.Count
+        $pct = if ($total -gt 0) { [math]::Round(($done / $total) * 100) } else { 0 }
 
         $UiSync.OverallPercent = $pct
-        $UiSync.StatusText     = "$done of $Total completed | Running: $running | Pending: $pending"
-        $UiSync.ElapsedText    = $elapsed.ToString('hh\:mm\:ss')
+        if ($total -gt 0) {
+            $UiSync.StatusText = "$done of $total disks compacted | Compacting: $running | Preparing VMs: $prep"
+        } else {
+            $UiSync.StatusText = "Preparing $prep VM(s) (stop + checkpoint merge)..."
+        }
+        $UiSync.ElapsedText = $elapsed.ToString('hh\:mm\:ss')
 
         $jobSnapshot = [System.Collections.ArrayList]::new()
+        # Prep jobs first - they don't have a real % so show status text
+        foreach ($vm in $ActivePrepJobs) {
+            $jp = Get-JobProgress -Job $vm.Job
+            $statusTxt = if ($jp.Status) { $jp.Status } else { 'Preparing...' }
+            [void]$jobSnapshot.Add(@{
+                Name    = "[PREP] $($vm.VMName) - $statusTxt"
+                Percent = $jp.Percent
+            })
+        }
         foreach ($disk in $ActiveJobs) {
-            $jobPct = Get-JobPercent -Job $disk.Job
+            $jp = Get-JobProgress -Job $disk.Job
             [void]$jobSnapshot.Add(@{
                 Name    = "$($disk.VMName) - $($disk.FileName)"
-                Percent = $jobPct
+                Percent = $jp.Percent
             })
         }
         $UiSync.Jobs = $jobSnapshot
     }
 
     # --- Synchronous processing loop (main thread of the detached process) ---
+    # Two job pools running concurrently:
+    #   - $activePrepJobs: one Start-Job per VM. Each does a graceful Stop-VM
+    #     (with hard-stop fallback), merges every checkpoint, then returns
+    #     that VM's VHD list. Bounded only by VM count (these are mostly idle
+    #     waiting on Hyper-V).
+    #   - $activeJobs: Optimize-VHD jobs, up to $MaxConcurrentJobs concurrent.
+    # When a prep job finishes, its VHDs are pushed onto $diskQueue, so the
+    # slowest-to-stop VM doesn't block compaction of fast ones.
+    $activePrepJobs = [System.Collections.Generic.List[PSCustomObject]]::new()
     $activeJobs     = [System.Collections.Generic.List[PSCustomObject]]::new()
-    $completedCount = 0
-    $totalCount     = $diskInfoList.Count
     $startTime      = Get-Date
 
     try {
-        while ($diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
+        while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
+               $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
             if ($UiSync.WindowClosed) { throw 'WindowClosed' }
 
+            # ----- Launch prep jobs (one per VM, all in parallel) -----
+            while ($prepQueue.Count -gt 0) {
+                $vm = $prepQueue.Dequeue()
+                [void]$UiSync.Log.Add("[PREP-START] $($vm.VMName)")
+                try {
+                    $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
+                        param($n, $timeoutSec)
+                        $startedAt = Get-Date
+                        $forced = $false
+
+                        # --- 1) Graceful shutdown (if running) ---
+                        $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
+                        if ($cur -and $cur.State -ne 'Off') {
+                            Write-Progress -Activity "Prep $n" -Status 'Stopping (graceful)' -PercentComplete 5
+                            try {
+                                Stop-VM -Name $n -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                            }
+                            catch {
+                                # Guest didn't accept the request; we'll fall through to the timeout/turn-off below
+                            }
+                            while ((Get-VM -Name $n -ErrorAction SilentlyContinue).State -ne 'Off') {
+                                if (((Get-Date) - $startedAt).TotalSeconds -gt $timeoutSec) {
+                                    Write-Progress -Activity "Prep $n" -Status 'Force turn-off (timeout)' -PercentComplete 30
+                                    Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                                    $forced = $true
+                                    Start-Sleep -Seconds 3
+                                    break
+                                }
+                                Write-Progress -Activity "Prep $n" -Status 'Stopping (graceful)' -PercentComplete 20
+                                Start-Sleep -Seconds 2
+                            }
+                        }
+
+                        # --- 2) Merge every checkpoint ---
+                        $snapshots = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue)
+                        if ($snapshots.Count -gt 0) {
+                            $i = 0
+                            $vmPath = (Get-VM -Name $n -ErrorAction SilentlyContinue).Path
+                            foreach ($snap in $snapshots) {
+                                $i++
+                                Write-Progress -Activity "Prep $n" -Status "Merging $i/$($snapshots.Count): $($snap.Name)" -PercentComplete (40 + (50 * $i / $snapshots.Count))
+                                try {
+                                    Remove-VMCheckpoint -VM $snap.VM -Name $snap.Name -ErrorAction Stop
+                                }
+                                catch {
+                                    # Try via VMSnapshot object directly
+                                    Remove-VMSnapshot -VMSnapshot $snap -ErrorAction SilentlyContinue
+                                }
+                                # Sidecar notes file maintained by select-DeleteSnapshotDomain
+                                if ($vmPath) {
+                                    $notesFile = if ($snap.Name -eq 'MemLabs Snapshot') {
+                                        Join-Path $vmPath 'MemLabs.Notes.json'
+                                    } else {
+                                        Join-Path $vmPath ($snap.Name + '.json')
+                                    }
+                                    if (Test-Path $notesFile) {
+                                        Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
+                                    }
+                                }
+                            }
+
+                            # Wait for AVHDX merges to settle: no VHD path should still
+                            # reference .avhdx and no checkpoints should remain.
+                            $mergeDeadline = (Get-Date).AddMinutes(15)
+                            while ((Get-Date) -lt $mergeDeadline) {
+                                $hds = @(Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)
+                                $pendingAvhdx = $hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' }
+                                $pendingChk   = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue).Count
+                                if (-not $pendingAvhdx -and $pendingChk -eq 0) { break }
+                                Write-Progress -Activity "Prep $n" -Status 'Waiting for merge to finish' -PercentComplete 92
+                                Start-Sleep -Seconds 3
+                            }
+                        }
+
+                        # --- 3) Enumerate VHDs to compact ---
+                        Write-Progress -Activity "Prep $n" -Status 'Enumerating VHDs' -PercentComplete 97
+                        $seen  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $disks = [System.Collections.Generic.List[hashtable]]::new()
+                        foreach ($hd in (Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
+                            if ($hd.Path -and $seen.Add($hd.Path) -and (Test-Path $hd.Path)) {
+                                $fi = [System.IO.FileInfo]::new($hd.Path)
+                                $disks.Add(@{
+                                    VMName       = $n
+                                    Path         = $hd.Path
+                                    FileName     = $fi.Name
+                                    OriginalSize = [long]$fi.Length
+                                })
+                            }
+                        }
+                        Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
+                        return @{ Ok = $true; Forced = $forced; Disks = $disks.ToArray() }
+                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec
+                    $vm.Job    = $job
+                    $vm.Status = 'Running'
+                    [void]$activePrepJobs.Add($vm)
+                }
+                catch {
+                    $vm.Status = 'Failed'
+                    $vm.Error  = $_.Exception.Message
+                    [void]$UiSync.Log.Add("[PREP-ERR] $($vm.VMName): $($_.Exception.Message)")
+                }
+            }
+
+            # ----- Reap completed prep jobs -----
+            $stillPrep = [System.Collections.Generic.List[PSCustomObject]]::new()
+            foreach ($vm in $activePrepJobs) {
+                if ($vm.Job.State -eq 'Completed') {
+                    try { $result = Receive-Job -Job $vm.Job -ErrorAction Stop } catch { $result = $null }
+                    Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
+                    if ($result -and $result.Ok) {
+                        $vm.Status = 'Completed'
+                        $vm.Forced = [bool]$result.Forced
+                        if ($vm.Forced) {
+                            [void]$UiSync.Log.Add("[PREP-WARN] $($vm.VMName): force turned-off (graceful timeout)")
+                        }
+                        $diskCount = if ($result.Disks) { $result.Disks.Count } else { 0 }
+                        [void]$UiSync.Log.Add("[PREP-DONE] $($vm.VMName) - $diskCount VHD(s) found")
+                        # Sort this VM's disks largest first locally; the queue is FIFO
+                        # but interleaving by VM means largest-first per-VM is fine.
+                        $sorted = @($result.Disks | Sort-Object { [long]$_.OriginalSize } -Descending)
+                        foreach ($d in $sorted) {
+                            $diskObj = [PSCustomObject]@{
+                                VMName       = $d.VMName
+                                Path         = $d.Path
+                                FileName     = $d.FileName
+                                OriginalSize = [long]$d.OriginalSize
+                                Job          = $null
+                                NewSize      = $null
+                                Status       = 'Pending'
+                                Error        = $null
+                            }
+                            $diskInfoList.Add($diskObj)
+                            $diskQueue.Enqueue($diskObj)
+                        }
+                    }
+                    else {
+                        $vm.Status = 'Failed'
+                        $vm.Error  = 'Prep job returned no result'
+                        [void]$UiSync.Log.Add("[PREP-FAIL] $($vm.VMName)")
+                    }
+                }
+                elseif ($vm.Job.State -eq 'Failed') {
+                    $vm.Status = 'Failed'
+                    $reason = $vm.Job.ChildJobs[0].JobStateInfo.Reason
+                    $vm.Error = if ($reason) { $reason.Message } else { 'Unknown prep error' }
+                    [void]$UiSync.Log.Add("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
+                    Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
+                }
+                else {
+                    [void]$stillPrep.Add($vm)
+                }
+            }
+            $activePrepJobs = $stillPrep
+
+            # ----- Launch compact jobs -----
             while ($activeJobs.Count -lt $MaxConcurrentJobs -and $diskQueue.Count -gt 0) {
                 $disk = $diskQueue.Dequeue()
                 [void]$UiSync.Log.Add("[START] $($disk.VMName) - $($disk.FileName)")
@@ -423,10 +605,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $disk.Status = 'Failed'
                     $disk.Error  = $_.Exception.Message
                     [void]$UiSync.Log.Add("[ERROR] $($disk.FileName): $($_.Exception.Message)")
-                    $completedCount++
                 }
             }
 
+            # ----- Reap completed compact jobs -----
             $stillRunning = [System.Collections.Generic.List[PSCustomObject]]::new()
             foreach ($disk in $activeJobs) {
                 if ($disk.Job.State -eq 'Completed') {
@@ -437,7 +619,6 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     $savedPct = if ($disk.OriginalSize -gt 0) { [math]::Round(($saved / $disk.OriginalSize) * 100, 1) } else { 0 }
                     [void]$UiSync.Log.Add("[DONE]  $($disk.VMName) - $($disk.FileName): $(Format-Size $disk.OriginalSize) -> $(Format-Size $disk.NewSize) (Saved: $(Format-Size $saved), $savedPct%)")
                     Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
-                    $completedCount++
                 }
                 elseif ($disk.Job.State -eq 'Failed') {
                     $disk.Status = 'Failed'
@@ -446,7 +627,6 @@ if ($env:_COMPACT_DISKS_WORKER) {
                     if (-not $disk.Error) { $disk.Error = 'Unknown error' }
                     [void]$UiSync.Log.Add("[FAIL]  $($disk.VMName) - $($disk.FileName): $($disk.Error)")
                     Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
-                    $completedCount++
                 }
                 else {
                     [void]$stillRunning.Add($disk)
@@ -454,40 +634,62 @@ if ($env:_COMPACT_DISKS_WORKER) {
             }
             $activeJobs = $stillRunning
 
-            Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -Total $totalCount -StartTime $startTime
+            Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -ActivePrepJobs $activePrepJobs -StartTime $startTime
 
-            if ($activeJobs.Count -gt 0 -or $diskQueue.Count -gt 0) {
-                Start-Sleep -Milliseconds 300
+            if ($activePrepJobs.Count -gt 0 -or $activeJobs.Count -gt 0 -or
+                $prepQueue.Count -gt 0 -or $diskQueue.Count -gt 0) {
+                Start-Sleep -Milliseconds 400
             }
         }
 
-        Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -Total $totalCount -StartTime $startTime
+        Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -ActivePrepJobs $activePrepJobs -StartTime $startTime
     }
     catch {
         # interrupted (window closed or error)
     }
     finally {
-        if ($activeJobs.Count -gt 0) {
-            foreach ($disk in $activeJobs) {
-                if ($disk.Job) {
-                    Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
-                    Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
-                    $disk.Status = 'Cancelled'
-                }
+        foreach ($vm in $activePrepJobs) {
+            if ($vm.Job) {
+                Stop-Job  -Job $vm.Job -ErrorAction SilentlyContinue
+                Remove-Job -Job $vm.Job -Force -ErrorAction SilentlyContinue
+                $vm.Status = 'Cancelled'
+            }
+        }
+        foreach ($disk in $activeJobs) {
+            if ($disk.Job) {
+                Stop-Job  -Job $disk.Job -ErrorAction SilentlyContinue
+                Remove-Job -Job $disk.Job -Force -ErrorAction SilentlyContinue
+                $disk.Status = 'Cancelled'
             }
         }
     }
 
     # --- Final summary into the UI log ---
-    $duration   = (Get-Date) - $startTime
-    $successful = @($diskInfoList | Where-Object { $_.Status -eq 'Completed' })
-    $failed     = @($diskInfoList | Where-Object { $_.Status -eq 'Failed' })
-    $cancelled  = @($diskInfoList | Where-Object { $_.Status -eq 'Cancelled' })
+    $duration    = (Get-Date) - $startTime
+    $successful  = @($diskInfoList | Where-Object { $_.Status -eq 'Completed' })
+    $failed      = @($diskInfoList | Where-Object { $_.Status -eq 'Failed' })
+    $cancelled   = @($diskInfoList | Where-Object { $_.Status -eq 'Cancelled' })
+    $prepFailed  = @($vmInfoList | Where-Object { $_.Status -eq 'Failed' })
+    $forcedStops = @($vmInfoList | Where-Object { $_.Forced })
 
     [void]$UiSync.Log.Add('')
     [void]$UiSync.Log.Add('========================================')
     [void]$UiSync.Log.Add('  Optimization Complete!')
     [void]$UiSync.Log.Add('========================================')
+
+    if ($forcedStops.Count -gt 0) {
+        [void]$UiSync.Log.Add('--- Force turned-off (graceful shutdown timed out) ---')
+        foreach ($f in $forcedStops) {
+            [void]$UiSync.Log.Add("  $($f.VMName)")
+        }
+    }
+
+    if ($prepFailed.Count -gt 0) {
+        [void]$UiSync.Log.Add('--- Prep failed (VM was not compacted) ---')
+        foreach ($f in $prepFailed) {
+            [void]$UiSync.Log.Add("  $($f.VMName): $($f.Error)")
+        }
+    }
 
     if ($successful.Count -gt 0) {
         $totalNewSize = ($successful | Measure-Object -Property NewSize -Sum).Sum
@@ -517,10 +719,10 @@ if ($env:_COMPACT_DISKS_WORKER) {
         }
     }
 
-    [void]$UiSync.Log.Add("Duration: $($duration.ToString('hh\:mm\:ss'))  |  Completed: $($successful.Count)  |  Failed: $($failed.Count)  |  Cancelled: $($cancelled.Count)  |  Skipped: $AttachedCount")
+    [void]$UiSync.Log.Add("Duration: $($duration.ToString('hh\:mm\:ss'))  |  Completed: $($successful.Count)  |  Failed: $($failed.Count)  |  Cancelled: $($cancelled.Count)  |  Forced: $($forcedStops.Count)  |  Prep-failed VMs: $($prepFailed.Count)")
 
     $UiSync.OverallPercent = 100
-    $UiSync.StatusText     = "All done - $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled"
+    $UiSync.StatusText     = "All done - $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced"
     $UiSync.Jobs           = [System.Collections.ArrayList]::new()
 
     # Window stays open for log review - wait until the user closes it, then clean up
@@ -534,6 +736,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
 }
 
 # ========================= NORMAL (INTERACTIVE) MODE =========================
+# The worker (background mode above) does everything: stop, merge checkpoints,
+# enumerate VHDs, and compact - all per-VM in parallel. This entry point just
+# validates the VM list and hands off.
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  Hyper-V VHD Optimization" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
@@ -552,119 +757,14 @@ if (-not $vms -or $vms.Count -eq 0) {
     return
 }
 
-Write-Host "Collecting VHD information from $($vms.Count) VM(s)..." -ForegroundColor Yellow
-
-# Get all hard disk drives in a single call (faster than per-VM)
-$allHardDrives = @(Get-VMHardDiskDrive -VM $vms -ErrorAction SilentlyContinue)
-Write-Host "  Found $($allHardDrives.Count) virtual disk(s), resolving details..." -ForegroundColor DarkGray
-
-# Build unique path list with VM info
-$SeenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-$vmLookup = @{}
-foreach ($v in $vms) { $vmLookup[$v.Name] = $v }
-
-$uniqueDisks = [System.Collections.Generic.List[PSCustomObject]]::new()
-foreach ($hd in $allHardDrives) {
-    if ($hd.Path -and $SeenPaths.Add($hd.Path)) {
-        $fi = [System.IO.FileInfo]::new($hd.Path)
-        if ($fi.Exists) {
-            $vm = $vmLookup[$hd.VMName]
-            $uniqueDisks.Add([PSCustomObject]@{
-                VMName       = $hd.VMName
-                VMState      = if ($vm) { $vm.State } else { 'Unknown' }
-                Path         = $hd.Path
-                FileName     = $fi.Name
-                OriginalSize = $fi.Length
-                VirtualSize  = $null
-                VhdType      = $null
-                Attached     = $null
-                VolumeRoot   = [System.IO.Path]::GetPathRoot($hd.Path)
-                Job          = $null
-                NewSize      = $null
-                Status       = 'Pending'
-                Error        = $null
-            })
-        }
-    }
+Write-Host "Selected $($vms.Count) VM(s):" -ForegroundColor Yellow
+foreach ($v in $vms) {
+    Write-Host ("  - {0,-25} State: {1}" -f $v.Name, $v.State) -ForegroundColor DarkGray
 }
+Write-Host "Optimization mode: $Mode | Max concurrent compact jobs: $MaxConcurrentJobs`n" -ForegroundColor Yellow
+Write-Host "Each VM will be gracefully stopped, have its checkpoints merged, and then compacted - all in parallel.`n" -ForegroundColor DarkGray
 
-# Resolve VHD metadata (VhdType, VirtualSize) in parallel via runspace pool
-if ($uniqueDisks.Count -gt 0) {
-    $rsPool = [runspacefactory]::CreateRunspacePool(1, [Math]::Min($uniqueDisks.Count, 16))
-    $rsPool.Open()
-    $rsJobs = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-    foreach ($disk in $uniqueDisks) {
-        $ps = [powershell]::Create().AddScript({
-            param($Path)
-            $v = Get-VHD -Path $Path -ErrorAction SilentlyContinue
-            if ($v) { @{ VhdType = $v.VhdType; VirtualSize = $v.Size; Attached = $v.Attached } }
-        }).AddArgument($disk.Path)
-        $ps.RunspacePool = $rsPool
-        $rsJobs.Add([PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); Disk = $disk })
-    }
-
-    $rsIndex = 0
-    foreach ($rj in $rsJobs) {
-        $rsIndex++
-        Write-Progress -Activity 'Collecting VHD information' `
-            -Status "Resolving VHD $rsIndex of $($rsJobs.Count): $($rj.Disk.FileName)" `
-            -PercentComplete ([math]::Round($rsIndex / $rsJobs.Count * 100))
-        $result = $rj.PS.EndInvoke($rj.Handle)
-        if ($result -and $result.Count -gt 0) {
-            $rj.Disk.VhdType     = $result[0].VhdType
-            $rj.Disk.VirtualSize = $result[0].VirtualSize
-            $rj.Disk.Attached    = $result[0].Attached
-        }
-        $rj.PS.Dispose()
-    }
-    $rsPool.Close()
-    $rsPool.Dispose()
-    Write-Progress -Activity 'Collecting VHD information' -Completed
-}
-
-$diskInfoList = @($uniqueDisks)
-
-if ($diskInfoList.Count -eq 0) {
-    Write-Warning "No VHD files found to optimize."
-    return
-}
-
-# Display initial state
-Write-Host "`n--- Current VHD Status ---" -ForegroundColor Cyan
-$diskInfoList | Format-Table -AutoSize @(
-    @{Label = 'VM'; Expression = { $_.VMName }; Width = 20 }
-    @{Label = 'State'; Expression = { $_.VMState } }
-    @{Label = 'VHD File'; Expression = { $_.FileName }; Width = 30 }
-    @{Label = 'Type'; Expression = { $_.VhdType } }
-    @{Label = 'Current Size'; Expression = { Format-Size $_.OriginalSize } }
-    @{Label = 'Max Size'; Expression = { Format-Size $_.VirtualSize } }
-)
-
-$totalOriginalSize = ($diskInfoList | Measure-Object -Property OriginalSize -Sum).Sum
-Write-Host "Total current disk usage: $(Format-Size $totalOriginalSize)" -ForegroundColor Yellow
-Write-Host "Optimization mode: $Mode | Max concurrent jobs: $MaxConcurrentJobs`n" -ForegroundColor Yellow
-
-# Check for running VMs with attached disks - skip them
-$attachedDisks = @($diskInfoList | Where-Object { $_.VMState -eq 'Running' })
-if ($attachedDisks) {
-    Write-Warning "The following VMs are running - their disks cannot be optimized:"
-    $attachedDisks | ForEach-Object { Write-Warning "  - $($_.VMName): $($_.FileName)" }
-    $diskInfoList = @($diskInfoList | Where-Object { $_.VMState -ne 'Running' })
-
-    if ($diskInfoList.Count -eq 0) {
-        Write-Warning "No eligible VHDs to optimize. Please shut down VMs first."
-        return
-    }
-    Write-Host ""
-}
-
-# Sort largest first (the worker will queue in this order)
-$diskInfoList = @($diskInfoList | Sort-Object OriginalSize -Descending)
-
-Write-Host "Starting optimization of $($diskInfoList.Count) VHD(s) (largest first, up to $MaxConcurrentJobs concurrent)...`n" -ForegroundColor Green
-
-# --- Serialize disk data and launch a detached background process ---
+# --- Serialize VM list and launch a detached background process ---
 $dataFile = [System.IO.Path]::Combine(
     [System.IO.Path]::GetTempPath(),
     "CompactDisks_$([guid]::NewGuid().ToString('N')).xml"
@@ -676,11 +776,10 @@ if ($VMNames -and $VMNames.Count -gt 0) {
 }
 
 @{
-    Disks = @($diskInfoList | ForEach-Object {
-        @{ VMName = $_.VMName; Path = $_.Path; FileName = $_.FileName; OriginalSize = $_.OriginalSize }
-    })
-    AttachedCount = $attachedDisks.Count
-    DomainLabel   = $domainLabel
+    VMs = @($vms | ForEach-Object { @{ VMName = $_.Name } })
+    AttachedCount       = 0   # legacy field, kept for backward compat in the worker
+    DomainLabel         = $domainLabel
+    ShutdownTimeoutSec  = 300
 } | Export-Clixml -Path $dataFile
 
 $psExe      = (Get-Process -Id $PID).Path

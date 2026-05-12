@@ -1257,95 +1257,12 @@ function Start-CompactDisksUI {
 function Merge-VMCheckpointsForCompact {
     <#
     .SYNOPSIS
-        Deletes (and waits for the merge of) every checkpoint on the given VMs.
-
-    .DESCRIPTION
-        Compacting a differencing AVHDX rarely saves space, and a VM with
-        checkpoints presents its top-most AVHDX as its hard-disk path. Before
-        we run Optimize-VHD we delete every snapshot/checkpoint, which causes
-        Hyper-V to merge each AVHDX chain back into the parent VHDX.
-
-        We then poll each VM until none of its hard disks point at an .avhdx
-        file (or any deleted snapshot still appears in Get-VMCheckpoint), so
-        Optimize-VHD runs against the merged parent.
-
-        Also removes the matching MemLabs.Notes.json / <snapshot>.json sidecar
-        files that select-DeleteSnapshotDomain maintains.
+        Deprecated - the WPF worker (Compact-Disks.ps1) now performs per-VM
+        prep (stop + checkpoint merge) in parallel with compaction.
     #>
     [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [object[]] $VMs
-    )
-
-    $vmsWithSnapshots = @()
-    foreach ($vm in $VMs) {
-        $snapshots = @(Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue)
-        if ($snapshots.Count -gt 0) {
-            $vmsWithSnapshots += [PSCustomObject]@{ VM = $vm; Snapshots = $snapshots }
-        }
-    }
-
-    if ($vmsWithSnapshots.Count -eq 0) {
-        return
-    }
-
-    $total = ($vmsWithSnapshots | ForEach-Object { $_.Snapshots.Count } | Measure-Object -Sum).Sum
-    Write-WhiteI -indent 0 "Merging $total checkpoint(s) across $($vmsWithSnapshots.Count) VM(s) before compaction..."
-
-    foreach ($entry in $vmsWithSnapshots) {
-        $vm = $entry.VM
-        $vmPath = (Get-VM2 -Name $vm.vmName).Path
-        foreach ($snapshot in $entry.Snapshots) {
-            $snapName = $snapshot.Name
-            Show-StatusEraseLine "Removing checkpoint '$snapName' on $($vm.vmName)" -indent
-            try {
-                Remove-VMCheckpoint2 -VMName $vm.vmName -Name $snapName | Out-Null
-            }
-            catch {
-                Write-RedX "Failed to remove '$snapName' on $($vm.vmName): $($_.Exception.Message)"
-                continue
-            }
-
-            # Remove sidecar notes file maintained by select-DeleteSnapshotDomain
-            if ($vmPath) {
-                if ($snapName -eq "MemLabs Snapshot") {
-                    $notesFile = Join-Path $vmPath 'MemLabs.Notes.json'
-                }
-                else {
-                    $notesFile = Join-Path $vmPath ($snapName + '.json')
-                }
-                if (Test-Path $notesFile) {
-                    Remove-Item $notesFile -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
-                }
-            }
-        }
-    }
-
-    # Wait for the AVHDX merges to complete. With the VMs stopped Hyper-V
-    # merges synchronously most of the time, but vmms can still finish writing
-    # behind the scenes - poll until no VM hard disk references an .avhdx and
-    # no MemLabs checkpoints remain.
-    $deadline = (Get-Date).AddMinutes(15)
-    while ((Get-Date) -lt $deadline) {
-        $pending = $false
-        foreach ($vm in $VMs) {
-            $hds = @(Get-VMHardDiskDrive -VMName $vm.vmName -ErrorAction SilentlyContinue)
-            if ($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' }) {
-                $pending = $true
-                break
-            }
-            if (Get-VMCheckpoint2 -VMName $vm.vmName -ErrorAction SilentlyContinue) {
-                $pending = $true
-                break
-            }
-        }
-        if (-not $pending) { break }
-        Show-StatusEraseLine "Waiting for checkpoint merges to finish..." -indent
-        Start-Sleep -Seconds 5
-    }
-
-    Write-GreenCheck "Checkpoint merge complete                                              "
+    param ([object[]] $VMs)
+    Write-Log "Merge-VMCheckpointsForCompact is deprecated; stop and merge now run inside the Compact-Disks WPF worker." -LogOnly
 }
 
 function select-OptimizeDomain {
@@ -1372,70 +1289,15 @@ function select-OptimizeDomain {
         return
     }
 
-    # Stop any selected VMs that are running; the WPF worker skips running VMs.
-    # Shut down gracefully in parallel - these VMs include DCs, SQL, and
-    # ConfigMgr site servers, so they need a chance to flush pending writes
-    # before we compact their VHDXs. Fall back to a hard turn-off only if a
-    # guest fails to shut down within the timeout.
-    $running = @($selectedVMs | Where-Object { $_.State -ne 'Off' })
-    if ($running.Count -gt 0) {
-        $shutdownTimeoutSec = 300  # 5 minutes per VM (jobs run in parallel)
-        Write-WhiteI -indent 0 "Gracefully shutting down $($running.Count) running VM(s) in parallel (timeout ${shutdownTimeoutSec}s)..."
-        $runningNames = @($running | Select-Object -ExpandProperty VmName)
-        $stopJobs = foreach ($vmName in $runningNames) {
-            Start-Job -Name "StopVM_$vmName" -ScriptBlock {
-                param($n, $timeoutSec)
-                $start = Get-Date
-                try {
-                    # Graceful shutdown via integration services
-                    Stop-VM -Name $n -Force -WarningAction SilentlyContinue -ErrorAction Stop
-                }
-                catch {
-                    # If the guest can't be reached gracefully, fall through to turn-off
-                }
-                # Wait for the VM to reach Off; if it doesn't, hard turn-off
-                while ((Get-VM -Name $n -ErrorAction SilentlyContinue).State -ne 'Off') {
-                    if (((Get-Date) - $start).TotalSeconds -gt $timeoutSec) {
-                        try {
-                            Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction Stop
-                            return @{ Name = $n; Ok = $true; Forced = $true }
-                        }
-                        catch {
-                            return @{ Name = $n; Ok = $false; Error = $_.Exception.Message }
-                        }
-                    }
-                    Start-Sleep -Seconds 2
-                }
-                return @{ Name = $n; Ok = $true; Forced = $false }
-            } -ArgumentList $vmName, $shutdownTimeoutSec
-        }
-        $stopJobs | Wait-Job | Out-Null
-        foreach ($j in $stopJobs) {
-            $r = Receive-Job -Job $j
-            if ($r.Ok -and -not $r.Forced) {
-                Write-GreenCheck "Gracefully stopped $($r.Name)"
-            }
-            elseif ($r.Ok -and $r.Forced) {
-                Write-OrangePoint "Force turned-off $($r.Name) (graceful shutdown timed out)"
-            }
-            else {
-                Write-RedX "Failed to stop $($r.Name): $($r.Error)"
-            }
-            Remove-Job -Job $j -Force -ErrorAction SilentlyContinue
-        }
-    }
-
-    # Merge any existing checkpoints so Optimize-VHD operates on the parent
-    # VHDX (compacting a differencing AVHDX gives near-zero savings, and after
-    # we delete a checkpoint Hyper-V also automatically merges its AVHDX back
-    # into the parent).
-    Merge-VMCheckpointsForCompact -VMs $selectedVMs
-
+    # The WPF worker now does everything per-VM in parallel:
+    #   graceful shutdown (with hard-stop fallback) -> merge checkpoints ->
+    #   enqueue VHDs for Optimize-VHD. As each VM finishes its prep its disks
+    #   join the compact queue, so slow-stopping VMs don't block fast ones.
     Start-CompactDisksUI -VMNames ($selectedVMs | Select-Object -ExpandProperty VmName) -DomainLabel $domain
 
     Write-Host
     Write-Host "VHD compaction is running in a separate WPF window." -ForegroundColor Green
-    Write-Host "VMs were stopped before launch and will NOT be auto-restarted - use the domain Start menu when compaction finishes." -ForegroundColor DarkGray
+    Write-Host "The worker will stop, merge checkpoints, and compact each VM in parallel. VMs will NOT be auto-restarted." -ForegroundColor DarkGray
     Start-Sleep -Seconds 3
 }
 
