@@ -937,8 +937,11 @@ function Format-OptionToken {
     # Returns "<ANSI><text>" — no trailing reset, since the next token will set its own color
     # (or Write-Host2 will append PSStyle.Reset at the end).
     param(
-        [Parameter(Mandatory)] [string]$Color,
-        [Parameter(Mandatory, AllowEmptyString = $true)] [string]$Text
+        [Parameter(Mandatory)]
+        [string]$Color,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
     )
     return "$(Get-AnsiColorCached $Color)$Text"
 }
