@@ -1232,11 +1232,13 @@ function Start-CompactDisksUI {
     $scriptPath = (Resolve-Path $scriptPath).Path
 
     $vmListQuoted = ($VMNames | ForEach-Object { "'{0}'" -f ($_ -replace "'", "''") }) -join ','
+    # NOTE: -DomainLabel is passed via env var (_COMPACT_DISKS_DOMAINLABEL),
+    # not via -Command, because powershell.exe -Command's quoting around an
+    # embedded -DomainLabel '...' argument was unreliable in practice (the
+    # parent process ended up with $DomainLabel empty and the worker title
+    # fell back to '<count> VM(s)'). Env vars are inherited verbatim by the
+    # child process so there's no shell-quoting layer to fight.
     $command = "& '$scriptPath' -Mode $Mode -MaxConcurrentJobs $MaxConcurrentJobs -VMNames @($vmListQuoted)"
-    if ($DomainLabel) {
-        $escapedLabel = $DomainLabel -replace "'", "''"
-        $command += " -DomainLabel '$escapedLabel'"
-    }
 
     $psExe = (Get-Process -Id $PID).Path
     if (-not $psExe) { $psExe = 'powershell.exe' }
@@ -1248,12 +1250,18 @@ function Start-CompactDisksUI {
     )
 
     Write-WhiteI -indent 0 "Launching Compact-Disks UI for $($VMNames.Count) VM(s)..."
+    if ($DomainLabel) {
+        $env:_COMPACT_DISKS_DOMAINLABEL = $DomainLabel
+    }
     try {
-        Start-Process -FilePath $psExe -ArgumentList $argList -WindowStyle Normal | Out-Null
+        Start-Process -FilePath $psExe -ArgumentList $argList -WindowStyle Normal -UseNewEnvironment:$false | Out-Null
         Write-GreenCheck "Compact-Disks worker launched. A WPF progress window will appear shortly."
     }
     catch {
         Write-RedX "Failed to launch Compact-Disks.ps1: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item Env:\_COMPACT_DISKS_DOMAINLABEL -ErrorAction SilentlyContinue
     }
 }
 

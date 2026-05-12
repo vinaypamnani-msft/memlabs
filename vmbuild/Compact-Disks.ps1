@@ -1900,12 +1900,22 @@ $dataFile = [System.IO.Path]::Combine(
 )
 
 $domainLabel = ''
-if ($PSBoundParameters.ContainsKey('DomainLabel') -and $DomainLabel) {
+if ($DomainLabel) {
     $domainLabel = $DomainLabel
+}
+elseif ($env:_COMPACT_DISKS_DOMAINLABEL) {
+    # Start-CompactDisksUI passes the domain label via env var because
+    # powershell.exe -Command quoting around an embedded -DomainLabel '...'
+    # argument was unreliable. See note in Start-CompactDisksUI.
+    $domainLabel = $env:_COMPACT_DISKS_DOMAINLABEL
 }
 elseif ($VMNames -and $VMNames.Count -gt 0) {
     $domainLabel = "$($VMNames.Count) VM(s)"
 }
+# Clear so it doesn't leak to grandchild processes (the worker re-launch
+# below inherits env vars, but DomainLabel is plumbed through the clixml
+# file from this point on).
+Remove-Item Env:\_COMPACT_DISKS_DOMAINLABEL -ErrorAction SilentlyContinue
 
 @{
     VMs                 = @($vms | ForEach-Object { @{ VMName = $_.Name } })
