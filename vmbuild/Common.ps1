@@ -798,10 +798,15 @@ function Get-File {
                     $destinationDrive = Get-PSDrive -Name (Get-Item -LiteralPath $destinationDirectory -ErrorAction Stop).PSDrive.Name -ErrorAction Stop
                     $freeBytes = [int64]$destinationDrive.Free
 
-                    if ($freeBytes -lt $requiredBytes) {
+                    $minimumRemainingBytes = 8GB
+                    $requiredWithReserveBytes = $requiredBytes + $minimumRemainingBytes
+
+                    if ($freeBytes -lt $requiredWithReserveBytes) {
                         $requiredGb = [Math]::Round(($requiredBytes / 1GB), 2)
+                        $reserveGb = [Math]::Round(($minimumRemainingBytes / 1GB), 2)
+                        $requiredWithReserveGb = [Math]::Round(($requiredWithReserveBytes / 1GB), 2)
                         $freeGb = [Math]::Round(($freeBytes / 1GB), 2)
-                        Write-Log "Get-File: Not enough disk space to copy '$sourceDisplay'. Required ${requiredGb}GB, available ${freeGb}GB on drive '$($destinationDrive.Name):'." -Failure
+                        Write-Log "Get-File: Not enough disk space to copy '$sourceDisplay' while keeping ${reserveGb}GB free. File requires ${requiredGb}GB, total required ${requiredWithReserveGb}GB, available ${freeGb}GB on drive '$($destinationDrive.Name):'." -Failure
                         return $false
                     }
                 }
