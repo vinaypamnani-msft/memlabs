@@ -2108,6 +2108,8 @@ function Get-List {
 
         if ($FlushCache.IsPresent) {
             $global:vm_List = $null
+            $global:TestConfigFastCache = $null
+            $global:VMStringCache = $null
             return
         }
 

@@ -1108,6 +1108,35 @@ function Test-Configuration {
     if ($null -eq $OrigSmartUpdateValue ) {
         $OrigSmartUpdateValue = $false
     }
+
+    # Fast-path memoization: when called repeatedly in -Fast mode with SmartUpdate disabled
+    # (the genconfig main-menu redraw pattern), the validation result is a pure function of
+    # the InputObject contents. Cache by SHA1 of its JSON so back-to-back menu transitions
+    # skip the full revalidation pass (New-DeployConfig + ~25 Test-Valid* calls).
+    $fastCacheJson = $null
+    $fastCacheKey = $null
+    $fastCacheEligible = ($Fast.IsPresent -and -not $Final.IsPresent -and $InputObject -and $OrigSmartUpdateValue -eq $true)
+    if ($fastCacheEligible) {
+        try {
+            $fastCacheJson = $InputObject | ConvertTo-Json -Depth 5 -Compress
+            $sha = [System.Security.Cryptography.SHA1]::Create()
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($fastCacheJson)
+                $fastCacheKey = [System.BitConverter]::ToString($sha.ComputeHash($bytes))
+            }
+            finally {
+                $sha.Dispose()
+            }
+            if ($global:TestConfigFastCache -and $global:TestConfigFastCache.Key -eq $fastCacheKey) {
+                Write-Log -Verbose "Test-Configuration: returning cached -Fast result (hash $($fastCacheKey.Substring(0,12)))"
+                return $global:TestConfigFastCache.Value
+            }
+        }
+        catch {
+            $fastCacheKey = $null
+        }
+    }
+
     try {
 
         $return = [PSCustomObject]@{
@@ -1136,9 +1165,15 @@ function Test-Configuration {
         }
 
         if ($InputObject) {
-            # Convert to Json and back to make a copy of the object, so the original is not modified
+            # Convert to Json and back to make a copy of the object, so the original is not modified.
+            # Reuse the JSON we already produced for the fast-cache key when available.
             try {
-                $configObject = $InputObject | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+                if ($fastCacheJson) {
+                    $configObject = $fastCacheJson | ConvertFrom-Json
+                }
+                else {
+                    $configObject = $InputObject | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+                }
             }
             catch {
                 $return.Message = "Failed to load Config as JSON. Please check if the config is valid or create a new one using genconfig.ps1"
@@ -1668,6 +1703,7 @@ function Test-Configuration {
             $return.Valid = $true
             $return.Problems = 0
             $return.Failures = 0
+            if ($fastCacheKey) { $global:TestConfigFastCache = @{ Key = $fastCacheKey; Value = $return } }
             return $return
         }
 
@@ -1675,12 +1711,14 @@ function Test-Configuration {
         if ($return.Problems -ne 0) {
             $return.Message = $return.Message.ToString().Trim()
             Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+            if ($fastCacheKey) { $global:TestConfigFastCache = @{ Key = $fastCacheKey; Value = $return } }
             return $return
         }
 
         # everything is good
         $return.Valid = $true
         Write-Progress2 -Activity "Validating Configuration" -Status "Validation in progress" -Completed
+        if ($fastCacheKey) { $global:TestConfigFastCache = @{ Key = $fastCacheKey; Value = $return } }
         return $return
     }
     catch {

@@ -5934,10 +5934,53 @@ function get-VMString {
 
     )
 
+    # Result memoization. get-VMString is called once per VM on every redraw of the
+    # Select-MainMenu loop. Inside, it walks Get-List2 (which re-clones the deployConfig
+    # via JSON) plus does a second Get-List2 for the color map. With many VMs that's the
+    # dominant per-redraw cost. The output is a pure function of the VM, the relevant
+    # config bits, the $colors switch, and the console width — cache on a hash of those.
+    $vmStringCacheKey = $null
+    try {
+        $cacheParts = [ordered]@{
+            vm     = $virtualMachine
+            vms    = $config.virtualMachines
+            opts   = $config.vmOptions
+            colors = [bool]$colors.IsPresent
+            width  = $host.UI.RawUI.WindowSize.Width
+        }
+        $cacheJson = $cacheParts | ConvertTo-Json -Depth 6 -Compress
+        $sha = [System.Security.Cryptography.SHA1]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($cacheJson)
+            $vmStringCacheKey = [System.BitConverter]::ToString($sha.ComputeHash($bytes))
+        }
+        finally {
+            $sha.Dispose()
+        }
+        if ($null -eq $global:VMStringCache) {
+            $global:VMStringCache = @{}
+        }
+        if ($global:VMStringCache.ContainsKey($vmStringCacheKey)) {
+            return $global:VMStringCache[$vmStringCacheKey]
+        }
+        # Bound the cache so it can't grow unbounded across long sessions.
+        if ($global:VMStringCache.Count -gt 1024) {
+            $global:VMStringCache = @{}
+        }
+    }
+    catch {
+        $vmStringCacheKey = $null
+    }
+
     $name = $null
     $temp = $null
     $SiteCode = $null
     $modified = get-IsExistingVMModified -virtualMachine $virtualMachine
+
+    # Resolve Get-List2 once and reuse below (color map loop + remoteSQLVM lookup).
+    # Get-List2 -DeployConfig clones the config via JSON each call, so collapsing the
+    # two call sites is a measurable win when this function is invoked per-VM in a loop.
+    $allVMs = get-list2 -deployConfig $config
 
 
     if ($virtualMachine.source -eq "hyperv" -or $virtualMachine.vmId) {
@@ -6034,12 +6077,10 @@ function get-VMString {
     }
 
     if ($virtualMachine.remoteSQLVM) {
-        $sqlVM = Get-List2 -DeployConfig $config | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
+        $sqlVM = $allVMs | Where-Object { $_.vmName -eq $virtualMachine.remoteSQLVM }
         if ($sqlVM.OtherNode) { $name += "  SQL AO [$($sqlVM.vmName),$($sqlVM.OtherNode)]" }
         else { $name += "  Remote SQL [$($virtualMachine.remoteSQLVM)]" }
-    }
-
-    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
+    }    if ($virtualMachine.sqlVersion -and -not $virtualMachine.sqlInstanceDir) {
         $name += "  SQL [$($virtualMachine.sqlVersion)]"
     }
 
@@ -6096,7 +6137,6 @@ function get-VMString {
     $casCount = 0
     $priCount = 0
     $secCount = 0
-    $allVMs = get-list2 -deployConfig $config
     foreach ($vm in $allVMs) {
         switch ($vm.Role) {
             "CAS" {
@@ -6204,6 +6244,9 @@ function get-VMString {
     }
 
     Write-log "Color for $($virtualMachine.Role) is $name" -verbose
+    if ($vmStringCacheKey) {
+        $global:VMStringCache[$vmStringCacheKey] = "$name"
+    }
     return "$name"
 }
 
