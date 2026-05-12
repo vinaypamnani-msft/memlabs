@@ -537,36 +537,55 @@ if ($env:_COMPACT_DISKS_WORKER) {
     # bytes per drive, not just per-VM. For every drive that can't hold all
     # merges at once, we'll serialize merges on that drive via a named
     # cross-process mutex acquired inside each prep job.
+    #
+    # VMs that don't fit even individually are marked Status='Deferred'
+    # (NOT 'Failed') and held back. After the main pass completes (which
+    # frees disk space via merges and Optimize-VHD on the VMs that did fit),
+    # we re-plan the deferred VMs and run another pass. Up to 2 retry passes
+    # before declaring them failed.
     $SerializeDrives = @()
-    try {
-        if (Get-Command Resolve-VMCheckpointMergePlan -ErrorAction SilentlyContinue) {
-            $allVmNames = @($vmInfoList | ForEach-Object VMName)
-            $mergePlan = Resolve-VMCheckpointMergePlan -VMNames $allVmNames
-            foreach ($d in $mergePlan.Drives) {
+    $maxRetryPasses  = 2
+    $pass            = 0
+
+    function Invoke-MergePlan {
+        param([string[]]$Names, [int]$PassNumber)
+        try {
+            if (-not (Get-Command Resolve-VMCheckpointMergePlan -ErrorAction SilentlyContinue)) {
+                return @{ SerializeDrives = @(); FailingVMs = @() }
+            }
+            $mp = Resolve-VMCheckpointMergePlan -VMNames $Names
+            $tag = if ($PassNumber -eq 0) { 'MERGE-PLAN' } else { "MERGE-PLAN-RETRY$PassNumber" }
+            foreach ($d in $mp.Drives) {
                 $msg = '{0}: total={1:N1}GB max={2:N1}GB avail={3:N1}GB -> {4}' -f `
                     $d.Drive, ($d.AvhdxTotal/1GB), ($d.AvhdxMax/1GB), ($d.Available/1GB), $d.Classification
-                Add-UiLog ("[MERGE-PLAN] $msg")
+                Add-UiLog ("[$tag] $msg")
             }
-            if (-not $mergePlan.Ok) {
-                foreach ($d in $mergePlan.Drives | Where-Object Classification -eq 'Fail') {
-                    Add-UiLog ("[MERGE-PLAN] Drive $($d.Drive): not enough free space even for largest single VM. Failing VMs: $($d.FailingVMs -join ', ')")
-                }
-                # Mark FailingVMs so they're skipped/marked PREP-FAIL up front.
-                foreach ($vm in $vmInfoList) {
-                    if ($mergePlan.FailingVMs -contains $vm.VMName) {
-                        $vm.PreFlightFail = $true
-                    }
+            if (-not $mp.Ok) {
+                foreach ($d in $mp.Drives | Where-Object Classification -eq 'Fail') {
+                    Add-UiLog ("[$tag] Drive $($d.Drive): not enough free space for largest VM. Affected: $($d.FailingVMs -join ', ')")
                 }
             }
-            $SerializeDrives = @($mergePlan.SerializeDrives)
-            if ($SerializeDrives.Count -gt 0) {
-                Add-UiLog ("[MERGE-PLAN] Serializing merges on drive(s): $($SerializeDrives -join ', ')")
+            if ($mp.SerializeDrives.Count -gt 0) {
+                Add-UiLog ("[$tag] Serializing merges on drive(s): $($mp.SerializeDrives -join ', ')")
             }
+            return @{ SerializeDrives = @($mp.SerializeDrives); FailingVMs = @($mp.FailingVMs) }
+        } catch {
+            Add-UiLog ("[MERGE-PLAN-WARN] Planning failed: $($_.Exception.Message)")
+            return @{ SerializeDrives = @(); FailingVMs = @() }
         }
-    } catch {
-        Add-UiLog ("[MERGE-PLAN-WARN] Pre-flight planning failed: $($_.Exception.Message)")
     }
 
+    $namesForPlan = @($vmInfoList | ForEach-Object VMName)
+    $planResult   = Invoke-MergePlan -Names $namesForPlan -PassNumber 0
+    $SerializeDrives = $planResult.SerializeDrives
+    foreach ($vm in $vmInfoList) {
+        if ($planResult.FailingVMs -contains $vm.VMName) {
+            $vm.PreFlightFail = $true
+        }
+    }
+
+    do {
+        $shouldRetry = $false
     try {
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
@@ -576,9 +595,12 @@ if ($env:_COMPACT_DISKS_WORKER) {
             while ($prepQueue.Count -gt 0) {
                 $vm = $prepQueue.Dequeue()
                 if ($vm.PSObject.Properties['PreFlightFail'] -and $vm.PreFlightFail) {
-                    $vm.Status = 'Failed'
+                    # Deferred (NOT failed): wait until others compact and
+                    # free up enough room. Final retry pass below converts
+                    # to 'Failed' if it still can't fit.
+                    $vm.Status = 'Deferred'
                     $vm.Error  = 'Pre-flight: not enough free disk space to merge checkpoints'
-                    Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
+                    Add-UiLog ("[PREP-DEFER] $($vm.VMName): $($vm.Error)")
                     continue
                 }
                 Add-UiLog ("[PREP-START] $($vm.VMName)")
@@ -1287,6 +1309,42 @@ if ($env:_COMPACT_DISKS_WORKER) {
             }
         }
     }
+
+        # --- Retry pass: deferred VMs may now fit thanks to space freed by Optimize-VHD ---
+        $pass++
+        $deferred = @($vmInfoList | Where-Object { $_.Status -eq 'Deferred' })
+        if ($deferred.Count -gt 0 -and $pass -le $maxRetryPasses -and -not $UiSync.WindowClosed) {
+            $defNames = @($deferred | ForEach-Object VMName)
+            Add-UiLog ('')
+            Add-UiLog ("--- Retry pass $pass for $($deferred.Count) deferred VM(s): $($defNames -join ', ') ---")
+            $planResult = Invoke-MergePlan -Names $defNames -PassNumber $pass
+            $SerializeDrives = $planResult.SerializeDrives
+            foreach ($vm in $deferred) {
+                if ($planResult.FailingVMs -contains $vm.VMName) {
+                    # Still doesn't fit even after others finished compacting.
+                    $vm.PreFlightFail = $true
+                    $vm.Status = 'Failed'
+                    Add-UiLog ("[PREP-FAIL] $($vm.VMName): still insufficient free space after retry pass $pass")
+                } else {
+                    # Now fits - reset and requeue.
+                    $vm.PreFlightFail = $false
+                    $vm.Status = 'Pending'
+                    $vm.Error  = $null
+                    $vm.Job    = $null
+                    $prepQueue.Enqueue($vm)
+                    $shouldRetry = $true
+                    Add-UiLog ("[PREP-RETRY] $($vm.VMName) requeued (pass $pass)")
+                }
+            }
+        }
+        elseif ($deferred.Count -gt 0) {
+            # Out of retry budget or window closed - mark deferred VMs failed.
+            foreach ($vm in $deferred) {
+                $vm.Status = 'Failed'
+                Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error) (retry budget exhausted)")
+            }
+        }
+    } while ($shouldRetry)
 
     # --- Auto-restart VMs that were Running at the start ---
     # Order matters: DCs first (other VMs need AD), then file servers (some
