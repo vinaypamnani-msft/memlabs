@@ -1205,7 +1205,9 @@ function Start-CompactDisksUI {
     .DESCRIPTION
         Spawns Compact-Disks.ps1 in a separate hidden PowerShell process. The
         worker shows a WPF progress window and runs Optimize-VHD in parallel
-        for every VHD owned by the given VMs. Returns immediately so the
+        for every VHD owned by the given VMs. The worker dot-sources
+        Common.ps1 itself to pick up $Common.LocalAdmin for in-guest cleanup,
+        so no credential plumbing is needed here. Returns immediately so the
         caller (genconfig) stays interactive.
     #>
     [CmdletBinding()]
@@ -1219,17 +1221,7 @@ function Start-CompactDisksUI {
         [ValidateRange(1, 16)]
         [int] $MaxConcurrentJobs = 8,
 
-        [string] $DomainLabel,
-
-        # FQDN of the domain these VMs belong to. Used for PSDirect online
-        # cleanup when a VM is still running. Optional - if omitted, the
-        # worker just skips online cleanup.
-        [string] $DomainFqdn,
-
-        # Local admin credential (typically $Common.LocalAdmin) for opening
-        # PSDirect sessions into running guests. Optional - if omitted, the
-        # worker just skips online cleanup.
-        [System.Management.Automation.PSCredential] $LocalAdmin
+        [string] $DomainLabel
     )
 
     $scriptPath = Join-Path $PSScriptRoot '..\Compact-Disks.ps1'
@@ -1239,25 +1231,8 @@ function Start-CompactDisksUI {
     }
     $scriptPath = (Resolve-Path $scriptPath).Path
 
-    # Persist the admin credential to a per-user-DPAPI-protected clixml so
-    # the worker process (running as the same user) can deserialize it.
-    $credFileArg = ''
-    if ($LocalAdmin) {
-        $credFile = [System.IO.Path]::Combine(
-            [System.IO.Path]::GetTempPath(),
-            "CompactDisksCred_$([guid]::NewGuid().ToString('N')).xml"
-        )
-        $LocalAdmin | Export-Clixml -Path $credFile
-        $credFileArg = " -AdminCredentialFile '$credFile'"
-    }
-
-    $domainArg = ''
-    if ($DomainFqdn) {
-        $domainArg = " -DomainFqdn '$DomainFqdn'"
-    }
-
     $vmListQuoted = ($VMNames | ForEach-Object { "'{0}'" -f ($_ -replace "'", "''") }) -join ','
-    $command = "& '$scriptPath' -Mode $Mode -MaxConcurrentJobs $MaxConcurrentJobs -VMNames @($vmListQuoted)$credFileArg$domainArg"
+    $command = "& '$scriptPath' -Mode $Mode -MaxConcurrentJobs $MaxConcurrentJobs -VMNames @($vmListQuoted)"
 
     $psExe = (Get-Process -Id $PID).Path
     if (-not $psExe) { $psExe = 'powershell.exe' }
@@ -1317,12 +1292,9 @@ function select-OptimizeDomain {
     #   online cleanup (if Running) -> graceful shutdown (with hard-stop
     #   fallback) -> merge checkpoints -> mount/cleanup/zero-fill/defrag ->
     #   Optimize-VHD. As each VM finishes its prep its disks join the compact
-    #   queue, so slow-stopping VMs don't block fast ones.
-    Start-CompactDisksUI `
-        -VMNames ($selectedVMs | Select-Object -ExpandProperty VmName) `
-        -DomainLabel $domain `
-        -DomainFqdn $domain `
-        -LocalAdmin $Common.LocalAdmin
+    #   queue, so slow-stopping VMs don't block fast ones. The worker dot-
+    #   sources Common.ps1 itself to pick up $Common.LocalAdmin.
+    Start-CompactDisksUI -VMNames ($selectedVMs | Select-Object -ExpandProperty VmName) -DomainLabel $domain
 
     Write-Host
     Write-Host "VHD compaction is running in a separate WPF window." -ForegroundColor Green

@@ -52,18 +52,10 @@ param(
     [switch]$SkipZeroFill,
 
     # Skip the in-guest (online) cleanup that runs against still-running VMs
-    # via PSDirect BEFORE shutting them down. Default is to run it. Requires
-    # -AdminCredentialFile.
-    [switch]$SkipOnlineClean,
-
-    # Path to a clixml file containing a serialized PSCredential (typically
-    # $Common.LocalAdmin) used to open PSDirect sessions into running VMs
-    # for the online cleanup phase.
-    [string]$AdminCredentialFile,
-
-    # FQDN of the domain these VMs are joined to. Used as the first attempt
-    # for PSDirect username; falls back to local <VMNAME>\<admin>.
-    [string]$DomainFqdn
+    # via PSDirect BEFORE shutting them down. Default is to run it.
+    # Credentials are sourced from $Common.LocalAdmin after we dot-source
+    # Common.ps1 in worker mode.
+    [switch]$SkipOnlineClean
 )
 
 function Format-Size {
@@ -93,6 +85,21 @@ if ($env:_COMPACT_DISKS_WORKER) {
     Remove-Item Env:\_COMPACT_DISKS_WORKER   -ErrorAction SilentlyContinue
     Remove-Item Env:\_COMPACT_DISKS_DATAFILE  -ErrorAction SilentlyContinue
 
+    # Dot-source Common.ps1 so we have $Common.LocalAdmin (used by the
+    # per-VM prep jobs for PSDirect online cleanup) and helpers like
+    # Invoke-VmCommand / Get-VmSession. Use -InJob to suppress the
+    # background-image/UI bits we don't want from this detached console.
+    try {
+        $commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+        if (Test-Path $commonPath) {
+            if ($Common -and $Common.Initialized) { $Common.Initialized = $false }
+            . $commonPath -InJob:$true
+        }
+    }
+    catch {
+        Write-Warning "Failed to dot-source Common.ps1 (online cleanup will be skipped): $($_.Exception.Message)"
+    }
+
     Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
     # Load serialized disk data from the temp file
@@ -102,8 +109,11 @@ if ($env:_COMPACT_DISKS_WORKER) {
     $AttachedCount = $importedData.AttachedCount
     $DomainLabel   = $importedData.DomainLabel
     $ShutdownTimeoutSec = if ($importedData.ShutdownTimeoutSec) { [int]$importedData.ShutdownTimeoutSec } else { 300 }
-    $WorkerDomainFqdn = $importedData.DomainFqdn
-    $WorkerAdminCred  = $importedData.AdminCred
+
+    # Path to Common.ps1 - each prep job dot-sources it to gain access to
+    # Invoke-VmCommand + $Common.LocalAdmin for online cleanup. If Common.ps1
+    # didn't load in this worker process, online cleanup is silently skipped.
+    $WorkerCommonPath = if ($Common -and $Common.Initialized) { Join-Path $PSScriptRoot 'Common.ps1' } else { $null }
 
     # Per-VM prep records (stop + checkpoint merge) - one entry per VM.
     # When prep completes its disks are pushed onto $diskQueue.
@@ -470,116 +480,108 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 [void]$UiSync.Log.Add("[PREP-START] $($vm.VMName)")
                 try {
                     $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
-                        param($n, $timeoutSec, $adminCred, $domainFqdn, $doOnlineClean)
+                        param($n, $timeoutSec, $commonPath, $doOnlineClean)
                         $startedAt = Get-Date
                         $forced = $false
                         $onlineCleanRan = $false
 
-                        # --- 0) Online cleanup (only if VM is currently Running) ---
-                        # We open a PSDirect session and run an in-guest cleanup
-                        # script. This frees up gigabytes from WSUS cache,
-                        # SoftwareDistribution, temp, dumps, prefetch, recycle
-                        # bin, and triggers offline component-store cleanup
-                        # (DISM /Cleanup-Image /StartComponentCleanup /ResetBase)
-                        # so the post-shutdown defrag + Optimize-VHD can
-                        # actually reclaim the space.
-                        $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
-                        if ($doOnlineClean -and $adminCred -and $cur -and $cur.State -eq 'Running') {
-                            Write-Progress -Activity "Prep $n" -Status 'Online cleanup (in-guest)' -PercentComplete 2
-                            $sess = $null
+                        # Dot-source Common.ps1 so we have Invoke-VmCommand /
+                        # Get-VmSession / $Common.LocalAdmin. -InJob suppresses
+                        # the UI/background-image init bits.
+                        $commonLoaded = $false
+                        if ($doOnlineClean -and $commonPath -and (Test-Path $commonPath)) {
                             try {
-                                # Try domain account first, then local fallback
-                                $userBase = $adminCred.GetNetworkCredential().UserName
-                                $tryUsers = @()
-                                if ($domainFqdn) {
-                                    $netBios = ($domainFqdn -split '\.')[0]
-                                    $tryUsers += "$netBios\$userBase"
-                                }
-                                $tryUsers += "$n\$userBase"
-                                foreach ($u in $tryUsers) {
-                                    $tryCred = New-Object System.Management.Automation.PSCredential($u, $adminCred.Password)
-                                    try {
-                                        $sess = New-PSSession -VMName $n -Credential $tryCred -ErrorAction Stop
-                                        break
-                                    }
-                                    catch {
-                                        $sess = $null
-                                    }
-                                }
-                                if ($sess) {
-                                    Invoke-Command -Session $sess -ScriptBlock {
-                                        $ProgressPreference = 'SilentlyContinue'
-                                        $ErrorActionPreference = 'SilentlyContinue'
-
-                                        # Stop services that lock the caches we want to nuke
-                                        $svcs = @('wuauserv','bits','cryptsvc','WSUSService','UsoSvc','TrustedInstaller')
-                                        foreach ($s in $svcs) {
-                                            try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue } catch {}
-                                        }
-
-                                        $purge = @(
-                                            'C:\Windows\SoftwareDistribution\Download\*',
-                                            'C:\Windows\Temp\*',
-                                            'C:\Windows\Logs\CBS\*',
-                                            'C:\Windows\Logs\DISM\*',
-                                            'C:\Windows\Prefetch\*',
-                                            'C:\Windows\Minidump\*',
-                                            'C:\Windows\Memory.dmp',
-                                            'C:\inetpub\logs\LogFiles\*',
-                                            'C:\ProgramData\Microsoft\Windows\WER\*',
-                                            'C:\ProgramData\Microsoft\Windows\WindowsUpdate\Log\*',
-                                            'C:\ProgramData\USOShared\Logs\*',
-                                            'C:\Users\*\AppData\Local\Temp\*',
-                                            'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*',
-                                            'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*',
-                                            'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*'
-                                        )
-                                        foreach ($pat in $purge) {
-                                            try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
-                                        }
-
-                                        # Empty recycle bins on every drive
-                                        try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
-
-                                        # Offline-style component store cleanup against the running system.
-                                        # /ResetBase makes all currently-installed updates permanent
-                                        # (cannot uninstall) and lets DISM purge superseded payloads.
-                                        try {
-                                            & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null
-                                        } catch {}
-                                        try {
-                                            & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null
-                                        } catch {}
-
-                                        # WSUS server content cleanup, if WSUS is installed
-                                        try {
-                                            if (Get-Module -ListAvailable -Name UpdateServices) {
-                                                Import-Module UpdateServices -ErrorAction SilentlyContinue
-                                                $wsus = Get-WsusServer -ErrorAction SilentlyContinue
-                                                if ($wsus) {
-                                                    Invoke-WsusServerCleanup -CleanupObsoleteComputers `
-                                                        -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
-                                                        -CompressUpdates -DeclineSupersededUpdates `
-                                                        -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
-                                                }
-                                            }
-                                        } catch {}
-
-                                        # Restart the services we stopped (best-effort)
-                                        foreach ($s in @('wuauserv','bits','cryptsvc')) {
-                                            try { Start-Service -Name $s -ErrorAction SilentlyContinue } catch {}
-                                        }
-                                    } -ErrorAction SilentlyContinue
-                                    $onlineCleanRan = $true
-                                }
+                                if ($Common -and $Common.Initialized) { $Common.Initialized = $false }
+                                . $commonPath -InJob:$true
+                                $commonLoaded = $true
                             }
                             catch {
                                 # Online cleanup is best-effort; never block compaction
                             }
-                            finally {
-                                if ($sess) {
-                                    try { Remove-PSSession -Session $sess -ErrorAction SilentlyContinue } catch {}
+                        }
+
+                        # --- 0) Online cleanup (only if VM is currently Running) ---
+                        # Uses Invoke-VmCommand which handles credential lookup
+                        # (domain account first, then local fallback via VM
+                        # note) and PSSession caching for us.
+                        $cur = Get-VM -Name $n -ErrorAction SilentlyContinue
+                        if ($commonLoaded -and $cur -and $cur.State -eq 'Running' -and $Common.LocalAdmin) {
+                            Write-Progress -Activity "Prep $n" -Status 'Online cleanup (in-guest)' -PercentComplete 2
+
+                            # Discover the VM's domain via the VM note so
+                            # Invoke-VmCommand picks the right credentials.
+                            $note = Get-VMNote -VMName $n -ErrorAction SilentlyContinue
+                            $vmDomain = if ($note -and $note.domain) { $note.domain } else { 'WORKGROUP' }
+
+                            $cleanupScript = {
+                                $ProgressPreference = 'SilentlyContinue'
+                                $ErrorActionPreference = 'SilentlyContinue'
+
+                                # Stop services that lock the caches we want to nuke
+                                $svcs = @('wuauserv','bits','cryptsvc','WSUSService','UsoSvc','TrustedInstaller')
+                                foreach ($s in $svcs) {
+                                    try { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue } catch {}
                                 }
+
+                                $purge = @(
+                                    'C:\Windows\SoftwareDistribution\Download\*',
+                                    'C:\Windows\Temp\*',
+                                    'C:\Windows\Logs\CBS\*',
+                                    'C:\Windows\Logs\DISM\*',
+                                    'C:\Windows\Prefetch\*',
+                                    'C:\Windows\Minidump\*',
+                                    'C:\Windows\Memory.dmp',
+                                    'C:\inetpub\logs\LogFiles\*',
+                                    'C:\ProgramData\Microsoft\Windows\WER\*',
+                                    'C:\ProgramData\Microsoft\Windows\WindowsUpdate\Log\*',
+                                    'C:\ProgramData\USOShared\Logs\*',
+                                    'C:\Users\*\AppData\Local\Temp\*',
+                                    'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*',
+                                    'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*',
+                                    'C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*'
+                                )
+                                foreach ($pat in $purge) {
+                                    try { Remove-Item -Path $pat -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                                }
+
+                                try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+
+                                # Component-store cleanup. /ResetBase makes
+                                # installed updates permanent (can't uninstall)
+                                # and lets DISM purge superseded payloads.
+                                try { & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null } catch {}
+                                try { & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null } catch {}
+
+                                # WSUS server content cleanup (if WSUS role present)
+                                try {
+                                    if (Get-Module -ListAvailable -Name UpdateServices) {
+                                        Import-Module UpdateServices -ErrorAction SilentlyContinue
+                                        $wsus = Get-WsusServer -ErrorAction SilentlyContinue
+                                        if ($wsus) {
+                                            Invoke-WsusServerCleanup -CleanupObsoleteComputers `
+                                                -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
+                                                -CompressUpdates -DeclineSupersededUpdates `
+                                                -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
+                                        }
+                                    }
+                                } catch {}
+
+                                # Restart the services we stopped (best-effort)
+                                foreach ($s in @('wuauserv','bits','cryptsvc')) {
+                                    try { Start-Service -Name $s -ErrorAction SilentlyContinue } catch {}
+                                }
+                            }
+
+                            try {
+                                $result = Invoke-VmCommand -VmName $n -VmDomainName $vmDomain `
+                                    -ScriptBlock $cleanupScript -DisplayName 'Compact-Disks online cleanup' `
+                                    -SuppressLog
+                                if ($result -and -not $result.ScriptBlockFailed) {
+                                    $onlineCleanRan = $true
+                                }
+                            }
+                            catch {
+                                # best-effort; never block compaction
                             }
                         }
 
@@ -664,7 +666,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
                         return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; Disks = $disks.ToArray() }
-                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerAdminCred, $WorkerDomainFqdn, (-not $SkipOnlineClean)
+                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean)
                     $vm.Job    = $job
                     $vm.Status = 'Running'
                     [void]$activePrepJobs.Add($vm)
@@ -1060,27 +1062,10 @@ if ($VMNames -and $VMNames.Count -gt 0) {
     $domainLabel = "$($VMNames.Count) VM(s)"
 }
 
-# Pre-read the admin credential here (in the foreground process, same user
-# context as caller) so we can re-serialize it into the worker data file.
-$adminCred = $null
-if ($AdminCredentialFile -and (Test-Path $AdminCredentialFile)) {
-    try {
-        $adminCred = Import-Clixml -Path $AdminCredentialFile
-    }
-    catch {
-        Write-Warning "Failed to import admin credential from '$AdminCredentialFile': $($_.Exception.Message)"
-    }
-    # Clean up the source file - the worker only needs the in-memory copy
-    # which we re-serialize below.
-    Remove-Item -Path $AdminCredentialFile -Force -ErrorAction SilentlyContinue
-}
-
 @{
     VMs                 = @($vms | ForEach-Object { @{ VMName = $_.Name } })
     AttachedCount       = 0   # legacy field, kept for backward compat in the worker
     DomainLabel         = $domainLabel
-    DomainFqdn          = $DomainFqdn
-    AdminCred           = $adminCred
     ShutdownTimeoutSec  = 300
 } | Export-Clixml -Path $dataFile
 
