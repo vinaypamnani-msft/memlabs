@@ -1233,6 +1233,10 @@ function Start-CompactDisksUI {
 
     $vmListQuoted = ($VMNames | ForEach-Object { "'{0}'" -f ($_ -replace "'", "''") }) -join ','
     $command = "& '$scriptPath' -Mode $Mode -MaxConcurrentJobs $MaxConcurrentJobs -VMNames @($vmListQuoted)"
+    if ($DomainLabel) {
+        $escapedLabel = $DomainLabel -replace "'", "''"
+        $command += " -DomainLabel '$escapedLabel'"
+    }
 
     $psExe = (Get-Process -Id $PID).Path
     if (-not $psExe) { $psExe = 'powershell.exe' }

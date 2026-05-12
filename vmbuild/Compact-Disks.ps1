@@ -55,7 +55,12 @@ param(
     # via PSDirect BEFORE shutting them down. Default is to run it.
     # Credentials are sourced from $Common.LocalAdmin after we dot-source
     # Common.ps1 in worker mode.
-    [switch]$SkipOnlineClean
+    [switch]$SkipOnlineClean,
+
+    # Friendly label shown in the WPF window title bar and embedded in the
+    # per-run log file name. Normally a domain name; falls back to a VM
+    # count if not supplied.
+    [string]$DomainLabel
 )
 
 function Format-Size {
@@ -1623,7 +1628,10 @@ $dataFile = [System.IO.Path]::Combine(
 )
 
 $domainLabel = ''
-if ($VMNames -and $VMNames.Count -gt 0) {
+if ($PSBoundParameters.ContainsKey('DomainLabel') -and $DomainLabel) {
+    $domainLabel = $DomainLabel
+}
+elseif ($VMNames -and $VMNames.Count -gt 0) {
     $domainLabel = "$($VMNames.Count) VM(s)"
 }
 
