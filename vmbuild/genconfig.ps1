@@ -692,6 +692,27 @@ function Get-GenericHelp {
     
 }
 
+# Push any in-memory edits to existing (already-deployed) VMs back into the
+# deploy config as hidden VM entries, so Test-Configuration / deployment can
+# see them. No-op if nothing was edited.
+function Add-ModifiedExistingVMsToConfig {
+    foreach ($virtualMachine in $global:existingMachines) {
+        if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
+            Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
+        }
+    }
+}
+
+# Returns $true if any already-deployed VM has been edited in this session.
+function Test-AnyExistingVMModified {
+    foreach ($virtualMachine in $global:existingMachines) {
+        if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Select-MainMenu {
     if (-not $global:existingMachines) {   
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $false 
@@ -825,11 +846,7 @@ function Select-MainMenu {
                 Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" -HelpFunction "Get-GenericHelp"
             }
             "d" {
-                foreach ($virtualMachine in $global:existingMachines) {
-                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
-                    }
-                }
+                Add-ModifiedExistingVMsToConfig
                 $global:DisableSmartUpdate = $false
                 return $true
             }
@@ -838,11 +855,7 @@ function Select-MainMenu {
                 return $false 
             }
             "r" {
-                foreach ($virtualMachine in $global:existingMachines) {
-                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        Add-ModifiedExistingVMToDeployConfig -vm $virtualMachine -configToModify $global:config -hidden:$true
-                    }
-                }
+                Add-ModifiedExistingVMsToConfig
                 $c = Test-Configuration -InputObject $Global:Config
                 $global:DebugConfig = $c.DeployConfig
                 write-Host 'Debug Config stored in $global:DebugConfig'
@@ -850,12 +863,7 @@ function Select-MainMenu {
                 return $global:DebugConfig
             }
             "!" {
-                $modified = $false
-                foreach ($virtualMachine in $global:existingMachines) {
-                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        $modified = $true
-                    }
-                }
+                $modified = Test-AnyExistingVMModified
                 $response = "y"
                 if ($modified) {
                     $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
@@ -871,12 +879,7 @@ function Select-MainMenu {
                 }                
             }
             "*" {                                              
-                $modified = $false
-                foreach ($virtualMachine in $global:existingMachines) {
-                    if (get-IsExistingVMModified -virtualMachine $virtualMachine) {
-                        $modified = $true
-                    }
-                }
+                $modified = Test-AnyExistingVMModified
                 $response = "y"
                 if ($modified) {
                     $response = Read-YesOrNoWithTimeout -Prompt "One or more modified existing machines found. These changes will not be saved. Continue?" -HideHelp -Default "y" -timeout 15
