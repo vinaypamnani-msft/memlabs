@@ -1512,7 +1512,7 @@ function Select-MainMenu {
 
                 if ($response.StartsWith("-D")) {
                     $response = $response.SubString(2)
-                    write-log -verbose "Deleting VM $response"
+                    write-log -verbose "Deleting VM '$response' from config"
                     Select-VirtualMachines $vmNameToNumberMap[$response] "Z"
                 }
                 else {
@@ -2270,7 +2270,7 @@ function Select-Config {
                 $savedConfigJson = Get-Content $file | ConvertFrom-Json
             }
             catch {
-                $savedNotes = $_
+                Write-Log "Failed to parse config file '$($file.FullName)': $_" -Warning
             }
 
             $savedNotes = "[" + $file.LastWriteTime.GetDateTimeFormats()[2].PadLeft(8) + "]"
@@ -5615,7 +5615,7 @@ function Select-Options {
         # We got the [1] Number pressed. Lets match that up to the actual value.
         $i = 0
         
-        write-log -verbose "Select-Options response = $response"
+        write-log -verbose "Select-Options for '$MenuName': response = $response"
         if (($response -as [int]) -is [int]) {
             $response = $response -as [int]
             $item = $itemMap[$response]
@@ -5629,7 +5629,7 @@ function Select-Options {
             
                 $value = $property."$item"
                 $name = $item
-                write-log -verbose  "$name = $value"               
+                write-log -verbose  "$name = $value (VM: $($property.vmName))"               
             } 
         }
 
@@ -6311,11 +6311,9 @@ function get-VMString {
         if (-not $color) {
             $color = "%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         }
-        Write-log "Setting $name to $color for $($virtualMachine.Role)" -verbose
         $name = $name.TrimEnd() + $color
     }
 
-    Write-log "Color for $($virtualMachine.Role) is $name" -verbose
     if ($vmStringCacheKey) {
         $global:VMStringCache[$vmStringCacheKey] = "$name"
     }
@@ -7212,7 +7210,7 @@ function show-NewVMMenu {
         [string]$SiteCode
     )
 
-    write-log -Verbose "show-NewVMMenu called wite $role $SiteCode"
+    write-log -Verbose "show-NewVMMenu called with role='$role' siteCode='$SiteCode'"
     if (-not $role) {
         $role = Select-RolesForExisting -enhance:$true
         if (-not $role) {
@@ -7288,7 +7286,7 @@ function show-NewVMMenu {
     if (-not $machineName) {
         return
     }
-    write-log -verbose "Returned machineName $machineName"
+    write-log -verbose "show-NewVMMenu returned machineName '$machineName' for role '$role'"
     return $machineName
 }
 
@@ -7419,7 +7417,7 @@ function Select-VirtualMachines {
                         continue VMLoop
                     }
 
-                    write-log -logonly "Modify properties returned $newValue"
+                    write-log -logonly "Modify properties for '$($virtualMachine.vmName)' returned $newValue"
                     if ($newValue -eq "Z") {
                         $response2 = Read-YesOrNoWithTimeout -Prompt "Delete VM $($virtualMachine.vmName) from Hyper-V? (Y/n)" -HideHelp -timeout 180 -Default "y"
 
@@ -7451,9 +7449,9 @@ function Select-VirtualMachines {
                     }
                     if ($newValue -eq "N") {
 
-                        Write-Log -Verbose "Adding new disk to VM"
-                        $count = 0
                         $VmName = $virtualMachine.vmName
+                        Write-Log -Verbose "$VmName`: Adding new disk to VM"
+                        $count = 0
                         $vmObject = get-vm2 -name $VmName
                         Write-Log "Stopping $VmName"
                         $stopped = Stop-Vm2 -Name $VmName -Passthru
@@ -7475,13 +7473,25 @@ function Select-VirtualMachines {
                         $size = "500GB"
                         Write-Log "$VmName`: Adding $newDiskPath"
                         if (-not $Migrate) {
-                            New-VHD -Path $newDiskPath -SizeBytes ($size / 1) -Dynamic | out-null
+                            try {
+                                New-VHD -Path $newDiskPath -SizeBytes ($size / 1) -Dynamic -ErrorAction Stop | out-null
+                            }
+                            catch {
+                                Write-Log "$VmName`: New-VHD failed for $newDiskPath`: $_" -Failure
+                                return $false
+                            }
                         }
                         if (-not (Test-Path $newDiskPath)) {
                             Write-Log "Failed to find $newDiskPath" -Failure
                             return
                         }
-                        Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath | out-null
+                        try {
+                            Add-VMHardDiskDrive -VMName $VmName -Path $newDiskPath -ErrorAction Stop | out-null
+                        }
+                        catch {
+                            Write-Log "$VmName`: Add-VMHardDiskDrive failed for $newDiskPath`: $_" -Failure
+                            return $false
+                        }
                         Write-Log "Starting $VmName"
                         $Started = Start-Vm2 -Name $VmName -Passthru
                         if (-not $Started) {
@@ -7500,7 +7510,7 @@ function Select-VirtualMachines {
                             Write-Log "Could not Initialize new disk" -Failure
                         }
                         else {
-                            Write-Log ".done"
+                            Write-Log "$VmName`: Disk $newDiskPath initialized"
                         }
                         return
                     }
@@ -7871,7 +7881,8 @@ function Select-VirtualMachines {
             }
         }
         if ($newValue -eq "Z") {
-            write-log -verbose "Removing machine $response or $machineName"
+            $vmToRemove = if ($machineName) { $machineName } else { $response }
+            write-log -verbose "Removing VM '$vmToRemove' from config"
             $i = 0
             $removeVM = $true
             foreach ($virtualMachine in $global:existingMachines) {
@@ -8028,8 +8039,13 @@ function Save-Config {
     $response = Read-Single -Prompt "Save Filename" -currentValue $filename -HideHelp -Timeout 30 -useReadHost
 
     if ($fullFileName -and (-not $response)) {
-        $config | ConvertTo-Json -Depth 5 | Out-File $fullfilename
-        Write-Host "Saved to $fullfilename"
+        try {
+            $config | ConvertTo-Json -Depth 5 | Out-File $fullfilename -ErrorAction Stop
+            Write-Host "Saved to $fullfilename"
+        }
+        catch {
+            Write-Log "Failed to save config to '$fullfilename': $_" -Failure
+        }
         Write-Log -HostOnly -Verbose "(3)Returning File: $fileName -> $fullFileName"
         return $filename
     }
@@ -8045,9 +8061,14 @@ function Save-Config {
         $filename += ".json"
     }
 
-    $config | ConvertTo-Json -Depth 5 | Out-File $filename
-    #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
-    Write-Host "Saved to $filename"
+    try {
+        $config | ConvertTo-Json -Depth 5 | Out-File $filename -ErrorAction Stop
+        #$return.ConfigFileName = Split-Path -Path $fileName -Leaf
+        Write-Host "Saved to $filename"
+    }
+    catch {
+        Write-Log "Failed to save config to '$filename': $_" -Failure
+    }
     Write-Host
     Write-Verbose "11"
     $filename = Split-Path -Path $fileName -Leaf
