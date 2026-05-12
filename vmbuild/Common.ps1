@@ -4953,6 +4953,65 @@ if (-not $Common.Initialized) {
 
         # Get latest hotfix version
 
+        # Kick off environment detection in parallel (PS7 ThreadJob). The env
+        # probe is the slowest cold-start step that's truly self-contained: it
+        # calls Get-DnsClient + Get-NetIPAddress, and on non-Azure hosts the
+        # Invoke-RestMethod to 169.254.169.254 blocks for the full 2s timeout.
+        # Running it alongside the directory/setup work below overlaps that
+        # wait with otherwise-serial init. The job is only started when:
+        #   - PS 7 with Start-ThreadJob available (ThreadJob shares the
+        #     process; ~100ms to spin up vs many seconds for Start-Job)
+        #   - not running InJob
+        #   - the on-disk init-context cache file looks stale (cheap mtime peek)
+        #   - env detection isn't being skipped via switch/profile
+        # On any of those failing, we fall through to the existing inline
+        # behavior so PS 5.1 / cache-hit / skipped paths are unchanged.
+        $envProbeJob = $null
+        $envCacheLikelyStale = $true
+        if (-not $DisableInitContextCache) {
+            try {
+                if (Test-Path $initContextCacheFile) {
+                    $cacheAgeMin = ((Get-Date) - (Get-Item $initContextCacheFile -ErrorAction Stop).LastWriteTime).TotalMinutes
+                    if ($cacheAgeMin -le $InitContextCacheMinutes) {
+                        $envCacheLikelyStale = $false
+                    }
+                }
+            }
+            catch {}
+        }
+        if ($PS7 -and -not $InJob -and -not $effectiveSkipEnvironmentDetection -and $envCacheLikelyStale `
+                -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+            try {
+                $envProbeJob = Start-ThreadJob -Name "MemLabs-EnvProbe" -ScriptBlock {
+                    $result = [PSCustomObject]@{ CorpNetInterfaceIndex = $null; IsAzureVM = $false }
+                    try {
+                        $dnsClient = Get-DnsClient -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
+                        if ($dnsClient) { $result.CorpNetInterfaceIndex = $dnsClient.InterfaceIndex }
+                    }
+                    catch {}
+                    try {
+                        if (Get-NetIPAddress -AddressFamily IPV4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq "10.1.0.4" }) {
+                            $result.IsAzureVM = $true
+                        }
+                    }
+                    catch {}
+                    if (-not $result.IsAzureVM) {
+                        try {
+                            $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop
+                            if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
+                                $result.IsAzureVM = $true
+                            }
+                        }
+                        catch {}
+                    }
+                    return $result
+                }
+            }
+            catch {
+                $envProbeJob = $null
+            }
+        }
+
         Set-BackgroundImage $image "right" (50 - 7) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Loading Global Configuration" -PercentComplete 7
         # Common global props
@@ -4988,23 +5047,44 @@ if (-not $Common.Initialized) {
         if (-not $InJob) {
             $colors = Get-Colors
             if (-not $loadedInitContextCache) {
-                $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
-                if ($dnsClient) {
-                    $corpNetInterfaceIndex = $dnsClient.InterfaceIndex
+                # Prefer the background ThreadJob result when available; falls
+                # through to inline probing otherwise (PS 5.1, job failed to
+                # start, or env detection skipped).
+                $envFromJob = $null
+                if ($envProbeJob) {
+                    try {
+                        $envFromJob = Receive-Job -Job $envProbeJob -Wait -AutoRemoveJob -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        Write-Log "Background env probe job failed: $_" -LogOnly
+                        $envFromJob = $null
+                    }
+                    $envProbeJob = $null
                 }
 
-                if (-not $effectiveSkipEnvironmentDetection) {
-                    if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
-                    if (-not $isAzureVM) {
-                        try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
-                        catch {}
-                        if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
-                            $isAzureVM = $true
-                        }
-                    }
+                if ($envFromJob) {
+                    $corpNetInterfaceIndex = $envFromJob.CorpNetInterfaceIndex
+                    $isAzureVM = [bool]$envFromJob.IsAzureVM
                 }
                 else {
-                    Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
+                    $dnsClient = Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix -eq "corp.microsoft.com" } | Select-Object -First 1
+                    if ($dnsClient) {
+                        $corpNetInterfaceIndex = $dnsClient.InterfaceIndex
+                    }
+
+                    if (-not $effectiveSkipEnvironmentDetection) {
+                        if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                        if (-not $isAzureVM) {
+                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                            catch {}
+                            if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
+                                $isAzureVM = $true
+                            }
+                        }
+                    }
+                    else {
+                        Write-Log "Skipping Azure/environment detection during initialization." -LogOnly
+                    }
                 }
 
                 if (-not $DisableInitContextCache) {
@@ -5022,6 +5102,13 @@ if (-not $Common.Initialized) {
             }
             else {
                 Write-Log "Skipping environment probes because initialization context cache is fresh." -LogOnly
+                # Cache was loaded after we speculatively started the env probe
+                # job (the on-disk mtime check is approximate). Discard the job
+                # so we don't leak a runspace.
+                if ($envProbeJob) {
+                    try { Remove-Job -Job $envProbeJob -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+                    $envProbeJob = $null
+                }
             }
         }
 
