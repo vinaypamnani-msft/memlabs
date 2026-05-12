@@ -7453,7 +7453,7 @@ function Select-VirtualMachines {
                         Write-Log "Stopping $VmName"
                         $stopped = Stop-Vm2 -Name $VmName -Passthru
                         if (-not $stopped) {
-                            Write-Log "$VmName`: VM Not Stopped."
+                            Write-Log "$VmName`: VM Not Stopped." -Failure
                             return $false
                         }
                         while ($true) {
@@ -7480,19 +7480,19 @@ function Select-VirtualMachines {
                         Write-Log "Starting $VmName"
                         $Started = Start-Vm2 -Name $VmName -Passthru
                         if (-not $Started) {
-                            Write-Log "$VmName`: VM Not Started."
+                            Write-Log "$VmName`: VM Not Started." -Failure
                             return $false
                         }
                         $connected = Wait-ForVM -VmName $VMname -PathToVerify "C:\Users" -VmDomainName $virtualMachine.Domain -TimeoutMinutes 2 -Quiet
                         if (-not $connected) {
                             #Write-Progress2 -Log -PercentComplete 0 -Activity "StartVM" -Status "Could not connect to the VM after waiting for 2 minutes."
-                            Write-Log "$VmName`: Could not connect to the VM after waiting for 2 minutes."
+                            Write-Log "$VmName`: Could not connect to the VM after waiting for 2 minutes." -Failure
                             return $false
                         }
                         Write-Log "Initializing disk.." -NoNewLine
                         $result = Invoke-VmCommand -VmName $VmName -VmDomainName $virtualMachine.Domain -ScriptBlock $global:Initialize_Disk -SuppressLog -ArgumentList @("AUTO", $size, $label)
                         if ($result.ScriptBlockFailed) {
-                            Write-Log "Could not Initialize new disk" -LogOnly
+                            Write-Log "Could not Initialize new disk" -Failure
                         }
                         else {
                             Write-Log ".done"
