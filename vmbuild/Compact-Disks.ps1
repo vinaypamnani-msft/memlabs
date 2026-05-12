@@ -532,6 +532,41 @@ if ($env:_COMPACT_DISKS_WORKER) {
         Add-UiLog ("Logging to: $script:CompactLogPath")
     }
 
+    # --- Pre-flight: plan concurrent checkpoint merges across all VMs ---
+    # Prep jobs run in parallel, so we have to look at the *aggregate* AVHDX
+    # bytes per drive, not just per-VM. For every drive that can't hold all
+    # merges at once, we'll serialize merges on that drive via a named
+    # cross-process mutex acquired inside each prep job.
+    $SerializeDrives = @()
+    try {
+        if (Get-Command Resolve-VMCheckpointMergePlan -ErrorAction SilentlyContinue) {
+            $allVmNames = @($vmInfoList | ForEach-Object VMName)
+            $mergePlan = Resolve-VMCheckpointMergePlan -VMNames $allVmNames
+            foreach ($d in $mergePlan.Drives) {
+                $msg = '{0}: total={1:N1}GB max={2:N1}GB avail={3:N1}GB -> {4}' -f `
+                    $d.Drive, ($d.AvhdxTotal/1GB), ($d.AvhdxMax/1GB), ($d.Available/1GB), $d.Classification
+                Add-UiLog ("[MERGE-PLAN] $msg")
+            }
+            if (-not $mergePlan.Ok) {
+                foreach ($d in $mergePlan.Drives | Where-Object Classification -eq 'Fail') {
+                    Add-UiLog ("[MERGE-PLAN] Drive $($d.Drive): not enough free space even for largest single VM. Failing VMs: $($d.FailingVMs -join ', ')")
+                }
+                # Mark FailingVMs so they're skipped/marked PREP-FAIL up front.
+                foreach ($vm in $vmInfoList) {
+                    if ($mergePlan.FailingVMs -contains $vm.VMName) {
+                        $vm.PreFlightFail = $true
+                    }
+                }
+            }
+            $SerializeDrives = @($mergePlan.SerializeDrives)
+            if ($SerializeDrives.Count -gt 0) {
+                Add-UiLog ("[MERGE-PLAN] Serializing merges on drive(s): $($SerializeDrives -join ', ')")
+            }
+        }
+    } catch {
+        Add-UiLog ("[MERGE-PLAN-WARN] Pre-flight planning failed: $($_.Exception.Message)")
+    }
+
     try {
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
@@ -540,10 +575,16 @@ if ($env:_COMPACT_DISKS_WORKER) {
             # ----- Launch prep jobs (one per VM, all in parallel) -----
             while ($prepQueue.Count -gt 0) {
                 $vm = $prepQueue.Dequeue()
+                if ($vm.PSObject.Properties['PreFlightFail'] -and $vm.PreFlightFail) {
+                    $vm.Status = 'Failed'
+                    $vm.Error  = 'Pre-flight: not enough free disk space to merge checkpoints'
+                    Add-UiLog ("[PREP-FAIL] $($vm.VMName): $($vm.Error)")
+                    continue
+                }
                 Add-UiLog ("[PREP-START] $($vm.VMName)")
                 try {
                     $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
-                        param($n, $timeoutSec, $commonPath, $doOnlineClean)
+                        param($n, $timeoutSec, $commonPath, $doOnlineClean, $serializeDrives)
                         $startedAt = Get-Date
                         $forced = $false
                         $onlineCleanRan = $false
@@ -759,6 +800,38 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 return @{ Ok = $false; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = @(); Error = ($chk.Reason) }
                             }
 
+                            # Acquire a cross-process named mutex per drive that
+                            # the merge plan flagged for serialization. This
+                            # blocks other prep jobs from merging on the same
+                            # drive at the same time, preventing the cumulative
+                            # AVHDX size from exceeding free disk space.
+                            $heldMutexes = @()
+                            $vmMergeDrives = @()
+                            if ($serializeDrives -and $serializeDrives.Count -gt 0 -and `
+                                $chk -and $chk.Details) {
+                                foreach ($det in $chk.Details) {
+                                    if ($serializeDrives -contains $det.Drive) {
+                                        $vmMergeDrives += $det.Drive
+                                    }
+                                }
+                            }
+                            foreach ($drv in $vmMergeDrives) {
+                                # Drive letter -> mutex name. Local-only naming
+                                # is fine since all prep jobs run on this host.
+                                $mxName = "MemLabsMerge_$($drv.TrimEnd(':'))"
+                                try {
+                                    $mx = [System.Threading.Mutex]::new($false, $mxName)
+                                    Write-Output "::LOG::[MERGE-WAIT] waiting for drive $drv mutex"
+                                    [void]$mx.WaitOne()
+                                    Write-Output "::LOG::[MERGE-LOCK] acquired drive $drv mutex"
+                                    $heldMutexes += $mx
+                                } catch {
+                                    Write-Output "::LOG::[MERGE-WARN] failed to acquire $drv mutex: $($_.Exception.Message)"
+                                }
+                            }
+
+                            try {
+
                             $i = 0
                             $vmPath = (Get-VM -Name $n -ErrorAction SilentlyContinue).Path
                             foreach ($snap in $snapshots) {
@@ -795,6 +868,17 @@ if ($env:_COMPACT_DISKS_WORKER) {
                                 Write-Progress -Activity "Prep $n" -Status 'Waiting for merge to finish' -PercentComplete 92
                                 Start-Sleep -Seconds 3
                             }
+
+                            }
+                            finally {
+                                foreach ($mx in $heldMutexes) {
+                                    try { $mx.ReleaseMutex() } catch {}
+                                    try { $mx.Dispose() } catch {}
+                                }
+                                foreach ($drv in $vmMergeDrives) {
+                                    Write-Output "::LOG::[MERGE-UNLOCK] released drive $drv mutex"
+                                }
+                            }
                         }
 
                         # --- 3) Enumerate VHDs to compact ---
@@ -814,7 +898,7 @@ if ($env:_COMPACT_DISKS_WORKER) {
                         }
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
                         return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; Disks = $disks.ToArray() }
-                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean)
+                    } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean), $SerializeDrives
                     $vm.Job    = $job
                     $vm.Status = 'Running'
                     [void]$activePrepJobs.Add($vm)

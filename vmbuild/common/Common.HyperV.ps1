@@ -413,6 +413,67 @@ function Remove-VMCheckpoint2 {
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
 
+function Get-VMCheckpointMergeRequirements {
+    <#
+    .SYNOPSIS
+        Returns the per-drive disk space requirements to merge a VM's
+        checkpoint chain. Pure data, no free-space check.
+
+    .OUTPUTS
+        PSCustomObject with: VMName, ByDrive (hashtable: drive letter ->
+        @{ AvhdxBytes; Files (paths); Parents (@{Path;Max}) }).
+    #>
+    [CmdletBinding()]
+    param ( [Parameter(Mandatory = $true)] [string]$VMName )
+
+    $byDrive = @{}
+    try {
+        $hds = @(Get-VMHardDiskDrive -VMName $VMName -ErrorAction Stop)
+    } catch {
+        return [PSCustomObject]@{ VMName = $VMName; ByDrive = $byDrive; Error = $_.Exception.Message }
+    }
+    foreach ($hd in $hds) {
+        if (-not $hd.Path) { continue }
+        $cur = $null
+        try { $cur = Get-VHD -Path $hd.Path -ErrorAction Stop } catch { continue }
+        $avhdxBytes = 0L
+        $avhdxFiles = @()
+        while ($cur -and $cur.ParentPath) {
+            if ($cur.Path -match '\.avhdx?$') {
+                try { $avhdxBytes += ([System.IO.FileInfo]::new($cur.Path)).Length } catch {}
+                $avhdxFiles += $cur.Path
+            }
+            try { $cur = Get-VHD -Path $cur.ParentPath -ErrorAction Stop } catch { $cur = $null }
+        }
+        if (-not $cur) { continue }
+        if ($avhdxBytes -le 0) { continue }
+        $parentPath = $cur.Path
+        $drive = $null
+        try { $drive = [System.IO.Path]::GetPathRoot($parentPath).TrimEnd('\') } catch {}
+        if (-not $drive) { continue }
+        if (-not $byDrive.ContainsKey($drive)) {
+            $byDrive[$drive] = @{ AvhdxBytes = 0L; Files = @(); Parents = @() }
+        }
+        $byDrive[$drive].AvhdxBytes += $avhdxBytes
+        $byDrive[$drive].Files      += $avhdxFiles
+        $byDrive[$drive].Parents    += @{ Path = $parentPath; Max = [long]$cur.Size }
+    }
+    return [PSCustomObject]@{ VMName = $VMName; ByDrive = $byDrive }
+}
+
+function Get-DriveFreeBytes {
+    param([Parameter(Mandatory = $true)][string]$Drive)
+    try {
+        $vol = Get-Volume -DriveLetter $Drive[0] -ErrorAction Stop
+        return [long]$vol.SizeRemaining
+    } catch {
+        try {
+            $di = New-Object System.IO.DriveInfo($Drive + '\')
+            return [long]$di.AvailableFreeSpace
+        } catch { return 0L }
+    }
+}
+
 function Test-VMCheckpointMergeFreeSpace {
     <#
     .SYNOPSIS
@@ -446,83 +507,34 @@ function Test-VMCheckpointMergeFreeSpace {
         [long]$MinFreeBytes = 5GB
     )
 
+    $req = Get-VMCheckpointMergeRequirements -VMName $VMName
     $result = [PSCustomObject]@{
         Ok      = $true
         VMName  = $VMName
         Reason  = $null
         Details = @()
     }
-
-    try {
-        $hds = @(Get-VMHardDiskDrive -VMName $VMName -ErrorAction Stop)
-    }
-    catch {
+    if ($req.PSObject.Properties['Error'] -and $req.Error) {
         $result.Ok = $false
-        $result.Reason = "Get-VMHardDiskDrive failed: $($_.Exception.Message)"
+        $result.Reason = "Get-VMHardDiskDrive failed: $($req.Error)"
         return $result
     }
-    if ($hds.Count -eq 0) { return $result }  # nothing to merge
+    if ($req.ByDrive.Count -eq 0) { return $result }
 
-    # Walk every AVHDX from each attached disk back to its root VHDX. Group
-    # AVHDX bytes by the drive letter their *root parent* lives on (that's
-    # where the merge writes).
-    $byDrive = @{}  # drive letter -> @{ AvhdxBytes; ParentPath; ParentMax; AvhdxFiles }
-    foreach ($hd in $hds) {
-        if (-not $hd.Path) { continue }
-        $cur = $null
-        try { $cur = Get-VHD -Path $hd.Path -ErrorAction Stop } catch { continue }
-        $avhdxBytes = 0L
-        $avhdxFiles = @()
-        # Walk parent chain - $cur could be the AVHDX leaf or already the VHDX
-        while ($cur -and $cur.ParentPath) {
-            if ($cur.Path -match '\.avhdx?$') {
-                try { $avhdxBytes += ([System.IO.FileInfo]::new($cur.Path)).Length } catch {}
-                $avhdxFiles += $cur.Path
-            }
-            try { $cur = Get-VHD -Path $cur.ParentPath -ErrorAction Stop } catch { $cur = $null }
-        }
-        if (-not $cur) { continue }
-        $parentPath = $cur.Path
-        $parentMax  = [long]$cur.Size
-        if ($avhdxBytes -le 0) { continue }   # no checkpoints on this disk
-
-        $drive = $null
-        try { $drive = [System.IO.Path]::GetPathRoot($parentPath).TrimEnd('\') } catch {}
-        if (-not $drive) { continue }
-        if (-not $byDrive.ContainsKey($drive)) {
-            $byDrive[$drive] = @{ AvhdxBytes = 0L; Files = @(); Parents = @() }
-        }
-        $byDrive[$drive].AvhdxBytes += $avhdxBytes
-        $byDrive[$drive].Files      += $avhdxFiles
-        $byDrive[$drive].Parents    += @{ Path = $parentPath; Max = $parentMax }
-    }
-
-    foreach ($drive in $byDrive.Keys) {
-        $needRaw = [long]$byDrive[$drive].AvhdxBytes
+    foreach ($drive in $req.ByDrive.Keys) {
+        $needRaw = [long]$req.ByDrive[$drive].AvhdxBytes
         $needed  = [long][Math]::Max($MinFreeBytes, [Math]::Ceiling($needRaw * $SafetyFactor))
-        $free    = 0L
-        try {
-            $vol = Get-Volume -DriveLetter $drive[0] -ErrorAction Stop
-            $free = [long]$vol.SizeRemaining
-        }
-        catch {
-            try {
-                $di = New-Object System.IO.DriveInfo($drive + '\')
-                $free = [long]$di.AvailableFreeSpace
-            } catch {}
-        }
+        $free    = Get-DriveFreeBytes -Drive $drive
         $detail = [PSCustomObject]@{
-            Drive     = $drive
-            Required  = $needed
-            RawAvhdx  = $needRaw
-            Available = $free
-            Ok        = ($free -ge $needed)
-            AvhdxFiles = $byDrive[$drive].Files
+            Drive      = $drive
+            Required   = $needed
+            RawAvhdx   = $needRaw
+            Available  = $free
+            Ok         = ($free -ge $needed)
+            AvhdxFiles = $req.ByDrive[$drive].Files
         }
         $result.Details += $detail
-        if (-not $detail.Ok) {
-            $result.Ok = $false
-        }
+        if (-not $detail.Ok) { $result.Ok = $false }
     }
 
     if (-not $result.Ok) {
@@ -535,6 +547,108 @@ function Test-VMCheckpointMergeFreeSpace {
 
     return $result
 }
+
+function Resolve-VMCheckpointMergePlan {
+    <#
+    .SYNOPSIS
+        Plans concurrent merges across multiple VMs to avoid disk-full hangs.
+
+    .DESCRIPTION
+        Given a set of VM names, computes:
+          - Per-drive: total AVHDX bytes required across all VMs, the largest
+            single VM's bytes, and currently available free space.
+          - Drive classification:
+              * Parallel: sum*SafetyFactor + MinFree fits in available -> OK to
+                merge all VMs in parallel.
+              * Serialize: sum doesn't fit but largest single VM does -> the
+                drive must be merge-serialized (one VM at a time).
+              * Fail: largest single VM still doesn't fit -> no amount of
+                serialization helps; that VM cannot be merged safely.
+
+    .OUTPUTS
+        PSCustomObject with:
+          VMs (array of per-VM requirement objects),
+          Drives (per-drive plan: Drive, AvhdxTotal, AvhdxMax, Available,
+                  Required, RequiredMax, Classification, FailingVMs),
+          SerializeDrives (string[]),
+          FailingVMs (string[]),
+          Ok (bool - false if any FailingVMs).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string[]]$VMNames,
+        [double]$SafetyFactor = 1.20,
+        [long]$MinFreeBytes = 5GB
+    )
+
+    $vmReqs = @()
+    foreach ($n in $VMNames) {
+        $vmReqs += Get-VMCheckpointMergeRequirements -VMName $n
+    }
+
+    # Aggregate per drive: total, max-single-VM, list-of-VMs-touching-it
+    $drives = @{}
+    foreach ($r in $vmReqs) {
+        foreach ($drv in $r.ByDrive.Keys) {
+            $bytes = [long]$r.ByDrive[$drv].AvhdxBytes
+            if (-not $drives.ContainsKey($drv)) {
+                $drives[$drv] = @{ Total = 0L; Max = 0L; VMs = @() }
+            }
+            $drives[$drv].Total += $bytes
+            if ($bytes -gt $drives[$drv].Max) { $drives[$drv].Max = $bytes }
+            $drives[$drv].VMs   += [PSCustomObject]@{ VMName = $r.VMName; Bytes = $bytes }
+        }
+    }
+
+    $plan = [PSCustomObject]@{
+        VMs             = $vmReqs
+        Drives          = @()
+        SerializeDrives = @()
+        FailingVMs      = @()
+        Ok              = $true
+    }
+
+    foreach ($drv in $drives.Keys) {
+        $free  = Get-DriveFreeBytes -Drive $drv
+        $reqT  = [long][Math]::Max($MinFreeBytes, [Math]::Ceiling($drives[$drv].Total * $SafetyFactor))
+        $reqM  = [long][Math]::Max($MinFreeBytes, [Math]::Ceiling($drives[$drv].Max   * $SafetyFactor))
+        $cls   = if ($free -ge $reqT) { 'Parallel' }
+                 elseif ($free -ge $reqM) { 'Serialize' }
+                 else { 'Fail' }
+        $failingVMs = @()
+        if ($cls -eq 'Fail') {
+            foreach ($v in $drives[$drv].VMs) {
+                $vmReqBytes = [long][Math]::Max($MinFreeBytes, [Math]::Ceiling($v.Bytes * $SafetyFactor))
+                if ($vmReqBytes -gt $free) { $failingVMs += $v.VMName }
+            }
+            if ($failingVMs.Count -eq 0) {
+                # Defensive: every VM individually fits but at least one combined
+                # group exceeds; serialize instead of failing.
+                $cls = 'Serialize'
+            }
+        }
+        $plan.Drives += [PSCustomObject]@{
+            Drive          = $drv
+            AvhdxTotal     = [long]$drives[$drv].Total
+            AvhdxMax       = [long]$drives[$drv].Max
+            Available      = $free
+            Required       = $reqT
+            RequiredMax    = $reqM
+            Classification = $cls
+            VMs            = $drives[$drv].VMs
+            FailingVMs     = $failingVMs
+        }
+        if ($cls -eq 'Serialize') { $plan.SerializeDrives += $drv }
+        if ($cls -eq 'Fail') {
+            $plan.Ok = $false
+            foreach ($v in $failingVMs) {
+                if ($plan.FailingVMs -notcontains $v) { $plan.FailingVMs += $v }
+            }
+        }
+    }
+    return $plan
+}
+
 
 function Checkpoint-VM2 {
     [CmdletBinding()]
