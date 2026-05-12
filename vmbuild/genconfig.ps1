@@ -6229,7 +6229,10 @@ function get-VMString {
         $name += "]"
     }
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)
-    write-log "Name is $name $virtualMachine and max is $MaxWidth" -logonly
+    # Demoted from -LogOnly: this runs once per VM on every menu redraw and
+    # stringifying $virtualMachine is expensive. Promote with -Verbose only
+    # when actively diagnosing the label builder.
+    write-log "Name is $name $virtualMachine and max is $MaxWidth" -Verbose
 
     if ($name.Length -ge $MaxWidth) {
         $name = $name.Substring(0, $MaxWidth - 3) + "..."
