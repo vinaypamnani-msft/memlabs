@@ -334,6 +334,18 @@ function Write-Log {
     $info = $true
     $logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
 
+    # Fast path: if this is a -Verbose call and verbose logging is disabled, do nothing.
+    # Skipping here avoids two Get-PSCallStack walks plus Text/string formatting per call,
+    # which is significant in hot paths like menu rendering where Write-Log -Verbose is
+    # invoked dozens of times per redraw. -ShowNotification still needs to fire even when
+    # verbose is off, so don't short-circuit when it's set.
+    if ($MyInvocation.BoundParameters["Verbose"].IsPresent `
+            -and -not $Common.VerboseEnabled `
+            -and -not $ShowNotification.IsPresent `
+            -and -not $OutputStream.IsPresent) {
+        return
+    }
+
     # Get caller function name and add it to Text
     try {
         $caller = (Get-PSCallStack | Select-Object Command, Location, Arguments)[1].Command

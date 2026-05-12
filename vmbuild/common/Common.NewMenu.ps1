@@ -80,7 +80,11 @@ function Add-MenuItem {
     }
     
     #$MenuItems.Add($MenuItem) | out-null
-    write-log -LogOnly "$($MenuItems.Count) Adding $MenuItem"
+    # -Verbose (was -LogOnly): this fires on every Add-MenuItem call, dozens of times per
+    # menu redraw. Forcing a disk write + Get-PSCallStack walk per item makes the
+    # property menu feel sluggish to load. Demote to verbose so it only logs when the
+    # user explicitly enabled verbose diagnostics.
+    write-log -Verbose "$($MenuItems.Count) Adding $MenuItem"
     return $MenuItem
 
 }
@@ -534,13 +538,16 @@ function Get-Menu2 {
             $temp = Get-MenuItems -OptionArray $OptionArray -CurrentValue $CurrentValue -additionalOptions $additionalOptions -preOptions $preOptions -menuName $MenuName -MultiSelect:$MultiSelect -AllSelected:$AllSelected -split:$split
             write-log -verbose "Get-MenuItems returned $temp. type: $($temp.GetType())"
             $menuItems = $temp
-            Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
+            Write-Log -Verbose "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
         }
    
         if (-not $Global:MenuHistory) {
             $Global:MenuHistory = @{}
         }
-        Write-Log -LogOnly "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
+        # Was a duplicate -LogOnly write of the same MenuItems summary. Both interpolate the
+        # entire $menuItems collection (one ToString per item) and write to disk on every
+        # Get-Menu2 call. Demoted to verbose to keep menu loads snappy.
+        Write-Log -Verbose "[$menuName] [Get-Menu2] MenuItems Count $($menuItems.Count) '$menuItems'"
         #foreach ($menuItem in $menuItems) {
         #    write-host "[Get-Menu2] Item: $menuItem"
         #}
@@ -1083,7 +1090,9 @@ function Start-Navigation {
         if ($null -ne $menuItem.itemName -and $menuItem.Selectable) {
             $ValidChars += $menuItem.itemName.ToString().Substring(0, 1).ToUpperInvariant()
             $NumSelectable++
-            write-log -logonly "Found Selectable Item $menuItem" 
+            # -Verbose (was -LogOnly): fires per selectable item per Start-Navigation call,
+            # which adds noticeable disk I/O when redrawing large menus. Demote to verbose.
+            write-log -Verbose "Found Selectable Item $menuItem" 
         }
 
         if ($menuItem.Selected -and $menuItem.Displayed) {
