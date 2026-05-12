@@ -1373,29 +1373,50 @@ function select-OptimizeDomain {
     }
 
     # Stop any selected VMs that are running; the WPF worker skips running VMs.
-    # Run the stops in parallel - we don't need a graceful guest shutdown
-    # since the VMs will be compacted immediately and aren't auto-restarted.
+    # Shut down gracefully in parallel - these VMs include DCs, SQL, and
+    # ConfigMgr site servers, so they need a chance to flush pending writes
+    # before we compact their VHDXs. Fall back to a hard turn-off only if a
+    # guest fails to shut down within the timeout.
     $running = @($selectedVMs | Where-Object { $_.State -ne 'Off' })
     if ($running.Count -gt 0) {
-        Write-WhiteI -indent 0 "Stopping $($running.Count) running VM(s) in parallel before optimization..."
+        $shutdownTimeoutSec = 300  # 5 minutes per VM (jobs run in parallel)
+        Write-WhiteI -indent 0 "Gracefully shutting down $($running.Count) running VM(s) in parallel (timeout ${shutdownTimeoutSec}s)..."
         $runningNames = @($running | Select-Object -ExpandProperty VmName)
         $stopJobs = foreach ($vmName in $runningNames) {
             Start-Job -Name "StopVM_$vmName" -ScriptBlock {
-                param($n)
+                param($n, $timeoutSec)
+                $start = Get-Date
                 try {
-                    Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction Stop
-                    return @{ Name = $n; Ok = $true }
+                    # Graceful shutdown via integration services
+                    Stop-VM -Name $n -Force -WarningAction SilentlyContinue -ErrorAction Stop
                 }
                 catch {
-                    return @{ Name = $n; Ok = $false; Error = $_.Exception.Message }
+                    # If the guest can't be reached gracefully, fall through to turn-off
                 }
-            } -ArgumentList $vmName
+                # Wait for the VM to reach Off; if it doesn't, hard turn-off
+                while ((Get-VM -Name $n -ErrorAction SilentlyContinue).State -ne 'Off') {
+                    if (((Get-Date) - $start).TotalSeconds -gt $timeoutSec) {
+                        try {
+                            Stop-VM -Name $n -TurnOff -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                            return @{ Name = $n; Ok = $true; Forced = $true }
+                        }
+                        catch {
+                            return @{ Name = $n; Ok = $false; Error = $_.Exception.Message }
+                        }
+                    }
+                    Start-Sleep -Seconds 2
+                }
+                return @{ Name = $n; Ok = $true; Forced = $false }
+            } -ArgumentList $vmName, $shutdownTimeoutSec
         }
         $stopJobs | Wait-Job | Out-Null
         foreach ($j in $stopJobs) {
             $r = Receive-Job -Job $j
-            if ($r.Ok) {
-                Write-GreenCheck "Stopped $($r.Name)"
+            if ($r.Ok -and -not $r.Forced) {
+                Write-GreenCheck "Gracefully stopped $($r.Name)"
+            }
+            elseif ($r.Ok -and $r.Forced) {
+                Write-OrangePoint "Force turned-off $($r.Name) (graceful shutdown timed out)"
             }
             else {
                 Write-RedX "Failed to stop $($r.Name): $($r.Error)"
