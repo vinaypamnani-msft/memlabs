@@ -1196,3 +1196,143 @@ function Get-VMFixes {
 
     return $fixesToPerform
 }
+
+function Optimize-VHDX {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
+        [object] $VMs
+    )
+
+    foreach ($vm in $VMs) {
+        $restart = $false
+        if ($vm.State -ne "Off") {
+            stop-vm2 -name $vm.VmName
+            $restart = $true
+        }
+
+        foreach ($hd in Get-VHD -VMId $vm.VmId) {
+            #    Mount-VHD -Path $hd.Path
+            $mounted = $false
+            Write-WhiteI -indent 0 "Starting optimization of $($vm.vmName) $($hd.Path)"
+            try {
+                $drive = Mount-VHD -Path $hd.Path -ErrorAction SilentlyContinue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                if ($drive) {
+                    $mounted = $true
+                }
+                else {
+                    stop-vm2 -name $vm.VmName -TurnOff
+                    start-sleep -seconds 30
+                    $drive = Mount-VHD -Path $hd.Path -ErrorAction continue -PassThru | Get-Disk | Get-Partition | Get-Volume
+                    if ($drive) {
+                        $mounted = $true
+                    }
+                    else {
+                        Write-RedX "Failed to mount $($hd.Path) again"
+                        $mounted = $false
+                        continue
+                    }                   
+                }
+                $driveLetterOnly = ($drive | Where-Object { $null -ne $_.driveLetter } | Select-Object -First 1).DriveLetter
+                $driveLetter = $driveLetterOnly + ":"
+                Write-GreenCheck "Mounted $($hd.Path) to $driveLetter"
+                Start-Sleep -seconds 5
+                defrag $driveLetter /h /x
+                defrag $driveLetter /h /k /l
+                defrag $driveLetter /h /x
+                defrag $driveLetter /h /k 
+                $global:progressPreference = "SilentlyContinue"                
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -Defrag -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -SlabConsolidate -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                try {
+                    Optimize-Volume -DriveLetter $driveLetterOnly -ReTrim -ErrorAction Stop | Out-Null
+                }
+                catch {}
+                $global:progressPreference = "Continue"
+                Write-GreenCheck "Defragmented $driveLetter"
+                try {
+                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Stop
+                }
+                catch {}
+                Write-GreenCheck "Optimized $($hd.Path)"
+            }
+            finally {
+                if ($mounted) {
+                    Dismount-VHD -Path $hd.Path
+                    Start-Sleep -seconds 5
+                    Optimize-VHD -Path $hd.Path -Mode Full -ErrorAction Continue
+                }
+                if ($restart) {
+                    Start-VM2 -retryseconds 30 -Name $vm.VmName
+                    Write-GreenCheck "Restarted $($vm.VmName)"
+                }
+                else {
+                    Write-GreenCheck "Dismounted $($hd.Path)"
+                }
+            }
+        }
+    }
+}
+
+
+
+function select-OptimizeDomain {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, HelpMessage = "Domain To Optimize")]
+        [string] $domain
+    )
+
+    $CustomOptions = @{}
+    $vms = get-list -type vm -DomainName $domain -SmartUpdate
+
+    $vmsname = $vms | Select-Object -ExpandProperty vmName
+    #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
+    
+    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VM to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
+        
+    if ($response -eq "ESCAPE" -or $response -eq "NOITEMS") {
+        return "ESCAPE"
+    }
+    $sizeBefore = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
+    write-Host "Total size of VMs in $domain before optimize: $([math]::Round($sizeBefore,2))GB"
+    $VmList = $vms | Where-Object { $_.VmName -in $response }
+    Optimize-VHDX -VMs $VmList
+    
+    Remove-Item -Path $common.CachePath -include "*.Json" -Recurse -ProgressAction SilentlyContinue
+    get-list -type VM -SmartUpdate -ResetCache | out-null
+    $sizeAfter = (Get-List -type vm -domain $domain | measure-object -sum DiskUsedGB).sum
+    write-Host "Total size of VMs in $domain after optimize: $([math]::Round($sizeAfter,2))GB"
+    write-Host "Total Savings: $([math]::Round($sizeBefore - $sizeAfter,2))GB"
+    Start-Sleep -seconds 10
+    write-host
+    Write-Host "$domain has been stopped and optimized. Make sure to restart the domain if necessary."
+
+}
+
+
+
+
+
+
+function Select-DeletePending {
+
+
+    Write-Log -Activity "These VMs are currently 'in progress', if there is no deployment running, you should delete them and redeploy"
+    get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
+    Write-WhiteI "Please confirm these VM's are not currently in process of being deployed."
+    Write-OrangePoint "Selecting 'Yes' will permanently delete all VMs and scopes."
+    $response = Read-YesOrNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
+    if (-not [String]::IsNullOrWhiteSpace($response)) {
+        if ($response.ToLowerInvariant() -eq "y" -or $response.ToLowerInvariant() -eq "yes") {
+            Remove-InProgress
+            Get-List -type VM -SmartUpdate | Out-Null
+        }
+    }
+}
