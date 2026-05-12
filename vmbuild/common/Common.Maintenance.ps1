@@ -1280,7 +1280,7 @@ function select-OptimizeDomain {
 
     $vmsname = $vms | Select-Object -ExpandProperty vmName
 
-    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VMs to Compact" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect
+    $response = Get-Menu2 -MenuName "Select VMs to Optimize in $domain" -Prompt "Select VMs to Compact" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect -AllSelected
 
     if ($response -eq "ESCAPE" -or $response -eq "NOITEMS") {
         return "ESCAPE"
