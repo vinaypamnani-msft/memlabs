@@ -38,27 +38,23 @@ function Remove-VirtualMachine {
         return $false
     }
 
-    # Helper: ensure VM is fully stopped with timeout
+    # Helper: ensure VM is fully stopped with timeout.
+    # Since we're deleting the VM, skip the graceful shutdown and TurnOff directly
+    # (no point waiting for the guest OS to shut down cleanly).
     function Wait-VMStopped {
         param (
             [Microsoft.HyperV.PowerShell.VirtualMachine] $VM,
-            [int] $TimeoutSeconds = 60,
+            [int] $TimeoutSeconds = 30,
             [switch] $WhatIf
         )
         if ($VM.State -eq "Off") { return $true }
 
-        Write-Log "VM '$($VM.Name)' is in state '$($VM.State)'. Attempting graceful shutdown..." -SubActivity
+        Write-Log "VM '$($VM.Name)' is in state '$($VM.State)'. Forcing power off (delete in progress)..." -SubActivity
         try {
-            $VM | Stop-VM -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
+            $VM | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
         }
         catch {
-            Write-Log "Graceful stop failed: $($_.Exception.Message). Forcing turn off..." -Warning
-            try {
-                $VM | Stop-VM -TurnOff -Force -WhatIf:$WhatIf -WarningAction SilentlyContinue -ErrorAction Stop
-            }
-            catch {
-                Write-Log "TurnOff also failed: $($_.Exception.Message)" -Warning
-            }
+            Write-Log "TurnOff failed: $($_.Exception.Message)" -Warning
         }
 
         if ($WhatIf) { return $true }
@@ -66,14 +62,13 @@ function Remove-VirtualMachine {
         # Poll until Off or timeout
         $elapsed = 0
         while ($elapsed -lt $TimeoutSeconds) {
-            Start-Sleep -Seconds 2
-            $elapsed += 2
+            Start-Sleep -Seconds 1
+            $elapsed += 1
             $refreshed = Get-VM -Name $VM.Name -ErrorAction SilentlyContinue
             if (-not $refreshed -or $refreshed.State -eq "Off") {
                 Write-Log "VM '$($VM.Name)' is now Off." -SubActivity
                 return $true
             }
-            Write-Log "Waiting for VM to stop... ($elapsed/$TimeoutSeconds`s)" -SubActivity
         }
 
         Write-Log "VM '$($VM.Name)' did not reach Off state within $TimeoutSeconds seconds." -Warning
@@ -134,17 +129,10 @@ function Remove-VirtualMachine {
         }
     }
 
-    # -- Folder removal (attempt 1: before Remove-VM) --
-    $folderRemoved = $false
-    if (-not $Migrate) {
-        Write-Log "$VmName`: Purging $($vmTest.Path) folder (attempt before Remove-VM)..." -HostOnly
-        $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
-        if (-not $folderRemoved) {
-            Write-Log "$VmName`: Could not fully remove folder before Remove-VM. Will retry after." -Warning
-        }
-    }
-
-    # -- Remove VM from Hyper-V --
+    # -- Remove VM from Hyper-V first --
+    # Remove-VM only removes the VM definition (it does NOT delete VHDX/folder),
+    # so it's fast. Doing this first releases the vmms.exe lock on the .vmcx
+    # configuration file, which otherwise blocks folder deletion.
     try {
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf -ErrorAction Stop
         Write-Log "VM '$VmName' removed from Hyper-V." -SubActivity
@@ -153,15 +141,17 @@ function Remove-VirtualMachine {
         Write-Log "Remove-VM failed for '$VmName': $($_.Exception.Message)" -Warning
     }
 
-    # -- Folder removal (attempt 2: after Remove-VM releases handles) --
-    if (-not $Migrate -and -not $folderRemoved) {
+    # -- Folder removal (after Remove-VM has released file handles) --
+    $folderRemoved = $false
+    if (-not $Migrate) {
         if (Test-Path $vmTest.Path) {
-            Write-Log "$VmName`: Retrying folder removal after Remove-VM..." -HostOnly
+            Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
             $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
             if (-not $folderRemoved) {
                 Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
             }
-        } else {
+        }
+        else {
             $folderRemoved = $true
         }
     }
