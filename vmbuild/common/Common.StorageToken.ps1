@@ -411,22 +411,44 @@ function Remove-Windows2025UpgradeFiles {
         return
     }
 
-    Write-Log "Testing upgrade to 2025 cleanup" -LogOnly
+    Write-Log "Remove-Windows2025UpgradeFiles: Starting upgrade-to-2025 cleanup" -LogOnly
 
     $upgradePath = "C:\temp\Upgrade2025"
     $supportFile = Join-Path $Common.AzureFilesPath "support\WindowsServer2025.zip"
 
-    if (Test-Path $upgradePath) {
+    Write-Log "Remove-Windows2025UpgradeFiles: Testing path '$upgradePath'" -LogOnly
+    $upgradePathExists = Test-Path $upgradePath
+    Write-Log "Remove-Windows2025UpgradeFiles: Test-Path '$upgradePath' returned $upgradePathExists" -LogOnly
+
+    if ($upgradePathExists) {
         Write-Host "Removing 2025 Upgrade Support files - $upgradePath"
-        Remove-Item -Path $upgradePath -Recurse -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+        Write-Log "Remove-Windows2025UpgradeFiles: Removing '$upgradePath' (recursive)" -LogOnly
+        try {
+            Remove-Item -Path $upgradePath -Recurse -Force -ErrorAction Stop -ProgressAction SilentlyContinue
+            Write-Log "Remove-Windows2025UpgradeFiles: Removed '$upgradePath'" -LogOnly
+        }
+        catch {
+            Write-Log "Remove-Windows2025UpgradeFiles: Failed to remove '$upgradePath': $_" -Warning
+        }
     }
 
-    if (Test-Path $supportFile) {
+    Write-Log "Remove-Windows2025UpgradeFiles: Testing path '$supportFile'" -LogOnly
+    $supportFileExists = Test-Path $supportFile
+    Write-Log "Remove-Windows2025UpgradeFiles: Test-Path '$supportFile' returned $supportFileExists" -LogOnly
+
+    if ($supportFileExists) {
         Write-Host "Removing 2025 Upgrade Support files - $supportFile"
-        Remove-Item -Path $supportFile -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+        Write-Log "Remove-Windows2025UpgradeFiles: Removing '$supportFile'" -LogOnly
+        try {
+            Remove-Item -Path $supportFile -Force -ErrorAction Stop -ProgressAction SilentlyContinue
+            Write-Log "Remove-Windows2025UpgradeFiles: Removed '$supportFile'" -LogOnly
+        }
+        catch {
+            Write-Log "Remove-Windows2025UpgradeFiles: Failed to remove '$supportFile': $_" -Warning
+        }
     }
-    
-    Write-Log "Success cleaning upgrade to 2025" -LogOnly
+
+    Write-Log "Remove-Windows2025UpgradeFiles: Success cleaning upgrade to 2025" -LogOnly
 }
 
 function Initialize-Storage {
