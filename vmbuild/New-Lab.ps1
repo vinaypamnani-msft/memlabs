@@ -57,6 +57,20 @@ param (
 
 $global:NoSnapshot = $NoSnapshot
 
+# Give the user immediate visible feedback. Everything below this point (the
+# shortcut creation, dot-sourcing Common.ps1, and Initialize-Common) can take
+# several seconds on a cold start - especially if vmms / WMI / Hyper-V module
+# autoload is slow - and until Write-Progress kicks in the host can otherwise
+# look completely hung.
+Write-Host ""
+Write-Host "MemLabs New-Lab starting..." -ForegroundColor Cyan
+Write-Host "  PID            : $PID"
+Write-Host "  PowerShell     : $($PSVersionTable.PSVersion)"
+Write-Host "  Script root    : $PSScriptRoot"
+Write-Host "  Started (local): $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host "  Loading Common.ps1 and initializing... (this can take a few seconds on a cold start)"
+Write-Host ""
+
 try {
     $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
     $shortcutLocation = "$desktopPath\MEMLABS - VMBuild.lnk"
