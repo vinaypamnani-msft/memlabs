@@ -673,8 +673,7 @@ function Select-MainMenu {
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $false 
         $global:existingMachines = Get-ExistingVMs -config $global:config        
     }
-   
-    $VMNameToNumberMap = @{}
+
     while ($true) {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:StartOver = $false
@@ -683,36 +682,10 @@ function Select-MainMenu {
         $global:GenConfigErrorMessages = @()
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
-        $preOptions = [ordered]@{}
-        $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
-        $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
-        $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
-        $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
-        if ($Global:Config.cmOptions) {
-            $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
-            $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
-        }
-        
-        $customOptions = [ordered]@{}
 
-        $i = 0
-        $virtualMachines = @()
-
-      
-
-
-        if ($global:existingMachines) {
-            $preOptions += [ordered]@{ "*B1" = ""; "*B2" = "Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
-            foreach ($existingVM in $global:existingMachines) {
-                $i = $i + 1
-                $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
-                $customOptions += [ordered]@{"-D$i" = "$name" }
-                $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $($existingVM.vmName). Press [Del] to delete from Hyper-V. Only some properties can be adjusted." }
-                $VMNameToNumberMap[$i.ToString()] = $existingVM.vmName
-            }
-        }
-        $customOptions += [ordered]@{"*V2" = "" }
-        $customOptions += [ordered]@{"*B3" = "Virtual Machines to be deployed%$($Global:Common.Colors.GenConfigHeader)" }
+        # Sort virtualMachines so DC/BDC come first, then everything else by
+        # name. Modifies $global:Config in-place. Wrapped in try/catch because
+        # very early in startup $global:Config may still be missing.
         try {
             if ($global:Config.virtualMachines) {
                 $virtualMachines = @($global:Config.virtualMachines | Where-Object { $_.role -in "DC", "BDC" })
@@ -732,41 +705,11 @@ function Select-MainMenu {
 
             $global:Config.virtualMachines = @()
         }
-        if ($global:config.virtualMachines) {
-            foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
-                if ($null -eq $virtualMachine) {
-                    #$global:config.virtualMachines | convertTo-Json -Depth 5 | out-host
-                    continue
-                }
-                $i = $i + 1
-                $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
-                $customOptions += [ordered]@{"-D$i" = "$name" }
-                $customOptions += [ordered]@{"H$i" = "Modify the installation properties for $($virtualMachine.Vmname). Press [Del] to remove. This is a new VM that has not yet deployed." }
-                $VMNameToNumberMap[$i.ToString()] = $virtualMachine.vmName
-                #write-Option "$i" "$($name)"
-            }
-        }
 
-        $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
-        $customOptions += [ordered]@{ "HN" = "Adds a new VM to this deployment. You can add clients, servers, or even new siteservers." }
-        $customOptions += [ordered]@{ "*D1" = ""; "*BD" = "Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
-        $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "H!" = "Saves the current configuration, and returns to the main menu.  You can return to this deployment from the main menu." }
-        $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
-        $customOptions += [ordered]@{ "HS" = "Saves the current configuration to your config folder, but does not deploy. You can load it from the main menu" }
-        if ($InternalUseOnly.IsPresent) {
-            $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
-            $customOptions += [ordered]@{ "HQ" = "Exits the script. Warning: Does not save." }
-            $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
-            $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }            
-        }
-        if ($enableDebug) {
-            $customOptions += [ordered]@{ "R" = "Return deployConfig" }
-            $customOptions += [ordered]@{ "HR" = "Debug option to return `$deployconfig" }
-            $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
-            $customOptions += [ordered]@{ "HZ" = "Debug option to regenerate DSC.ZIP" }
-        }
-
+        $built = Build-MainMenuOptions
+        $preOptions = $built.PreOptions
+        $customOptions = $built.Options
+        $vmNameToNumberMap = $built.VMNameToNumberMap
 
         $MenuName = "VM Deployment Menu - $($Global:Config.vmOptions.DomainName)"
         if ($Global:configfile) {
@@ -862,6 +805,82 @@ function Select-MainMenu {
                 }
             }
         }
+    }
+}
+
+# Builds the VM Deployment Menu (Select-MainMenu's menu): Global Options pre-list,
+# Existing VMs (already deployed), VMs to be deployed, then Add VM / Save /
+# Deploy / Quit / debug actions. Returns:
+#   @{ PreOptions = <ordered>; Options = <ordered>; VMNameToNumberMap = <string->name> }
+# VMNameToNumberMap lets the caller's default-case dispatch translate the
+# numbered VM shortcuts back into VM names.
+#
+# Reads $global:Config, $global:existingMachines, $InternalUseOnly, $enableDebug.
+function Build-MainMenuOptions {
+    $preOptions = [ordered]@{}
+    $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
+    $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
+    $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
+    if ($Global:Config.cmOptions) {
+        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
+    }
+
+    $customOptions = [ordered]@{}
+    $VMNameToNumberMap = @{}
+    $i = 0
+
+    if ($global:existingMachines) {
+        $preOptions += [ordered]@{ "*B1" = ""; "*B2" = "Existing Virtual Machines%$($Global:Common.Colors.GenConfigHeader)" }
+        foreach ($existingVM in $global:existingMachines) {
+            $i = $i + 1
+            $name = Get-VMString -config $global:config -virtualMachine $existingVM -colors
+            $customOptions += [ordered]@{"-D$i" = "$name" }
+            $customOptions += [ordered]@{"H$i" = "Modify the properties of the already deployed VM named $($existingVM.vmName). Press [Del] to delete from Hyper-V. Only some properties can be adjusted." }
+            $VMNameToNumberMap[$i.ToString()] = $existingVM.vmName
+        }
+    }
+    $customOptions += [ordered]@{"*V2" = "" }
+    $customOptions += [ordered]@{"*B3" = "Virtual Machines to be deployed%$($Global:Common.Colors.GenConfigHeader)" }
+
+    if ($global:config.virtualMachines) {
+        foreach ($virtualMachine in $global:config.virtualMachines | Where-Object { -not $_.Hidden }) {
+            if ($null -eq $virtualMachine) {
+                continue
+            }
+            $i = $i + 1
+            $name = Get-VMString -config $global:config -virtualMachine $virtualMachine -colors
+            $customOptions += [ordered]@{"-D$i" = "$name" }
+            $customOptions += [ordered]@{"H$i" = "Modify the installation properties for $($virtualMachine.Vmname). Press [Del] to remove. This is a new VM that has not yet deployed." }
+            $VMNameToNumberMap[$i.ToString()] = $virtualMachine.vmName
+        }
+    }
+
+    $customOptions += [ordered]@{ "N" = "Add New Virtual Machine%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVMNumber)" }
+    $customOptions += [ordered]@{ "HN" = "Adds a new VM to this deployment. You can add clients, servers, or even new siteservers." }
+    $customOptions += [ordered]@{ "*D1" = ""; "*BD" = "Deployment Actions%$($Global:Common.Colors.GenConfigHeader)" }
+    $customOptions += [ordered]@{ "!" = "Return to main menu %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "H!" = "Saves the current configuration, and returns to the main menu.  You can return to this deployment from the main menu." }
+    $customOptions += [ordered]@{ "S" = "Save Configuration and Exit %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HS" = "Saves the current configuration to your config folder, but does not deploy. You can load it from the main menu" }
+    if ($InternalUseOnly.IsPresent) {
+        $customOptions += [ordered]@{ "Q" = "Quit Without Saving!%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)" }
+        $customOptions += [ordered]@{ "HQ" = "Exits the script. Warning: Does not save." }
+        $customOptions += [ordered]@{ "D" = "Deploy And Save Config%$($Global:Common.Colors.GenConfigDeploy)%$($Global:Common.Colors.GenConfigDeployNumber)" }
+        $customOptions += [ordered]@{ "HD" = "Saves the current configuration to your config folder, and will start creation of the VMs" }
+    }
+    if ($enableDebug) {
+        $customOptions += [ordered]@{ "R" = "Return deployConfig" }
+        $customOptions += [ordered]@{ "HR" = "Debug option to return `$deployconfig" }
+        $customOptions += [ordered]@{ "Z" = "Generate DSC.Zip" }
+        $customOptions += [ordered]@{ "HZ" = "Debug option to regenerate DSC.ZIP" }
+    }
+
+    return @{
+        PreOptions        = $preOptions
+        Options           = $customOptions
+        VMNameToNumberMap = $VMNameToNumberMap
     }
 }
 
