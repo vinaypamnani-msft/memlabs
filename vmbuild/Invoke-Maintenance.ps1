@@ -43,6 +43,12 @@ function Test-ChocoSuccessCode {
     return ($Code -eq 0 -or $Code -eq 1641 -or $Code -eq 3010)
 }
 
+function Test-ChocoAvailable {
+    return ($null -ne (Get-Command choco -ErrorAction SilentlyContinue))
+}
+
+$script:MaintenanceHadFailure = $false
+
 function Invoke-System32CurlMaintenance {
     Write-LogMessage 'Starting System32 curl maintenance...'
 
@@ -58,6 +64,11 @@ function Invoke-System32CurlMaintenance {
 
     if (-not (Test-Path $chocoCurlShim)) {
         Write-LogMessage "Chocolatey curl shim not found at '$chocoCurlShim'. Skipping uninstall."
+        return
+    }
+
+    if (-not (Test-ChocoAvailable)) {
+        Write-LogMessage 'Chocolatey CLI not found. Skipping curl uninstall.' -Level 'WARNING'
         return
     }
 
@@ -245,6 +256,11 @@ function Invoke-WindowsTerminalMaintenance {
 
     Write-LogMessage 'Windows Terminal not installed, attempting to install...'
 
+    if (-not (Test-ChocoAvailable)) {
+        Write-LogMessage 'Chocolatey CLI not found. Skipping Windows Terminal install.' -Level 'WARNING'
+        return
+    }
+
     & choco install microsoft-ui-xaml -y | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Write-LogMessage 'Failed to install microsoft-ui-xaml.' -Level 'WARNING'
@@ -266,6 +282,11 @@ function Invoke-WindowsTerminalMaintenance {
 
 function Invoke-WeeklyUpgrades {
     Write-LogMessage 'Starting weekly upgrades...'
+
+    if (-not (Test-ChocoAvailable)) {
+        Write-LogMessage 'Chocolatey CLI not found. Skipping weekly upgrades.' -Level 'WARNING'
+        return
+    }
 
     $ps7Flag = Join-Path $env:TEMP 'memlabs_ps7_upgrade.flag'
     $chocoAllFlag = Join-Path $env:TEMP 'memlabs_choco_all_upgrade.flag'
@@ -336,12 +357,17 @@ Write-LogMessage "Script path: $scriptPath"
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
 
-Invoke-System32CurlMaintenance
-Invoke-DotNet6Maintenance
-Invoke-WindowsTerminalMaintenance
-Invoke-WeeklyUpgrades
+try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 
 Write-LogMessage '========================================' 
 Write-LogMessage 'Maintenance script completed'
 Write-LogMessage "Log file: $logFile"
 Write-LogMessage '========================================' 
+
+if ($script:MaintenanceHadFailure) {
+    exit 1
+}
+exit 0
