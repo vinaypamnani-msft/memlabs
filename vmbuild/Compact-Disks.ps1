@@ -408,16 +408,63 @@ if ($env:_COMPACT_DISKS_WORKER) {
         # Intercept close. While work is active we never let the X button kill
         # the process - that would Stop-Job an in-flight snapshot merge or
         # Optimize-VHD and risk corrupting the chain or leaving the VHDX
-        # mounted on the host. Instead we offer:
-        #   Yes    - request a safe stop. We cancel the close, set
-        #            StopRequested, and the main loop drains naturally.
-        #            The window stays open until all jobs finish; then the
-        #            existing Add_Closed path takes over.
-        #   No     - cancel; keep working.
-        #   Cancel - force close. Sets ForceClose+WindowClosed; the main
-        #            loop kills jobs and dismounts. Last resort.
+        # mounted on the host. Instead we show a custom 3-button dialog:
+        #   'Safe Stop'  - request a safe stop. We cancel the close, set
+        #                  StopRequested, and the main loop drains naturally.
+        #   'Keep Going' - cancel the close; work continues.
+        #   'Force Kill' - sets ForceClose+WindowClosed; the main loop kills
+        #                  jobs and dismounts. Last resort.
+        # (System.Windows.MessageBox has fixed Yes/No/Cancel labels - we
+        # build a custom dialog so the destructive button reads 'Force Kill'.)
         # Once StopRequested is set (or we're past the work phase), the X
         # button is a normal close.
+        $script:ShowCloseDialog = {
+            param([string]$Title, [string]$Body, [bool]$IncludeSafeStop)
+            $btnXaml = if ($IncludeSafeStop) {
+@'
+                <Button x:Name="BtnSafeStop"  Content="Safe Stop"  IsDefault="True"  MinWidth="110" Margin="0,0,8,0" Padding="10,4"/>
+                <Button x:Name="BtnKeepGoing" Content="Keep Going"                  MinWidth="110" Margin="0,0,8,0" Padding="10,4"/>
+                <Button x:Name="BtnForceKill" Content="Force Kill" IsCancel="True"  MinWidth="110"                   Padding="10,4" Background="#F38BA8" Foreground="White"/>
+'@
+            } else {
+@'
+                <Button x:Name="BtnKeepGoing" Content="Keep Going" IsDefault="True" MinWidth="110" Margin="0,0,8,0" Padding="10,4"/>
+                <Button x:Name="BtnForceKill" Content="Force Kill" IsCancel="True"  MinWidth="110"                   Padding="10,4" Background="#F38BA8" Foreground="White"/>
+'@
+            }
+            $dlgXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Title" SizeToContent="Height" Width="560" MinHeight="200"
+        WindowStartupLocation="CenterOwner" Background="#1E1E2E"
+        ShowInTaskbar="False" ResizeMode="NoResize" Topmost="True">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Foreground="#CDD6F4" FontSize="13" FontFamily="Segoe UI"
+                   TextWrapping="Wrap" Margin="0,0,0,18"
+                   Text="$([System.Security.SecurityElement]::Escape($Body))"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+$btnXaml
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+            $rd = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($dlgXaml))
+            $dlg = [System.Windows.Markup.XamlReader]::Load($rd)
+            $dlg.Owner = $window
+            $result = 'KeepGoing'
+            if ($IncludeSafeStop) {
+                $dlg.FindName('BtnSafeStop').Add_Click({ $result = 'SafeStop'; $dlg.DialogResult = $true }.GetNewClosure())
+            }
+            $dlg.FindName('BtnKeepGoing').Add_Click({ $result = 'KeepGoing'; $dlg.DialogResult = $true }.GetNewClosure())
+            $dlg.FindName('BtnForceKill').Add_Click({ $result = 'ForceKill'; $dlg.DialogResult = $true }.GetNewClosure())
+            [void]$dlg.ShowDialog()
+            return $result
+        }
+
         $window.Add_Closing({
             param($sender, $e)
             # If a stop is already in progress, let the close go through only
@@ -428,14 +475,13 @@ if ($env:_COMPACT_DISKS_WORKER) {
             if (-not $busy) { return }
 
             if ($UiSync.StopRequested) {
-                # Already asked once - second click means 'I really want out'.
-                $r2 = [System.Windows.MessageBox]::Show(
-                    "A safe stop is already in progress. Active jobs (snapshot merges, Optimize-VHD, mounted VHDs) are being allowed to finish.`n`nForce close NOW anyway? This may leave VHDs mounted on the host or interrupt a snapshot merge in progress (risk of orphaned .avhdx files).",
-                    'Force close?',
-                    [System.Windows.MessageBoxButton]::YesNo,
-                    [System.Windows.MessageBoxImage]::Warning,
-                    [System.Windows.MessageBoxResult]::No)
-                if ($r2 -eq [System.Windows.MessageBoxResult]::Yes) {
+                # Already asked once - second click is a Force Kill / Keep
+                # Waiting decision.
+                $r2 = & $script:ShowCloseDialog `
+                    -Title 'Force kill?' `
+                    -Body  ("A safe stop is already in progress. Active jobs (snapshot merges, Optimize-VHD, mounted VHDs) are being allowed to finish.`n`nForce Kill NOW anyway? This may leave VHDs mounted on the host or interrupt a snapshot merge in progress (risk of orphaned .avhdx files).") `
+                    -IncludeSafeStop $false
+                if ($r2 -eq 'ForceKill') {
                     $UiSync.ForceClose   = $true
                     $UiSync.WindowClosed = $true
                     return
@@ -444,22 +490,20 @@ if ($env:_COMPACT_DISKS_WORKER) {
                 return
             }
 
-            $resp = [System.Windows.MessageBox]::Show(
-                "VHD optimization is in progress.`n`nClosing now would Stop-Job snapshot merges and Optimize-VHD calls that are running, which can leave the VHD chain in a half-merged state and/or leave VHDX files mounted on the host.`n`nYes    - Stop accepting new work and wait for the current jobs to finish safely, then close. (Recommended)`nNo     - Keep going.`nCancel - FORCE close now. Risk of corruption / mounted disks.",
-                'Stop optimization?',
-                [System.Windows.MessageBoxButton]::YesNoCancel,
-                [System.Windows.MessageBoxImage]::Warning,
-                [System.Windows.MessageBoxResult]::Yes)
+            $resp = & $script:ShowCloseDialog `
+                -Title 'Stop optimization?' `
+                -Body  ("VHD optimization is in progress.`n`nClosing now would Stop-Job snapshot merges and Optimize-VHD calls that are running, which can leave the VHD chain in a half-merged state and/or leave VHDX files mounted on the host.`n`nSafe Stop  - Stop accepting new work and wait for the current jobs to finish safely, then close. (Recommended)`nKeep Going - Continue optimizing.`nForce Kill - End now. Risk of corruption / mounted disks.") `
+                -IncludeSafeStop $true
 
             switch ($resp) {
-                'Yes' {
+                'SafeStop' {
                     $UiSync.StopRequested = $true
                     $e.Cancel = $true
                 }
-                'No' {
+                'KeepGoing' {
                     $e.Cancel = $true
                 }
-                'Cancel' {
+                'ForceKill' {
                     $UiSync.ForceClose   = $true
                     $UiSync.WindowClosed = $true
                 }
