@@ -630,6 +630,18 @@ function Write-Log {
 
     if ($write) {
         $Text = $Text.ToString().Trim()
+
+        # Strip non-printable / non-ASCII characters (emoji, box-drawing, etc.)
+        # before writing to the log. Some upstream output paths (e.g. captured
+        # stdout from native processes, or Out-String through a non-UTF8 host)
+        # convert these to literal '?' chars, which then show up as runs like
+        # "?????????" in the log viewer. Drop them entirely, then collapse any
+        # remaining '?' runs that resulted from earlier lossy conversions.
+        # Single '?' in normal prose (e.g. "Continue?") is preserved.
+        $Text = [System.Text.RegularExpressions.Regex]::Replace($Text, '[^\x09\x20-\x7E]', '')
+        $Text = [System.Text.RegularExpressions.Regex]::Replace($Text, '\?{2,}', '')
+        $Text = $Text.Trim()
+
         try {
             $CallingFunction = Get-PSCallStack | Select-Object -first 2 | select-object -last 1
             $context = $CallingFunction.Command
