@@ -1410,8 +1410,31 @@ $btnXaml
                                 # Component-store cleanup. /ResetBase makes
                                 # installed updates permanent (can't uninstall)
                                 # and lets DISM purge superseded payloads.
-                                try { & dism.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null; _Add "  DISM StartComponentCleanup /ResetBase: ok" } catch { _Add "  DISM StartComponentCleanup: FAILED" }
-                                try { & dism.exe /Online /Cleanup-Image /SPSuperseded /Quiet | Out-Null; _Add "  DISM SPSuperseded: ok" } catch { _Add "  DISM SPSuperseded: FAILED" }
+                                # Timeout: offline DISM can hang forever on
+                                # corrupt component stores.
+                                $dismTimeoutMin = 15
+                                try {
+                                    $proc = Start-Process -FilePath 'dism.exe' `
+                                        -ArgumentList '/Online','/Cleanup-Image','/StartComponentCleanup','/ResetBase','/Quiet' `
+                                        -WindowStyle Hidden -PassThru -ErrorAction Stop
+                                    if ($proc.WaitForExit($dismTimeoutMin * 60 * 1000)) {
+                                        _Add "  DISM StartComponentCleanup /ResetBase: ok"
+                                    } else {
+                                        try { $proc.Kill() } catch {}
+                                        _Add "  DISM StartComponentCleanup: timed out after ${dismTimeoutMin}m; killed"
+                                    }
+                                } catch { _Add "  DISM StartComponentCleanup: FAILED $($_.Exception.Message)" }
+                                try {
+                                    $proc = Start-Process -FilePath 'dism.exe' `
+                                        -ArgumentList '/Online','/Cleanup-Image','/SPSuperseded','/Quiet' `
+                                        -WindowStyle Hidden -PassThru -ErrorAction Stop
+                                    if ($proc.WaitForExit($dismTimeoutMin * 60 * 1000)) {
+                                        _Add "  DISM SPSuperseded: ok"
+                                    } else {
+                                        try { $proc.Kill() } catch {}
+                                        _Add "  DISM SPSuperseded: timed out after ${dismTimeoutMin}m; killed"
+                                    }
+                                } catch { _Add "  DISM SPSuperseded: FAILED $($_.Exception.Message)" }
 
                                 # Silent disk cleanup (cleanmgr /sagerun) -
                                 # pre-set StateFlags so every category is
@@ -2213,14 +2236,32 @@ $btnXaml
                                             } catch {}
                                         }
 
-                                        # Offline DISM only makes sense on the system volume
+                                        # Offline DISM only makes sense on the system volume.
+                                        # Use Start-Process + WaitForExit with a
+                                        # timeout: offline DISM can hang forever
+                                        # on corrupt component stores (seen on
+                                        # Server 2019 Root CAs that never get
+                                        # serviced).
                                         if (Test-Path "$root\Windows\System32") {
                                             Write-PhaseLog "DISM /Cleanup-Image ${letter}:"
+                                            $dismTimeoutMin = 15
                                             try {
-                                                & dism.exe /Image:"$root\" /Cleanup-Image /StartComponentCleanup /ResetBase /Quiet | Out-Null
+                                                $proc = Start-Process -FilePath 'dism.exe' `
+                                                    -ArgumentList "/Image:`"$root\`"",'/Cleanup-Image','/StartComponentCleanup','/ResetBase','/Quiet' `
+                                                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+                                                if (-not $proc.WaitForExit($dismTimeoutMin * 60 * 1000)) {
+                                                    Write-PhaseLog "DISM StartComponentCleanup timed out after ${dismTimeoutMin}m; killing"
+                                                    try { $proc.Kill() } catch {}
+                                                }
                                             } catch {}
                                             try {
-                                                & dism.exe /Image:"$root\" /Cleanup-Image /SPSuperseded /Quiet | Out-Null
+                                                $proc = Start-Process -FilePath 'dism.exe' `
+                                                    -ArgumentList "/Image:`"$root\`"",'/Cleanup-Image','/SPSuperseded','/Quiet' `
+                                                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+                                                if (-not $proc.WaitForExit($dismTimeoutMin * 60 * 1000)) {
+                                                    Write-PhaseLog "DISM SPSuperseded timed out after ${dismTimeoutMin}m; killing"
+                                                    try { $proc.Kill() } catch {}
+                                                }
                                             } catch {}
                                         }
                                     }
