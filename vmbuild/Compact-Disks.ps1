@@ -1400,20 +1400,21 @@ $btnXaml
                                 # (typically ~RAM size, often multi-GB).
                                 try { & powercfg.exe /h off 2>$null | Out-Null; _Add "  powercfg /h off: ok" } catch { _Add "  powercfg /h off: FAILED" }
 
-                                # Delete all VSS shadow copies / system
-                                # restore points. They can hold many GB.
-                                $vssTimeoutMin = 60
-                                try {
-                                    $proc = Start-Process -FilePath 'vssadmin.exe' `
-                                        -ArgumentList 'delete','shadows','/all','/quiet' `
-                                        -WindowStyle Hidden -PassThru -Wait:$false -ErrorAction Stop
-                                    if ($proc.WaitForExit($vssTimeoutMin * 60 * 1000)) {
-                                        _Add "  vssadmin delete shadows /all: ok"
-                                    } else {
-                                        try { $proc.Kill() } catch {}
-                                        _Add "  vssadmin delete shadows: timed out after ${vssTimeoutMin}m; killed"
-                                    }
-                                } catch { _Add "  vssadmin: FAILED $($_.Exception.Message)" }
+                                # NOTE: Previously called 'vssadmin delete
+                                # shadows /all /quiet' here to reclaim space
+                                # held by VSS shadow copies. Removed because
+                                # the literal string is one of the most
+                                # heavily-flagged ransomware indicators in
+                                # AMSI/ASR heuristics - just having it in a
+                                # PowerShell script on disk is enough to
+                                # trigger 'PowerView script detected' /
+                                # ransomware-behavior alerts on the host
+                                # (Defender scans script content, not just
+                                # execution). Lab VMs created by MemLabs
+                                # don't run scheduled restore points so
+                                # there's typically nothing to delete, and
+                                # the zero-fill + Optimize-Volume -ReTrim
+                                # passes reclaim the same space anyway.
 
                                 # Component-store cleanup. /ResetBase makes
                                 # installed updates permanent (can't uninstall)
