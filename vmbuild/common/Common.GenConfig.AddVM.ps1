@@ -724,3 +724,32 @@ function Add-NewVMForRole {
         return $machineName
     }
 }
+
+function Add-OfflineRootCAVMIfMissing {
+    # When cmOptions.UseOfflineRootCA is enabled but no Standalone Offline
+    # Root CA exists - neither in the in-memory config nor already deployed
+    # in the target domain - auto-add one so the user doesn't have to.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.cmOptions) { return }
+    if (-not $ConfigToModify.cmOptions.UsePKI) { return }
+    if (-not $ConfigToModify.cmOptions.UseOfflineRootCA) { return }
+    if (-not $ConfigToModify.vmOptions -or -not $ConfigToModify.vmOptions.domainName) { return }
+
+    $existsInConfig = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' }).Count -gt 0
+    if ($existsInConfig) { return }
+
+    $domainName = $ConfigToModify.vmOptions.domainName
+    try {
+        $existsInDomain = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | Where-Object { $_.role -eq 'StandaloneRootCA' }).Count -gt 0
+        if ($existsInDomain) { return }
+    } catch {}
+
+    write-log "[OfflineRootCA] UseOfflineRootCA enabled but no StandaloneRootCA VM found - auto-adding one to domain $domainName"
+    Add-NewVMForRole -Role 'StandaloneRootCA' -Domain $domainName -ConfigToModify $ConfigToModify -OperatingSystem 'Server 2022' -Quiet:$true | Out-Null
+}
