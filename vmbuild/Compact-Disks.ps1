@@ -931,6 +931,36 @@ $btnXaml
             Add-UiLog ('[STARTUP-SWEEP] Sweep itself failed: {0}' -f $_.Exception.Message)
         }
 
+        # Crash-recovery diagnostic: list any VMs that look like they were
+        # mid-prep when the previous run died (snapshots present AND/OR
+        # AVHDX still attached). These get adopted naturally by the prep
+        # queue below - the settle loop waits for VMMS's in-flight merge
+        # to finish whether VMMS started it 5 seconds ago or 5 hours ago -
+        # but it's worth surfacing so the user understands why the first
+        # prep job(s) might "do nothing" for a long time on startup.
+        try {
+            $inflightVms = @()
+            foreach ($_vm in (Get-VM -ErrorAction SilentlyContinue)) {
+                $_snaps = @(Get-VMCheckpoint -VM $_vm -ErrorAction SilentlyContinue)
+                $_avhdx = @(Get-VMHardDiskDrive -VM $_vm -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' })
+                if ($_snaps.Count -eq 0 -and $_avhdx.Count -eq 0) { continue }
+                $inflightVms += [pscustomobject]@{
+                    VMName    = $_vm.Name
+                    Snapshots = $_snaps.Count
+                    AvhdxLeaves = $_avhdx.Count
+                }
+            }
+            if ($inflightVms.Count -gt 0) {
+                Add-UiLog ('[STARTUP-RECOVERY] {0} VM(s) have leftover snapshots or AVHDX leaves (likely from a prior interrupted run or background merge):' -f $inflightVms.Count)
+                foreach ($_iv in $inflightVms) {
+                    Add-UiLog ('[STARTUP-RECOVERY]   {0}: snapshots={1}, avhdx-attached={2}' -f $_iv.VMName, $_iv.Snapshots, $_iv.AvhdxLeaves)
+                }
+                Add-UiLog ('[STARTUP-RECOVERY] These will be picked up automatically; the merge-settle loop will wait for any in-flight VMMS merges to complete.')
+            }
+        } catch {
+            Add-UiLog ('[STARTUP-RECOVERY] Probe failed: {0}' -f $_.Exception.Message)
+        }
+
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
             # Hard stop (user picked 'force close' in the closing prompt, or

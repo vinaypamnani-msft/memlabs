@@ -197,21 +197,40 @@ function Start-VM2 {
                     }                                        
                     Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
                 }
-                # "The process cannot access the file because it is being used
-                # by another process." (HRESULT 0x80070020). Typically caused
-                # by a ghost host VHD mount left behind when a tool mounted
-                # an .avhdx leaf that Hyper-V then merged away in the
-                # background. Sweep stray mounts and retry once.
-                if (($StopError -ne $null) -and (
-                        ($StopError.Exception.Message -match 'being used by another process') -or
-                        ($StopError.Exception.Message -match '0x80070020'))) {
-                    write-progress2 "Start VM" -Status "VHD locked - sweeping stray host mounts for $Name" -force
-                    try { Write-Log "${Name}: Start-VM hit 'file in use'; running Clear-StrayVhdMounts" -LogOnly } catch {}
+                # Broad self-heal: any non-empty $StopError after the
+                # auth-tag handler ran. Most commonly caused by a ghost
+                # host VHD mount (left behind when a tool mounted an
+                # .avhdx leaf that Hyper-V later merged away in the
+                # background, OR by a previous PowerShell process
+                # crashing mid-merge while it had a host mount on a
+                # soon-to-be-deleted AVHDX). Other Hyper-V "VM didn't
+                # start" failure modes also occasionally clear after
+                # the storage subsystem is poked, so we do this for
+                # ANY Start-VM error rather than gating on a specific
+                # message - if there's nothing to clean up,
+                # Clear-StrayVhdMounts is a no-op and we just don't
+                # retry. The previous narrow message-match missed
+                # localized error strings on non-English hosts and
+                # wrapped exceptions.
+                if (($StopError -ne $null) -and ($vm.State -ne 'Running')) {
+                    $isFileInUse = ($StopError.Exception.Message -match 'being used by another process') -or
+                                   ($StopError.Exception.Message -match '0x80070020')
+                    $reason = if ($isFileInUse) { "file-in-use" } else { "Start-VM failed: $($StopError.Exception.Message)" }
+                    write-progress2 "Start VM" -Status "Sweeping stray host mounts for $Name ($reason)" -force
+                    try { Write-Log "${Name}: Start-VM failed ($reason); running Clear-StrayVhdMounts before retry" -LogOnly } catch {}
                     $cleared = Clear-StrayVhdMounts -VMName $Name
                     if ($cleared -gt 0) {
                         try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
                         $StopError = $null
                         Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    }
+                    elseif ($isFileInUse) {
+                        # No ghosts to clear, but error explicitly says
+                        # the file is locked. The lock is held by something
+                        # we can't fix from here (vmms internal handle,
+                        # antivirus, etc.) - log the diagnostic and let
+                        # the outer retry loop give it another try.
+                        try { Write-Log "${Name}: file-in-use error but Clear-StrayVhdMounts found nothing to clear; lock is held externally" -Warning } catch {}
                     }
                 }
                 $vm = Get-VM2 -Name $Name -Fallback
