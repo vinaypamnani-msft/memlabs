@@ -389,7 +389,7 @@ Empty=True
     # First, copy root CA files from host to DC
     # Ensure the destination directory exists on the remote VM before copying.
     # Copy-Item -ToSession fails with cryptic errors if the target dir is missing.
-    Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create RootCAFiles dir" -SuppressLog `
+    $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create RootCAFiles dir" -SuppressLog `
         -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\RootCAFiles" -Force | Out-Null }
     $copyFailed = $false
     foreach ($fileName in $filesToCopy) {
@@ -654,7 +654,7 @@ CertificateTemplate = SubCA
             Write-Log "[TwoTierPKI] ERROR: CSR file not found on host at $reqOnHost" -Failure
             return $false
         }
-        Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
+        $null = Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
             -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\IntermediateCAFiles" -Force | Out-Null }
         $copyOk = Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
         if (-not $copyOk) {
@@ -804,7 +804,7 @@ CertificateTemplate = SubCA
             Write-Log "[TwoTierPKI] ERROR: Signed cert not found on host at $cerOnHost" -Failure
             return $false
         }
-        Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
+        $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
             -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\IntermediateCAFiles" -Force | Out-Null }
         $copyOk = Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
         if (-not $copyOk) {
