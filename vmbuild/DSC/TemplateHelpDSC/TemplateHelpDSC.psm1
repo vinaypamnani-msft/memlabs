@@ -1452,8 +1452,25 @@ class DelegateControl {
         $arg1 = "CN=System Management,CN=System,$root"
         $permissioninfo = & $cmd $arg1
 
-        # Use helper method to check permissions
-        return $this.CheckPermissions($permissioninfo, $_machinename, $DomainName)
+        # Use helper method to check permissions (strict pattern)
+        if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
+            return $true
+        }
+
+        # Relaxed fallback: the strict wildcard pattern can fail on some
+        # Windows versions where dsacls.exe output format differs slightly.
+        # Use regex to match machine name + full control indicator.
+        $joinedLines = $this.JoinDsaclsOutput($permissioninfo)
+        $relaxedMatch = $joinedLines | Where-Object {
+            $_ -match [regex]::Escape($_machinename) -and ($_ -match 'FULL CONTROL' -or $_ -match 'Generic All')
+        }
+        if ($relaxedMatch) {
+            Write-Verbose "Strict pattern missed but relaxed match found: $relaxedMatch"
+            return $true
+        }
+
+        Write-Verbose "No permission match found for $_machinename"
+        return $false
     }
 
     [DelegateControl] Get() {
