@@ -1453,6 +1453,26 @@ $btnXaml
                                     try { Start-Service -Name $s -ErrorAction SilentlyContinue } catch {}
                                 }
 
+                                # ReTrim: tell NTFS to re-issue TRIM/UNMAP for
+                                # all free clusters. On a Hyper-V Gen2 guest
+                                # this translates to zeroed blocks in the VHDX,
+                                # which Optimize-VHD can then reclaim. Critical
+                                # for BitLocker volumes: encryption makes free
+                                # space look like random data at the block
+                                # level, but TRIM bypasses encryption entirely
+                                # because the hypervisor handles it below the
+                                # guest filesystem layer.
+                                try {
+                                    $trimVols = @(Get-Volume -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.DriveLetter -and $_.DriveType -eq 'Fixed' })
+                                    foreach ($tv in $trimVols) {
+                                        try {
+                                            Optimize-Volume -DriveLetter $tv.DriveLetter -ReTrim -ErrorAction Stop
+                                            _Add "  Optimize-Volume -ReTrim $($tv.DriveLetter): ok"
+                                        } catch { _Add "  Optimize-Volume -ReTrim $($tv.DriveLetter): FAILED $($_.Exception.Message)" }
+                                    }
+                                } catch { _Add "  ReTrim: FAILED $($_.Exception.Message)" }
+
                                 $freeEnd = _GetFree
                                 _Add ("END in-guest cleanup ; C: free = {0:N1} GB (reclaimed {1:N1} GB)" -f ($freeEnd/1GB), (($freeEnd-$freeStart)/1GB))
                                 return ,$report
