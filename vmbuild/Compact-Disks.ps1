@@ -320,12 +320,18 @@ if ($env:_COMPACT_DISKS_WORKER) {
             foreach ($s in $stray) {
                 $loc = $s.Location
                 if ($vmOwned.ContainsKey($loc.ToLowerInvariant())) { continue }
+                # Use -DiskNumber, NOT -Path: the common case here is a
+                # GHOST mount where the AVHDX backing file is already gone
+                # (Hyper-V deleted it after a merge). Dismount-VHD -Path
+                # does an existence check on the path first and silently
+                # fails for ghosts; -DiskNumber operates on the storage
+                # subsystem directly and works regardless.
                 try {
-                    Dismount-VHD -Path $loc -ErrorAction Stop
+                    Dismount-VHD -DiskNumber $s.Number -ErrorAction Stop
                     $strayDismounted++
-                    try { Add-UiLog ("[CLEANUP] Stray dismount: $loc") } catch {}
+                    try { Add-UiLog ("[CLEANUP] Stray dismount (disk #$($s.Number)): $loc") } catch {}
                 } catch {
-                    try { Add-UiLog ("[CLEANUP] Stray dismount FAILED for ${loc}: $($_.Exception.Message)") } catch {}
+                    try { Add-UiLog ("[CLEANUP] Stray dismount FAILED (disk #$($s.Number), $loc): $($_.Exception.Message)") } catch {}
                 }
             }
             if ($strayDismounted -gt 0) {
