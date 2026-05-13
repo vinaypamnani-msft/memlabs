@@ -1,4 +1,4 @@
-# Displays a Menu based on a property, offers options in [1], [2],[3] format
+﻿# Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
     [CmdletBinding()]

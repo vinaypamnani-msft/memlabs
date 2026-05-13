@@ -1,4 +1,4 @@
-# Common.ps1
+﻿# Common.ps1
 [CmdletBinding()]
 param (
     [Parameter()]

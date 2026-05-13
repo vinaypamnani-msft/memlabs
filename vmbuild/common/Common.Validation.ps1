@@ -1,4 +1,4 @@
-function Add-ValidationMessage {
+﻿function Add-ValidationMessage {
     param (
         [string]$Message,
         [object]$ReturnObject,

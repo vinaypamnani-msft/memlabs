@@ -1,4 +1,4 @@
-#Common.StorageToken.ps1
+﻿#Common.StorageToken.ps1
 # NOTE: This file is dot-sourced during DSC generation which runs under
 # PowerShell 5.1. Do not use PS7+ syntax (e.g. ?? ?. ??= ternary).
 function Get-StorageToken {

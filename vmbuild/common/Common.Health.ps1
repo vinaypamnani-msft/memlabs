@@ -1,4 +1,4 @@
-# Common.Health.ps1
+﻿# Common.Health.ps1
 # Overall-health dashboard widget shown on the Main Menu.
 # Self-contained: queries Get-List, formats a compact status block, and
 # caches results in $Global:HealthStatsCache for ~20s so per-keystroke menu
