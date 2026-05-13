@@ -1823,7 +1823,49 @@ $btnXaml
                             try {
                                 Write-PhaseLog 'Mounting VHDX'
                                 Write-Progress -Activity "Compact $p" -Status 'Mounting' -PercentComplete 2
-                                $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
+                                # Mount with a self-heal retry: if the parent
+                                # VHDX is locked by a leftover ghost host
+                                # mount (e.g. a previous compact job crashed
+                                # mid-run, or a ghost materialized after the
+                                # worker's startup sweep), one Mount-VHD will
+                                # throw 0x80070020 'file in use'. Sweep any
+                                # stray host mounts that don't belong to a
+                                # VM and retry once. This is the same logic
+                                # Start-VM2 uses, applied at the mount site.
+                                $mountResult = $null
+                                try {
+                                    $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
+                                } catch {
+                                    $mountErr = $_.Exception.Message
+                                    $isFileInUse = ($mountErr -match 'being used by another process') -or ($mountErr -match '0x80070020')
+                                    if ($isFileInUse) {
+                                        Write-PhaseLog "Mount-VHD failed with file-in-use; sweeping stray host mounts and retrying"
+                                        try {
+                                            $vmOwned = @{}
+                                            foreach ($_hd in (Get-VM -ErrorAction SilentlyContinue | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+                                                if ($_hd.Path) { $vmOwned[$_hd.Path.ToLowerInvariant()] = $true }
+                                            }
+                                            $cleared = 0
+                                            foreach ($_s in (Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -and $_.Location -match '\.a?vhdx?$' })) {
+                                                if ($vmOwned.ContainsKey($_s.Location.ToLowerInvariant())) { continue }
+                                                try {
+                                                    Dismount-VHD -DiskNumber $_s.Number -ErrorAction Stop
+                                                    $cleared++
+                                                    Write-PhaseLog ("  Dismounted stray host VHD (disk #{0}): {1}" -f $_s.Number, $_s.Location)
+                                                } catch {
+                                                    Write-PhaseLog ("  Stray dismount FAILED (disk #{0}, {1}): {2}" -f $_s.Number, $_s.Location, $_.Exception.Message)
+                                                }
+                                            }
+                                            Write-PhaseLog ("  Sweep cleared {0} stray mount(s); retrying Mount-VHD" -f $cleared)
+                                        } catch {
+                                            Write-PhaseLog "  Sweep itself failed: $($_.Exception.Message)"
+                                        }
+                                        Start-Sleep -Seconds 2
+                                        $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
+                                    } else {
+                                        throw
+                                    }
+                                }
                                 $mounted = $true
                                 Start-Sleep -Seconds 2
                                 # Capture the disk number now while $mountResult
