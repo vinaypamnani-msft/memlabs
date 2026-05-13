@@ -913,6 +913,40 @@ $btnXaml
                         $wasRunning = ($initial -and $initial.State -eq 'Running')
                         Write-PrepLog ("Initial state: {0}" -f ($initial.State))
 
+                        # Capture pre-merge byte total: every VHDX attached
+                        # to the VM, plus every .avhdx differencing link in
+                        # its parent chain. This is the 'before' size for
+                        # the final summary (vs the 'after' which is the
+                        # post-merge + post-Optimize-VHD parent size).
+                        # Without this the summary undercounts savings
+                        # massively when checkpoints get merged (typical
+                        # case: VM with 200 GB of AVHDX merges down to a
+                        # 50 GB parent, but Optimize-VHD only reclaims a few
+                        # more GB - the bulk of the savings happened in the
+                        # merge step, not the compact step).
+                        $preMergeBytes = [long]0
+                        try {
+                            $seenChain = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                            foreach ($hd in (Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
+                                if (-not $hd.Path) { continue }
+                                $cur = $hd.Path
+                                # Walk parent chain via Get-VHD ParentPath.
+                                while ($cur -and $seenChain.Add($cur)) {
+                                    try {
+                                        if (Test-Path -LiteralPath $cur) {
+                                            $preMergeBytes += ([System.IO.FileInfo]::new($cur)).Length
+                                        }
+                                    } catch {}
+                                    $parent = $null
+                                    try { $parent = (Get-VHD -Path $cur -ErrorAction SilentlyContinue).ParentPath } catch {}
+                                    $cur = $parent
+                                }
+                            }
+                            Write-PrepLog ("Pre-merge total (chain): {0:N1} GB" -f ($preMergeBytes/1GB))
+                        } catch {
+                            Write-PrepLog "Pre-merge sizing failed: $($_.Exception.Message)"
+                        }
+
                         # Dot-source Common.ps1 so we have Invoke-VmCommand /
                         # Get-VmSession / $Common.LocalAdmin, plus the
                         # Test-VMCheckpointMergeFreeSpace pre-merge check.
@@ -1370,7 +1404,7 @@ $btnXaml
                         }
                         Write-PrepLog ("--- Prep done for $n ({0} disk(s), {1:N0}s elapsed) ---" -f $disks.Count, ((Get-Date)-$startedAt).TotalSeconds)
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
-                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; Disks = $disks.ToArray() }
+                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; PreMergeBytes = $preMergeBytes; Disks = $disks.ToArray() }
                     } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean), $SerializeDrives
                     $vm.Job    = $job
                     $vm.Status = 'Running'
@@ -1425,6 +1459,7 @@ $btnXaml
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
                         $vm.WasRunning = [bool]$result.WasRunning
+                        $vm | Add-Member -NotePropertyName PreMergeBytes -NotePropertyValue ([long]($result.PreMergeBytes)) -Force
                         if ($result.MergeSkipped) {
                             $vm.MergeSkipped = $true
                             Add-UiLog ("[PREP-WARN] $($vm.VMName): merge skipped (insufficient free space) - compacting AVHDX leaf only")
@@ -2023,6 +2058,31 @@ $btnXaml
     Add-UiLog ("  Duration : $($duration.ToString('hh\:mm\:ss'))")
     Add-UiLog ("  Disks    : $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled")
     Add-UiLog ("  VMs      : $($vmInfoList.Count) total, $($prepFailed.Count) prep-failed, $($forcedStops.Count) force-stopped")
+
+    # Full-accounting totals: pre-merge (everything attached including
+    # the AVHDX chain), post-merge (parent VHDX after Remove-VMCheckpoint
+    # collapsed the chain - this is what the disk table's 'Before' column
+    # shows), and post-compact (after Optimize-VHD).
+    $preMergeTotal = ($vmInfoList | Where-Object { $_.PreMergeBytes } | Measure-Object -Property PreMergeBytes -Sum).Sum
+    if (-not $preMergeTotal) { $preMergeTotal = 0 }
+    $postMergeTotal = ($diskInfoList | Measure-Object -Property OriginalSize -Sum).Sum
+    if (-not $postMergeTotal) { $postMergeTotal = 0 }
+    $postCompactSuccessOld = ($successful | Measure-Object -Property OriginalSize -Sum).Sum
+    $postCompactSuccessNew = ($successful | Measure-Object -Property NewSize      -Sum).Sum
+    if (-not $postCompactSuccessOld) { $postCompactSuccessOld = 0 }
+    if (-not $postCompactSuccessNew) { $postCompactSuccessNew = 0 }
+    $postCompactTotal = $postMergeTotal - ($postCompactSuccessOld - $postCompactSuccessNew)
+    $mergeSaved      = $preMergeTotal  - $postMergeTotal
+    $compactSaved    = $postMergeTotal - $postCompactTotal
+    $grandSaved      = $preMergeTotal  - $postCompactTotal
+    if ($preMergeTotal -gt 0) {
+        Add-UiLog ('')
+        Add-UiLog ('  Size accounting:')
+        Add-UiLog ("    Before merge   : $(Format-Size $preMergeTotal)   (parent VHDX + all .avhdx in the chain)")
+        Add-UiLog ("    After merge    : $(Format-Size $postMergeTotal)   (saved $(Format-Size $mergeSaved) by collapsing checkpoints)")
+        Add-UiLog ("    After compact  : $(Format-Size $postCompactTotal)   (saved $(Format-Size $compactSaved) by Optimize-VHD)")
+        Add-UiLog ("    Total reclaimed: $(Format-Size $grandSaved)")
+    }
     Add-UiLog ('')
 
     # -------- Per-disk table --------
