@@ -762,7 +762,13 @@ CertificateTemplate = SubCA
                     if ($newDisp -ne $CR_DISP_ISSUED) {
                         throw "ResubmitRequest returned unexpected disposition $newDisp (expected $CR_DISP_ISSUED=Issued)"
                     }
-                    $disposition = $newDisp
+
+                    # The original $certRequest object still has stale
+                    # "pending" state. Must call RetrievePending to refresh
+                    # its internal cert buffer before GetCertificate works.
+                    _Log "Calling ICertRequest::RetrievePending to refresh state..."
+                    $disposition = $certRequest.RetrievePending($requestID, $caConfig)
+                    _Log "RetrievePending returned disposition=$disposition"
                 }
 
                 if ($disposition -eq $CR_DISP_ISSUED) {
