@@ -635,6 +635,7 @@ function Add-NewVMForRole {
                 OfflineSCP                = $false
                 OfflineSUP                = $false
                 UsePKI                    = $false
+                UseOfflineRootCA          = $false
             }
             $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
         }

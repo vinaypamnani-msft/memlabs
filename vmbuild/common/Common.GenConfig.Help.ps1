@@ -43,6 +43,7 @@ function Get-GenericHelp {
         "Install" { "Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand" }
         "EVALVersion" { "Install the EVAL license for ConfigMgr.  This will expire in 6 months." }
         "UsePKI" { "Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP." }
+        "UseOfflineRootCA" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a cert for an Enterprise Subordinate CA on the DC. Requires UsePKI and a StandaloneRootCA VM." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
         "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
