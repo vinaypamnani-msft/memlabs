@@ -158,31 +158,33 @@ function Start-VM2 {
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
     $vmLockMx = $null
+    $vmLockHeld = $false
     try {
         # Per-VM cross-process lock. If Compact-Disks (or another MemLabs
         # operation that honors MemLabs_VM_<name>) is currently working
         # on this VM - merging checkpoints, mounting the VHDX for offline
         # cleanup, running Optimize-VHD - starting the VM right now would
         # either fail with 0x80070020 file-in-use, or worse, cause the
-        # other tool to dismount the VHDX out from under us. Wait for it.
+        # other tool to dismount the VHDX out from under us. Try briefly
+        # then bail with a clear error rather than silently waiting.
         try {
             $vmLockMx = [System.Threading.Mutex]::new($false, "MemLabs_VM_$Name")
-            $gotLock = $false
-            try { $gotLock = $vmLockMx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $gotLock = $true }
-            if (-not $gotLock) {
-                Write-Log "${Name}: another MemLabs operation holds the VM lock; waiting up to 60 min..." -Warning
-                try { $gotLock = $vmLockMx.WaitOne([TimeSpan]::FromMinutes(60)) }
-                catch [System.Threading.AbandonedMutexException] { $gotLock = $true }
-                if ($gotLock) { Write-Log "${Name}: VM lock acquired; proceeding with Start-VM" -LogOnly }
-                else { Write-Log "${Name}: timed out waiting for VM lock; proceeding without it" -Warning }
-            }
-            if (-not $gotLock) {
+            try { $vmLockHeld = $vmLockMx.WaitOne([TimeSpan]::FromSeconds(5)) }
+            catch [System.Threading.AbandonedMutexException] { $vmLockHeld = $true }
+            if (-not $vmLockHeld) {
+                Write-Log "${Name}: another MemLabs operation holds the VM lock (MemLabs_VM_$Name); refusing to start VM. Wait for the other operation (e.g. Compact-Disks) to finish and retry." -Warning
                 try { $vmLockMx.Dispose() } catch {}
                 $vmLockMx = $null
+                if ($Passthru) { return $false }
+                return
             }
         } catch {
-            try { Write-Log "${Name}: failed to acquire VM lock: $($_.Exception.Message)" -Warning } catch {}
+            # If the mutex object itself can't be created (extremely rare),
+            # log it and continue without the lock - we can't make this a
+            # hard failure or the host would become unable to start VMs.
+            try { Write-Log "${Name}: failed to acquire VM lock object: $($_.Exception.Message); proceeding without it" -Warning } catch {}
             $vmLockMx = $null
+            $vmLockHeld = $false
         }
 
         $vm = Get-VM2 -Name $Name -Fallback
@@ -311,7 +313,7 @@ function Start-VM2 {
         write-progress2 "Start VM" -Status "Started VM $Name" -force -Completed
         $Global:ProgressPreference = $OriginalProgressPreference
         if ($vmLockMx) {
-            try { $vmLockMx.ReleaseMutex() } catch {}
+            if ($vmLockHeld) { try { $vmLockMx.ReleaseMutex() } catch {} }
             try { $vmLockMx.Dispose() } catch {}
         }
     }
