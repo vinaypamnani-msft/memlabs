@@ -405,8 +405,9 @@ if ($env:_COMPACT_DISKS_WORKER) {
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*" MinHeight="120"/>
+            <RowDefinition Height="6"/>
+            <RowDefinition Height="*" MinHeight="120"/>
         </Grid.RowDefinitions>
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock x:Name="TitleText" FontSize="20" FontWeight="SemiBold"
@@ -430,10 +431,15 @@ if ($env:_COMPACT_DISKS_WORKER) {
         </StackPanel>
         <TextBlock Grid.Row="2" Text="Active Jobs" FontSize="15" FontWeight="SemiBold"
                    Margin="0,6,0,6" Foreground="#F9E2AF"/>
-        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,0,0,10">
+        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto" Margin="0,0,0,4">
             <StackPanel x:Name="JobPanel"/>
         </ScrollViewer>
-        <Border Grid.Row="4" Background="#181825" CornerRadius="4" Padding="10" MaxHeight="140">
+        <GridSplitter Grid.Row="4" Height="6" HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch" ResizeBehavior="PreviousAndNext"
+                      ResizeDirection="Rows" Background="#313244"
+                      ShowsPreview="True"
+                      ToolTip="Drag to resize the log panel"/>
+        <Border Grid.Row="5" Background="#181825" CornerRadius="4" Padding="10" Margin="0,4,0,0">
             <TextBox x:Name="LogText" FontSize="12" FontFamily="Consolas"
                      TextWrapping="Wrap" Foreground="#A6ADC8" Background="Transparent"
                      BorderThickness="0" IsReadOnly="True" IsReadOnlyCaretVisible="False"
