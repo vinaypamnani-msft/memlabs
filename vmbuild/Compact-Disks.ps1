@@ -1756,7 +1756,16 @@ $btnXaml
                         }
                         Write-PrepLog ("--- Prep done for $n ({0} disk(s), {1:N0}s elapsed) ---" -f $disks.Count, ((Get-Date)-$startedAt).TotalSeconds)
                         Write-Progress -Activity "Prep $n" -Status 'Done' -PercentComplete 100
-                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; PreMergeBytes = $preMergeBytes; Disks = $disks.ToArray() }
+                        # MergePerformed: true only if there was actually a
+                        # checkpoint chain to collapse AND we did collapse it.
+                        # The size-accounting summary uses this to skip VMs
+                        # whose 'before' and 'after' are the same parent VHDX
+                        # (no chain) - including them just adds noise (and can
+                        # produce slightly negative 'merge savings' because
+                        # Hyper-V may have grown the parent file by a small
+                        # amount between the two FileInfo reads).
+                        $mergePerformed = ($snapshots.Count -gt 0) -and (-not $mergeSkipped)
+                        return @{ Ok = $true; Forced = $forced; OnlineCleaned = $onlineCleanRan; WasRunning = $wasRunning; MergeSkipped = $mergeSkipped; MergePerformed = $mergePerformed; PreMergeBytes = $preMergeBytes; Disks = $disks.ToArray() }
                     } -ArgumentList $vm.VMName, $ShutdownTimeoutSec, $WorkerCommonPath, (-not $SkipOnlineClean), $SerializeDrives
                     $vm.Job    = $job
                     $vm.Status = 'Running'
@@ -1811,7 +1820,8 @@ $btnXaml
                         $vm.Status = 'Completed'
                         $vm.Forced = [bool]$result.Forced
                         $vm.WasRunning = [bool]$result.WasRunning
-                        $vm | Add-Member -NotePropertyName PreMergeBytes -NotePropertyValue ([long]($result.PreMergeBytes)) -Force
+                        $vm | Add-Member -NotePropertyName PreMergeBytes   -NotePropertyValue ([long]($result.PreMergeBytes)) -Force
+                        $vm | Add-Member -NotePropertyName MergePerformed  -NotePropertyValue ([bool]$result.MergePerformed)  -Force
                         if ($result.MergeSkipped) {
                             $vm.MergeSkipped = $true
                             Add-UiLog ("[PREP-WARN] $($vm.VMName): merge skipped (insufficient free space) - compacting AVHDX leaf only")
@@ -2653,12 +2663,28 @@ $btnXaml
     # the AVHDX chain), post-merge (parent VHDX after Remove-VMCheckpoint
     # collapsed the chain - this is what the disk table's 'Before' column
     # shows), and post-compact (after Optimize-VHD).
-    $preMergeTotal = ($vmInfoList | Where-Object { $_.PreMergeBytes } | Measure-Object -Property PreMergeBytes -Sum).Sum
+    #
+    # Restricted to VMs where a merge actually happened ($_.MergePerformed):
+    # for VMs with no checkpoints (or where the merge was skipped because
+    # there wasn't enough free disk space) the "Before" and "After" merge
+    # numbers describe the same parent VHDX and just add noise to the
+    # accounting - and can produce slightly negative "merge savings" if
+    # Hyper-V grew the parent in between the two FileInfo reads. Their
+    # compact savings still show up in the per-disk table below.
+    $mergedVms = @($vmInfoList | Where-Object {
+        $_.PSObject.Properties['MergePerformed'] -and $_.MergePerformed
+    })
+    $mergedVmNames = @{}
+    foreach ($mv in $mergedVms) { $mergedVmNames[$mv.VMName] = $true }
+    $mergedDisks = @($diskInfoList | Where-Object { $mergedVmNames.ContainsKey($_.VMName) })
+    $mergedSuccessful = @($successful | Where-Object { $mergedVmNames.ContainsKey($_.VMName) })
+
+    $preMergeTotal = ($mergedVms | Where-Object { $_.PreMergeBytes } | Measure-Object -Property PreMergeBytes -Sum).Sum
     if (-not $preMergeTotal) { $preMergeTotal = 0 }
-    $postMergeTotal = ($diskInfoList | Measure-Object -Property OriginalSize -Sum).Sum
+    $postMergeTotal = ($mergedDisks | Measure-Object -Property OriginalSize -Sum).Sum
     if (-not $postMergeTotal) { $postMergeTotal = 0 }
-    $postCompactSuccessOld = ($successful | Measure-Object -Property OriginalSize -Sum).Sum
-    $postCompactSuccessNew = ($successful | Measure-Object -Property NewSize      -Sum).Sum
+    $postCompactSuccessOld = ($mergedSuccessful | Measure-Object -Property OriginalSize -Sum).Sum
+    $postCompactSuccessNew = ($mergedSuccessful | Measure-Object -Property NewSize      -Sum).Sum
     if (-not $postCompactSuccessOld) { $postCompactSuccessOld = 0 }
     if (-not $postCompactSuccessNew) { $postCompactSuccessNew = 0 }
     $postCompactTotal = $postMergeTotal - ($postCompactSuccessOld - $postCompactSuccessNew)
@@ -2667,7 +2693,7 @@ $btnXaml
     $grandSaved      = $preMergeTotal  - $postCompactTotal
     if ($preMergeTotal -gt 0) {
         Add-UiLog ('')
-        Add-UiLog ('  Size accounting:')
+        Add-UiLog ("  Size accounting (across $($mergedVms.Count) VM(s) where checkpoints were merged):")
         Add-UiLog ("    Before merge   : $(Format-Size $preMergeTotal)   (parent VHDX + all .avhdx in the chain)")
         Add-UiLog ("    After merge    : $(Format-Size $postMergeTotal)   (saved $(Format-Size $mergeSaved) by collapsing checkpoints)")
         Add-UiLog ("    After compact  : $(Format-Size $postCompactTotal)   (saved $(Format-Size $compactSaved) by Optimize-VHD)")
