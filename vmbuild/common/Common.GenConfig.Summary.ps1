@@ -1,4 +1,4 @@
-function get-VMOptionsSummary {
+﻿function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     if ($null -eq $options.timeZone) {

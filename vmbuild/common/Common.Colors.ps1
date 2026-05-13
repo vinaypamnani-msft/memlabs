@@ -1,4 +1,4 @@
-try {
+﻿try {
     # Load System.Drawing (maybe needed for PS5)
     [reflection.assembly]::LoadWithPartialName( "System.Drawing") | Out-Null
 }
