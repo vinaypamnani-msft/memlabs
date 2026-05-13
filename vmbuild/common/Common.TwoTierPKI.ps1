@@ -8,6 +8,39 @@
 # Uses PSDirect (Invoke-VmCommand / Copy-ItemSafe) for all VM communication.
 ###############################################################################
 
+function Copy-ItemFromVM {
+    <#
+    .SYNOPSIS
+        Copy a file FROM a guest VM to the host via PSDirect (Copy-Item -FromSession).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Destination,
+        [Parameter(Mandatory)] [string] $VMName,
+        [Parameter(Mandatory)] [string] $VMDomainName
+    )
+
+    if (-not (Test-Path $Destination)) {
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    }
+
+    $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomainName
+    if (-not $ps) {
+        Write-Log "[Copy-ItemFromVM] Failed to get session for $VMName" -Failure
+        return $false
+    }
+    try {
+        Copy-Item -FromSession $ps -Path $Path -Destination $Destination -Force -ErrorAction Stop
+        Write-Log "[Copy-ItemFromVM] Copied $Path from $VMName to $Destination" -LogOnly
+        return $true
+    }
+    catch {
+        Write-Log "[Copy-ItemFromVM] Failed: $($_.Exception.Message)" -Failure
+        return $false
+    }
+}
+
 function Install-TwoTierPKI {
     <#
     .SYNOPSIS
@@ -238,7 +271,7 @@ Empty=True
     $filesToCopy = $result.ScriptBlockOutput.ExportedFiles
     foreach ($fileName in $filesToCopy) {
         $srcPath = Join-Path $rootCAFilesPath $fileName
-        Copy-ItemSafe -Path $srcPath -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        Copy-ItemFromVM -Path $srcPath -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
     }
     Write-Log "[TwoTierPKI] Root CA files copied to host: $hostStagingPath"
 
@@ -396,7 +429,7 @@ Critical=Yes
     Write-Log "[TwoTierPKI] Copying CSR '$reqFileName' from DC to Root CA via host..." -LogOnly
 
     # DC → host
-    Copy-ItemSafe -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $dcVMName -VMDomainName $domainName
+    Copy-ItemFromVM -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $dcVMName -VMDomainName $domainName
     # host → Root CA
     $reqOnHost = Join-Path $hostStagingPath $reqFileName
     Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
@@ -485,7 +518,7 @@ Critical=Yes
     Write-Log "[TwoTierPKI] Copying signed cert '$cerFileName' from Root CA to DC via host..." -LogOnly
 
     # Root CA → host
-    Copy-ItemSafe -Path $result3.ScriptBlockOutput.CerFile -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+    Copy-ItemFromVM -Path $result3.ScriptBlockOutput.CerFile -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
     # host → DC
     $cerOnHost = Join-Path $hostStagingPath $cerFileName
     Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
