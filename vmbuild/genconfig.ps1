@@ -679,9 +679,24 @@ function Select-MainMenu {
         $global:StartOver = $false
         $global:GoBack = $false
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
+        # Preserve any validation errors carried over from a full (non-fast)
+        # validation pass (e.g. disk-space warnings that -fast skips).
+        $carryOver = $global:PendingValidationErrors
+        $global:PendingValidationErrors = $null
         $global:GenConfigErrorMessages = @()
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
+        if ($carryOver) {
+            # Re-inject messages from the full validation that fast mode
+            # doesn't reproduce (they'd otherwise vanish from the error box).
+            # Skip any that fast validation already added (avoid duplicates).
+            $existingMsgs = @($global:GenConfigErrorMessages | ForEach-Object { $_.Message })
+            foreach ($co in $carryOver) {
+                if ($co.Message -and $co.Message -notin $existingMsgs) {
+                    $global:GenConfigErrorMessages += $co
+                }
+            }
+        }
 
         # Sort virtualMachines so DC/BDC come first, then everything else by
         # name. Modifies $global:Config in-place. Wrapped in try/catch because
@@ -1037,6 +1052,17 @@ do {
                 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigError2 "Config file is not valid:`r`n"
                 Write-ValidationMessages -TestObject $c
                 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigError2 "`r`nPlease fix the problem(s), or hit CTRL-C to exit."
+                # Log validation failures so they appear in vmbuild.log
+                $messages = $($c.Message) -split "\r\n"
+                foreach ($msg in $messages.Trim()) {
+                    if (-not [string]::IsNullOrWhiteSpace($msg)) {
+                        Write-Log "Deploy validation failed: $msg" -Warning -LogOnly
+                    }
+                }
+                # Carry these errors forward so they persist in the menu's
+                # error box after the fast-validation pass clears and
+                # repopulates $global:GenConfigErrorMessages.
+                $global:PendingValidationErrors = @($global:GenConfigErrorMessages)
             }
         }
 
