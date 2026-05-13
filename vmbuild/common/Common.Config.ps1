@@ -2375,6 +2375,14 @@ Function Write-ColorizedBrackets {
         [Parameter()]
         [string] $BracketColor = $Global:Common.Colors.GenConfigBrackets
     )
+    # If the caller has embedded ANSI color sequences (ESC '[' ... 'm') in the text,
+    # the bracket-splitting loop below would slice through the CSI prefix on '[' and
+    # corrupt it (the ESC byte ends up alone, and the rest prints as literal text).
+    # In that case, write the text as-is and let the embedded colors render.
+    if ($text -and $text.Contains([char]27)) {
+        Write-Host $text -NoNewline
+        return
+    }
     while (-not [string]::IsNullOrWhiteSpace($text)) {
         #write-host $text
         $indexLeft = $text.IndexOf('[')
