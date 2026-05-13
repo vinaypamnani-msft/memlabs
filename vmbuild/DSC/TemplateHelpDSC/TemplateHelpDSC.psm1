@@ -3983,7 +3983,7 @@ class ImportCertificateTemplate {
             Write-Verbose " -- Restart-Service -Name CertSvc"
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-            Restart-Service -Name CertSvc
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
             start-sleep -seconds 60
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
             $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
@@ -4306,7 +4306,7 @@ class AddCertificateTemplate {
             Write-Verbose " -- Restart-Service -Name CertSvc"
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-            Restart-Service -Name CertSvc
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
             start-sleep -seconds 15
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
             $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count

@@ -675,7 +675,7 @@
         $waitOnDependency = $nextDepend
         
 
-        if ($ThisVM.InstallCA) {
+        if ($ThisVM.InstallCA -and -not $ThisVM.SubordinateCA) {
 
 
             WriteStatus CertTemplates {
