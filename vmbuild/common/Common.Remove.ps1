@@ -91,7 +91,8 @@ function Remove-VirtualMachine {
         return
     }
 
-    $parent = (Get-Item $vmTest.Path -ErrorAction SilentlyContinue)?.Parent
+    $parentItem = Get-Item $vmTest.Path -ErrorAction SilentlyContinue
+    $parent = if ($parentItem) { $parentItem.Parent } else { $null }
 
     Write-Log "VM '$VmName' exists. Removing." -SubActivity
 
