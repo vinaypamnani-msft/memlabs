@@ -680,6 +680,21 @@ $btnXaml
             $StatusText.Text       = $UiSync.StatusText
             $ElapsedText.Text      = "Elapsed: $($UiSync.ElapsedText)"
 
+            # When the worker signals completion, recolor the status line
+            # green + bold to draw the user's eye, and append "(Done)" to
+            # the window title bar so it's obvious even when minimized.
+            if ($UiSync.Done -and -not $ui.DoneApplied) {
+                try {
+                    $StatusText.Foreground = $bc.ConvertFrom('#A6E3A1')
+                    $StatusText.FontWeight = 'Bold'
+                    $StatusText.FontSize   = 16
+                    if ($window.Title -notmatch '\(Done\)$') {
+                        $window.Title = $window.Title + '  (Done)'
+                    }
+                } catch {}
+                $ui.DoneApplied = $true
+            }
+
             $snapshot = @($UiSync.Jobs)
             $currentNames = ($snapshot | ForEach-Object { $_.Name }) -join '|'
             $structureChanged = ($currentNames -ne $ui.JobHash)
@@ -2784,8 +2799,13 @@ $btnXaml
     }
 
     $UiSync.OverallPercent = 100
-    $UiSync.StatusText     = "All done - $($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced"
+    $UiSync.StatusText     = "✅ Complete - you can now close this window.   ($($successful.Count) completed, $($failed.Count) failed, $($cancelled.Count) cancelled, $($forcedStops.Count) forced)"
     $UiSync.Jobs           = [System.Collections.ArrayList]::new()
+    # Flips the StatusText to green/bold and appends "(Done)" to the
+    # window title so the user knows they can close the window.
+    $UiSync.Done           = $true
+    Add-UiLog ('')
+    Add-UiLog ('>>> Optimization complete. You can now close this window. <<<')
 
     # Window stays open for log review - wait until the user closes it, then clean up
     while (-not $UiSync.WindowClosed) { Start-Sleep -Milliseconds 500 }
