@@ -899,6 +899,38 @@ $btnXaml
         $shouldRetry = $false
     try {
         $stopAnnounced = $false
+
+        # Proactive ghost-mount sweep at worker startup. If a previous
+        # Compact-Disks run crashed mid-merge (or the host was rebooted
+        # while a merge was in flight), there can be host-side VHD
+        # mounts whose backing AVHDX has already been deleted by Hyper-V.
+        # Those ghosts lock the parent VHDX and will break the very
+        # first Mount-VHD we attempt below. Clear them now, ONCE, before
+        # any prep/compact job runs. Same logic as Invoke-CompactCleanup
+        # step 2b but run upfront instead of only on shutdown.
+        try {
+            $startupVmOwned = @{}
+            foreach ($_hd in (Get-VM -ErrorAction SilentlyContinue | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+                if ($_hd.Path) { $startupVmOwned[$_hd.Path.ToLowerInvariant()] = $true }
+            }
+            $startupCleared = 0
+            foreach ($_s in (Get-Disk -ErrorAction SilentlyContinue | Where-Object { $_.Location -and $_.Location -match '\.a?vhdx?$' })) {
+                if ($startupVmOwned.ContainsKey($_s.Location.ToLowerInvariant())) { continue }
+                try {
+                    Dismount-VHD -DiskNumber $_s.Number -ErrorAction Stop
+                    $startupCleared++
+                    Add-UiLog ('[STARTUP-SWEEP] Dismounted stray host VHD (disk #{0}): {1}' -f $_s.Number, $_s.Location)
+                } catch {
+                    Add-UiLog ('[STARTUP-SWEEP] Failed to dismount disk #{0} ({1}): {2}' -f $_s.Number, $_s.Location, $_.Exception.Message)
+                }
+            }
+            if ($startupCleared -gt 0) {
+                Add-UiLog ('[STARTUP-SWEEP] Cleared {0} stray host VHD mount(s) inherited from a previous run.' -f $startupCleared)
+            }
+        } catch {
+            Add-UiLog ('[STARTUP-SWEEP] Sweep itself failed: {0}' -f $_.Exception.Message)
+        }
+
         while ($prepQueue.Count -gt 0 -or $activePrepJobs.Count -gt 0 -or
                $diskQueue.Count -gt 0 -or $activeJobs.Count -gt 0) {
             # Hard stop (user picked 'force close' in the closing prompt, or
@@ -1671,8 +1703,9 @@ $btnXaml
                     $DoDefrag     = -not $SkipDefrag
                     $DoOfflineClean = -not $SkipOfflineClean
                     $DoZeroFill   = -not $SkipZeroFill
+                    $JobVmName    = $disk.VMName
                     $job = Start-Job -ScriptBlock {
-                        param($p, $m, $defrag, $offlineClean, $zeroFill)
+                        param($p, $m, $defrag, $offlineClean, $zeroFill, $vmName)
                         # Do NOT set $ProgressPreference = 'SilentlyContinue'
                         # here - it suppresses Write-Progress records (both
                         # ours and Optimize-VHD's native progress) so the
@@ -1695,18 +1728,24 @@ $btnXaml
                         # If $p doesn't exist anymore, the merge has fully
                         # completed and we should re-resolve to whatever VHDX
                         # is now attached in its place.
-                        function Resolve-CurrentVhd([string]$origPath) {
+                        # Scoped to the owning VM: $vmName comes from the
+                        # parent and is the only VM whose disk chain we are
+                        # supposed to touch. Walking ALL VMs would let us
+                        # re-resolve to the wrong file if two VMs ever
+                        # share a basename root.
+                        function Resolve-CurrentVhd([string]$origPath, [string]$ownerVm) {
                             try {
                                 $origLeaf = [System.IO.Path]::GetFileNameWithoutExtension($origPath)
                                 $rootName = $origLeaf -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
-                                foreach ($vmObj in (Get-VM -ErrorAction SilentlyContinue)) {
-                                    foreach ($hd in (Get-VMHardDiskDrive -VM $vmObj -ErrorAction SilentlyContinue)) {
-                                        if (-not $hd.Path) { continue }
-                                        $cand     = [System.IO.Path]::GetFileNameWithoutExtension($hd.Path)
-                                        $candRoot = $cand -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
-                                        if ($candRoot -eq $rootName -and (Test-Path -LiteralPath $hd.Path)) {
-                                            return $hd.Path
-                                        }
+                                $vmObj = $null
+                                if ($ownerVm) { $vmObj = Get-VM -Name $ownerVm -ErrorAction SilentlyContinue }
+                                if (-not $vmObj) { return $null }
+                                foreach ($hd in (Get-VMHardDiskDrive -VM $vmObj -ErrorAction SilentlyContinue)) {
+                                    if (-not $hd.Path) { continue }
+                                    $cand     = [System.IO.Path]::GetFileNameWithoutExtension($hd.Path)
+                                    $candRoot = $cand -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
+                                    if ($candRoot -eq $rootName -and (Test-Path -LiteralPath $hd.Path)) {
+                                        return $hd.Path
                                     }
                                 }
                             } catch {}
@@ -1725,7 +1764,7 @@ $btnXaml
                             $reDeadline = (Get-Date).AddMinutes(30)
                             $resolved   = $null
                             while ((Get-Date) -lt $reDeadline) {
-                                $cand = Resolve-CurrentVhd $p
+                                $cand = Resolve-CurrentVhd $p $vmName
                                 if ($cand -and $cand -notmatch '\.avhdx?$') { $resolved = $cand; break }
                                 if (-not (Test-Path -LiteralPath $p) -and $cand) { $resolved = $cand; break }
                                 Start-Sleep -Seconds 5
@@ -1749,6 +1788,7 @@ $btnXaml
                         # then dismount and Optimize-VHD against the parent.
                         $needMount = $offlineClean -or $defrag -or $zeroFill
                         $mounted = $false
+                        $mountedDiskNumber = $null  # captured for -DiskNumber dismount fallback (ghost-safe)
                         if ($needMount) {
                             try {
                                 Write-PhaseLog 'Mounting VHDX'
@@ -1756,6 +1796,16 @@ $btnXaml
                                 $mountResult = Mount-VHD -Path $p -PassThru -ErrorAction Stop
                                 $mounted = $true
                                 Start-Sleep -Seconds 2
+                                # Capture the disk number now while $mountResult
+                                # is fresh. We need it later for a robust
+                                # dismount: Dismount-VHD -Path does Test-Path
+                                # first and silently no-ops if the file is
+                                # gone (the exact failure mode that produced
+                                # the original ghost-mount bug).
+                                try {
+                                    $mountedDiskNumber = ($mountResult | Get-Disk -ErrorAction SilentlyContinue).Number
+                                    if ($mountedDiskNumber) { Write-PhaseLog ("Mounted as disk #{0}" -f $mountedDiskNumber) }
+                                } catch {}
 
                                 # Inside a Start-Job the volume manager often
                                 # does NOT auto-assign drive letters to a
@@ -1993,8 +2043,41 @@ $btnXaml
                                 if ($mounted) {
                                     Write-PhaseLog 'Dismounting'
                                     Write-Progress -Activity "Compact $p" -Status 'Dismounting' -PercentComplete 27
-                                    Dismount-VHD -Path $p -ErrorAction SilentlyContinue
-                                    Start-Sleep -Seconds 3
+                                    # Try -Path first (handles the normal case).
+                                    $dismountOk = $false
+                                    try {
+                                        Dismount-VHD -Path $p -ErrorAction Stop
+                                        $dismountOk = $true
+                                    } catch {
+                                        Write-PhaseLog "Dismount-VHD -Path failed: $($_.Exception.Message)"
+                                    }
+                                    Start-Sleep -Seconds 2
+                                    # Verify the mount actually went away. If
+                                    # the file got moved/deleted/merged-away
+                                    # while we were inside the cleanup loop,
+                                    # -Path silently no-ops and the host
+                                    # mount lingers as a ghost (this is the
+                                    # exact bug we are defending against).
+                                    # Falling back to -DiskNumber operates on
+                                    # the storage subsystem directly and
+                                    # works regardless of file existence.
+                                    if ($mountedDiskNumber) {
+                                        try {
+                                            $stillMounted = Get-Disk -Number $mountedDiskNumber -ErrorAction SilentlyContinue
+                                            if ($stillMounted -and $stillMounted.Location -and ($stillMounted.Location -match '\.a?vhdx?$')) {
+                                                Write-PhaseLog ("Disk #{0} still mounted after dismount; forcing -DiskNumber dismount of {1}" -f $mountedDiskNumber, $stillMounted.Location)
+                                                try {
+                                                    Dismount-VHD -DiskNumber $mountedDiskNumber -ErrorAction Stop
+                                                    Write-PhaseLog ("  -DiskNumber dismount: ok")
+                                                } catch {
+                                                    Write-PhaseLog ("  -DiskNumber dismount FAILED: $($_.Exception.Message)")
+                                                }
+                                            } elseif (-not $dismountOk) {
+                                                Write-PhaseLog ("Disk #{0} no longer present; dismount considered successful" -f $mountedDiskNumber)
+                                            }
+                                        } catch {}
+                                    }
+                                    Start-Sleep -Seconds 1
                                 }
                             }
                         }
@@ -2049,7 +2132,7 @@ $btnXaml
                             throw
                         }
                         Write-Progress -Activity "Compact $p" -Status 'Done' -PercentComplete 100
-                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill
+                    } -ArgumentList $VhdPath, $OptMode, $DoDefrag, $DoOfflineClean, $DoZeroFill, $JobVmName
                     $disk.Job       = $job
                     $disk.Status    = 'Running'
                     $disk.StartTime = Get-Date
