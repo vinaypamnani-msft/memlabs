@@ -297,6 +297,42 @@ if ($env:_COMPACT_DISKS_WORKER) {
             try { Add-UiLog ("[CLEANUP] Dismounted $dismounted VHD(s) left attached by interrupted jobs") } catch {}
         }
 
+        # 2b. Host-wide sweep: catch leaks where a Mount-VHD targeted an
+        #     AVHDX leaf that Hyper-V's background merge subsequently
+        #     deleted. The original-path Dismount in (2) misses that case
+        #     because the AVHDX file no longer exists, but the host still
+        #     has the parent VHDX wired up via the dead chain - which then
+        #     locks the parent and breaks Start-VM with "file in use" the
+        #     next time the user touches the VM.
+        #
+        #     Strategy: enumerate every disk on the host whose Location
+        #     ends in .vhd/.vhdx/.avhdx, ask Get-VHD whether it's a real
+        #     attached VHD, and dismount any that no current VM owns.
+        try {
+            $vmOwned = @{}
+            foreach ($hd in (Get-VM -ErrorAction SilentlyContinue | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+                if ($hd.Path) { $vmOwned[$hd.Path.ToLowerInvariant()] = $true }
+            }
+            $stray = @(Get-Disk -ErrorAction SilentlyContinue | Where-Object {
+                $_.Location -and ($_.Location -match '\.a?vhdx?$')
+            })
+            $strayDismounted = 0
+            foreach ($s in $stray) {
+                $loc = $s.Location
+                if ($vmOwned.ContainsKey($loc.ToLowerInvariant())) { continue }
+                try {
+                    Dismount-VHD -Path $loc -ErrorAction Stop
+                    $strayDismounted++
+                    try { Add-UiLog ("[CLEANUP] Stray dismount: $loc") } catch {}
+                } catch {
+                    try { Add-UiLog ("[CLEANUP] Stray dismount FAILED for ${loc}: $($_.Exception.Message)") } catch {}
+                }
+            }
+            if ($strayDismounted -gt 0) {
+                try { Add-UiLog ("[CLEANUP] Stray-mount sweep dismounted $strayDismounted VHD(s)") } catch {}
+            }
+        } catch {}
+
         # 3. Best-effort: clear any stale zero-fill temp file the
         #    interrupted job might have left inside a mounted volume.
         #    (After dismount the file is gone with the volume, so nothing
@@ -1639,6 +1675,63 @@ $btnXaml
                         # $Job.ChildJobs[0].Progress so the UI bar moves.
                         $vhdName = [System.IO.Path]::GetFileName($p)
                         function Write-PhaseLog($msg) { Write-Output "::LOG::$vhdName : $msg" }
+
+                        # --- Re-resolve $p before we touch it ---
+                        # If $p ends in .avhdx, the prep job's settle gate let
+                        # an AVHDX leaf through and Hyper-V's background merge
+                        # is still finishing. We MUST NOT Mount-VHD on the
+                        # AVHDX in that case: if the merge completes mid-mount,
+                        # Hyper-V deletes the AVHDX out from under us and our
+                        # Dismount-VHD silently no-ops, leaving the parent
+                        # VHDX wired to a ghost host mount. That's exactly
+                        # what produces the post-run "file in use" failure
+                        # when the user later tries to start the VM.
+                        # If $p doesn't exist anymore, the merge has fully
+                        # completed and we should re-resolve to whatever VHDX
+                        # is now attached in its place.
+                        function Resolve-CurrentVhd([string]$origPath) {
+                            try {
+                                $origLeaf = [System.IO.Path]::GetFileNameWithoutExtension($origPath)
+                                $rootName = $origLeaf -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
+                                foreach ($vmObj in (Get-VM -ErrorAction SilentlyContinue)) {
+                                    foreach ($hd in (Get-VMHardDiskDrive -VM $vmObj -ErrorAction SilentlyContinue)) {
+                                        if (-not $hd.Path) { continue }
+                                        $cand     = [System.IO.Path]::GetFileNameWithoutExtension($hd.Path)
+                                        $candRoot = $cand -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
+                                        if ($candRoot -eq $rootName -and (Test-Path -LiteralPath $hd.Path)) {
+                                            return $hd.Path
+                                        }
+                                    }
+                                }
+                            } catch {}
+                            return $null
+                        }
+                        $needsReresolve = ($p -match '\.avhdx?$') -or (-not (Test-Path -LiteralPath $p))
+                        if ($needsReresolve) {
+                            $reason = if ($p -match '\.avhdx?$') { 'path is an .avhdx leaf (merge may still be in progress)' } else { 'path no longer exists (merge completed after enumerate)' }
+                            Write-PhaseLog "Pre-mount re-resolve: $reason"
+                            # If it's still .avhdx, give the background merge
+                            # a brief window to finish so we land on the
+                            # parent VHDX. We poll for up to 30 minutes,
+                            # checking that the path no longer exists OR
+                            # an attached path matching the same root is now
+                            # a .vhdx file.
+                            $reDeadline = (Get-Date).AddMinutes(30)
+                            $resolved   = $null
+                            while ((Get-Date) -lt $reDeadline) {
+                                $cand = Resolve-CurrentVhd $p
+                                if ($cand -and $cand -notmatch '\.avhdx?$') { $resolved = $cand; break }
+                                if (-not (Test-Path -LiteralPath $p) -and $cand) { $resolved = $cand; break }
+                                Start-Sleep -Seconds 5
+                            }
+                            if ($resolved) {
+                                Write-PhaseLog "Re-resolved to: $resolved"
+                                $p = $resolved
+                                $vhdName = [System.IO.Path]::GetFileName($p)
+                            } else {
+                                Write-PhaseLog "Re-resolve FAILED after 30 min; proceeding with original path '$p' (may fail downstream)"
+                            }
+                        }
 
                         # --- Mount-once for offline-clean + defrag + zero-fill ---
                         # Optimize-VHD only reclaims blocks that contain zeros.
