@@ -675,10 +675,6 @@ CertificateTemplate = SubCA
             function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
             try {
-                # Import PSPKI
-                _Log "Importing PSPKI..."
-                Import-Module PSPKI -Force
-
                 $reqFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.req"
                 $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
 
@@ -707,47 +703,70 @@ CertificateTemplate = SubCA
                     Start-Sleep -Seconds 5
                 }
 
-                _Log "Submitting certificate request: $reqFile"
+                # Use certreq.exe (native, always available with ADCS) instead
+                # of PSPKI which is not installed on the standalone Root CA.
+                _Log "Submitting certificate request via certreq: $reqFile"
 
-                # Submit the request
-                $ca = Get-CertificationAuthority
-                $submitResult = Submit-CertificateRequest -Path $reqFile -CertificationAuthority $ca
-                _Log "Request submitted. Request ID: $($submitResult.RequestID), Status: $($submitResult.Status)"
+                # Submit the CSR to the local CA
+                $submitOutput = & certreq.exe -submit -config - "$reqFile" "$cerFile" 2>&1
+                $submitExitCode = $LASTEXITCODE
+                _Log "certreq -submit exit code: $submitExitCode"
+                foreach ($line in $submitOutput) { _Log "  certreq: $line" }
 
-                # Approve the request (standalone CA holds requests pending by default).
-                # Status enum values vary across PSPKI versions ("Pending", "Taken Under Submission", etc.),
-                # so we approve unless already issued.
-                if ($submitResult.Status -ne "Issued") {
-                    _Log "Approving pending request (Status='$($submitResult.Status)')..."
-                    try {
-                        $submitResult | Approve-CertificateRequest | Out-Null
-                        _Log "Request approved."
-                    }
-                    catch {
-                        _Log "Approve-CertificateRequest threw (may already be issued): $($_.Exception.Message)"
-                    }
-
-                    # Verify approval worked by re-querying
-                    Start-Sleep -Seconds 3
+                if ($submitExitCode -eq 0) {
+                    # Request was immediately issued (auto-approve was on)
+                    _Log "Certificate issued immediately."
                 }
-
-                # Retrieve the issued certificate
-                _Log "Retrieving issued certificate..."
-                $requestID = $submitResult.RequestID
-                & certreq.exe -retrieve $requestID $cerFile | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    _Log "WARNING: certreq -retrieve exit code $LASTEXITCODE - attempting alternate retrieval"
-                    # Alternate: try retrieving via PSPKI
-                    try {
-                        $issued = Get-IssuedRequest -CertificationAuthority $ca -RequestID $requestID
-                        if ($issued) {
-                            $issued | Receive-Certificate -Path $cerFile | Out-Null
-                            _Log "Retrieved via PSPKI Receive-Certificate"
+                elseif ($submitExitCode -eq 5) {
+                    # Request is pending (standalone CA default behavior).
+                    # Parse the request ID from certreq output and approve it.
+                    $requestID = $null
+                    foreach ($line in $submitOutput) {
+                        if ($line -match 'RequestId:\s*(\d+)' -or $line -match 'RequestId\s*"?(\d+)') {
+                            $requestID = $Matches[1]
+                            break
                         }
                     }
-                    catch {
-                        _Log "Alternate retrieval also failed: $($_.Exception.Message)"
+                    if (-not $requestID) {
+                        # Try alternate pattern
+                        foreach ($line in $submitOutput) {
+                            if ($line -match '(\d+)') {
+                                # The first number in certreq pending output is often the request ID
+                                $requestID = $Matches[1]
+                                break
+                            }
+                        }
                     }
+                    if (-not $requestID) {
+                        throw "Could not parse request ID from certreq output"
+                    }
+                    _Log "Request pending with ID: $requestID. Approving..."
+
+                    # Approve (resubmit) the pending request
+                    $approveOutput = & certutil.exe -resubmit $requestID 2>&1
+                    $approveExitCode = $LASTEXITCODE
+                    _Log "certutil -resubmit exit code: $approveExitCode"
+                    foreach ($line in $approveOutput) { _Log "  certutil: $line" }
+
+                    if ($approveExitCode -ne 0) {
+                        throw "certutil -resubmit failed (exit code $approveExitCode): $($approveOutput | Out-String)"
+                    }
+
+                    Start-Sleep -Seconds 3
+
+                    # Retrieve the now-issued certificate
+                    _Log "Retrieving issued certificate for request ID $requestID..."
+                    $retrieveOutput = & certreq.exe -retrieve -config - $requestID "$cerFile" 2>&1
+                    $retrieveExitCode = $LASTEXITCODE
+                    _Log "certreq -retrieve exit code: $retrieveExitCode"
+                    foreach ($line in $retrieveOutput) { _Log "  certreq: $line" }
+
+                    if ($retrieveExitCode -ne 0) {
+                        throw "certreq -retrieve failed (exit code $retrieveExitCode): $($retrieveOutput | Out-String)"
+                    }
+                }
+                else {
+                    throw "certreq -submit failed (exit code $submitExitCode): $($submitOutput | Out-String)"
                 }
 
                 if (Test-Path $cerFile) {
