@@ -668,7 +668,7 @@ CertificateTemplate = SubCA
         Write-Log "[TwoTierPKI] Step 3: Signing CSR on Root CA..." -NoIndent
 
         $step3Script = {
-            param($IntCAFilesPath, $IntCAServer, $IntCAName)
+            param($IntCAFilesPath, $IntCAServer, $IntCAName, $RootCAName)
 
             $ErrorActionPreference = 'Stop'
             $report = [System.Collections.Generic.List[string]]::new()
@@ -695,20 +695,41 @@ CertificateTemplate = SubCA
                     throw "CSR file not found: $reqFile"
                 }
 
-                # Ensure CA service is running
+                # Build explicit CA config string. -config - in certreq shows
+                # an interactive CA picker dialog which fails in PSDirect.
+                # Detect from registry (most reliable) or fall back to param.
+                $caConfigName = $null
+                try {
+                    $caConfigName = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration" -Name Active -ErrorAction Stop).Active
+                } catch {}
+                if (-not $caConfigName) { $caConfigName = $RootCAName }
+                $caConfig = "$env:COMPUTERNAME\$caConfigName"
+                _Log "Using CA config: $caConfig"
+
+                # Ensure CA service is running and responsive
                 $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
                 if ($svc -and $svc.Status -ne 'Running') {
                     _Log "Starting certsvc..."
                     Start-Service certsvc -ErrorAction Stop
-                    Start-Sleep -Seconds 5
                 }
+                # Wait for CA to respond to certutil -ping (same pattern as Step 1)
+                _Log "Waiting for CA to become responsive..."
+                $deadline = (Get-Date).AddSeconds(90)
+                $ready = $false
+                while ((Get-Date) -lt $deadline) {
+                    $pingOut = & certutil.exe -ping 2>&1
+                    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+                    Start-Sleep -Seconds 3
+                }
+                if (-not $ready) { throw "CA service did not become responsive within 90 seconds" }
+                _Log "CA is responsive."
 
                 # Use certreq.exe (native, always available with ADCS) instead
                 # of PSPKI which is not installed on the standalone Root CA.
                 _Log "Submitting certificate request via certreq: $reqFile"
 
-                # Submit the CSR to the local CA
-                $submitOutput = & certreq.exe -submit -config - "$reqFile" "$cerFile" 2>&1
+                # Submit the CSR to the local CA using explicit config
+                $submitOutput = & certreq.exe -submit -config "$caConfig" "$reqFile" "$cerFile" 2>&1
                 $submitExitCode = $LASTEXITCODE
                 _Log "certreq -submit exit code: $submitExitCode"
                 foreach ($line in $submitOutput) { _Log "  certreq: $line" }
@@ -756,7 +777,7 @@ CertificateTemplate = SubCA
 
                     # Retrieve the now-issued certificate
                     _Log "Retrieving issued certificate for request ID $requestID..."
-                    $retrieveOutput = & certreq.exe -retrieve -config - $requestID "$cerFile" 2>&1
+                    $retrieveOutput = & certreq.exe -retrieve -config "$caConfig" $requestID "$cerFile" 2>&1
                     $retrieveExitCode = $LASTEXITCODE
                     _Log "certreq -retrieve exit code: $retrieveExitCode"
                     foreach ($line in $retrieveOutput) { _Log "  certreq: $line" }
@@ -791,7 +812,7 @@ CertificateTemplate = SubCA
 
         $result3 = Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" `
             -ScriptBlock $step3Script `
-            -ArgumentList $intCAFilesPath, $intCAServer, $intCAName `
+            -ArgumentList $intCAFilesPath, $intCAServer, $intCAName, $rootCAName `
             -DisplayName "TwoTierPKI Step 3: Sign CSR on Root CA"
 
         if ($result3.ScriptBlockFailed -or -not $result3.ScriptBlockOutput.Success) {
