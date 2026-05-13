@@ -724,97 +724,59 @@ CertificateTemplate = SubCA
                 if (-not $ready) { throw "CA service did not become responsive within 90 seconds" }
                 _Log "CA is responsive."
 
-                # Use certutil -submit (never shows UI dialogs, unlike certreq
-                # which can pop a template-picker or CA-picker even with -config).
-                _Log "Submitting certificate request via certutil: $reqFile"
+                # Use ICertRequest COM object to submit the CSR. This is the
+                # only approach that is:
+                #  - Fully non-interactive (no UI dialogs ever)
+                #  - Available on ALL Windows Server versions with ADCS
+                #  - Independent of certutil/certreq verb availability
+                _Log "Submitting certificate request via ICertRequest COM: $reqFile"
 
-                # certutil -submit [-config CA] <req> [<cert> [<chain> [<fullresponse>]]]
-                $submitOutput = & certutil.exe -submit -config "$caConfig" "$reqFile" "$cerFile" 2>&1
-                $submitExitCode = $LASTEXITCODE
-                _Log "certutil -submit exit code: $submitExitCode"
-                foreach ($line in $submitOutput) { _Log "  certutil: $line" }
+                # Read the request file content
+                $reqContent = Get-Content -Path $reqFile -Raw
 
-                # Parse the request ID from certutil output regardless of exit code
-                $requestID = $null
-                foreach ($line in $submitOutput) {
-                    if ($line -match 'RequestId:\s*(\d+)') {
-                        $requestID = $Matches[1]
-                        break
+                # Submit via COM
+                $CR_IN_BASE64HEADER = 0x0  # PKCS10 with ----BEGIN headers
+                $CR_IN_FORMATANY    = 0x0
+                $CR_DISP_ISSUED     = 3
+                $CR_DISP_UNDER_SUBMISSION = 5
+
+                $certRequest = New-Object -ComObject CertificateAuthority.Request
+                _Log "Calling ICertRequest::Submit to $caConfig..."
+                $disposition = $certRequest.Submit(
+                    $CR_IN_BASE64HEADER,   # encoding flags
+                    $reqContent,            # request blob
+                    "",                     # attributes (empty for standalone CA)
+                    $caConfig               # CA config string
+                )
+                $requestID = $certRequest.GetRequestId()
+                _Log "Submit returned disposition=$disposition, RequestId=$requestID"
+
+                if ($disposition -eq $CR_DISP_UNDER_SUBMISSION) {
+                    # Standalone CA puts requests in "pending" state by default.
+                    # Approve via ICertAdmin COM.
+                    _Log "Request is pending (disposition=5). Approving via ICertAdmin..."
+                    $certAdmin = New-Object -ComObject CertificateAuthority.Admin
+                    $newDisp = $certAdmin.ResubmitRequest($caConfig, $requestID)
+                    _Log "ICertAdmin::ResubmitRequest returned disposition=$newDisp"
+
+                    if ($newDisp -ne $CR_DISP_ISSUED) {
+                        throw "ResubmitRequest returned unexpected disposition $newDisp (expected $CR_DISP_ISSUED=Issued)"
                     }
+                    $disposition = $newDisp
                 }
-                if (-not $requestID) {
-                    foreach ($line in $submitOutput) {
-                        if ($line -match 'RequestId[^:]*:\s*"?(\d+)') {
-                            $requestID = $Matches[1]
-                            break
-                        }
-                    }
-                }
 
-                if ($submitExitCode -eq 0 -and (Test-Path $cerFile) -and (Get-Item $cerFile).Length -gt 0) {
-                    # Certificate was issued immediately (auto-approve / policy module accepted)
-                    _Log "Certificate issued and retrieved immediately (request ID: $requestID)."
-                }
-                elseif ($submitExitCode -eq 5 -or ($requestID -and -not (Test-Path $cerFile))) {
-                    # Request is pending (standalone CA default). Approve and retrieve.
-                    if (-not $requestID) {
-                        throw "Could not parse request ID from certutil -submit output"
-                    }
-                    _Log "Request pending with ID: $requestID. Approving..."
-
-                    # Approve (resubmit) the pending request
-                    $approveOutput = & certutil.exe -resubmit $requestID 2>&1
-                    $approveExitCode = $LASTEXITCODE
-                    _Log "certutil -resubmit exit code: $approveExitCode"
-                    foreach ($line in $approveOutput) { _Log "  certutil: $line" }
-
-                    if ($approveExitCode -ne 0) {
-                        throw "certutil -resubmit failed (exit code $approveExitCode): $($approveOutput | Out-String)"
-                    }
-
-                    Start-Sleep -Seconds 3
-
-                    # Retrieve the issued certificate via certreq -retrieve
-                    # (certreq -retrieve does NOT show UI when given an
-                    # explicit -config and request ID)
-                    _Log "Retrieving issued certificate for request ID $requestID..."
-                    $retrieveOutput = & certreq.exe -retrieve -f -config "$caConfig" $requestID "$cerFile" 2>&1
-                    $retrieveExitCode = $LASTEXITCODE
-                    _Log "certreq -retrieve exit code: $retrieveExitCode"
-                    foreach ($line in $retrieveOutput) { _Log "  certreq: $line" }
-
-                    if ($retrieveExitCode -ne 0) {
-                        # Fallback: try certutil -view to export the cert
-                        _Log "certreq -retrieve failed; trying certutil -view as fallback..."
-                        $viewOutput = & certutil.exe -view -restrict "RequestID=$requestID" -out RawCertificate 2>&1
-                        $viewExitCode = $LASTEXITCODE
-                        _Log "certutil -view exit code: $viewExitCode"
-                        if ($viewExitCode -eq 0) {
-                            # certutil -view dumps the cert as Base64 in the
-                            # output. Extract and write to file.
-                            $certLines = @()
-                            $inCert = $false
-                            foreach ($line in $viewOutput) {
-                                $lineStr = "$line"
-                                if ($lineStr -match '-----BEGIN CERTIFICATE-----') { $inCert = $true }
-                                if ($inCert) { $certLines += $lineStr }
-                                if ($lineStr -match '-----END CERTIFICATE-----') { $inCert = $false }
-                            }
-                            if ($certLines.Count -gt 2) {
-                                Set-Content -Path $cerFile -Value ($certLines -join "`n") -Force
-                                _Log "Certificate extracted from certutil -view output ($($certLines.Count) lines)"
-                            }
-                            else {
-                                throw "certreq -retrieve failed and certutil -view did not contain a certificate"
-                            }
-                        }
-                        else {
-                            throw "certreq -retrieve failed (exit code $retrieveExitCode) and certutil -view also failed: $($viewOutput | Out-String)"
-                        }
-                    }
+                if ($disposition -eq $CR_DISP_ISSUED) {
+                    # Retrieve the issued certificate
+                    _Log "Certificate issued. Retrieving..."
+                    $CR_OUT_BASE64HEADER = 0x0  # Base64 with headers
+                    $certBase64 = $certRequest.GetCertificate($CR_OUT_BASE64HEADER)
+                    Set-Content -Path $cerFile -Value $certBase64 -Force -NoNewline
+                    _Log "Certificate written to $cerFile"
                 }
                 else {
-                    throw "certutil -submit failed (exit code $submitExitCode): $($submitOutput | Out-String)"
+                    # Unexpected disposition
+                    $dispMsg = $certRequest.GetDispositionMessage()
+                    throw "Certificate request failed. Disposition=$disposition, Message: $dispMsg"
                 }
 
                 if (Test-Path $cerFile) {
