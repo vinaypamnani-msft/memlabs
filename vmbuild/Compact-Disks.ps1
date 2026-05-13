@@ -2980,7 +2980,7 @@ Remove-Item Env:\_COMPACT_DISKS_DOMAINLABEL -ErrorAction SilentlyContinue
 
 $psExe      = (Get-Process -Id $PID).Path
 $scriptPath = $MyInvocation.MyCommand.Path
-$argString  = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode {1} -MaxConcurrentJobs {2}' -f $scriptPath, $Mode, $MaxConcurrentJobs
+$argString  = '-NoProfile -WindowStyle Hidden -File "{0}" -Mode {1} -MaxConcurrentJobs {2}' -f $scriptPath, $Mode, $MaxConcurrentJobs
 if ($SkipDefrag)       { $argString += ' -SkipDefrag' }
 if ($SkipOfflineClean) { $argString += ' -SkipOfflineClean' }
 if ($SkipZeroFill)     { $argString += ' -SkipZeroFill' }
