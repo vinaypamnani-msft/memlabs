@@ -1383,8 +1383,17 @@ class DelegateControl {
             Write-Status "Running dsacls.exe to add FULL Control ($arg3) to $arg1. Try $retries/$maxretries"
             Write-Verbose "Running $cmd $arg1 $arg2 $arg3 $arg4"
             $result = & $cmd $arg1 $arg2 $arg3 $arg4 *>&1
+            $dsaclsExitCode = $LASTEXITCODE
 
             Write-Verbose "Result $result"
+            Write-Verbose "dsacls.exe exit code: $dsaclsExitCode"
+
+            # If dsacls.exe reported success (exit code 0), trust it and
+            # do a quick verify. The old 60s-per-retry logic turned a
+            # simple pattern-match problem into a 90-minute wait.
+            if ($dsaclsExitCode -eq 0) {
+                Start-Sleep -Seconds 2
+            }
 
             $tcmd = "dsacls.exe"
             $targ1 = "CN=System Management,CN=System,$root"
@@ -1396,9 +1405,29 @@ class DelegateControl {
                 break
             }
 
-            Write-Verbose "$tcmd $targ1 did not contain the new permissions. Sleeping 60 seconds and trying again"
+            # If dsacls.exe said it succeeded but our pattern match failed,
+            # log diagnostic info and try a case-insensitive fallback check
+            # before sleeping.
+            if ($dsaclsExitCode -eq 0) {
+                Write-Status "dsacls.exe returned success but verification pattern did not match - checking with relaxed match"
+                $joinedLines = $this.JoinDsaclsOutput($permissioninfo)
+                # Relaxed check: look for the machine name anywhere with
+                # any form of "FULL CONTROL" or "GA" (Generic All)
+                $relaxedMatch = $joinedLines | Where-Object {
+                    $_ -match [regex]::Escape($_machinename) -and ($_ -match 'FULL CONTROL' -or $_ -match 'Generic All')
+                }
+                if ($relaxedMatch) {
+                    Write-Status "Relaxed verification passed for $_machinename"
+                    Write-Verbose "Matched line: $relaxedMatch"
+                    break
+                }
+                Write-Verbose "Relaxed match also failed. dsacls output sample:"
+                $joinedLines | Select-Object -First 20 | ForEach-Object { Write-Verbose "  $_" }
+            }
+
+            Write-Verbose "$tcmd $targ1 did not contain the new permissions. Sleeping 10 seconds and trying again"
             Write-Verbose "$permissioninfo"
-            Start-Sleep -Seconds 60
+            Start-Sleep -Seconds 10
 
         }
 
