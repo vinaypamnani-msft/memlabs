@@ -1,4 +1,6 @@
 #Common.StorageToken.ps1
+# NOTE: This file is dot-sourced during DSC generation which runs under
+# PowerShell 5.1. Do not use PS7+ syntax (e.g. ?? ?. ??= ternary).
 function Get-StorageToken {
     param(
         [int]$MinutesRemaining = 30
@@ -280,7 +282,7 @@ function Get-StorageConfig {
     foreach ($file in ($configFiles | Sort-Object @{
     Expression = {
         if ($_.Name -match '^_storageConfig(\d+)(?:\.(\d+))?\.json$') {
-            [int]$matches[1] * 100000 + [int]($matches[2] ?? 0)
+            [int]$matches[1] * 100000 + [int]$(if ($matches[2]) { $matches[2] } else { 0 })
         }
     }
 } -Descending)) {
