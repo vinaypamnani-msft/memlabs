@@ -614,6 +614,17 @@ try {
                     #Refresh deployConfig to add any props that may have been added in New-VirtualMachine, eg ClusterIPAddress
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
                 }
+                if ($i -eq 2) {
+                    # Two-tier PKI: orchestrate offline root CA + enterprise subordinate CA
+                    if ($deployConfig.cmOptions.UseOfflineRootCA) {
+                        $pkiSuccess = Install-TwoTierPKI -DeployConfig $deployConfig
+                        if (-not $pkiSuccess) {
+                            Write-Log "[TwoTierPKI] Two-tier PKI deployment failed." -Failure
+                            $configured = $false
+                            break
+                        }
+                    }
+                }
             }
         }
     }

@@ -491,6 +491,17 @@
 
         if ($ThisVM.InstallCA) {
 
+            # When SubordinateCA is set, the CA installation is handled by the
+            # host-driven two-tier PKI orchestrator after Phase2 completes.
+            # The offline root CA must issue the subordinate cert first.
+            if ($ThisVM.SubordinateCA) {
+                WriteStatus ADCS {
+                    DependsOn = $waitOnDependency
+                    Status    = "Skipping CA install (two-tier PKI - will be configured post-Phase2)"
+                }
+            }
+            else {
+
             WriteStatus ADCS {
                 DependsOn = $waitOnDependency
                 Status    = "Installing Certificate Authority"
@@ -545,6 +556,7 @@
             else {
                 $waitOnDependency = $nextDepend
             }
+            } # end else (not SubordinateCA)
         }
 
        

@@ -4466,7 +4466,8 @@ function Set-SupportedOptions {
         "SQLAO",
         "WSUS",
         "DC",
-        "BDC"
+        "BDC",
+        "StandaloneRootCA"
     )
 
     $rolesForExisting = @(
@@ -4483,7 +4484,8 @@ function Set-SupportedOptions {
         "FileServer",
         "SQLAO",
         "WSUS",
-        "BDC"
+        "BDC",
+        "StandaloneRootCA"
     )
 
     $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs")
@@ -4780,6 +4782,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
+. $PSScriptRoot\common\Common.TwoTierPKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
 
 

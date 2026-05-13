@@ -457,6 +457,10 @@ function Add-NewVMForRole {
         "WorkgroupMember" {}
         "InternetClient" {}
         "AADClient" {}
+        "StandaloneRootCA" {
+            $virtualMachine.Memory = "2GB"
+            $virtualMachine.virtualProcs = 2
+        }
         "DomainMember" {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique

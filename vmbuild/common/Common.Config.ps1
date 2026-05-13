@@ -58,6 +58,9 @@ function Get-UserConfiguration {
             if ($null -eq ($config.cmOptions.UsePKI)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false -Force
             }
+            if ($null -eq ($config.cmOptions.UseOfflineRootCA)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UseOfflineRootCA" -Value $false -Force
+            }
             if ($null -eq ($config.cmOptions.PrePopulateObjects)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "PrePopulateObjects" -Value $true -Force
             }
@@ -113,6 +116,13 @@ function Get-UserConfiguration {
                     if ($config.cmOptions.UsePKI) {                    
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -force
                     }
+                }
+                # Only flag DCs that will actually install a CA AND aren't already
+                # configured as a forest-trust subordinate (externalDomainJoinSiteCode
+                # uses ThisParams.RootCA to subordinate to a different forest's root).
+                if ($config.cmOptions.UsePKI -and $config.cmOptions.UseOfflineRootCA -and `
+                    $vm.InstallCA -and (-not $vm.externalDomainJoinSiteCode)) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "SubordinateCA" -Value $true -force
                 }
             }
             #add missing Properties
@@ -2365,14 +2375,6 @@ Function Write-ColorizedBrackets {
         [Parameter()]
         [string] $BracketColor = $Global:Common.Colors.GenConfigBrackets
     )
-    # If the caller has embedded ANSI color sequences (ESC '[' ... 'm') in the text,
-    # the bracket-splitting loop below would slice through the CSI prefix on '[' and
-    # corrupt it (the ESC byte ends up alone, and the rest prints as literal text).
-    # In that case, write the text as-is and let the embedded colors render.
-    if ($text -and $text.Contains([char]27)) {
-        Write-Host $text -NoNewline
-        return
-    }
     while (-not [string]::IsNullOrWhiteSpace($text)) {
         #write-host $text
         $indexLeft = $text.IndexOf('[')

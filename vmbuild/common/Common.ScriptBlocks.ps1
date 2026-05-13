@@ -1548,6 +1548,7 @@ $global:VM_Config = {
                     "WorkgroupMember" { $dscRole += "WorkgroupMember" }
                     "AADClient" { $dscRole += "WorkgroupMember" }
                     "InternetClient" { $dscRole += "WorkgroupMember" }
+                    "StandaloneRootCA" { $dscRole += "WorkgroupMember" }
                     default { $dscRole += "DomainMember" }
                 }
 
