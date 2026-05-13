@@ -13,7 +13,7 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $isCas = $ThisVM.Role -eq "CAS"
-$DCName = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" }).vmName
+$DCName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }).vmName
 # Read Site Code from registry
 
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'

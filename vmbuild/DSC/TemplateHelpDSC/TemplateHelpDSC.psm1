@@ -3280,6 +3280,12 @@ class ModuleAdd {
         $_userScope = $this.UserScope
 
         write-Status "Installing powershell module $_moduleName for scope $_userScope"
+
+        # Force TLS 1.2 for PSGallery/NuGet access - without this, older
+        # Windows Server defaults to TLS 1.0/1.1 which PSGallery rejects,
+        # causing Install-Module to hang or time out for up to 30 minutes.
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
         $Nuget = $null
         try {
             $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
@@ -4079,6 +4085,10 @@ class AddCertificateTemplate {
         Write-Status "Adding Certificate Template $_TemplateName ."   
         if ($_Group) {
 
+            # Force TLS 1.2 before any PSGallery access - prevents 30-min
+            # hangs on Server 2016/2019 where .NET defaults to TLS 1.0/1.1.
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
             $module = Get-InstalledModule -Name PSPKI -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
             IF ($null -eq $module) {
@@ -4131,7 +4141,7 @@ class AddCertificateTemplate {
                         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
                         Write-Status "Restarting CertSvc"
                         restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-                        start-sleep -Seconds 60
+                        start-sleep -Seconds 15
                     }
                     catch {
                         Write-Verbose "Starting CertSvc: $_"
@@ -4163,7 +4173,7 @@ class AddCertificateTemplate {
             $registryKey = "HKCU:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-            start-sleep -seconds 60
+            start-sleep -seconds 15
         }
         catch {}
         if (-not $this.PermissionsOnly) {
@@ -4210,7 +4220,7 @@ class AddCertificateTemplate {
                         $registryKey = "HKCU:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
                         Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
                         Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-                        start-sleep -seconds 60
+                        start-sleep -seconds 15
                     }
                     catch {}
                 }
@@ -4251,7 +4261,7 @@ class AddCertificateTemplate {
             $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
             Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
             Restart-Service -Name CertSvc
-            start-sleep -seconds 60
+            start-sleep -seconds 15
             Write-Verbose " -- ADCSAdministration\get-Catemplate"
             $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
         }

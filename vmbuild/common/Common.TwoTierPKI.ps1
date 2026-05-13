@@ -84,8 +84,23 @@ function Install-TwoTierPKI {
             _Log "Installing PSPKI module..."
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             if (-not (Get-Module -ListAvailable -Name PSPKI)) {
-                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-                Install-Module -Name PSPKI -Force -SkipPublisherCheck | Out-Null
+                $retryCount = 0
+                $installed = $false
+                while (-not $installed -and $retryCount -lt 3) {
+                    $retryCount++
+                    try {
+                        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+                        Install-Module -Name PSPKI -Force -SkipPublisherCheck -MaximumVersion 4.2.0 | Out-Null
+                        $installed = $true
+                    }
+                    catch {
+                        _Log "PSPKI install attempt $retryCount failed: $($_.Exception.Message)"
+                        if ($retryCount -lt 3) {
+                            Start-Sleep -Seconds 10
+                            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        } else { throw }
+                    }
+                }
             }
             Import-Module PSPKI -Force
 
@@ -148,7 +163,7 @@ Empty=True
             # Set DSConfigDN (standalone CA needs this for AD-aware templates)
             _Log "Setting DSConfigDN..."
             $dnParts = $DomainName.Split(".")
-            $configDN = "CN=Configuration," + ($dnParts | ForEach-Object { "DC=$_" }) -join ","
+            $configDN = "CN=Configuration," + (($dnParts | ForEach-Object { "DC=$_" }) -join ",")
             & certutil.exe -setreg CA\DSConfigDN $configDN | Out-Null
 
             # Set CRL periods
