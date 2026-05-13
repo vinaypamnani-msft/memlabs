@@ -187,6 +187,13 @@ function Get-NewMachineName {
         }
     }
 
+    if ($Role -eq "StandaloneRootCA") {
+        # Default to "OfflineCA" (no number); the loop below will append a
+        # numeric suffix only if a duplicate exists.
+        $RoleName = "OfflineCA"
+        $SkipOne = $true
+    }
+
     [int]$i = 1
     while ($true) {
         if ($SkipOne -and $i -eq 1) {
