@@ -26,6 +26,7 @@ function Get-NewMachineName {
     $CurrentName = $vm.vmName
     $Role = $vm.Role
     $RoleName = $vm.Role
+    $DuplicateRoleName = $null
     if ($Role -eq "OSDClient") {
         $RoleName = "OSD"
     }
@@ -188,9 +189,11 @@ function Get-NewMachineName {
     }
 
     if ($Role -eq "StandaloneRootCA") {
-        # Default to "OfflineCA" (no number); the loop below will append a
-        # numeric suffix only if a duplicate exists.
-        $RoleName = "OfflineCA"
+        # First attempt: "OfflineRoot" (PREFIX-OFFLINEROOT = 15 chars with a
+        # 3-char prefix). If a duplicate exists, fall back to "OfflineCA1",
+        # "OfflineCA2", etc. (PREFIX-OFFLINECA1 = 15 chars).
+        $RoleName = "OfflineRoot"
+        $DuplicateRoleName = "OfflineCA"
         $SkipOne = $true
     }
 
@@ -198,6 +201,9 @@ function Get-NewMachineName {
     while ($true) {
         if ($SkipOne -and $i -eq 1) {
             $NewName = $RoleName
+        }
+        elseif ($DuplicateRoleName) {
+            $NewName = $DuplicateRoleName + ($i - 1)
         }
         else {
             $NewName = $RoleName + ($i)
