@@ -1402,9 +1402,17 @@ $btnXaml
 
                                 # Delete all VSS shadow copies / system
                                 # restore points. They can hold many GB.
+                                $vssTimeoutMin = 60
                                 try {
-                                    $vssOut = & vssadmin.exe delete shadows /all /quiet 2>&1
-                                    _Add ("  vssadmin delete shadows /all: {0}" -f (($vssOut | Out-String).Trim() -replace "`r?`n",' | '))
+                                    $proc = Start-Process -FilePath 'vssadmin.exe' `
+                                        -ArgumentList 'delete','shadows','/all','/quiet' `
+                                        -WindowStyle Hidden -PassThru -Wait:$false -ErrorAction Stop
+                                    if ($proc.WaitForExit($vssTimeoutMin * 60 * 1000)) {
+                                        _Add "  vssadmin delete shadows /all: ok"
+                                    } else {
+                                        try { $proc.Kill() } catch {}
+                                        _Add "  vssadmin delete shadows: timed out after ${vssTimeoutMin}m; killed"
+                                    }
                                 } catch { _Add "  vssadmin: FAILED $($_.Exception.Message)" }
 
                                 # Component-store cleanup. /ResetBase makes
@@ -1457,16 +1465,27 @@ $btnXaml
                                 } catch { _Add "  cleanmgr: FAILED $($_.Exception.Message)" }
 
                                 # WSUS server content cleanup (if WSUS role present)
+                                $wsusTimeoutMin = 120
                                 try {
                                     if (Get-Module -ListAvailable -Name UpdateServices) {
                                         Import-Module UpdateServices -ErrorAction SilentlyContinue
                                         $wsus = Get-WsusServer -ErrorAction SilentlyContinue
                                         if ($wsus) {
-                                            Invoke-WsusServerCleanup -CleanupObsoleteComputers `
-                                                -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
-                                                -CompressUpdates -DeclineSupersededUpdates `
-                                                -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
-                                            _Add "  WSUS server cleanup: ran"
+                                            $wsusJob = Start-Job -ScriptBlock {
+                                                Import-Module UpdateServices -ErrorAction SilentlyContinue
+                                                Invoke-WsusServerCleanup -CleanupObsoleteComputers `
+                                                    -CleanupObsoleteUpdates -CleanupUnneededContentFiles `
+                                                    -CompressUpdates -DeclineSupersededUpdates `
+                                                    -DeclineExpiredUpdates -ErrorAction SilentlyContinue | Out-Null
+                                            }
+                                            if ($wsusJob | Wait-Job -Timeout ($wsusTimeoutMin * 60)) {
+                                                try { Receive-Job $wsusJob -ErrorAction Stop | Out-Null } catch {}
+                                                _Add "  WSUS server cleanup: ran"
+                                            } else {
+                                                _Add "  WSUS server cleanup: timed out after ${wsusTimeoutMin}m; killed"
+                                                Stop-Job $wsusJob -ErrorAction SilentlyContinue
+                                            }
+                                            Remove-Job $wsusJob -Force -ErrorAction SilentlyContinue
                                         }
                                     }
                                 } catch { _Add "  WSUS cleanup: FAILED $($_.Exception.Message)" }
@@ -2275,27 +2294,41 @@ $btnXaml
                                         $letter = $vol.DriveLetter
                                         Write-PhaseLog "Defrag ${letter}: starting"
                                         Write-Progress -Activity "Compact $p" -Status "Defrag ${letter}: ($vi/$($volumes.Count))" -PercentComplete (8 + (10 * $vi / [Math]::Max($volumes.Count, 1)))
+                                        $defragTimeoutMin = 120
                                         foreach ($defragArgs in @('/h /x', '/h /k /l', '/h /x', '/h /k')) {
                                             Write-PhaseLog "defrag ${letter}: $defragArgs"
-                                            $argList = $defragArgs -split '\s+'
                                             try {
-                                                $out = & defrag.exe "${letter}:" @argList 2>&1
-                                                foreach ($ln in @($out)) {
-                                                    $t = ($ln | Out-String).Trim()
-                                                    if ($t) {
-                                                        foreach ($sub in ($t -split "`r?`n")) {
-                                                            $sub = $sub.Trim()
-                                                            if ($sub) { Write-PhaseLog "  defrag> $sub" }
-                                                        }
-                                                    }
+                                                $proc = Start-Process -FilePath 'defrag.exe' `
+                                                    -ArgumentList "${letter}:",($defragArgs -split '\s+') `
+                                                    -WindowStyle Hidden -PassThru -ErrorAction Stop
+                                                if ($proc.WaitForExit($defragTimeoutMin * 60 * 1000)) {
+                                                    Write-PhaseLog "  defrag ${letter}: $defragArgs complete (exit $($proc.ExitCode))"
+                                                } else {
+                                                    Write-PhaseLog "  defrag ${letter}: $defragArgs timed out after ${defragTimeoutMin}m; killing"
+                                                    try { $proc.Kill() } catch {}
                                                 }
                                             } catch {
                                                 Write-PhaseLog "  defrag ERROR: $($_.Exception.Message)"
                                             }
                                         }
-                                        try { Optimize-Volume -DriveLetter $letter -Defrag         -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: Defrag ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: Defrag failed: $($_.Exception.Message)" }
-                                        try { Optimize-Volume -DriveLetter $letter -SlabConsolidate -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: SlabConsolidate ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: SlabConsolidate failed: $($_.Exception.Message)" }
-                                        try { Optimize-Volume -DriveLetter $letter -ReTrim         -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: ReTrim ok" } catch { Write-PhaseLog "  Optimize-Volume ${letter}: ReTrim failed: $($_.Exception.Message)" }
+                                        $optVolTimeoutMin = 60
+                                        foreach ($optOp in @('Defrag','SlabConsolidate','ReTrim')) {
+                                            try {
+                                                $optJob = Start-Job -ScriptBlock {
+                                                    param($l,$op)
+                                                    $params = @{ DriveLetter = $l; $op = $true; ErrorAction = 'Stop' }
+                                                    Optimize-Volume @params | Out-Null
+                                                } -ArgumentList $letter, $optOp
+                                                if ($optJob | Wait-Job -Timeout ($optVolTimeoutMin * 60)) {
+                                                    try { Receive-Job $optJob -ErrorAction Stop | Out-Null; Write-PhaseLog "  Optimize-Volume ${letter}: $optOp ok" }
+                                                    catch { Write-PhaseLog "  Optimize-Volume ${letter}: $optOp failed: $($_.Exception.Message)" }
+                                                } else {
+                                                    Write-PhaseLog "  Optimize-Volume ${letter}: $optOp timed out after ${optVolTimeoutMin}m; killing"
+                                                    Stop-Job $optJob -ErrorAction SilentlyContinue
+                                                }
+                                                Remove-Job $optJob -Force -ErrorAction SilentlyContinue
+                                            } catch { Write-PhaseLog "  Optimize-Volume ${letter}: $optOp failed: $($_.Exception.Message)" }
+                                        }
                                         Write-PhaseLog "Defrag ${letter}: complete"
                                     }
                                 }
