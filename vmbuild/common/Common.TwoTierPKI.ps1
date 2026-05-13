@@ -387,9 +387,27 @@ Empty=True
     Write-Log "[TwoTierPKI] Step 2: Preparing Intermediate CA on $dcVMName..." -NoIndent
 
     # First, copy root CA files from host to DC
+    # Ensure the destination directory exists on the remote VM before copying.
+    # Copy-Item -ToSession fails with cryptic errors if the target dir is missing.
+    Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create RootCAFiles dir" -SuppressLog `
+        -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\RootCAFiles" -Force | Out-Null }
+    $copyFailed = $false
     foreach ($fileName in $filesToCopy) {
         $srcOnHost = Join-Path $hostStagingPath $fileName
-        Copy-ItemSafe -Path $srcOnHost -Destination "C:\temp\RootCAFiles\" -VMName $dcVMName -VMDomainName $domainName
+        if (-not (Test-Path $srcOnHost)) {
+            Write-Log "[TwoTierPKI] ERROR: Source file not found on host: $srcOnHost" -Failure
+            $copyFailed = $true
+            continue
+        }
+        $copyOk = Copy-ItemSafe -Path $srcOnHost -Destination "C:\temp\RootCAFiles\" -VMName $dcVMName -VMDomainName $domainName
+        if (-not $copyOk) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy '$fileName' to DC" -Failure
+            $copyFailed = $true
+        }
+    }
+    if ($copyFailed) {
+        Write-Log "[TwoTierPKI] ERROR: One or more Root CA files failed to copy to DC" -Failure
+        return $false
     }
 
     $step2Script = {
@@ -636,7 +654,13 @@ CertificateTemplate = SubCA
             Write-Log "[TwoTierPKI] ERROR: CSR file not found on host at $reqOnHost" -Failure
             return $false
         }
-        Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
+            -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\IntermediateCAFiles" -Force | Out-Null }
+        $copyOk = Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        if (-not $copyOk) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy CSR to Root CA" -Failure
+            return $false
+        }
 
         #---------------------------------------------------------------------------
         # STEP 3: Sign CSR on Root CA
@@ -780,7 +804,13 @@ CertificateTemplate = SubCA
             Write-Log "[TwoTierPKI] ERROR: Signed cert not found on host at $cerOnHost" -Failure
             return $false
         }
-        Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
+        Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
+            -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\IntermediateCAFiles" -Force | Out-Null }
+        $copyOk = Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
+        if (-not $copyOk) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy signed cert to DC" -Failure
+            return $false
+        }
 
         #---------------------------------------------------------------------------
         # STEP 4: Complete Intermediate CA (DC)
