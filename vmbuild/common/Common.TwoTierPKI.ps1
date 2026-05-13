@@ -224,15 +224,20 @@ Empty=True
                     Install-Module -Name PSPKI -Force -SkipPublisherCheck -MaximumVersion 4.2.0 | Out-Null
                 }
 
-                # Ensure service is running
+                # Ensure service is running AND responsive. After a VM reboot
+                # certsvc may report 'Running' before its internal cert store
+                # is fully initialized — certutil -ca.cert will fail in that
+                # window. Always wait for ping regardless of reported status.
                 $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
                 if ($svc.Status -ne 'Running') {
                     _Log "Starting certsvc (was $($svc.Status))..."
                     Start-Service certsvc -ErrorAction Stop
-                    if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
-                        throw "CA service did not become responsive within 60 seconds"
-                    }
                 }
+                _Log "Waiting for CA service to become fully responsive..."
+                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
+                    throw "CA service did not become responsive within 90 seconds"
+                }
+                _Log "CA service is ready."
             }
 
             Import-Module PSPKI -Force
@@ -287,17 +292,38 @@ Empty=True
                 New-Item -ItemType Directory -Path $RootCAFilesPath -Force | Out-Null
             }
 
-            # Export cert
+            # Export cert - try CertEnroll directory first (always populated by
+            # Install-AdcsCertificationAuthority), then certutil -ca.cert as fallback
             $rootCertPath = Join-Path $RootCAFilesPath "$RootCAName.crt"
-            & certutil.exe -ca.cert $rootCertPath | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "certutil -ca.cert failed with exit code $LASTEXITCODE" }
+            $certEnrollDir = "C:\Windows\System32\CertSrv\CertEnroll\"
+            $certEnrollCert = Get-ChildItem -Path $certEnrollDir -Filter "*.crt" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($certEnrollCert) {
+                _Log "Copying CA cert from CertEnroll: $($certEnrollCert.Name)"
+                Copy-Item -Path $certEnrollCert.FullName -Destination $rootCertPath -Force
+            }
+            else {
+                _Log "No .crt in CertEnroll, trying certutil -ca.cert..."
+                $certutilOutput = & certutil.exe -ca.cert $rootCertPath 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    _Log "certutil -ca.cert output: $($certutilOutput | Out-String)"
+                    throw "certutil -ca.cert failed with exit code $LASTEXITCODE. Output: $($certutilOutput | Out-String)"
+                }
+            }
             if (-not (Test-Path $rootCertPath)) { throw "Root CA certificate file not created: $rootCertPath" }
 
-            # Export CRL
-            $crlSourceDir = "C:\Windows\System32\CertSrv\CertEnroll\"
-            $crlFiles = Get-ChildItem -Path $crlSourceDir -Filter "*.crl" -ErrorAction SilentlyContinue
+            # Export CRL (from CertEnroll - same dir as cert)
+            $crlFiles = Get-ChildItem -Path $certEnrollDir -Filter "*.crl" -ErrorAction SilentlyContinue
             if (-not $crlFiles -or $crlFiles.Count -eq 0) {
-                _Log "WARNING: No CRL files found in $crlSourceDir - CRL may not have published yet"
+                # CRL might not exist yet if this is a re-run after cert publish failed.
+                # Force a CRL publish and retry.
+                _Log "No CRL files found in $certEnrollDir - forcing CRL publish..."
+                $crlOutput = & certutil.exe -crl 2>&1
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -crl failed: $($crlOutput | Out-String)" }
+                Start-Sleep -Seconds 3
+                $crlFiles = Get-ChildItem -Path $certEnrollDir -Filter "*.crl" -ErrorAction SilentlyContinue
+            }
+            if (-not $crlFiles -or $crlFiles.Count -eq 0) {
+                _Log "WARNING: Still no CRL files found in $certEnrollDir after forced publish"
             }
             foreach ($f in $crlFiles) {
                 Copy-Item -Path $f.FullName -Destination $RootCAFilesPath -Force
