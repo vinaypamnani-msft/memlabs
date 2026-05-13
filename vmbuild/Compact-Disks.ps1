@@ -1059,13 +1059,63 @@ $btnXaml
             # spin until the active lists drain naturally.
             if ($UiSync.StopRequested) {
                 if (-not $stopAnnounced) {
-                    Add-UiLog ('[STOP-REQUESTED] User requested close; waiting for active jobs to finish safely before closing...')
+                    Add-UiLog ('[STOP-REQUESTED] User requested close; cancelling safely interruptible work and waiting for the rest...')
                     $stopAnnounced = $true
                 }
-                $UiSync.StatusText = ('Stop requested - waiting for {0} active job(s) to finish safely...' -f ($activePrepJobs.Count + $activeJobs.Count))
                 # Drain queues so nothing new gets started.
                 while ($prepQueue.Count -gt 0) { [void]$prepQueue.Dequeue() }
                 while ($diskQueue.Count -gt 0) { [void]$diskQueue.Dequeue() }
+
+                # Fast path: kill any compact job currently in a phase we can
+                # safely abort. Defrag / SlabConsolidate / ReTrim, zero-fill,
+                # and offline file deletes are all safe to interrupt - the
+                # NTFS volume stays consistent (defrag uses transactional
+                # moves) and the leftover zero.tmp / partial deletes are
+                # gone the moment we dismount.
+                # NOT killable:
+                #   * Mount (in-progress) - risks ghost mount before
+                #     $mountedDiskNumber is captured
+                #   * Dismount               - already on its way out
+                #   * Optimize-VHD           - actively rewriting the VHDX;
+                #                              interrupting can corrupt
+                #   * Pending (not started)  - nothing to kill yet
+                # The job's own dismount finally is bypassed by Stop-Job, but
+                # Invoke-CompactCleanup's host-wide ghost-mount sweep at exit
+                # picks up any VHDX we leave attached.
+                $killablePhases = @('OfflineClean','Defrag','ZeroFill')
+                $killedNow = 0
+                foreach ($d in @($activeJobs)) {
+                    if ($killablePhases -notcontains $d.CurrentPhase) { continue }
+                    Add-UiLog ("[STOP-KILL] $($d.VMName) - $($d.FileName): aborting at phase '$($d.CurrentPhase)' (safe to interrupt)")
+                    try { Stop-Job -Job $d.Job -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Job -Job $d.Job -Force -ErrorAction SilentlyContinue } catch {}
+                    $d.Status  = 'Stopped'
+                    $d.EndTime = Get-Date
+                    $d.Error   = "Stopped by user (safe-stop) during $($d.CurrentPhase)"
+                    $d.NewSize = $d.OriginalSize
+                    [void]$activeJobs.Remove($d)
+                    $killedNow++
+                }
+
+                # Killing the powershell job process orphans any defrag.exe
+                # children it spawned; they keep the volume busy and block
+                # the cleanup-time dismount. Reap them directly. Same for
+                # cleanmgr.exe (zero risk - it's user-mode).
+                if ($killedNow -gt 0) {
+                    foreach ($procName in @('defrag','cleanmgr')) {
+                        try {
+                            $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+                            foreach ($pr in $procs) {
+                                try { Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue } catch {}
+                            }
+                            if ($procs.Count -gt 0) {
+                                Add-UiLog ("[STOP-KILL] terminated $($procs.Count) orphan $procName.exe process(es)")
+                            }
+                        } catch {}
+                    }
+                }
+
+                $UiSync.StatusText = ('Stop requested - waiting for {0} active job(s) to finish safely...' -f ($activePrepJobs.Count + $activeJobs.Count))
                 if ($activePrepJobs.Count -eq 0 -and $activeJobs.Count -eq 0) {
                     break
                 }
@@ -1789,6 +1839,14 @@ $btnXaml
                                 Error        = $null
                                 StartTime    = $null
                                 EndTime      = $null
+                                # Coarse phase tracker, updated as the
+                                # compact job emits ::LOG:: lines. Used by
+                                # the soft-stop fast path to decide whether
+                                # this job can be killed safely (see the
+                                # StopRequested branch in the main loop).
+                                # Values: Pending, Mount, OfflineClean,
+                                # Defrag, ZeroFill, Dismount, OptimizeVHD.
+                                CurrentPhase = 'Pending'
                             }
                             $diskInfoList.Add($diskObj)
                             $diskQueue.Enqueue($diskObj)
@@ -2315,7 +2373,28 @@ $btnXaml
                     $out = Receive-Job -Job $disk.Job -Keep:$false -ErrorAction SilentlyContinue
                     foreach ($line in @($out)) {
                         if ($line -is [string] -and $line.StartsWith('::LOG::')) {
-                            Add-UiLog ("[PHASE] $($disk.VMName) - $($line.Substring(7))")
+                            $msg = $line.Substring(7)
+                            Add-UiLog ("[PHASE] $($disk.VMName) - $msg")
+                            # Coarse phase tracker. Strip "<filename> : " prefix
+                            # (Write-PhaseLog in the worker prepends it).
+                            $body = $msg
+                            $colonIdx = $body.IndexOf(' : ')
+                            if ($colonIdx -ge 0) { $body = $body.Substring($colonIdx + 3) }
+                            $body = $body.TrimStart()
+                            switch -Regex ($body) {
+                                '^Mounting'                    { $disk.CurrentPhase = 'Mount' }
+                                '^Mounted '                    { $disk.CurrentPhase = 'Mount' }
+                                '^Mounted as disk'             { $disk.CurrentPhase = 'Mount' }
+                                '^Offline clean '              { $disk.CurrentPhase = 'OfflineClean' }
+                                '^Defrag '                     { $disk.CurrentPhase = 'Defrag' }
+                                '^defrag '                     { $disk.CurrentPhase = 'Defrag' }
+                                '^\s*defrag>'                  { $disk.CurrentPhase = 'Defrag' }
+                                '^\s*Optimize-Volume '         { $disk.CurrentPhase = 'Defrag' }
+                                '^Zero-fill '                  { $disk.CurrentPhase = 'ZeroFill' }
+                                '^Dismounting'                 { $disk.CurrentPhase = 'Dismount' }
+                                '^Dismount-VHD'                { $disk.CurrentPhase = 'Dismount' }
+                                '^Optimize-VHD '               { $disk.CurrentPhase = 'OptimizeVHD' }
+                            }
                         }
                     }
                 } catch {}
