@@ -1353,24 +1353,132 @@ $btnXaml
                                 }
                             }
 
-                            # Wait for AVHDX merges to settle: no VHD path should still
-                            # reference .avhdx and no checkpoints should remain.
-                            Write-PrepLog "[MERGE] Waiting for AVHDX merges to settle (max 15 min)..."
-                            $mergeDeadline = (Get-Date).AddMinutes(15)
-                            $lastSettleLog = Get-Date
+                            # Wait for AVHDX merges to settle.
+                            #
+                            # The strict gate: every Get-VMHardDiskDrive path
+                            # must end in .vhdx (no .avhdx) AND there must be
+                            # zero VMCheckpoint/VMSnapshot entries. This is
+                            # the strongest signal we can get from Hyper-V,
+                            # because it's exactly what the downstream
+                            # ENUMERATE step (and Optimize-VHD) consumes:
+                            # if Hyper-V hasn't swung the VM's disk pointer
+                            # back to the parent VHDX yet, the merge isn't
+                            # done from our perspective, period.
+                            #
+                            # We DO NOT trust a momentary "0 pending" reading:
+                            # mid-merge, Hyper-V can briefly show the parent
+                            # while it's swapping the chain, then go back to
+                            # showing the AVHDX leaf. Counter-only logic was
+                            # the previous bug (PS1SITE log showed
+                            # "Settled in 904s" while ENUMERATE then captured
+                            # 3 AVHDX paths -> Optimize-VHD got "not an
+                            # existing virtual hard disk file" 5-15 min later
+                            # once the real merge finally finished and the
+                            # AVHDX leaves were deleted).
+                            #
+                            # Two stuck states are distinguished and logged:
+                            #   * AVHDX still attached, snapshots gone -> the
+                            #     background merge is still running. Track
+                            #     AVHDX file size to confirm forward progress.
+                            #   * Snapshot reappeared (e.g. raced with us
+                            #     between enumerate + Remove, or a Remove
+                            #     silently no-op'd) -> retry Remove and keep
+                            #     waiting.
+                            $settleTimeoutMin = 45
+                            Write-PrepLog ("[MERGE] Waiting for AVHDX merges to settle (max {0} min; gating on .avhdx-attached AND snapshot count)..." -f $settleTimeoutMin)
+                            $mergeDeadline   = (Get-Date).AddMinutes($settleTimeoutMin)
+                            $lastSettleLog   = Get-Date
+                            $lastAvhdxBytes  = $null
+                            $lastProgressAt  = Get-Date
+                            $reMergeAttempts = 0
+                            $maxReMerge      = 5
+                            $settled         = $false
                             while ((Get-Date) -lt $mergeDeadline) {
                                 $hds = @(Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)
                                 $pendingAvhdx = @($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' })
-                                $pendingChk   = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue).Count
-                                if ($pendingAvhdx.Count -eq 0 -and $pendingChk -eq 0) { break }
+                                $curSnaps     = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue)
+                                $pendingChk   = $curSnaps.Count
+                                if ($pendingAvhdx.Count -eq 0 -and $pendingChk -eq 0) {
+                                    $settled = $true
+                                    break
+                                }
+
+                                # Missed-merge detection: if a snapshot is
+                                # present, our Remove-VMCheckpoint loop above
+                                # didn't catch it (race or silent no-op).
+                                # Re-issue Remove on whatever's there.
+                                if ($pendingChk -gt 0 -and $reMergeAttempts -lt $maxReMerge) {
+                                    $reMergeAttempts++
+                                    Write-PrepLog ("[MERGE-RETRY] {0} snapshot(s) reappeared (attempt {1}/{2}); re-issuing Remove" -f $pendingChk, $reMergeAttempts, $maxReMerge)
+                                    foreach ($s in $curSnaps) {
+                                        Write-PrepLog ("[MERGE-RETRY]   Remove '{0}'" -f $s.Name)
+                                        try { Remove-VMCheckpoint -VM $s.VM -Name $s.Name -ErrorAction Stop }
+                                        catch {
+                                            try { Remove-VMSnapshot -VMSnapshot $s -ErrorAction Stop }
+                                            catch { Write-PrepLog ("[MERGE-RETRY]     failed: {0}" -f $_.Exception.Message) }
+                                        }
+                                    }
+                                }
+
+                                # Track AVHDX byte total to confirm forward
+                                # progress (a stuck merge shows constant
+                                # bytes; a healthy merge shrinks them).
+                                $curBytes = [long]0
+                                foreach ($pa in $pendingAvhdx) {
+                                    try { if (Test-Path -LiteralPath $pa.Path) { $curBytes += ([System.IO.FileInfo]::new($pa.Path)).Length } } catch {}
+                                }
+                                if ($lastAvhdxBytes -ne $null -and $curBytes -lt $lastAvhdxBytes) {
+                                    $lastProgressAt = Get-Date
+                                }
+                                $lastAvhdxBytes = $curBytes
+
                                 if (((Get-Date) - $lastSettleLog).TotalSeconds -ge 30) {
-                                    Write-PrepLog ("[MERGE]   still settling: {0} pending AVHDX, {1} pending checkpoint(s)" -f $pendingAvhdx.Count, $pendingChk)
+                                    $sinceProgress = ((Get-Date) - $lastProgressAt).TotalSeconds
+                                    Write-PrepLog ("[MERGE]   still settling: {0} pending AVHDX ({1:N1} GB), {2} pending checkpoint(s); {3:N0}s since last shrink" -f $pendingAvhdx.Count, ($curBytes/1GB), $pendingChk, $sinceProgress)
                                     $lastSettleLog = Get-Date
                                 }
                                 Write-Progress -Activity "Prep $n" -Status 'Waiting for merge to finish' -PercentComplete 92
                                 Start-Sleep -Seconds 3
                             }
-                            Write-PrepLog ("[MERGE] Settled in {0:N0}s" -f ((Get-Date)-$mergeStart).TotalSeconds)
+
+                            if ($settled) {
+                                Write-PrepLog ("[MERGE] Settled in {0:N0}s" -f ((Get-Date)-$mergeStart).TotalSeconds)
+                            }
+                            else {
+                                # Diagnostic dump so we can tell whether the
+                                # merge job is genuinely wedged or just slow,
+                                # and so post-mortem has the snapshot list +
+                                # AVHDX file sizes + parent chain.
+                                Write-PrepLog ("[MERGE-STUCK] Settle timed out after {0} min - diagnostic dump follows" -f $settleTimeoutMin)
+                                try {
+                                    $vmState = (Get-VM -Name $n -ErrorAction SilentlyContinue).State
+                                    Write-PrepLog ("[MERGE-STUCK]   VM state: {0}" -f $vmState)
+                                } catch {}
+                                try {
+                                    $stuckSnaps = @(Get-VMCheckpoint -VMName $n -ErrorAction SilentlyContinue)
+                                    Write-PrepLog ("[MERGE-STUCK]   Snapshots remaining: {0}" -f $stuckSnaps.Count)
+                                    foreach ($s in $stuckSnaps) { Write-PrepLog ("[MERGE-STUCK]     - {0} (created {1})" -f $s.Name, $s.CreationTime) }
+                                } catch {}
+                                try {
+                                    foreach ($hd in @(Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
+                                        if (-not $hd.Path) { continue }
+                                        $sz = try { ([System.IO.FileInfo]::new($hd.Path)).Length } catch { 0 }
+                                        Write-PrepLog ("[MERGE-STUCK]   Attached: {0} ({1:N1} GB)" -f $hd.Path, ($sz/1GB))
+                                        $cur = $hd.Path
+                                        $depth = 0
+                                        while ($cur -and $depth -lt 10) {
+                                            $par = $null
+                                            try { $par = (Get-VHD -Path $cur -ErrorAction SilentlyContinue).ParentPath } catch {}
+                                            if (-not $par) { break }
+                                            $psz = try { if (Test-Path -LiteralPath $par) { ([System.IO.FileInfo]::new($par)).Length } else { 0 } } catch { 0 }
+                                            Write-PrepLog ("[MERGE-STUCK]     parent: {0} ({1:N1} GB)" -f $par, ($psz/1GB))
+                                            $cur = $par
+                                            $depth++
+                                        }
+                                    }
+                                } catch {}
+                                Write-PrepLog ("[MERGE-STUCK] Proceeding to ENUMERATE anyway; compact step will re-resolve any AVHDX that merges away in the meantime.")
+                            }
                             } # if (-not $mergeSkipped)
 
                             }
@@ -1793,6 +1901,41 @@ $btnXaml
                         }
 
                         # --- Final Optimize-VHD on the parent (no longer mounted) ---
+                        # Defensive re-resolve: if the path we were handed no
+                        # longer exists, the prep job's settle gate let an
+                        # AVHDX leaf slip through and Hyper-V has since merged
+                        # it away. Ask Hyper-V what's actually attached now
+                        # and use that path instead. We match by filename root
+                        # (parent VHDX shares the basename with its AVHDX leaf,
+                        # minus the GUID suffix).
+                        if (-not (Test-Path -LiteralPath $p)) {
+                            Write-PhaseLog "Path no longer exists ('$p'); attempting to re-resolve via Get-VMHardDiskDrive (likely AVHDX merged away after enumerate)"
+                            $resolved = $null
+                            try {
+                                $origLeaf = [System.IO.Path]::GetFileNameWithoutExtension($p)
+                                # Strip Hyper-V's _<GUID> suffix on AVHDX leaves.
+                                $rootName = $origLeaf -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
+                                foreach ($vmObj in (Get-VM -ErrorAction SilentlyContinue)) {
+                                    foreach ($hd in (Get-VMHardDiskDrive -VM $vmObj -ErrorAction SilentlyContinue)) {
+                                        if (-not $hd.Path) { continue }
+                                        $cand = [System.IO.Path]::GetFileNameWithoutExtension($hd.Path)
+                                        $candRoot = $cand -replace '_[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$',''
+                                        if ($candRoot -eq $rootName -and (Test-Path -LiteralPath $hd.Path)) {
+                                            $resolved = $hd.Path
+                                            break
+                                        }
+                                    }
+                                    if ($resolved) { break }
+                                }
+                            } catch {}
+                            if ($resolved) {
+                                Write-PhaseLog "Re-resolved to: $resolved"
+                                $p = $resolved
+                            } else {
+                                Write-PhaseLog "Re-resolve FAILED; cannot find a current attached VHD matching '$origLeaf'"
+                            }
+                        }
+
                         $preOptSize = try { (Get-Item -LiteralPath $p -ErrorAction Stop).Length } catch { 0 }
                         Write-PhaseLog ("Optimize-VHD ($m) starting (current size: {0:N1} GB)" -f ($preOptSize/1GB))
                         Write-Progress -Activity "Compact $p" -Status "Optimize-VHD ($m)" -PercentComplete 30
