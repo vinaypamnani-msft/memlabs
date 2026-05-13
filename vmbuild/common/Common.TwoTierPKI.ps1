@@ -724,42 +724,41 @@ CertificateTemplate = SubCA
                 if (-not $ready) { throw "CA service did not become responsive within 90 seconds" }
                 _Log "CA is responsive."
 
-                # Use certreq.exe (native, always available with ADCS) instead
-                # of PSPKI which is not installed on the standalone Root CA.
-                _Log "Submitting certificate request via certreq: $reqFile"
+                # Use certutil -submit (never shows UI dialogs, unlike certreq
+                # which can pop a template-picker or CA-picker even with -config).
+                _Log "Submitting certificate request via certutil: $reqFile"
 
-                # Submit the CSR to the local CA using explicit config
-                $submitOutput = & certreq.exe -submit -config "$caConfig" "$reqFile" "$cerFile" 2>&1
+                # certutil -submit [-config CA] <req> [<cert> [<chain> [<fullresponse>]]]
+                $submitOutput = & certutil.exe -submit -config "$caConfig" "$reqFile" "$cerFile" 2>&1
                 $submitExitCode = $LASTEXITCODE
-                _Log "certreq -submit exit code: $submitExitCode"
-                foreach ($line in $submitOutput) { _Log "  certreq: $line" }
+                _Log "certutil -submit exit code: $submitExitCode"
+                foreach ($line in $submitOutput) { _Log "  certutil: $line" }
 
-                if ($submitExitCode -eq 0) {
-                    # Request was immediately issued (auto-approve was on)
-                    _Log "Certificate issued immediately."
+                # Parse the request ID from certutil output regardless of exit code
+                $requestID = $null
+                foreach ($line in $submitOutput) {
+                    if ($line -match 'RequestId:\s*(\d+)') {
+                        $requestID = $Matches[1]
+                        break
+                    }
                 }
-                elseif ($submitExitCode -eq 5) {
-                    # Request is pending (standalone CA default behavior).
-                    # Parse the request ID from certreq output and approve it.
-                    $requestID = $null
+                if (-not $requestID) {
                     foreach ($line in $submitOutput) {
-                        if ($line -match 'RequestId:\s*(\d+)' -or $line -match 'RequestId\s*"?(\d+)') {
+                        if ($line -match 'RequestId[^:]*:\s*"?(\d+)') {
                             $requestID = $Matches[1]
                             break
                         }
                     }
+                }
+
+                if ($submitExitCode -eq 0 -and (Test-Path $cerFile) -and (Get-Item $cerFile).Length -gt 0) {
+                    # Certificate was issued immediately (auto-approve / policy module accepted)
+                    _Log "Certificate issued and retrieved immediately (request ID: $requestID)."
+                }
+                elseif ($submitExitCode -eq 5 -or ($requestID -and -not (Test-Path $cerFile))) {
+                    # Request is pending (standalone CA default). Approve and retrieve.
                     if (-not $requestID) {
-                        # Try alternate pattern
-                        foreach ($line in $submitOutput) {
-                            if ($line -match '(\d+)') {
-                                # The first number in certreq pending output is often the request ID
-                                $requestID = $Matches[1]
-                                break
-                            }
-                        }
-                    }
-                    if (-not $requestID) {
-                        throw "Could not parse request ID from certreq output"
+                        throw "Could not parse request ID from certutil -submit output"
                     }
                     _Log "Request pending with ID: $requestID. Approving..."
 
@@ -775,19 +774,47 @@ CertificateTemplate = SubCA
 
                     Start-Sleep -Seconds 3
 
-                    # Retrieve the now-issued certificate
+                    # Retrieve the issued certificate via certreq -retrieve
+                    # (certreq -retrieve does NOT show UI when given an
+                    # explicit -config and request ID)
                     _Log "Retrieving issued certificate for request ID $requestID..."
-                    $retrieveOutput = & certreq.exe -retrieve -config "$caConfig" $requestID "$cerFile" 2>&1
+                    $retrieveOutput = & certreq.exe -retrieve -f -config "$caConfig" $requestID "$cerFile" 2>&1
                     $retrieveExitCode = $LASTEXITCODE
                     _Log "certreq -retrieve exit code: $retrieveExitCode"
                     foreach ($line in $retrieveOutput) { _Log "  certreq: $line" }
 
                     if ($retrieveExitCode -ne 0) {
-                        throw "certreq -retrieve failed (exit code $retrieveExitCode): $($retrieveOutput | Out-String)"
+                        # Fallback: try certutil -view to export the cert
+                        _Log "certreq -retrieve failed; trying certutil -view as fallback..."
+                        $viewOutput = & certutil.exe -view -restrict "RequestID=$requestID" -out RawCertificate 2>&1
+                        $viewExitCode = $LASTEXITCODE
+                        _Log "certutil -view exit code: $viewExitCode"
+                        if ($viewExitCode -eq 0) {
+                            # certutil -view dumps the cert as Base64 in the
+                            # output. Extract and write to file.
+                            $certLines = @()
+                            $inCert = $false
+                            foreach ($line in $viewOutput) {
+                                $lineStr = "$line"
+                                if ($lineStr -match '-----BEGIN CERTIFICATE-----') { $inCert = $true }
+                                if ($inCert) { $certLines += $lineStr }
+                                if ($lineStr -match '-----END CERTIFICATE-----') { $inCert = $false }
+                            }
+                            if ($certLines.Count -gt 2) {
+                                Set-Content -Path $cerFile -Value ($certLines -join "`n") -Force
+                                _Log "Certificate extracted from certutil -view output ($($certLines.Count) lines)"
+                            }
+                            else {
+                                throw "certreq -retrieve failed and certutil -view did not contain a certificate"
+                            }
+                        }
+                        else {
+                            throw "certreq -retrieve failed (exit code $retrieveExitCode) and certutil -view also failed: $($viewOutput | Out-String)"
+                        }
                     }
                 }
                 else {
-                    throw "certreq -submit failed (exit code $submitExitCode): $($submitOutput | Out-String)"
+                    throw "certutil -submit failed (exit code $submitExitCode): $($submitOutput | Out-String)"
                 }
 
                 if (Test-Path $cerFile) {
