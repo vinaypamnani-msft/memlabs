@@ -81,6 +81,67 @@ function Remove-VMSwitch2 {
     }
 }
 
+# Clear-StrayVhdMounts
+#
+# Walks every disk on the host whose backing Location ends in
+# .vhd / .vhdx / .avhdx and dismounts any that no current VM owns. This
+# catches "ghost" host mounts left behind when something (typically the
+# Compact-Disks worker) mounted an .avhdx leaf that Hyper-V then merged
+# away in the background - the AVHDX file is gone but the host's storage
+# subsystem still has the chain wired up, which locks the parent VHDX
+# and breaks Start-VM with "The process cannot access the file because
+# it is being used by another process." (0x80070020).
+#
+# Dismount-VHD -Path can't fix that because it does a Test-Path on the
+# path first and silently fails for ghosts. -DiskNumber operates on the
+# storage subsystem directly and works regardless of whether the
+# backing file still exists.
+#
+# Safe to call any time: an attached VHD that IS owned by a VM is
+# skipped, so we never disturb a running VM.
+function Clear-StrayVhdMounts {
+    [CmdletBinding()]
+    param(
+        # Optional VM name. If supplied, the function will only consider
+        # ghosts whose Location filename root matches this VM's name.
+        # Stays defensive: if the match fails we fall back to the full
+        # host-wide sweep behaviour.
+        [Parameter(Mandatory = $false)]
+        [string]$VMName
+    )
+    try {
+        $vmOwned = @{}
+        foreach ($hd in (Get-VM -ErrorAction SilentlyContinue | Get-VMHardDiskDrive -ErrorAction SilentlyContinue)) {
+            if ($hd.Path) { $vmOwned[$hd.Path.ToLowerInvariant()] = $true }
+        }
+        $stray = @(Get-Disk -ErrorAction SilentlyContinue | Where-Object {
+            $_.Location -and ($_.Location -match '\.a?vhdx?$')
+        })
+        $count = 0
+        foreach ($s in $stray) {
+            $loc = $s.Location
+            if ($vmOwned.ContainsKey($loc.ToLowerInvariant())) { continue }
+            if ($VMName) {
+                # Ignore ghosts that don't look like they belong to this VM.
+                # Filename pattern: <VMName>_<role>[_<GUID>].avhdx|.vhdx
+                $leaf = [System.IO.Path]::GetFileName($loc)
+                if ($leaf -notlike "$VMName*") { continue }
+            }
+            try {
+                Dismount-VHD -DiskNumber $s.Number -ErrorAction Stop
+                $count++
+                try { Write-Log "Clear-StrayVhdMounts: dismounted stray (disk #$($s.Number)): $loc" -LogOnly } catch {}
+            } catch {
+                try { Write-Log "Clear-StrayVhdMounts: failed to dismount disk #$($s.Number) ($loc): $($_.Exception.Message)" -Warning } catch {}
+            }
+        }
+        return $count
+    } catch {
+        try { Write-Log "Clear-StrayVhdMounts: sweep failed: $($_.Exception.Message)" -Warning } catch {}
+        return 0
+    }
+}
+
 function Start-VM2 {
     [CmdletBinding()]
     param (
@@ -135,6 +196,23 @@ function Start-VM2 {
                         Remove-VMSavedState -vm $vm -ErrorAction SilentlyContinue 
                     }                                        
                     Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                }
+                # "The process cannot access the file because it is being used
+                # by another process." (HRESULT 0x80070020). Typically caused
+                # by a ghost host VHD mount left behind when a tool mounted
+                # an .avhdx leaf that Hyper-V then merged away in the
+                # background. Sweep stray mounts and retry once.
+                if (($StopError -ne $null) -and (
+                        ($StopError.Exception.Message -match 'being used by another process') -or
+                        ($StopError.Exception.Message -match '0x80070020'))) {
+                    write-progress2 "Start VM" -Status "VHD locked - sweeping stray host mounts for $Name" -force
+                    try { Write-Log "${Name}: Start-VM hit 'file in use'; running Clear-StrayVhdMounts" -LogOnly } catch {}
+                    $cleared = Clear-StrayVhdMounts -VMName $Name
+                    if ($cleared -gt 0) {
+                        try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
+                        $StopError = $null
+                        Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    }
                 }
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Running") {
