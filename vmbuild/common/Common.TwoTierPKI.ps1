@@ -5,6 +5,9 @@
 # Enterprise Subordinate CA on DC). Called after Phase2 completes when
 # cmOptions.UseOfflineRootCA is enabled.
 #
+# IDEMPOTENT: Every step detects existing state and skips work already done.
+# Safe to re-run after partial failure — will resume from where it left off.
+#
 # Uses PSDirect (Invoke-VmCommand / Copy-ItemSafe) for all VM communication.
 ###############################################################################
 
@@ -54,6 +57,9 @@ function Install-TwoTierPKI {
           Step 3: Signs the CSR on the Root CA (Submit, Approve, Retrieve)
           Step 4: Completes the Intermediate CA (installs cert, configures CDP/AIA, publishes CRL)
           Step 5: Shuts down the Root CA VM
+
+        IDEMPOTENT: Each step checks whether its work is already done and skips
+        forward if so. Safe to re-run after partial failure.
 
     .PARAMETER DeployConfig
         The deployment configuration object.
@@ -112,34 +118,62 @@ function Install-TwoTierPKI {
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
-        try {
-            # Install PSPKI module
-            _Log "Installing PSPKI module..."
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            if (-not (Get-Module -ListAvailable -Name PSPKI)) {
-                $retryCount = 0
-                $installed = $false
-                while (-not $installed -and $retryCount -lt 3) {
-                    $retryCount++
-                    try {
-                        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-                        Install-Module -Name PSPKI -Force -SkipPublisherCheck -MaximumVersion 4.2.0 | Out-Null
-                        $installed = $true
+        # Helper: wait for certsvc to become responsive after restart
+        function Wait-CertSvcReady {
+            param([int]$TimeoutSec = 60)
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    if ($svc -and $svc.Status -eq 'Running') {
+                        # Verify CA is actually responding
+                        $null = & certutil.exe -ping 2>&1
+                        if ($LASTEXITCODE -eq 0) { return $true }
                     }
-                    catch {
-                        _Log "PSPKI install attempt $retryCount failed: $($_.Exception.Message)"
-                        if ($retryCount -lt 3) {
-                            Start-Sleep -Seconds 10
-                            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                        } else { throw }
+                } catch {}
+                Start-Sleep -Seconds 2
+            }
+            return $false
+        }
+
+        try {
+            # Check if CA is already installed (idempotency)
+            $caAlreadyInstalled = $false
+            try {
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc) {
+                    $caAlreadyInstalled = $true
+                    _Log "CA service already exists (state: $($svc.Status)) - skipping installation"
+                }
+            } catch {}
+
+            if (-not $caAlreadyInstalled) {
+                # Install PSPKI module
+                _Log "Installing PSPKI module..."
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                if (-not (Get-Module -ListAvailable -Name PSPKI)) {
+                    $retryCount = 0
+                    $installed = $false
+                    while (-not $installed -and $retryCount -lt 3) {
+                        $retryCount++
+                        try {
+                            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+                            Install-Module -Name PSPKI -Force -SkipPublisherCheck -MaximumVersion 4.2.0 | Out-Null
+                            $installed = $true
+                        }
+                        catch {
+                            _Log "PSPKI install attempt $retryCount failed: $($_.Exception.Message)"
+                            if ($retryCount -lt 3) {
+                                Start-Sleep -Seconds 10
+                                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                            } else { throw }
+                        }
                     }
                 }
-            }
-            Import-Module PSPKI -Force
 
-            # Write CAPolicy.inf
-            _Log "Writing CAPolicy.inf..."
-            $caPolicyContent = @"
+                # Write CAPolicy.inf
+                _Log "Writing CAPolicy.inf..."
+                $caPolicyContent = @"
 [Version]
 Signature="`$Windows NT`$"
 
@@ -159,26 +193,51 @@ Empty=True
 [AuthorityInformationAccess]
 Empty=True
 "@
-            Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
+                Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
 
-            # Install ADCS role
-            _Log "Installing ADCS role..."
-            Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+                # Install ADCS role
+                _Log "Installing ADCS role..."
+                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
-            # Install Standalone Root CA
-            _Log "Installing Standalone Root CA '$RootCAName'..."
-            Install-AdcsCertificationAuthority -CAType StandaloneRootCa `
-                -CACommonName $RootCAName `
-                -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
-                -KeyLength 4096 `
-                -HashAlgorithmName SHA256 `
-                -ValidityPeriod Years `
-                -ValidityPeriodUnits 20 `
-                -Force | Out-Null
+                # Install Standalone Root CA
+                _Log "Installing Standalone Root CA '$RootCAName'..."
+                Install-AdcsCertificationAuthority -CAType StandaloneRootCa `
+                    -CACommonName $RootCAName `
+                    -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                    -KeyLength 4096 `
+                    -HashAlgorithmName SHA256 `
+                    -ValidityPeriod Years `
+                    -ValidityPeriodUnits 20 `
+                    -Force | Out-Null
 
-            Start-Sleep -Seconds 5
+                _Log "Waiting for CA service to become ready..."
+                if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                    throw "CA service did not become responsive within 60 seconds after installation"
+                }
+                _Log "CA service is ready."
+            }
+            else {
+                # Ensure PSPKI is available even on re-run
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                if (-not (Get-Module -ListAvailable -Name PSPKI)) {
+                    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+                    Install-Module -Name PSPKI -Force -SkipPublisherCheck -MaximumVersion 4.2.0 | Out-Null
+                }
 
-            # Configure CDP
+                # Ensure service is running
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc.Status -ne 'Running') {
+                    _Log "Starting certsvc (was $($svc.Status))..."
+                    Start-Service certsvc -ErrorAction Stop
+                    if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                        throw "CA service did not become responsive within 60 seconds"
+                    }
+                }
+            }
+
+            Import-Module PSPKI -Force
+
+            # Configure CDP (idempotent - removes existing http/file entries and re-adds)
             _Log "Configuring CDP..."
             $crlList = Get-CACrlDistributionPoint
             foreach ($crl in $crlList) {
@@ -188,7 +247,7 @@ Empty=True
             }
             Add-CACRLDistributionPoint -Uri "$($WebURL)$($RootCAName)%8%9.crl" -AddToCertificateCDP -AddToFreshestCrl -Force | Out-Null
 
-            # Configure AIA
+            # Configure AIA (idempotent)
             _Log "Configuring AIA..."
             Get-CAAuthorityInformationAccess | Where-Object { $_.Uri -like '*http*' -or $_.Uri -like '*file*' } | Remove-CAAuthorityInformationAccess -Force | Out-Null
             Add-CAAuthorityInformationAccess -AddToCertificateAia "$($WebURL)$($RootCAName).crt" -Force | Out-Null
@@ -198,8 +257,9 @@ Empty=True
             $dnParts = $DomainName.Split(".")
             $configDN = "CN=Configuration," + (($dnParts | ForEach-Object { "DC=$_" }) -join ",")
             & certutil.exe -setreg CA\DSConfigDN $configDN | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CA\DSConfigDN returned exit code $LASTEXITCODE" }
 
-            # Set CRL periods
+            # Set CRL periods (idempotent registry writes)
             _Log "Setting CRL periods..."
             & certutil.exe -setreg CA\CRLPeriodUnits 26 | Out-Null
             & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
@@ -215,8 +275,11 @@ Empty=True
             # Restart CA service and publish CRL
             _Log "Restarting certsvc and publishing CRL..."
             Restart-Service certsvc
-            Start-Sleep -Seconds 5
+            if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                throw "CA service did not become responsive after restart"
+            }
             & certutil.exe -crl | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -crl returned exit code $LASTEXITCODE" }
 
             # Export Root CA cert and CRL
             _Log "Exporting Root CA cert and CRL..."
@@ -227,10 +290,15 @@ Empty=True
             # Export cert
             $rootCertPath = Join-Path $RootCAFilesPath "$RootCAName.crt"
             & certutil.exe -ca.cert $rootCertPath | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "certutil -ca.cert failed with exit code $LASTEXITCODE" }
+            if (-not (Test-Path $rootCertPath)) { throw "Root CA certificate file not created: $rootCertPath" }
 
             # Export CRL
             $crlSourceDir = "C:\Windows\System32\CertSrv\CertEnroll\"
             $crlFiles = Get-ChildItem -Path $crlSourceDir -Filter "*.crl" -ErrorAction SilentlyContinue
+            if (-not $crlFiles -or $crlFiles.Count -eq 0) {
+                _Log "WARNING: No CRL files found in $crlSourceDir - CRL may not have published yet"
+            }
             foreach ($f in $crlFiles) {
                 Copy-Item -Path $f.FullName -Destination $RootCAFilesPath -Force
             }
@@ -238,6 +306,10 @@ Empty=True
             _Log "Step 1 complete. Files exported to $RootCAFilesPath"
             $exportedFiles = @(Get-ChildItem $RootCAFilesPath | Select-Object -ExpandProperty Name)
             _Log "Exported files: $($exportedFiles -join ', ')"
+
+            if ($exportedFiles.Count -eq 0) {
+                throw "No files were exported to $RootCAFilesPath - something went wrong"
+            }
 
             return @{ Success = $true; Log = $report.ToArray(); ExportedFiles = $exportedFiles }
         }
@@ -269,9 +341,17 @@ Empty=True
     Write-Log "[TwoTierPKI] Copying Root CA files from $rootCAVMName to host staging..." -LogOnly
 
     $filesToCopy = $result.ScriptBlockOutput.ExportedFiles
+    if (-not $filesToCopy -or $filesToCopy.Count -eq 0) {
+        Write-Log "[TwoTierPKI] ERROR: No files to copy from Root CA" -Failure
+        return $false
+    }
     foreach ($fileName in $filesToCopy) {
         $srcPath = Join-Path $rootCAFilesPath $fileName
-        Copy-ItemFromVM -Path $srcPath -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        $copyResult = Copy-ItemFromVM -Path $srcPath -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        if (-not $copyResult) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy '$fileName' from Root CA to host" -Failure
+            return $false
+        }
     }
     Write-Log "[TwoTierPKI] Root CA files copied to host: $hostStagingPath"
 
@@ -294,12 +374,35 @@ Empty=True
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
         try {
-            # Install IIS
+            # Check if Sub CA is already fully configured (has a valid cert installed)
+            $subCAComplete = $false
+            $subCAPartial = $false
+            try {
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq 'Running') {
+                    # CA service running = fully configured (has cert installed)
+                    $subCAComplete = $true
+                    _Log "Subordinate CA already fully operational (certsvc running). Step 2 already done."
+                }
+                elseif ($svc) {
+                    # Service exists but not running = partially installed (waiting for cert)
+                    $subCAPartial = $true
+                    _Log "Subordinate CA partially installed (certsvc exists but state=$($svc.Status)). CSR should already exist."
+                }
+            } catch {}
+
+            if ($subCAComplete) {
+                # Already done - just return the CSR path for downstream steps
+                $reqFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.req"
+                return @{ Success = $true; Log = $report.ToArray(); ReqFile = $reqFile; AlreadyComplete = $true }
+            }
+
+            # Install IIS (idempotent)
             _Log "Installing IIS Web-Server..."
             Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
             Import-Module WebAdministration
 
-            # Create CRL virtual directory
+            # Create CRL virtual directory (idempotent)
             _Log "Creating CRL virtual directory..."
             if (-not (Test-Path $WebFolderPath)) {
                 New-Item -ItemType Directory -Path $WebFolderPath -Force | Out-Null
@@ -309,7 +412,7 @@ Empty=True
                 New-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -PhysicalPath $WebFolderPath | Out-Null
             }
 
-            # Enable double-escaping (required for delta CRL files with '+' in name)
+            # Enable double-escaping (idempotent)
             _Log "Enabling double-escaping on CRL vdir..."
             Set-WebConfigurationProperty -PSPath "IIS:\Sites\Default Web Site\CRL" `
                 -Filter "system.webServer/security/requestFiltering" `
@@ -322,20 +425,25 @@ Empty=True
                 Copy-Item -Path $f.FullName -Destination $WebFolderPath -Force
             }
 
-            # Publish root cert to AD
+            # Publish root cert to AD (idempotent with -f flag)
             _Log "Publishing root cert to AD..."
             $rootCertFile = Join-Path $RootCAFilesPath "$RootCAName.crt"
+            if (-not (Test-Path $rootCertFile)) {
+                throw "Root CA certificate not found: $rootCertFile"
+            }
             & certutil.exe -dspublish -f $rootCertFile RootCA | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish RootCA exit code $LASTEXITCODE" }
             & certutil.exe -dspublish -f $rootCertFile NTAuthCA | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish NTAuthCA exit code $LASTEXITCODE" }
 
-            # Publish root CRL to AD
+            # Publish root CRL to AD (idempotent with -f flag)
             _Log "Publishing root CRL to AD..."
             $crlFiles = Get-ChildItem -Path $RootCAFilesPath -Filter "*.crl" -ErrorAction SilentlyContinue
             foreach ($crl in $crlFiles) {
                 & certutil.exe -dspublish -f $crl.FullName | Out-Null
             }
 
-            # Create DNS alias pki.<domain> pointing to this DC
+            # Create DNS alias pki.<domain> pointing to this DC (idempotent)
             _Log "Creating DNS alias pki.$DomainName..."
             $dcHostName = $env:COMPUTERNAME
             try {
@@ -376,28 +484,80 @@ Critical=Yes
 "@
             Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
 
-            # Install ADCS role
-            _Log "Installing ADCS role..."
-            Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
-
-            # Install Enterprise Subordinate CA with offline request file
-            _Log "Installing Enterprise Subordinate CA '$IntCAName' (offline enrollment)..."
+            # Check if CSR already exists (from previous partial run)
             if (-not (Test-Path $IntCAFilesPath)) {
                 New-Item -ItemType Directory -Path $IntCAFilesPath -Force | Out-Null
             }
             $reqFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.req"
 
-            Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa `
-                -CACommonName $IntCAName `
-                -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
-                -KeyLength 2048 `
-                -HashAlgorithmName SHA256 `
-                -OutputCertRequestFile $reqFile `
-                -Force | Out-Null
+            if ($subCAPartial -and (Test-Path $reqFile)) {
+                _Log "CSR already exists from previous run: $reqFile - skipping CA installation"
+            }
+            else {
+                # Install ADCS role (idempotent)
+                _Log "Installing ADCS role..."
+                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
 
-            _Log "CSR generated: $reqFile"
+                # Install Enterprise Subordinate CA with offline request file
+                _Log "Installing Enterprise Subordinate CA '$IntCAName' (offline enrollment)..."
+                try {
+                    Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa `
+                        -CACommonName $IntCAName `
+                        -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                        -KeyLength 2048 `
+                        -HashAlgorithmName SHA256 `
+                        -OutputCertRequestFile $reqFile `
+                        -Force | Out-Null
+                }
+                catch {
+                    # If the error is "already installed", check for existing CSR
+                    if ($_.Exception.Message -match 'already installed' -and (Test-Path $reqFile)) {
+                        _Log "CA role already installed and CSR exists - continuing"
+                    }
+                    elseif ($_.Exception.Message -match 'already installed') {
+                        # CA installed but no CSR - it may have been installed with cert already
+                        # Check if certsvc exists (even if stopped = waiting for cert)
+                        $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                        if ($svc) {
+                            _Log "CA already installed (no CSR file found). Generating new CSR via certreq..."
+                            # Generate a new CSR from the existing key
+                            $infContent = @"
+[NewRequest]
+Subject = "CN=$IntCAName"
+KeyLength = 2048
+Exportable = TRUE
+UserProtected = FALSE
+MachineKeySet = TRUE
+ProviderName = "RSA#Microsoft Software Key Storage Provider"
+HashAlgorithm = SHA256
+RequestType = PKCS10
+[RequestAttributes]
+CertificateTemplate = SubCA
+"@
+                            $infFile = Join-Path $IntCAFilesPath "subreq.inf"
+                            Set-Content -Path $infFile -Value $infContent -Force
+                            & certreq.exe -new $infFile $reqFile | Out-Null
+                            if (-not (Test-Path $reqFile)) {
+                                throw "Failed to generate CSR. CA is partially installed but CSR could not be created."
+                            }
+                            _Log "CSR generated from existing installation: $reqFile"
+                        }
+                        else {
+                            throw
+                        }
+                    }
+                    else {
+                        throw
+                    }
+                }
+
+                if (-not (Test-Path $reqFile)) {
+                    throw "CSR file was not created: $reqFile"
+                }
+                _Log "CSR generated: $reqFile"
+            }
+
             _Log "Step 2 complete."
-
             return @{ Success = $true; Log = $report.ToArray(); ReqFile = $reqFile }
         }
         catch {
@@ -420,205 +580,340 @@ Critical=Yes
         return $false
     }
     foreach ($line in $result2.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-    Write-Log "[TwoTierPKI] Step 2 complete: Intermediate CA prepared, CSR generated"
 
-    #---------------------------------------------------------------------------
-    # HOST COPY: CSR from DC → host → Root CA
-    #---------------------------------------------------------------------------
-    $reqFileName = [System.IO.Path]::GetFileName($result2.ScriptBlockOutput.ReqFile)
-    Write-Log "[TwoTierPKI] Copying CSR '$reqFileName' from DC to Root CA via host..." -LogOnly
+    # If Sub CA is already fully complete (cert installed, service running), skip Steps 3-4
+    if ($result2.ScriptBlockOutput.AlreadyComplete) {
+        Write-Log "[TwoTierPKI] Step 2: Subordinate CA already operational - skipping Steps 3-4"
+    }
+    else {
+        Write-Log "[TwoTierPKI] Step 2 complete: Intermediate CA prepared, CSR generated"
 
-    # DC → host
-    Copy-ItemFromVM -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $dcVMName -VMDomainName $domainName
-    # host → Root CA
-    $reqOnHost = Join-Path $hostStagingPath $reqFileName
-    Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        #---------------------------------------------------------------------------
+        # HOST COPY: CSR from DC → host → Root CA
+        #---------------------------------------------------------------------------
+        $reqFileName = [System.IO.Path]::GetFileName($result2.ScriptBlockOutput.ReqFile)
+        if ([string]::IsNullOrWhiteSpace($reqFileName)) {
+            Write-Log "[TwoTierPKI] ERROR: Step 2 did not return a valid CSR file path" -Failure
+            return $false
+        }
+        Write-Log "[TwoTierPKI] Copying CSR '$reqFileName' from DC to Root CA via host..." -LogOnly
 
-    #---------------------------------------------------------------------------
-    # STEP 3: Sign CSR on Root CA
-    #---------------------------------------------------------------------------
-    Write-Log "[TwoTierPKI] Step 3: Signing CSR on Root CA..." -NoIndent
+        # DC → host
+        $copyResult = Copy-ItemFromVM -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $dcVMName -VMDomainName $domainName
+        if (-not $copyResult) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy CSR from DC to host" -Failure
+            return $false
+        }
+        # host → Root CA
+        $reqOnHost = Join-Path $hostStagingPath $reqFileName
+        if (-not (Test-Path $reqOnHost)) {
+            Write-Log "[TwoTierPKI] ERROR: CSR file not found on host at $reqOnHost" -Failure
+            return $false
+        }
+        Copy-ItemSafe -Path $reqOnHost -Destination $intCAFilesPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
 
-    $step3Script = {
-        param($IntCAFilesPath, $IntCAServer, $IntCAName)
+        #---------------------------------------------------------------------------
+        # STEP 3: Sign CSR on Root CA
+        #---------------------------------------------------------------------------
+        Write-Log "[TwoTierPKI] Step 3: Signing CSR on Root CA..." -NoIndent
 
-        $ErrorActionPreference = 'Stop'
-        $report = [System.Collections.Generic.List[string]]::new()
-        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+        $step3Script = {
+            param($IntCAFilesPath, $IntCAServer, $IntCAName)
 
-        try {
-            # Import PSPKI
-            _Log "Importing PSPKI..."
-            Import-Module PSPKI -Force
+            $ErrorActionPreference = 'Stop'
+            $report = [System.Collections.Generic.List[string]]::new()
+            function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
-            $reqFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.req"
-            $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
+            try {
+                # Import PSPKI
+                _Log "Importing PSPKI..."
+                Import-Module PSPKI -Force
 
-            _Log "Submitting certificate request: $reqFile"
+                $reqFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.req"
+                $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
 
-            # Submit the request
-            $submitResult = Submit-CertificateRequest -Path $reqFile -CertificationAuthority (Get-CertificationAuthority)
-            _Log "Request submitted. Request ID: $($submitResult.RequestID), Status: $($submitResult.Status)"
+                # Idempotency: if the cert file already exists, skip signing
+                if (Test-Path $cerFile) {
+                    $fileSize = (Get-Item $cerFile).Length
+                    if ($fileSize -gt 0) {
+                        _Log "Certificate file already exists ($fileSize bytes): $cerFile - skipping signing"
+                        return @{ Success = $true; Log = $report.ToArray(); CerFile = $cerFile }
+                    }
+                    else {
+                        _Log "Certificate file exists but is empty - removing and re-signing"
+                        Remove-Item $cerFile -Force
+                    }
+                }
 
-            # Approve the request (standalone CA holds requests pending by default).
-            # Status enum values vary across PSPKI versions ("Pending", "Taken Under Submission", etc.),
-            # so we approve unless already issued.
-            if ($submitResult.Status -ne "Issued") {
-                _Log "Approving pending request (Status='$($submitResult.Status)')..."
+                if (-not (Test-Path $reqFile)) {
+                    throw "CSR file not found: $reqFile"
+                }
+
+                # Ensure CA service is running
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -ne 'Running') {
+                    _Log "Starting certsvc..."
+                    Start-Service certsvc -ErrorAction Stop
+                    Start-Sleep -Seconds 5
+                }
+
+                _Log "Submitting certificate request: $reqFile"
+
+                # Submit the request
+                $ca = Get-CertificationAuthority
+                $submitResult = Submit-CertificateRequest -Path $reqFile -CertificationAuthority $ca
+                _Log "Request submitted. Request ID: $($submitResult.RequestID), Status: $($submitResult.Status)"
+
+                # Approve the request (standalone CA holds requests pending by default).
+                # Status enum values vary across PSPKI versions ("Pending", "Taken Under Submission", etc.),
+                # so we approve unless already issued.
+                if ($submitResult.Status -ne "Issued") {
+                    _Log "Approving pending request (Status='$($submitResult.Status)')..."
+                    try {
+                        $submitResult | Approve-CertificateRequest | Out-Null
+                        _Log "Request approved."
+                    }
+                    catch {
+                        _Log "Approve-CertificateRequest threw (may already be issued): $($_.Exception.Message)"
+                    }
+
+                    # Verify approval worked by re-querying
+                    Start-Sleep -Seconds 3
+                }
+
+                # Retrieve the issued certificate
+                _Log "Retrieving issued certificate..."
+                $requestID = $submitResult.RequestID
+                & certreq.exe -retrieve $requestID $cerFile | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    _Log "WARNING: certreq -retrieve exit code $LASTEXITCODE - attempting alternate retrieval"
+                    # Alternate: try retrieving via PSPKI
+                    try {
+                        $issued = Get-IssuedRequest -CertificationAuthority $ca -RequestID $requestID
+                        if ($issued) {
+                            $issued | Receive-Certificate -Path $cerFile | Out-Null
+                            _Log "Retrieved via PSPKI Receive-Certificate"
+                        }
+                    }
+                    catch {
+                        _Log "Alternate retrieval also failed: $($_.Exception.Message)"
+                    }
+                }
+
+                if (Test-Path $cerFile) {
+                    $fileSize = (Get-Item $cerFile).Length
+                    if ($fileSize -eq 0) {
+                        throw "Certificate file created but is empty (0 bytes): $cerFile"
+                    }
+                    _Log "Certificate retrieved ($fileSize bytes): $cerFile"
+                }
+                else {
+                    throw "Certificate file not found after retrieval: $cerFile"
+                }
+
+                _Log "Step 3 complete."
+                return @{ Success = $true; Log = $report.ToArray(); CerFile = $cerFile }
+            }
+            catch {
+                _Log "FAILED: $($_.Exception.Message)"
+                return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+            }
+        }
+
+        $result3 = Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" `
+            -ScriptBlock $step3Script `
+            -ArgumentList $intCAFilesPath, $intCAServer, $intCAName `
+            -DisplayName "TwoTierPKI Step 3: Sign CSR on Root CA"
+
+        if ($result3.ScriptBlockFailed -or -not $result3.ScriptBlockOutput.Success) {
+            $err = if ($result3.ScriptBlockFailed) { $result3.ScriptBlockFailed } else { $result3.ScriptBlockOutput.Error }
+            Write-Log "[TwoTierPKI] Step 3 FAILED: $err" -Failure
+            if ($result3.ScriptBlockOutput.Log) {
+                foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
+            }
+            return $false
+        }
+        foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
+        Write-Log "[TwoTierPKI] Step 3 complete: CSR signed"
+
+        #---------------------------------------------------------------------------
+        # HOST COPY: Signed cert from Root CA → host → DC
+        #---------------------------------------------------------------------------
+        $cerFileName = [System.IO.Path]::GetFileName($result3.ScriptBlockOutput.CerFile)
+        Write-Log "[TwoTierPKI] Copying signed cert '$cerFileName' from Root CA to DC via host..." -LogOnly
+
+        # Root CA → host
+        $copyResult = Copy-ItemFromVM -Path $result3.ScriptBlockOutput.CerFile -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
+        if (-not $copyResult) {
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy signed cert from Root CA to host" -Failure
+            return $false
+        }
+        # host → DC
+        $cerOnHost = Join-Path $hostStagingPath $cerFileName
+        if (-not (Test-Path $cerOnHost)) {
+            Write-Log "[TwoTierPKI] ERROR: Signed cert not found on host at $cerOnHost" -Failure
+            return $false
+        }
+        Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
+
+        #---------------------------------------------------------------------------
+        # STEP 4: Complete Intermediate CA (DC)
+        #---------------------------------------------------------------------------
+        Write-Log "[TwoTierPKI] Step 4: Completing Intermediate CA configuration on $dcVMName..." -NoIndent
+
+        $step4Script = {
+            param($IntCAName, $DomainName, $WebURL, $WebFolderPath, $IntCAFilesPath, $IntCAServer)
+
+            $ErrorActionPreference = 'Stop'
+            $report = [System.Collections.Generic.List[string]]::new()
+            function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+            # Helper: wait for certsvc to become responsive after restart
+            function Wait-CertSvcReady {
+                param([int]$TimeoutSec = 60)
+                $deadline = (Get-Date).AddSeconds($TimeoutSec)
+                while ((Get-Date) -lt $deadline) {
+                    try {
+                        $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                        if ($svc -and $svc.Status -eq 'Running') {
+                            $null = & certutil.exe -ping 2>&1
+                            if ($LASTEXITCODE -eq 0) { return $true }
+                        }
+                    } catch {}
+                    Start-Sleep -Seconds 2
+                }
+                return $false
+            }
+
+            try {
+                # Idempotency: check if CA is already fully operational
+                $alreadyOperational = $false
                 try {
-                    $submitResult | Approve-CertificateRequest | Out-Null
-                    _Log "Request approved."
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    if ($svc -and $svc.Status -eq 'Running') {
+                        $null = & certutil.exe -ping 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            $alreadyOperational = $true
+                            _Log "Intermediate CA already operational (certsvc running and responsive)"
+                        }
+                    }
+                } catch {}
+
+                $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
+
+                if (-not $alreadyOperational) {
+                    if (-not (Test-Path $cerFile)) {
+                        throw "Signed certificate file not found: $cerFile"
+                    }
+
+                    # Install the issued certificate
+                    _Log "Installing issued certificate: $cerFile"
+                    & certutil.exe -installcert $cerFile | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        # Check if it's already installed (exit code varies)
+                        $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                        if ($svc) {
+                            _Log "certutil -installcert returned $LASTEXITCODE but certsvc exists - may already be installed"
+                        }
+                        else {
+                            throw "certutil -installcert failed with exit code $LASTEXITCODE"
+                        }
+                    }
+
+                    # Activate CA
+                    _Log "Starting/restarting certsvc to activate CA..."
+                    Restart-Service certsvc -ErrorAction SilentlyContinue
+                    if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                        throw "CA service did not become responsive after certificate installation"
+                    }
+                    _Log "CA service is ready."
                 }
-                catch {
-                    _Log "Approve-CertificateRequest threw (may already be issued): $($_.Exception.Message)"
+
+                # Import PSPKI for CDP/AIA configuration
+                Import-Module PSPKI -Force -ErrorAction SilentlyContinue
+
+                # Configure CRL Distribution Points (idempotent - clear and re-add)
+                _Log "Configuring CDP..."
+                $crlList = Get-CACrlDistributionPoint
+                foreach ($crl in $crlList) {
+                    if ($crl.Uri -like '*http*' -or $crl.Uri -like '*file*') {
+                        Remove-CACrlDistributionPoint $crl.Uri -Force | Out-Null
+                    }
                 }
-            }
+                Add-CACRLDistributionPoint -Uri "file://$($WebFolderPath)$($IntCAName)%8%9.crl" -PublishToServer -PublishDeltaToServer -Force | Out-Null
+                Add-CACRLDistributionPoint -Uri "$($WebURL)$($IntCAName)%8%9.crl" -AddToCertificateCDP -AddToFreshestCrl -Force | Out-Null
 
-            # Retrieve the issued certificate
-            _Log "Retrieving issued certificate..."
-            $requestID = $submitResult.RequestID
-            & certreq.exe -retrieve $requestID $cerFile | Out-Null
+                # Configure AIA (idempotent)
+                _Log "Configuring AIA..."
+                Get-CAAuthorityInformationAccess | Where-Object { $_.Uri -like '*http*' -or $_.Uri -like '*file*' } | Remove-CAAuthorityInformationAccess -Force | Out-Null
+                Add-CAAuthorityInformationAccess -AddToCertificateAia "$($WebURL)$($IntCAName).crt" -Force | Out-Null
 
-            if (Test-Path $cerFile) {
-                _Log "Certificate retrieved: $cerFile"
-            }
-            else {
-                throw "Certificate file not found after retrieval: $cerFile"
-            }
+                # Set CRL periods (idempotent registry writes)
+                _Log "Setting CRL periods..."
+                & certutil.exe -setreg CA\CRLPeriodUnits 2 | Out-Null
+                & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 1 | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
+                & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 | Out-Null
+                & certutil.exe -setreg CA\CRLOverlapPeriod "Hours" | Out-Null
+                & certutil.exe -setreg CA\ValidityPeriodUnits 5 | Out-Null
+                & certutil.exe -setreg CA\ValidityPeriod "Years" | Out-Null
 
-            _Log "Step 3 complete."
-            return @{ Success = $true; Log = $report.ToArray(); CerFile = $cerFile }
-        }
-        catch {
-            _Log "FAILED: $($_.Exception.Message)"
-            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
-        }
-    }
+                # Enable auditing
+                _Log "Enabling audit..."
+                & certutil.exe -setreg CA\AuditFilter 127 | Out-Null
 
-    $result3 = Invoke-VmCommand -VmName $rootCAVMName -VmDomainName "WORKGROUP" `
-        -ScriptBlock $step3Script `
-        -ArgumentList $intCAFilesPath, $intCAServer, $intCAName `
-        -DisplayName "TwoTierPKI Step 3: Sign CSR on Root CA"
-
-    if ($result3.ScriptBlockFailed -or -not $result3.ScriptBlockOutput.Success) {
-        $err = if ($result3.ScriptBlockFailed) { $result3.ScriptBlockFailed } else { $result3.ScriptBlockOutput.Error }
-        Write-Log "[TwoTierPKI] Step 3 FAILED: $err" -Failure
-        if ($result3.ScriptBlockOutput.Log) {
-            foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
-        }
-        return $false
-    }
-    foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
-    Write-Log "[TwoTierPKI] Step 3 complete: CSR signed"
-
-    #---------------------------------------------------------------------------
-    # HOST COPY: Signed cert from Root CA → host → DC
-    #---------------------------------------------------------------------------
-    $cerFileName = [System.IO.Path]::GetFileName($result3.ScriptBlockOutput.CerFile)
-    Write-Log "[TwoTierPKI] Copying signed cert '$cerFileName' from Root CA to DC via host..." -LogOnly
-
-    # Root CA → host
-    Copy-ItemFromVM -Path $result3.ScriptBlockOutput.CerFile -Destination $hostStagingPath -VMName $rootCAVMName -VMDomainName "WORKGROUP"
-    # host → DC
-    $cerOnHost = Join-Path $hostStagingPath $cerFileName
-    Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
-
-    #---------------------------------------------------------------------------
-    # STEP 4: Complete Intermediate CA (DC)
-    #---------------------------------------------------------------------------
-    Write-Log "[TwoTierPKI] Step 4: Completing Intermediate CA configuration on $dcVMName..." -NoIndent
-
-    $step4Script = {
-        param($IntCAName, $DomainName, $WebURL, $WebFolderPath, $IntCAFilesPath, $IntCAServer)
-
-        $ErrorActionPreference = 'Stop'
-        $report = [System.Collections.Generic.List[string]]::new()
-        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
-
-        try {
-            $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
-
-            # Install the issued certificate
-            _Log "Installing issued certificate: $cerFile"
-            & certutil.exe -installcert $cerFile | Out-Null
-
-            # Activate CA
-            _Log "Restarting certsvc to activate CA..."
-            Restart-Service certsvc
-            Start-Sleep -Seconds 5
-
-            # Configure CRL Distribution Points
-            _Log "Configuring CDP..."
-            $crlList = Get-CACrlDistributionPoint
-            foreach ($crl in $crlList) {
-                if ($crl.Uri -like '*http*' -or $crl.Uri -like '*file*') {
-                    Remove-CACrlDistributionPoint $crl.Uri -Force | Out-Null
+                # Activate changes
+                _Log "Restarting certsvc to apply changes..."
+                Restart-Service certsvc
+                if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                    _Log "WARNING: CA service slow to respond after final restart"
                 }
+
+                # Publish CRL
+                _Log "Publishing CRL..."
+                & certutil.exe -crl | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -crl returned exit code $LASTEXITCODE" }
+
+                _Log "Step 4 complete. Intermediate CA is fully operational."
+                return @{ Success = $true; Log = $report.ToArray() }
             }
-            Add-CACRLDistributionPoint -Uri "file://$($WebFolderPath)$($IntCAName)%8%9.crl" -PublishToServer -PublishDeltaToServer -Force | Out-Null
-            Add-CACRLDistributionPoint -Uri "$($WebURL)$($IntCAName)%8%9.crl" -AddToCertificateCDP -AddToFreshestCrl -Force | Out-Null
-
-            # Configure AIA
-            _Log "Configuring AIA..."
-            Get-CAAuthorityInformationAccess | Where-Object { $_.Uri -like '*http*' -or $_.Uri -like '*file*' } | Remove-CAAuthorityInformationAccess -Force | Out-Null
-            Add-CAAuthorityInformationAccess -AddToCertificateAia "$($WebURL)$($IntCAName).crt" -Force | Out-Null
-
-            # Set CRL periods
-            _Log "Setting CRL periods..."
-            & certutil.exe -setreg CA\CRLPeriodUnits 2 | Out-Null
-            & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
-            & certutil.exe -setreg CA\CRLDeltaPeriodUnits 1 | Out-Null
-            & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
-            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 | Out-Null
-            & certutil.exe -setreg CA\CRLOverlapPeriod "Hours" | Out-Null
-            & certutil.exe -setreg CA\ValidityPeriodUnits 5 | Out-Null
-            & certutil.exe -setreg CA\ValidityPeriod "Years" | Out-Null
-
-            # Enable auditing
-            _Log "Enabling audit..."
-            & certutil.exe -setreg CA\AuditFilter 127 | Out-Null
-
-            # Activate changes
-            _Log "Restarting certsvc to apply changes..."
-            Restart-Service certsvc
-            Start-Sleep -Seconds 5
-
-            # Publish CRL
-            _Log "Publishing CRL..."
-            & certutil.exe -crl | Out-Null
-
-            _Log "Step 4 complete. Intermediate CA is fully operational."
-            return @{ Success = $true; Log = $report.ToArray() }
+            catch {
+                _Log "FAILED: $($_.Exception.Message)"
+                return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+            }
         }
-        catch {
-            _Log "FAILED: $($_.Exception.Message)"
-            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+
+        $result4 = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+            -ScriptBlock $step4Script `
+            -ArgumentList $intCAName, $domainName, $webURL, $webFolderPath, $intCAFilesPath, $intCAServer `
+            -DisplayName "TwoTierPKI Step 4: Complete Intermediate CA"
+
+        if ($result4.ScriptBlockFailed -or -not $result4.ScriptBlockOutput.Success) {
+            $err = if ($result4.ScriptBlockFailed) { $result4.ScriptBlockFailed } else { $result4.ScriptBlockOutput.Error }
+            Write-Log "[TwoTierPKI] Step 4 FAILED: $err" -Failure
+            if ($result4.ScriptBlockOutput.Log) {
+                foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+            }
+            return $false
         }
+        foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+        Write-Log "[TwoTierPKI] Step 4 complete: Intermediate CA operational"
     }
-
-    $result4 = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-        -ScriptBlock $step4Script `
-        -ArgumentList $intCAName, $domainName, $webURL, $webFolderPath, $intCAFilesPath, $intCAServer `
-        -DisplayName "TwoTierPKI Step 4: Complete Intermediate CA"
-
-    if ($result4.ScriptBlockFailed -or -not $result4.ScriptBlockOutput.Success) {
-        $err = if ($result4.ScriptBlockFailed) { $result4.ScriptBlockFailed } else { $result4.ScriptBlockOutput.Error }
-        Write-Log "[TwoTierPKI] Step 4 FAILED: $err" -Failure
-        if ($result4.ScriptBlockOutput.Log) {
-            foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-        }
-        return $false
-    }
-    foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-    Write-Log "[TwoTierPKI] Step 4 complete: Intermediate CA operational"
 
     #---------------------------------------------------------------------------
     # STEP 5: Shutdown Root CA VM
     #---------------------------------------------------------------------------
     Write-Log "[TwoTierPKI] Step 5: Shutting down Root CA VM '$rootCAVMName'..."
     try {
-        Stop-VM -Name $rootCAVMName -Force -ErrorAction Stop
-        Write-Log "[TwoTierPKI] Root CA VM shut down successfully."
+        $vmState = (Get-VM -Name $rootCAVMName -ErrorAction SilentlyContinue).State
+        if ($vmState -eq 'Off') {
+            Write-Log "[TwoTierPKI] Root CA VM already off."
+        }
+        else {
+            Stop-VM -Name $rootCAVMName -Force -ErrorAction Stop
+            Write-Log "[TwoTierPKI] Root CA VM shut down successfully."
+        }
     }
     catch {
         Write-Log "[TwoTierPKI] WARNING: Failed to shut down Root CA VM: $($_.Exception.Message)" -Warning
