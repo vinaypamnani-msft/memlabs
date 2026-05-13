@@ -157,7 +157,34 @@ function Start-VM2 {
 
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
+    $vmLockMx = $null
     try {
+        # Per-VM cross-process lock. If Compact-Disks (or another MemLabs
+        # operation that honors MemLabs_VM_<name>) is currently working
+        # on this VM - merging checkpoints, mounting the VHDX for offline
+        # cleanup, running Optimize-VHD - starting the VM right now would
+        # either fail with 0x80070020 file-in-use, or worse, cause the
+        # other tool to dismount the VHDX out from under us. Wait for it.
+        try {
+            $vmLockMx = [System.Threading.Mutex]::new($false, "MemLabs_VM_$Name")
+            $gotLock = $false
+            try { $gotLock = $vmLockMx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $gotLock = $true }
+            if (-not $gotLock) {
+                Write-Log "${Name}: another MemLabs operation holds the VM lock; waiting up to 60 min..." -Warning
+                try { $gotLock = $vmLockMx.WaitOne([TimeSpan]::FromMinutes(60)) }
+                catch [System.Threading.AbandonedMutexException] { $gotLock = $true }
+                if ($gotLock) { Write-Log "${Name}: VM lock acquired; proceeding with Start-VM" -LogOnly }
+                else { Write-Log "${Name}: timed out waiting for VM lock; proceeding without it" -Warning }
+            }
+            if (-not $gotLock) {
+                try { $vmLockMx.Dispose() } catch {}
+                $vmLockMx = $null
+            }
+        } catch {
+            try { Write-Log "${Name}: failed to acquire VM lock: $($_.Exception.Message)" -Warning } catch {}
+            $vmLockMx = $null
+        }
+
         $vm = Get-VM2 -Name $Name -Fallback
 
         if ($vm.State -eq "Running") {
@@ -283,6 +310,10 @@ function Start-VM2 {
     finally {
         write-progress2 "Start VM" -Status "Started VM $Name" -force -Completed
         $Global:ProgressPreference = $OriginalProgressPreference
+        if ($vmLockMx) {
+            try { $vmLockMx.ReleaseMutex() } catch {}
+            try { $vmLockMx.Dispose() } catch {}
+        }
     }
 }
 function Test-VmResponsive {

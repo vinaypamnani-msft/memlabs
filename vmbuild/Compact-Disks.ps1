@@ -220,6 +220,57 @@ if ($env:_COMPACT_DISKS_WORKER) {
     }
 
     # ------------------------------------------------------------------
+    # Per-VM cross-process lock (named mutex "MemLabs_VM_<vmname>").
+    #
+    # Acquired on the main script thread when a VM enters prep, released
+    # when the VM has no more pending/running disks. This blocks
+    # Start-VM2 (and any other MemLabs operation that honors the same
+    # mutex) in this or any other process from touching the VM while we
+    # have its disks unmounted, mid-merge, or mid-Optimize-VHD.
+    #
+    # Mutex MUST be released on the same thread that acquired it, so
+    # both Acquire-VmLock and Release-VmLock are only ever called from
+    # the orchestration loop (never from the UI runspace or from inside
+    # a Start-Job worker - the worker is a different process and would
+    # block on the lock the parent already holds, which is precisely
+    # the safety we want for OTHER processes).
+    # ------------------------------------------------------------------
+    $script:VmLocks = @{}
+    function Acquire-VmLock {
+        param([string]$VmName)
+        if ($script:VmLocks.ContainsKey($VmName)) { return }
+        $mxName = "MemLabs_VM_$VmName"
+        try {
+            $mx = [System.Threading.Mutex]::new($false, $mxName)
+            $got = $false
+            try { $got = $mx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $got = $true }
+            if (-not $got) {
+                Add-UiLog ("[VM-LOCK] $VmName : another MemLabs operation holds the VM lock; waiting up to 60 min...")
+                try { $got = $mx.WaitOne([TimeSpan]::FromMinutes(60)) }
+                catch [System.Threading.AbandonedMutexException] { $got = $true }
+            }
+            if ($got) {
+                $script:VmLocks[$VmName] = $mx
+                Add-UiLog ("[VM-LOCK] acquired $VmName")
+            } else {
+                Add-UiLog ("[VM-LOCK] $VmName : timed out waiting for lock; proceeding without it")
+                try { $mx.Dispose() } catch {}
+            }
+        } catch {
+            Add-UiLog ("[VM-LOCK] $VmName : failed to acquire lock: $($_.Exception.Message)")
+        }
+    }
+    function Release-VmLock {
+        param([string]$VmName)
+        if (-not $script:VmLocks.ContainsKey($VmName)) { return }
+        $mx = $script:VmLocks[$VmName]
+        try { $mx.ReleaseMutex() } catch {}
+        try { $mx.Dispose() } catch {}
+        [void]$script:VmLocks.Remove($VmName)
+        Add-UiLog ("[VM-LOCK] released $VmName")
+    }
+
+    # ------------------------------------------------------------------
     # Invoke-CompactCleanup - safety-net cleanup for early exit.
     #
     # If the user closes the WPF window mid-run (or the worker dies for
@@ -343,6 +394,15 @@ if ($env:_COMPACT_DISKS_WORKER) {
         #    interrupted job might have left inside a mounted volume.
         #    (After dismount the file is gone with the volume, so nothing
         #    to do here - kept as a comment for future maintainers.)
+
+        # 4. Release any per-VM locks we still hold so external callers
+        #    (Start-VM2 etc.) aren't blocked indefinitely after a crash
+        #    or force-close.
+        try {
+            if ($script:VmLocks -and $script:VmLocks.Count -gt 0) {
+                foreach ($lockedVm in @($script:VmLocks.Keys)) { Release-VmLock -VmName $lockedVm }
+            }
+        } catch {}
 
         try { Add-UiLog ("[CLEANUP] Safety cleanup complete") } catch {}
     }
@@ -1025,6 +1085,12 @@ $btnXaml
                     continue
                 }
                 Add-UiLog ("[PREP-START] $($vm.VMName)")
+                # Acquire the per-VM cross-process lock BEFORE the worker
+                # touches Hyper-V. This blocks Start-VM2 (and any other
+                # tool that honors MemLabs_VM_<name>) from poking the VM
+                # while we have its disks in flight. Released after the
+                # last compact job for this VM completes (or in cleanup).
+                Acquire-VmLock -VmName $vm.VMName
                 try {
                     $job = Start-Job -Name "Prep_$($vm.VMName)" -ScriptBlock {
                         param($n, $timeoutSec, $commonPath, $doOnlineClean, $serializeDrives)
@@ -2278,6 +2344,23 @@ $btnXaml
                 }
             }
             $activeJobs = $stillRunning
+
+            # Release per-VM locks for any VM that has no remaining work:
+            # no active prep job, no queued disks, no running compact job,
+            # and no Pending entries in $diskInfoList. Done here so we
+            # release as soon as a VM is fully processed (rather than
+            # waiting for the entire batch to complete).
+            if ($script:VmLocks.Count -gt 0) {
+                foreach ($lockedVm in @($script:VmLocks.Keys)) {
+                    $stillBusy = $false
+                    if ($activePrepJobs | Where-Object { $_.VMName -eq $lockedVm }) { $stillBusy = $true }
+                    elseif ($prepQueue | Where-Object { $_.VMName -eq $lockedVm }) { $stillBusy = $true }
+                    elseif ($activeJobs | Where-Object { $_.VMName -eq $lockedVm }) { $stillBusy = $true }
+                    elseif ($diskQueue | Where-Object { $_.VMName -eq $lockedVm }) { $stillBusy = $true }
+                    elseif ($diskInfoList | Where-Object { $_.VMName -eq $lockedVm -and ($_.Status -eq 'Pending' -or $_.Status -eq 'Running') }) { $stillBusy = $true }
+                    if (-not $stillBusy) { Release-VmLock -VmName $lockedVm }
+                }
+            }
 
             Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -ActivePrepJobs $activePrepJobs -StartTime $startTime
 
