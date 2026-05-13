@@ -681,8 +681,11 @@ function Select-MainMenu {
         Set-Variable -Scope "Global" -Name "DisableSmartUpdate" -Value $true
         $global:GenConfigErrorMessages = @()
         # Auto-add a StandaloneRootCA VM if UseOfflineRootCA was enabled but
-        # one doesn't exist in this config or in the target domain.
+        # one doesn't exist in this config or in the target domain. Conversely,
+        # if UseOfflineRootCA is now disabled, auto-remove any StandaloneRootCA
+        # VM that we previously auto-added (user-created ones are preserved).
         try { Add-OfflineRootCAVMIfMissing -ConfigToModify $Global:Config } catch { Write-Log "Add-OfflineRootCAVMIfMissing failed: $_" -LogOnly }
+        try { Remove-OfflineRootCAVMIfAutoAdded -ConfigToModify $Global:Config } catch { Write-Log "Remove-OfflineRootCAVMIfAutoAdded failed: $_" -LogOnly }
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
 
