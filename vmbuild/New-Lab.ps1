@@ -636,6 +636,7 @@ try {
         Set-TitleBar "SCRIPT FINISHED WITH FAILURES"
         $NewLabsuccess = $false
         Write-Log "### SCRIPT FINISHED WITH FAILURES (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Failure -NoIndent
+        Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         if ($currentPhase -ge 2) {
             if ($currentPhase -eq 8) {
                 write-host
@@ -730,6 +731,7 @@ finally {
         Write-Log "Script exited unsuccessfully. Ctrl-C may have been pressed. Killing running jobs." -LogOnly
         Set-TitleBar "Script Cancelled"
         Write-Log "### $Configuration Terminated $currentPhase" -HostOnly
+        Write-Log "Log file: $($Common.LogPath)" -Warning -NoIndent
         $exitcode = 2
         if ($currentPhase -ge 2 -and $currentPhase -le $maxPhase) {
             if ($currentPhase -eq 8) {

@@ -807,7 +807,7 @@ function Get-File {
     $bearerToken = $null
 
     # ---- Add auth if source is a storage URL ----
-    if ($Source -and $Source -like "$($StorageConfig.StorageLocation)*") {
+    if ($Source -and $StorageConfig.StorageLocation -and $Source -like "$($StorageConfig.StorageLocation)*") {
         $sourceDisplay = Split-Path $sourceDisplay -Leaf
 
         if ($StorageConfig.UseBearerAuth) {

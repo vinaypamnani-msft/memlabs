@@ -1103,7 +1103,17 @@ function Test-ValidDiskSpace {
         }
 
         if ($unknownSizeVms.Count -gt 0) {
-            Add-ValidationMessage -Message "Disk Space Validation: Source VHDX file(s) not yet downloaded for: $($unknownSizeVms -join ', '). Assumed 16GB each for space calculation; actual size may differ." -ReturnObject $ReturnObject -Warning
+            # Only emit as a blocking warning when disk space actually failed
+            # (provides context about the assumed sizes). When space is
+            # sufficient, just log it - the user can't fix "not downloaded"
+            # from the menu and it shouldn't block deployment.
+            $notDownloadedMsg = "Disk Space Validation: Source VHDX file(s) not yet downloaded for: $($unknownSizeVms -join ', '). Assumed 16GB each for space calculation; actual size may differ."
+            if ($freeBytes -lt $requiredWithReserve) {
+                Add-ValidationMessage -Message $notDownloadedMsg -ReturnObject $ReturnObject -Warning
+            }
+            else {
+                Write-Log -Verbose $notDownloadedMsg
+            }
         }
     }
     catch {
