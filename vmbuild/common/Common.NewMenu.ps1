@@ -991,12 +991,23 @@ Function Update-HelpText {
     Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
     Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))  
     if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {      
-           
+
+        # Truncate the help text so it fits on a single line. The box
+        # pre-clears exactly 3 rows (top border, text, bottom border);
+        # if the text wraps to a 2nd visual line it pushes the bottom
+        # border down and corrupts the layout. Reserve room for the
+        # leading " │🕮  " prefix and trailing margin.
+        $maxWidth = $host.UI.RawUI.WindowSize.Width - 6
+        $oneLineHelp = ($CurrentHelpText -replace "`r?`n", ' ').Trim()
+        if ($maxWidth -gt 4 -and $oneLineHelp.Length -gt $maxWidth) {
+            $oneLineHelp = $oneLineHelp.Substring(0, $maxWidth - 1) + '…'
+        }
+
         Set-CursorPosition -X 0 -Y $HelpPosition.Y
         write-host2 " ╭───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
         write-host2 " │" -noNewLine -ForegroundColor MediumOrchid
         write-host2 "🕮  " -ForegroundColor BlanchedAlmond -noNewLine
-        write-host2 "$CurrentHelpText" -foregroundColor $Color
+        write-host2 "$oneLineHelp" -foregroundColor $Color
         write-host2 " ╰───────────────────────────────────────────────────────────────────────────────────────────────" -ForegroundColor MediumOrchid
     
     }
