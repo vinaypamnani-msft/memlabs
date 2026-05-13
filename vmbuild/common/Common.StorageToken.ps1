@@ -464,7 +464,7 @@ function Initialize-Storage {
         # Load local config and determine auth mode
         $storageConfigLoaded = Get-StorageConfig
         if (-not $storageConfigLoaded) {
-            Write-Log "Get-StorageConfig failed — attempting offline mode using local cached files." -Warning
+            Write-Log "Get-StorageConfig failed - attempting offline mode using local cached files." -Warning
             $Common.OfflineMode = $true
 
             # Clear FatalError so offline mode can continue
@@ -487,7 +487,7 @@ function Initialize-Storage {
         }
 
         # Skip Update-StorageConfigFile entirely if storage config failed
-        # — we have no valid StorageLocation to build URLs with
+        # We have no valid StorageLocation to build URLs with
         if ($storageConfigLoaded) {
             Update-StorageConfigFile | Out-Null
         }
@@ -538,7 +538,7 @@ function Update-StorageConfigFile {
         $response = Invoke-StorageRequest -Url $url
 
         if (-not $response) {
-            Write-Log "Update-StorageConfigFile: Could not download $($script:downloadConfigName) — continuing with existing config." -LogOnly
+            Write-Log "Update-StorageConfigFile: Could not download $($script:downloadConfigName) - continuing with existing config." -LogOnly
             return $true  # Non-fatal
         }
 
@@ -609,7 +609,7 @@ function Update-FileList {
     $response = Invoke-StorageRequest -Url $url
 
     if (-not $response) {
-        # Download failed — fall back to local cache before giving up
+        # Download failed - fall back to local cache before giving up
         if (Test-Path $script:fileListPath) {
             Write-Log "Failed to download file list, falling back to local cache." -Warning
             $Common.OfflineMode = $true
