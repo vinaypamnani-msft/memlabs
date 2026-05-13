@@ -2443,8 +2443,15 @@ $btnXaml
 
             Update-Progress -DiskList $diskInfoList -ActiveJobs $activeJobs -ActivePrepJobs $activePrepJobs -StartTime $startTime
 
-            if ($activePrepJobs.Count -gt 0 -or $activeJobs.Count -gt 0 -or
-                $prepQueue.Count -gt 0 -or $diskQueue.Count -gt 0) {
+            # Skip the throttle sleep when we have free compact slots AND
+            # queued disks waiting: the next loop iteration's "Launch compact
+            # jobs" block will fill them right away. Otherwise a job that
+            # finishes early just sits idle for the full 400ms tick before
+            # its slot gets refilled, wasting wall time on every reap.
+            $haveCapacity = ($activeJobs.Count -lt $MaxConcurrentJobs) -and ($diskQueue.Count -gt 0)
+            if (-not $haveCapacity -and (
+                    $activePrepJobs.Count -gt 0 -or $activeJobs.Count -gt 0 -or
+                    $prepQueue.Count -gt 0 -or $diskQueue.Count -gt 0)) {
                 Start-Sleep -Milliseconds 400
             }
         }
