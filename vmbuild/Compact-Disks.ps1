@@ -735,11 +735,29 @@ $btnXaml
             $logEntries = @($UiSync.Log)
             if ($logEntries.Count -gt $ui.LogCount) {
                 $newLines = $logEntries[$ui.LogCount..($logEntries.Count - 1)]
-                $existing = $LogText.Text
-                if ($existing) { $existing += "`n" }
-                $LogText.Text = $existing + ($newLines -join "`n")
+                # Stick-to-bottom: only auto-scroll if the user was already
+                # parked at the bottom. If they've scrolled up to read older
+                # entries, leave the viewport where it is so new arrivals
+                # don't yank them back down. 4px slack absorbs sub-pixel
+                # rounding so the auto-follow doesn't break on its own.
+                $wasAtBottom = $true
+                try {
+                    $wasAtBottom = ($LogText.VerticalOffset + $LogText.ViewportHeight) -ge ($LogText.ExtentHeight - 4)
+                } catch {}
+                $append = ($newLines -join "`n")
+                if ($LogText.Text.Length -gt 0) { $append = "`n" + $append }
+                # AppendText preserves caret and avoids the scroll-reset that
+                # reassigning .Text would cause.
+                $LogText.AppendText($append)
                 $ui.LogCount = $logEntries.Count
-                $LogText.ScrollToEnd()
+                if ($wasAtBottom) {
+                    # ScrollToEnd before layout is recomputed scrolls to the
+                    # OLD end. Defer to Background so WPF measures the new
+                    # text first, then we land on the actual bottom.
+                    [void]$LogText.Dispatcher.BeginInvoke(
+                        [System.Windows.Threading.DispatcherPriority]::Background,
+                        [Action]{ $LogText.ScrollToEnd() })
+                }
             }
         })
         $timer.Start()
