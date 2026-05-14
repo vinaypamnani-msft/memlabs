@@ -1183,25 +1183,48 @@ $btnXaml
                         # 50 GB parent, but Optimize-VHD only reclaims a few
                         # more GB - the bulk of the savings happened in the
                         # merge step, not the compact step).
+                        # Per-disk map (root parent path -> chain bytes) so
+                        # the per-disk Before column in the summary table
+                        # can show the full pre-merge chain size for THAT
+                        # disk, not just the merged-down parent. The root
+                        # parent at the end of the chain stays the same
+                        # path through the merge, so we key the map by it
+                        # and look up by path again at ENUMERATE time.
                         $preMergeBytes = [long]0
+                        $preMergeByRoot = @{}
                         try {
                             $seenChain = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                             foreach ($hd in (Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
                                 if (-not $hd.Path) { continue }
                                 $cur = $hd.Path
+                                $chainBytes = [long]0
+                                $rootPath   = $null
                                 # Walk parent chain via Get-VHD ParentPath.
                                 while ($cur -and $seenChain.Add($cur)) {
                                     try {
                                         if (Test-Path -LiteralPath $cur) {
-                                            $preMergeBytes += ([System.IO.FileInfo]::new($cur)).Length
+                                            $sz = ([System.IO.FileInfo]::new($cur)).Length
+                                            $preMergeBytes += $sz
+                                            $chainBytes    += $sz
                                         }
                                     } catch {}
+                                    $rootPath = $cur
                                     $parent = $null
                                     try { $parent = (Get-VHD -Path $cur -ErrorAction SilentlyContinue).ParentPath } catch {}
                                     $cur = $parent
                                 }
+                                if ($rootPath -and $chainBytes -gt 0) {
+                                    # Multiple AVHDX leaves can share a root
+                                    # (rare but possible with shared parents);
+                                    # accumulate so we don't undercount.
+                                    if ($preMergeByRoot.ContainsKey($rootPath)) {
+                                        $preMergeByRoot[$rootPath] += $chainBytes
+                                    } else {
+                                        $preMergeByRoot[$rootPath] = $chainBytes
+                                    }
+                                }
                             }
-                            Write-PrepLog ("Pre-merge total (chain): {0:N1} GB" -f ($preMergeBytes/1GB))
+                            Write-PrepLog ("Pre-merge total (chain): {0:N1} GB across {1} root disk(s)" -f ($preMergeBytes/1GB), $preMergeByRoot.Count)
                         } catch {
                             Write-PrepLog "Pre-merge sizing failed: $($_.Exception.Message)"
                         }
@@ -1823,12 +1846,25 @@ $btnXaml
                         foreach ($hd in (Get-VMHardDiskDrive -VMName $n -ErrorAction SilentlyContinue)) {
                             if ($hd.Path -and $seen.Add($hd.Path) -and (Test-Path $hd.Path)) {
                                 $fi = [System.IO.FileInfo]::new($hd.Path)
-                                Write-PrepLog ("[ENUMERATE]   {0}  ({1:N1} GB)" -f $hd.Path, ($fi.Length/1GB))
+                                # OriginalSize: pre-merge chain bytes for
+                                # this root VHDX if we have them (the path
+                                # is the same root the chain rolled up to);
+                                # fall back to the on-disk size. This makes
+                                # the per-disk Before column reflect the
+                                # full chain, not just the post-merge
+                                # parent, so the Saved column credits the
+                                # merge step too.
+                                $preBytes = [long]$fi.Length
+                                if ($preMergeByRoot.ContainsKey($hd.Path)) {
+                                    $preBytes = [long]$preMergeByRoot[$hd.Path]
+                                }
+                                Write-PrepLog ("[ENUMERATE]   {0}  (now {1:N1} GB, pre-merge {2:N1} GB)" -f $hd.Path, ($fi.Length/1GB), ($preBytes/1GB))
                                 $disks.Add(@{
                                     VMName       = $n
                                     Path         = $hd.Path
                                     FileName     = $fi.Name
-                                    OriginalSize = [long]$fi.Length
+                                    OriginalSize = $preBytes
+                                    PostMergeSize = [long]$fi.Length
                                 })
                             }
                         }
@@ -1921,6 +1957,14 @@ $btnXaml
                                 Path         = $d.Path
                                 FileName     = $d.FileName
                                 OriginalSize = [long]$d.OriginalSize
+                                # Post-merge / pre-compact size (file size on
+                                # disk after Remove-VMCheckpoint settled, before
+                                # Optimize-VHD). For VMs without checkpoints
+                                # this equals OriginalSize. Used by the size-
+                                # accounting summary so postMergeTotal stays
+                                # correct now that OriginalSize includes the
+                                # full pre-merge chain.
+                                PostMergeSize = if ($d.PostMergeSize) { [long]$d.PostMergeSize } else { [long]$d.OriginalSize }
                                 Job          = $null
                                 NewSize      = $null
                                 Status       = 'Pending'
@@ -2791,10 +2835,14 @@ $btnXaml
 
     $preMergeTotal = ($mergedVms | Where-Object { $_.PreMergeBytes } | Measure-Object -Property PreMergeBytes -Sum).Sum
     if (-not $preMergeTotal) { $preMergeTotal = 0 }
-    $postMergeTotal = ($mergedDisks | Measure-Object -Property OriginalSize -Sum).Sum
+    # PostMergeSize is the per-disk file size right after the merge settled
+    # (before Optimize-VHD). Sum across the merged VMs to get the post-merge
+    # total. We can't use OriginalSize for this anymore now that
+    # OriginalSize represents the full pre-merge chain bytes.
+    $postMergeTotal = ($mergedDisks | Measure-Object -Property PostMergeSize -Sum).Sum
     if (-not $postMergeTotal) { $postMergeTotal = 0 }
-    $postCompactSuccessOld = ($mergedSuccessful | Measure-Object -Property OriginalSize -Sum).Sum
-    $postCompactSuccessNew = ($mergedSuccessful | Measure-Object -Property NewSize      -Sum).Sum
+    $postCompactSuccessOld = ($mergedSuccessful | Measure-Object -Property PostMergeSize -Sum).Sum
+    $postCompactSuccessNew = ($mergedSuccessful | Measure-Object -Property NewSize       -Sum).Sum
     if (-not $postCompactSuccessOld) { $postCompactSuccessOld = 0 }
     if (-not $postCompactSuccessNew) { $postCompactSuccessNew = 0 }
     $postCompactTotal = $postMergeTotal - ($postCompactSuccessOld - $postCompactSuccessNew)
