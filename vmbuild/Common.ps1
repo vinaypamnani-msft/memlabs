@@ -3900,7 +3900,8 @@ function Copy-ToolToVM {
         return $false
     }
 
-    $success = $true
+    # --- Build list of source paths to bundle ---
+    $zipEntries = @()
     foreach ($ToolItem in $Tool) {
         if ($ToolItem.NoUpdate -eq $true) {
             Write-Log "$vmName`: Skipped injecting '$($ToolItem.Name) since it's marked NoUpdate." -Verbose
@@ -3913,69 +3914,107 @@ function Copy-ToolToVM {
         }
         $fileTargetRelative = Join-Path $ToolItem.Target $toolFileName
 
-        Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
-
         if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $ToolItem.ExtractFolderIfZip) {
-            Write-Log "$vmName`: File is marked to extract '$($ToolItem.Name) since ExtractFolderIfZip is true" -Verbose
             $fileTargetRelative = $ToolItem.Target
         }
 
         $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
-        $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
-        $DirTargetPathInVM = Join-Path "C:\" $ToolItem.Target
-
-        $isContainer = $false
-        if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
-            $isContainer = $true
-            $fileTargetPathInVM = "C:\tools"
-        }
 
         if ($ToolItem.Name -eq "WMI Explorer") {
-            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
-            $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
-            $DirTargetPathInVM = "C:\$fileTargetRelative"
+            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe"
+            $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
         }
 
-        Write-Log "$vmName`: Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+        if (-not (Test-Path $toolPathHost)) {
+            Write-Log "$vmName`: Source path not found for '$($ToolItem.Name)': $toolPathHost" -Warning
+            continue
+        }
 
-        if ($Fast) {
-            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName) (Fast mode)" -Log -percentcomplete $percent
+        $zipEntries += [PSCustomObject]@{
+            Name             = $ToolItem.Name
+            SourcePath       = $toolPathHost
+            TargetRelative   = $fileTargetRelative
+        }
+    }
+
+    if ($zipEntries.Count -eq 0) {
+        Write-Log "$vmName`: No tools to inject." -Verbose
+        return $true
+    }
+
+    # --- Create a single zip bundle on the host ---
+    $zipStagingDir = Join-Path $Common.TempPath "toolzip-$VMName"
+    if (Test-Path $zipStagingDir) { Remove-Item $zipStagingDir -Recurse -Force }
+    New-Item -Path $zipStagingDir -ItemType Directory -Force | Out-Null
+
+    foreach ($entry in $zipEntries) {
+        $dest = Join-Path $zipStagingDir $entry.TargetRelative
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) {
+            New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+        }
+        if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+            Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
         }
         else {
-            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName)" -Log -percentcomplete $percent
+            Copy-Item -Path $entry.SourcePath -Destination $dest -Force
         }
-        try {
-            $progressPref = $ProgressPreference
-            $ProgressPreference = "SilentlyContinue"
-            try {
-                Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+    }
+
+    $zipPath = Join-Path $Common.TempPath "tools-$VMName.zip"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+    Write-Log "$vmName`: Creating tools bundle ($($zipEntries.Count) tools)..." -LogOnly
+    $progressPref = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Compress-Archive -Path "$zipStagingDir\*" -DestinationPath $zipPath -Force
+    }
+    finally {
+        $ProgressPreference = $progressPref
+    }
+
+    $zipSizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Log "$vmName`: Copying tools bundle (${zipSizeMB} MB, $($zipEntries.Count) tools) to VM..."
+    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${zipSizeMB} MB) to $VMName" -Log
+
+    # --- Copy the single zip to the VM and expand ---
+    $success = $true
+    $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        if ($Fast) {
+            Copy-Item -ToSession $ps -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        else {
+            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+
+        # Expand inside the VM
+        if (-not $WhatIf) {
+            $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
+                Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
+                Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
             }
-            catch {}
-            if ($isContainer) {
-                if ($Fast) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-                else {
-                    Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
+            if ($expandResult.ScriptBlockFailed) {
+                Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
+                $success = $false
             }
-            else {
-                if ($Fast) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-                else {
-                    Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-            }
-            Write-Log "$vmName`: Done Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
         }
-        catch {
-            Write-Log "$vmName`: Failed to inject '$($ToolItem.Name)'. $_" -Failure
-            $success = $false
+
+        if ($success) {
+            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle." -Success
         }
-        finally {
-            $ProgressPreference = $progressPref
-        }
+    }
+    catch {
+        Write-Log "$vmName`: Failed to copy tools bundle to VM. $_" -Failure
+        $success = $false
+    }
+    finally {
+        $ProgressPreference = $progressPref
+        # Cleanup host temp files
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $success
 }
@@ -4826,16 +4865,27 @@ if (-not $Common.Initialized) {
     $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
     $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
+    # Jobs inherit context from the parent process; skip expensive probes
+    # that are irrelevant inside Start-Job / ThreadJob workers.
+    if ($InJob) {
+        $effectiveSkipEnvironmentDetection = $true
+        $effectiveSkipMaintenanceRefresh = $true
+        $effectiveSkipHostPreparation = $true
+        $effectiveSkipVmCacheRefresh = $true
+    }
+
     try {
         Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
         $Global:ProgressPreference = 'SilentlyContinue'
-        try {
-            $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
-            if ($currentProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::High) {
-                $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+        if (-not $InJob) {
+            try {
+                $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+                if ($currentProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::High) {
+                    $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+                }
             }
+            catch {}
         }
-        catch {}
     }
     catch {}
     finally {
@@ -4860,7 +4910,11 @@ if (-not $Common.Initialized) {
         $gitBranchCacheFile = Join-Path $startupCachePath "git-branch-context.json"
 
         $image = (Join-Path $PSScriptRoot "MemLabs.png")
-        if (-not $PSBoundParameters.ContainsKey('DevBranch')) {
+        if ($InJob -and -not $PSBoundParameters.ContainsKey('DevBranch')) {
+            # Jobs don't need git status; default to non-dev branch
+            $devBranch = $false
+        }
+        elseif (-not $PSBoundParameters.ContainsKey('DevBranch')) {
             Write-Progress2 "MemLabs initializing" -Status "Checking Git Status" -PercentComplete 2
             write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
             $devBranch = $false
@@ -5280,7 +5334,9 @@ if (-not $Common.Initialized) {
         ### Set supported options
         Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Gathering Supported Options" -PercentComplete 13
-        Set-SupportedOptions
+        if (-not $InJob) {
+            Set-SupportedOptions
+        }
 
         # Generate cache
         $i = 14
