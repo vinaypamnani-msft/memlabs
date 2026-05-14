@@ -1017,8 +1017,9 @@ CertificateTemplate = SubCA
     Write-Log "[TwoTierPKI] Step 4b: Importing $($templateList.Count) certificate template(s) on $dcVMName..." -NoIndent
 
     $step4bScript = {
-        param($DomainName, $TemplateList)
+        param($DomainName, $TemplateListString)
 
+        $TemplateList = $TemplateListString -split '\|'
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
@@ -1250,7 +1251,7 @@ CertificateTemplate = SubCA
 
     $result4b = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
         -ScriptBlock $step4bScript `
-        -ArgumentList $domainName, $templateList `
+        -ArgumentList $domainName, ($templateList -join '|') `
         -DisplayName "TwoTierPKI Step 4b: Import certificate templates"
 
     if ($result4b.ScriptBlockFailed -or -not $result4b.ScriptBlockOutput.Success) {
