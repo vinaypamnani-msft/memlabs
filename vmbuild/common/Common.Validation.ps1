@@ -1128,9 +1128,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
         [switch]$Fast,
         [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
-        [switch]$Final
-        #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
-        #[bool] $fast = $false
+        [switch]$Final,
+        [Parameter(Mandatory = $false, HelpMessage = "Start phase for the deployment; URLs only needed by earlier phases are skipped.")]
+        [int]$StartPhase = 0
     )
     #Get-PSCallStack | out-host
 
@@ -1646,54 +1646,81 @@ function Test-Configuration {
                 Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error
             }
             else {
-                # Build the set of URL keys actually needed by this deployment.
-                # Universal URLs required by every Windows VM (Phase 3).
-                $requiredUrlKeys = @('DotNet', 'VCredist', 'VCredistX86', 'SQLClient', 'OleDB', 'ODBC')
+                # Build the set of URL keys actually needed by this deployment,
+                # taking StartPhase into account so we skip URLs for phases already done.
+                # Phase usage: DotNet=2, VCredist/SQLClient/OleDB/SSMS/ADK/ADKPE=3,
+                #              hallengren=4, PBIRS=7, ReportBuilder/PMPC/ODBC/ADK/ADKPE=8
+                $requiredUrlKeys = @()
 
-                $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
-                $hasSecondary = $containsSecondary
-
-                # ADK/ADKPE: CAS, Primary, PassiveSite
-                if ($hasSiteServers) {
-                    $requiredUrlKeys += @('ADK', 'ADKPE')
+                # Phase 2: DotNet
+                if ($StartPhase -le 2) {
+                    $requiredUrlKeys += 'DotNet'
                 }
 
-                # ReportBuilder: CAS, Primary, Secondary, PassiveSite (Phase 8)
-                if ($hasSiteServers -or $hasSecondary) {
-                    $requiredUrlKeys += 'ReportBuilder'
+                # Phase 3: VCredist, VCredistX86, SQLClient, OleDB, ODBC, SSMS, ADK, ADKPE
+                if ($StartPhase -le 3) {
+                    $requiredUrlKeys += @('VCredist', 'VCredistX86', 'SQLClient', 'OleDB', 'ODBC')
+
+                    $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion }
+                    $hasSSMS = $deployConfig.virtualMachines | Where-Object { $_.installSSMS -eq $true }
+                    if ($hasSQL -or $hasSSMS) {
+                        $requiredUrlKeys += 'SSMS'
+                    }
+
+                    $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
+                    if ($hasSiteServers) {
+                        $requiredUrlKeys += @('ADK', 'ADKPE')
+                    }
                 }
 
-                # SSMS: any VM with sqlVersion or installSSMS
-                $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion }
-                $hasSSMS = $deployConfig.virtualMachines | Where-Object { $_.installSSMS -eq $true }
-                if ($hasSQL -or $hasSSMS) {
-                    $requiredUrlKeys += 'SSMS'
+                # Phase 4: hallengren
+                if ($StartPhase -le 4) {
+                    if (-not $hasSQL) { $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion } }
+                    if ($hasSQL) {
+                        $requiredUrlKeys += 'hallengren'
+                    }
                 }
 
-                # hallengren: any VM with sqlVersion
-                if ($hasSQL) {
-                    $requiredUrlKeys += 'hallengren'
+                # Phase 7: PBIRS
+                if ($StartPhase -le 7) {
+                    $hasRP = $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }
+                    if ($hasRP) {
+                        $requiredUrlKeys += 'PBIRS'
+                    }
                 }
 
-                # PBIRS: any VM with installRP
-                $hasRP = $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }
-                if ($hasRP) {
-                    $requiredUrlKeys += 'PBIRS'
+                # Phase 8: ReportBuilder, PMPC, ODBC, ADK/ADKPE (also used here)
+                if ($StartPhase -le 8) {
+                    $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
+                    $hasSecondary = $containsSecondary
+
+                    if ($hasSiteServers -or $hasSecondary) {
+                        $requiredUrlKeys += 'ReportBuilder'
+                    }
+                    # ADK/ADKPE are also installed in Phase 8 for CAS/Primary/Passive
+                    if ($hasSiteServers) {
+                        $requiredUrlKeys += @('ADK', 'ADKPE')
+                    }
+                    # ODBC also used in Phase 8 for Secondary/CAS/Primary
+                    if ($hasSiteServers -or $hasSecondary) {
+                        $requiredUrlKeys += 'ODBC'
+                    }
+                    $hasPMPC = $deployConfig.virtualMachines | Where-Object { $_.InstallPatchMyPC -eq $true }
+                    if ($hasPMPC) {
+                        $requiredUrlKeys += 'PMPC'
+                    }
                 }
 
-                # Linux: any VM with Linux role
+                # Linux: needed in Phase 1 (VM creation)
                 $hasLinux = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Linux' }
                 if ($hasLinux) {
                     $requiredUrlKeys += 'Linux'
                 }
 
-                # PMPC: any VM with InstallPatchMyPC
-                $hasPMPC = $deployConfig.virtualMachines | Where-Object { $_.InstallPatchMyPC -eq $true }
-                if ($hasPMPC) {
-                    $requiredUrlKeys += 'PMPC'
-                }
-
                 # BgInfo is only used during base image creation, skip during deployment.
+
+                # De-duplicate
+                $requiredUrlKeys = $requiredUrlKeys | Select-Object -Unique
 
                 $Common.AzureFileList.Urls | ForEach-Object {
                     $_.psobject.properties | ForEach-Object {
@@ -1710,33 +1737,38 @@ function Test-Configuration {
                 }
             }
 
-            # CM download URLs: only test the version this deployment uses.
-            $cmVersionNeeded = $deployConfig.cmOptions.version
-            foreach ($version in $common.AzureFileList.CmVersions) {
-                if (-not $version.filename) {
-                    if ($cmVersionNeeded -and $cmVersionNeeded -notin $version.versions) { continue }
-                    try {
-                        if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
-                            Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+            # CM download URLs: only test the version this deployment uses (Phase 8).
+            if ($StartPhase -le 8) {
+                $cmVersionNeeded = $deployConfig.cmOptions.version
+                foreach ($version in $common.AzureFileList.CmVersions) {
+                    if (-not $version.filename) {
+                        if (-not $cmVersionNeeded) { continue }
+                        if ($cmVersionNeeded -notin $version.versions) { continue }
+                        try {
+                            if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                                Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                            }
                         }
-                    }
-                    catch {
-                        Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                        catch {
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                        }
                     }
                 }
             }
 
-            # SQL CU URLs: only test versions used by VMs in the deployment.
-            $sqlVersionsNeeded = @($deployConfig.virtualMachines.sqlVersion | Where-Object { $_ } | Select-Object -Unique)
-            foreach ($sql in $common.AzureFileList.ISO) {
-                if ($sqlVersionsNeeded.Count -gt 0 -and $sql.id -notin $sqlVersionsNeeded) { continue }
-                try {
-                    if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
-                        Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+            # SQL CU URLs: only test versions used by VMs in the deployment (Phase 4).
+            if ($StartPhase -le 4) {
+                $sqlVersionsNeeded = @($deployConfig.virtualMachines.sqlVersion | Where-Object { $_ } | Select-Object -Unique)
+                foreach ($sql in $common.AzureFileList.ISO) {
+                    if ($sqlVersionsNeeded.Count -eq 0 -or $sql.id -notin $sqlVersionsNeeded) { continue }
+                    try {
+                        if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
+                            Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                        }
                     }
-                }
-                catch {
-                    Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                    catch {
+                        Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                    }
                 }
             }
 

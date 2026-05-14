@@ -346,7 +346,7 @@ try {
 
     # Test Config
     try {
-        $testConfigResult = Test-Configuration -InputObject $userConfig -Final
+        $testConfigResult = Test-Configuration -InputObject $userConfig -Final -StartPhase ([int]$StartPhase)
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig

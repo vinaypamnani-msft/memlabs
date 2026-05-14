@@ -981,7 +981,7 @@ CertificateTemplate = SubCA
             Flush-LogBuffer -All
 
             $step4aInstallScript = {
-                param($IntCAName, $IntCAFilesPath, $IntCAServer)
+                param($IntCAName, $IntCAFilesPath, $IntCAServer, $RootCAFilesPath)
 
                 $ErrorActionPreference = 'Stop'
                 $report = [System.Collections.Generic.List[string]]::new()
@@ -991,7 +991,27 @@ CertificateTemplate = SubCA
                     $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
                     _Log "Installing certificate: $cerFile"
 
-                    $installOutput = & certutil.exe -installcert $cerFile 2>&1
+                    # Ensure root CA cert is in local Trusted Root store (certutil -installcert
+                    # validates the chain and can hang doing revocation checks if the root
+                    # is only published to AD and GP hasn't refreshed yet)
+                    $rootCerts = Get-ChildItem -Path $RootCAFilesPath -Filter "*.crt" -ErrorAction SilentlyContinue
+                    if (-not $rootCerts) {
+                        $rootCerts = Get-ChildItem -Path $RootCAFilesPath -Filter "*.cer" -ErrorAction SilentlyContinue
+                    }
+                    foreach ($rc in $rootCerts) {
+                        _Log "Adding Root CA cert to local Trusted Root store: $($rc.Name)"
+                        $null = & certutil.exe -addstore Root $rc.FullName 2>&1
+                        _Log "  certutil -addstore Root: exit $LASTEXITCODE"
+                    }
+
+                    # Also import Root CRLs so chain validation doesn't try to fetch online
+                    $rootCrls = Get-ChildItem -Path $RootCAFilesPath -Filter "*.crl" -ErrorAction SilentlyContinue
+                    foreach ($crl in $rootCrls) {
+                        _Log "Adding Root CRL to local store: $($crl.Name)"
+                        $null = & certutil.exe -addstore Root $crl.FullName 2>&1
+                    }
+
+                    $installOutput = & certutil.exe -installcert -f $cerFile 2>&1
                     _Log "certutil -installcert exit code: $LASTEXITCODE"
                     if ($installOutput) { _Log "Output: $($installOutput | Out-String)" }
 
@@ -1018,7 +1038,7 @@ CertificateTemplate = SubCA
 
             $result4aInstall = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
                 -ScriptBlock $step4aInstallScript `
-                -ArgumentList $intCAName, $intCAFilesPath, $intCAServer `
+                -ArgumentList $intCAName, $intCAFilesPath, $intCAServer, $rootCAFilesPath `
                 -DisplayName "TwoTierPKI Step 4a-install: certutil -installcert"
 
             if ($result4aInstall.ScriptBlockFailed -or -not $result4aInstall.ScriptBlockOutput.Success) {
