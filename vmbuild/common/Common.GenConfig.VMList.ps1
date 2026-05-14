@@ -319,7 +319,7 @@ function Select-Options {
             }
             "siteCode" {
                 if ($property.role -eq "PassiveSite") {
-                    Add-ErrorMessage -property $name "SiteCode can not be manually modified on a Passive server. Please modify this on the Active node"
+                    Add-ErrorMessage -property $name "SiteCode cannot be manually modified on a Passive server. Please modify this on the Active node"
                     continue MainLoop
                 }
                 if ($property.role -in ("SiteSystem", "WSUS")) {
@@ -331,11 +331,11 @@ function Select-Options {
                     $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
                     if ($SiteType -eq "CAS") {
                         if ($property.InstallMP) {
-                            Add-ErrorMessage -property $name "Can not install an MP on a CAS site. Automatically disabled"
+                            Add-ErrorMessage -property $name "Cannot install an MP on a CAS site. Automatically disabled"
                             $property.InstallMP = $false
                         }
                         if ($property.InstallDP) {
-                            Add-ErrorMessage -property $name "Can not install a DP on a CAS site. Automatically disabled"
+                            Add-ErrorMessage -property $name "Cannot install a DP on a CAS site. Automatically disabled"
                             $property.InstallDP = $false
                             $property.PsObject.Members.Remove("enablePullDP")
                             $property.PsObject.Members.Remove("pullDPSourceDP")
@@ -348,7 +348,7 @@ function Select-Options {
             }
             "role" {
                 if ($property.role -eq "PassiveSite") {
-                    Add-ErrorMessage -property $name "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
+                    Add-ErrorMessage -property $name "Role cannot be manually modified on a Passive server. Please disable HA or delete the VM."
                     continue MainLoop
                 }
                 if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
@@ -870,7 +870,7 @@ function Select-VirtualMachines {
                                     $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName } 
                                     if (-not $OtherVMs -and -not $OtherVMs2) {
                                         write-host
-                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other vm's.  Removing from config"
+                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other VMs. Removing from config"
                                         Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
                                     }
                                 }
@@ -985,7 +985,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($diskscount -le $neededDisks) {
                                     write-host
-                                    write-redx "SQL is configured to install to the disk we are trying to remove. Can not remove"
+                                    write-redx "SQL is configured to install to the disk we are trying to remove. Cannot remove"
                                     Continue VMLoop
                                 }
                             }
@@ -1003,7 +1003,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($diskscount -le $neededDisks) {
                                     write-host
-                                    write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Can not remove"
+                                    write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Cannot remove"
                                     Continue VMLoop
                                 }
                             }
@@ -1021,7 +1021,7 @@ function Select-VirtualMachines {
                                 }
                                 if ($diskscount -le $neededDisks) {
                                     write-host
-                                    write-redx "WSUS is configured to use to the disk we are trying to remove. Can not remove"
+                                    write-redx "WSUS is configured to use the disk we are trying to remove. Cannot remove"
                                     Continue VMLoop
                                 }
                             }
@@ -1074,12 +1074,12 @@ function Select-VirtualMachines {
                             foreach ($testVM in $global:config.virtualMachine) {
                                 if ($testVM.remoteContentLibVM -eq $virtualMachine.vmName) {
                                     Write-Host
-                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and can not be deleted at this time."
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and cannot be deleted at this time."
                                     $removeVM = $false
                                 }
                                 if ($testVM.fileServerVM -eq $virtualMachine.vmName) {
                                     Write-Host
-                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and can not be deleted at this time."
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and cannot be deleted at this time."
                                     $removeVM = $false
                                 }
                             }
@@ -1089,7 +1089,7 @@ function Select-VirtualMachines {
                                 foreach ($SQLAOVM in $SQLAOVMs) {
                                     if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
                                         Write-Host
-                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and cannot be deleted at this time."
                                         $removeVM = $false
                                     }
                                 }

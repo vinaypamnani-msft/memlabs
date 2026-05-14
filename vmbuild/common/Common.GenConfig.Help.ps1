@@ -18,12 +18,12 @@ function Get-GenericHelp {
     switch (($text -split "=")[0].Trim()) {
         "DeploymentType" { "Selects the default type of deployment, Primary or Hierarchy" }
         "DomainName" { "Change the FQDN of the domain" }
-        "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
+        "CMVersion" { "Select which version of ConfigMgr to install. Ignored if ConfigMgr is not being installed" }
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
         "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
-        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
+        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM. Can be overridden per VM via the dynamicMinRam setting" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
@@ -33,8 +33,8 @@ function Get-GenericHelp {
         "Prefix" { "Change the prefix of all machines in the domain.  This is used to ensure unique machine names across all domains." }
         "AdminName" { "Change the default administrator name for all machines and domains. Not recommended to change." }
         "BasePath" { "Change the location to save hyper-v VHDX and other files. Not recommended to change." }
-        "domainNetBiosName" { "Change the netbios name of the domain.  This will result in a disjoined namespace if it does not match the FQDN" }
-        "locale" { "If you have configured _localconfig.json, you can change the default language of your VM via language packs" }
+        "domainNetBiosName" { "Change the NetBIOS name of the domain. This will result in a disjoint namespace if it does not match the FQDN" }
+        "locale" { "If you have configured _localeConfig.json, you can change the default language of your VMs via language packs" }
         "timeZone" { "Change the timezone of all new VMs deployed in this session." }
 
         # Global CM
@@ -42,17 +42,17 @@ function Get-GenericHelp {
         "Version" { "Change the version of CM to install. By default, we select the newest baseline version." }
         "Install" { "Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand" }
         "EVALVersion" { "Install the EVAL license for ConfigMgr.  This will expire in 6 months." }
-        "UsePKI" { "Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP." }
+        "UsePKI" { "Automatically set up a complete PKI infrastructure, and use HTTPS for all CM roles, including DP/MP/SUP/RP." }
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA on this DC. A StandaloneRootCA VM will be auto-created." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
         "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
-        "PrePopulateObjects" { "This setting will pre populate a number of objects in the CM database, such as packages, scripts, OSD TS's, Baselines, etc" }
+        "PrePopulateObjects" { "This setting will pre-populate a number of objects in the CM database, such as packages, scripts, OSD Task Sequences, Baselines, etc." }
 
         # VM
 
         "vmName" { "Change the name of the VM" }
-        "Role" { "Change the role of the VM. Not recommended to change." }
+        "Role" { "Change the VM's role. Changing this is not recommended." }
         "Memory" { "Change the starting and Maximum memory for this VM." }
         "DynamicMinRam" { "Enables Dynamic Memory.  Sets the Minimum amount of RAM." }
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
@@ -62,7 +62,7 @@ function Get-GenericHelp {
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
         "Add Additional Disk" { "Adds another VHDX to this VM" }
         "Remove Last Additional Disk" { "Removes the last VHDX added to this machine" }
-        "Remove this VM from config" { "'Deletes' the VM. Since its not actually deployed yet, just prevents it from being deployed." }
+        "Remove this VM from config" { "'Deletes' the VM. Since it's not actually deployed yet, just prevents it from being deployed." }
         "SiteCode" { "Changes the sitecode for this site" }
         "InstallSSMS" { "SQL Server Management Studio will be installed on this VM" }
         "InstallDP" { "Install the Distribution Point role on this VM" }

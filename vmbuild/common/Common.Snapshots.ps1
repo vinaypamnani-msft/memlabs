@@ -321,7 +321,7 @@ function select-SnapshotDomain {
         [string] $domain
     )
     Write-Host
-    Write-Host2 -ForegroundColor Orange "It is recommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    Write-Host2 -ForegroundColor Orange "It is recommended to stop Critical VMs before snapshotting. Please select which VMs to stop."
     #Invoke-StopVMs -domain $domain
     $result = Select-StopDomain -domain $domain -AllSelected
     write-log "Snapshotting Virtual Machines in '$domain' result: $result"
@@ -409,7 +409,7 @@ function select-RestoreSnapshotDomain {
     }
     if ($missingVMS.Count -gt 0) {
         Write-Host
-        $DeleteVMs = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
+        $DeleteVMs = Read-Host2 -Prompt "The following VMs do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
     }
 
     if ($auto -and $snapshots.Count -eq 1) {

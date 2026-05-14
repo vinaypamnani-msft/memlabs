@@ -421,7 +421,7 @@ function Select-DomainMenu {
 
             if ($domainList.Count -eq 0) {
                 Write-Host
-                Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
+                Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VMs manually from Hyper-V"
 
                 return
             }
@@ -516,17 +516,17 @@ function Build-DomainSubMenuOptions {
         "H1"    = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
         "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
-        "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "3"     = "Compact VHDXs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "H3"    = "Select VMs to optimize. Running VMs are cleaned in-guest, then all selected VMs are stopped, checkpoints merged, VHDX free-space zeroed, and Optimize-VHD runs in parallel in a WPF window. VMs that were running at start are auto-restarted when compaction finishes."
         "*S"    = ""
         "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-        "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "S"     = "Snapshot all VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "HS"    = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
     }
 
     if ($checkPoint) {
         $customOptions += [ordered]@{
-            "R"  = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "R"  = "Restore all VMs to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             "HR" = "Restore a domain checkpoint/snapshot taken by this script. All VMs in the snapshot will be restored"
             "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
@@ -556,7 +556,7 @@ function Build-DomainSubMenuOptions {
         "*Z"  = ""
         "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
         "D"   = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)"
-        "HD"  = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs"
+        "HD"  = "Delete selected VMs from Hyper-V. This can be used to remove your entire domain, or individual VMs"
     }
 
     return $customOptions
@@ -1077,7 +1077,7 @@ do {
             Write-Host
             Write-verbose "13"
             if ($return.DeployNow -eq $true) {
-                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please close any open RDCMan sessions. Deployment will update the MemLabs.rdg file on the desktop."
             }
             Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
             $response = Read-YesOrNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp -timeout 180 -Default "y"

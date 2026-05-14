@@ -70,10 +70,10 @@ function Start-Maintenance {
             if ($stoppedCount -gt 0) {
                 $response = Read-YesOrNoWithTimeout -Prompt "$stoppedCount VMs stopped. Start [$($stoppedVms-join ",")] for Maintenance (y/N)" -HideHelp -Default "n" -timeout 15
                 if ($response -eq "y") {
-                    Write-Log "$vmCount VM's need maintenance. VM's will be started (if stopped) and shut down post-maintenance."
+                    Write-Log "$vmCount VMs need maintenance. VMs will be started (if stopped) and shut down post-maintenance."
                 }
                 else {
-                    Write-Log "$vmCount VM's need maintenance. VM's will NOT be started (if stopped)."
+                    Write-Log "$vmCount VMs need maintenance. VMs will NOT be started (if stopped)."
                     $maintenanceDoNotStart = $true
                 }
             }
@@ -1324,7 +1324,7 @@ function Select-DeletePending {
 
     Write-Log -Activity "These VMs are currently 'in progress', if there is no deployment running, you should delete them and redeploy"
     get-list -Type VM -SmartUpdate | Where-Object { $_.InProgress -eq "True" } | Format-Table -Property vmname, Role, SiteCode, DeployedOS, @{E = { "$($_.DynamicMinRam)-$($_.Memory)" }; L = "Memory" }, @{Label = "DiskUsedGB"; Expression = { [Math]::Round($_.DiskUsedGB, 2) } }, State, Domain, Network, SQLVersion | Out-Host
-    Write-WhiteI "Please confirm these VM's are not currently in process of being deployed."
+    Write-WhiteI "Please confirm these VMs are not currently in the process of being deployed."
     Write-OrangePoint "Selecting 'Yes' will permanently delete all VMs and scopes."
     $response = Read-YesOrNoWithTimeout -Prompt "Are you sure? (y/N)" -HideHelp -timeout 180 -Default "n"
     if (-not [String]::IsNullOrWhiteSpace($response)) {

@@ -116,11 +116,11 @@ function Get-AdditionalValidations {
             }
             $value = $property."$($Name)"
             if (($value / 1) -lt 50MB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to less than 50MB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to less than 50MB"
                 $value = $CurrentValue
             }
             if (($value / 1) -gt 64GB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to more than 64GB"
                 $value = $CurrentValue
             }
             if (($value / 1) -ge $property.memory / 1 ) {
@@ -139,12 +139,12 @@ function Get-AdditionalValidations {
             }
             $value = $property."$($Name)"
             if (($value / 1) -lt 50MB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to less than 50MB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to less than 50MB"
                 
                 $value = $CurrentValue
             }
             if (($value / 1) -gt 64GB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to more than 64GB"
                 $value = $CurrentValue
             }
             $property.$name = $value.ToUpperInvariant()
@@ -176,7 +176,7 @@ function Get-AdditionalValidations {
         }
         "virtualProcs" {            
             if ($value -le "0" -or $value -gt 16) {
-                Add-ErrorMessage -property $name -Warning "Valid values for $name is 1-16"
+                Add-ErrorMessage -property $name -Warning "Valid values for $name are 1-16"
                 $property.$name = 4
             }
         }
@@ -283,7 +283,7 @@ function Get-AdditionalValidations {
 
         }
         "OtherNode" {
-            Add-ErrorMessage -property $name  "OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+            Add-ErrorMessage -property $name  "OtherNode cannot be set manually. Please rename the 2nd node of the cluster to change this property."
             $property.$name = $currentValue
         }
         "network" {
@@ -309,7 +309,7 @@ function Get-AdditionalValidations {
         "vmName" {
 
             if (($value.Length + $Global:Config.VmOptions.Prefix.Length) -gt 15) {
-                Add-ErrorMessage -property $name  "VMName + Prefix can not be longer than 15 chars"
+                Add-ErrorMessage -property $name  "VMName + Prefix cannot be longer than 15 chars"
                 $property.$name = $currentValue
             }
             
@@ -334,7 +334,7 @@ function Get-AdditionalValidations {
             if ($value -eq $true) {
                 if ($property.Role -notin ("CAS", "Primary")) {
                     if (-not $Global:Config.cmOptions.UsePKI) {
-                        Add-ErrorMessage -property $name "PatchMyPC must be installed on the site server if not using PKI for SCCM"
+                        Add-ErrorMessage -property $name "PatchMyPC must be installed on the site server if not using PKI for ConfigMgr"
                         $property.$name = $false
                         $property.PsObject.Members.Remove("PatchMyPCFileServer")
                         return
@@ -381,7 +381,7 @@ function Get-AdditionalValidations {
                                 $property.PsObject.Members.Remove("wsusDataBaseServer")
                                 $property.PsObject.Members.Remove("InstallPatchMyPC")
                                 $property.PsObject.Members.Remove("PatchMyPCFileServer")
-                                Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
+                                Add-ErrorMessage -property $name "SUP role cannot be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
                             }
                         }
                         else {
@@ -465,7 +465,7 @@ function Get-AdditionalValidations {
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -in "Secondary", "CAS") {
-                Add-ErrorMessage -property $name -Warning "Can not install an MP on a CAS or secondary site"
+                Add-ErrorMessage -property $name -Warning "Cannot install an MP on a CAS or secondary site"
                 $property.installMP = $false
             }
             $newName = Rename-VirtualMachine -vm $property
@@ -504,7 +504,7 @@ function Get-AdditionalValidations {
         "installDP" {
 
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "CAS") {
-                Add-ErrorMessage -property $name -Warning "Can not install an DP for a CAS site"
+                Add-ErrorMessage -property $name -Warning "Cannot install a DP for a CAS site"
                 $property.installDP = $false
             }
 

@@ -285,11 +285,11 @@ function Test-ValidMachineName {
     }
 
     if ($name.EndsWith(".")) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] can not end with '.'." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] cannot end with '.'." -ReturnObject $ReturnObject -Failure
     }
     
     if ($name -eq $env:COMPUTERNAME) {
-        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Cannot be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
     }
 }
 
@@ -303,7 +303,7 @@ function Test-ValidUserName {
         return
     }
     if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest") {
-        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] can not be a Reserved Name, as these accounts exist by default and can not be added" -ReturnObject $return -Warning
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] cannot be a Reserved Name, as these accounts exist by default and cannot be added" -ReturnObject $return -Warning
     }
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($name -match $pattern) {
@@ -976,7 +976,7 @@ function Test-SingleRole {
             Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
         }
         else {
-            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role can not be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role cannot be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
         }
         return $false
     }
@@ -1348,7 +1348,7 @@ function Test-Configuration {
                     }
 
                     if ($vm.sqlport -in 21, 80, 135, 139, 443, 445, 860, 1434, 2382, 2383, 2393, 2394, 2725, 3260, 3389, 4022, 5022, 7022) {
-                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
+                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort cannot use OS reserved port #" -ReturnObject $return -Warning
                     }
                 }
                 # Minimum SQL Memory
@@ -1385,7 +1385,7 @@ function Test-Configuration {
                                 $list2 = Get-List2 -deployConfig $deployConfig
                                 $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
                                 if (-not $existingSUP) {                                                       
-                                    Add-ValidationMessage -Message "$vmName SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
+                                    Add-ValidationMessage -Message "$vmName SUP role cannot be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
                                 }
                             }
                             else {

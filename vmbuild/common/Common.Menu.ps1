@@ -524,10 +524,10 @@ function select-ChangeDynamicMemory {
             $vmsname = $disabled
         }
         if ($vmsname -and ($vmsname | Measure-Object).count -gt 0) {
-            Write-OrangePoint "$(($vmsname | Measure-Object).count) VM's in '$domain' are in state: $verb"
+            Write-OrangePoint "$(($vmsname | Measure-Object).count) VMs in '$domain' are in state: $verb"
         }
         else {
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' already have Dynamic Memory $($verb)d ***" }
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' already have Dynamic Memory $($verb)d ***" }
         }
         $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VMs" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
         Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
@@ -624,12 +624,12 @@ function Select-StartDomain {
 
         $notRunning = $vms | Where-Object { $_.State -ne "Running" -and $_.Role -ne "StandaloneRootCA" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
-            Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
+            Write-OrangePoint "$(($notRunning | Measure-Object).count) VMs in '$domain' are not Running"
         }
         else {
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***" }
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' are already Running ***" }
             return
-            #Write-GreenCheck "All VM's in '$domain' are already Running"
+            #Write-GreenCheck "All VMs in '$domain' are already Running"
             #return
         }
 
@@ -711,11 +711,11 @@ function Select-StopDomain {
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $running = $vms | Where-Object { $_.State -ne "Off" }
         if ($running -and ($running | Measure-Object).count -gt 0) {
-            Write-host "$(($running| Measure-Object).count) VM's in '$domain' are currently running."
+            Write-host "$(($running| Measure-Object).count) VMs in '$domain' are currently running."
         }
         else {
-            Write-host "All VM's in '$domain' are already turned off."
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }  
+            Write-host "All VMs in '$domain' are already turned off."
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' are already turned off. ***" }  
             return "NOITEMS"
         }
 

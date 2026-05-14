@@ -93,7 +93,7 @@ function Show-ExistingNetwork2 {
                 $i++
                 $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
                 $domainshort = $domain -Split " " | Select-Object -First 1
-                $customOptions += [ordered]@{ "H$i" = "Add additional VM's or change some settings in $domainshort" }
+                $customOptions += [ordered]@{ "H$i" = "Add additional VMs or change some settings in $domainshort" }
 
             }
 
@@ -152,7 +152,7 @@ function Show-ExistingNetwork2 {
 
     $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
-        $response = Read-YesOrNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
+        $response = Read-YesOrNoWithTimeout -Prompt "$TotalStoppedVMs Critical VMs in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
         if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
         }
         else {
