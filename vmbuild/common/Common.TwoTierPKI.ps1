@@ -1118,10 +1118,10 @@ CertificateTemplate = SubCA
             Reset-TemplateCache
             $publishFailed = $false
 
+            # ---- Phase B1: Set ACLs on all templates ----
             $tplIndex = 0
             foreach ($tplName in $TemplateList) {
                 $tplIndex++
-                _Log "--- Processing template $tplIndex/$($TemplateList.Count): $tplName ---"
                 # Determine the AD group that gets enroll permissions
                 $groupName = switch ($tplName) {
                     'ConfigMgrWebServerCertificate'                   { 'ConfigMgr IIS Servers' }
@@ -1134,8 +1134,7 @@ CertificateTemplate = SubCA
                     'Read, Enroll'
                 }
 
-                # --- ACL pass (mirrors DSC AddCertificateTemplate retry loop) ---
-                _Log "Setting ACL on '$tplName' for '$groupName' ($permissions)..."
+                _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName' ($permissions)..."
                 $retries = 0
                 $aclOk = $false
                 while ($retries -lt 10 -and -not $aclOk) {
@@ -1167,69 +1166,82 @@ CertificateTemplate = SubCA
                 if (-not $aclOk) {
                     _Log "FATAL: Failed to set ACL on '$tplName' after $retries attempts"
                     $publishFailed = $true
-                    continue
                 }
+            }
 
-                # --- Publish pass (mirrors DSC AddCertificateTemplate while loop) ---
-                _Log "Adding '$tplName' to CA template list..."
-                $publishRetries = 0
-                $maxPublishRetries = 30
-                $addOk = $false
-                while (-not $addOk -and $publishRetries -lt $maxPublishRetries) {
-                    $publishRetries++
+            if ($publishFailed) {
+                _Log "Aborting: ACL phase failed"
+                return @{ Success = $false; Log = $report.ToArray(); Error = "Template ACL failures (see log)" }
+            }
 
-                    # Check if already published
+            # ---- Phase B2: Issue Add-CATemplate for ALL templates ----
+            # Publish all at once so AD replication and CA cache refresh
+            # happen in parallel rather than serializing per template.
+            _Log "Publishing all $($TemplateList.Count) template(s) to CA..."
+            foreach ($tplName in $TemplateList) {
+                try {
+                    ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
+                    _Log "  Add-CATemplate '$tplName': ok"
+                } catch {
+                    _Log "  Add-CATemplate '$tplName' failed: $($_.Exception.Message) (will retry in verify loop)"
+                    # PSPKI fallback
                     try {
-                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Name -eq $tplName }).Count
-                        if ($count -gt 0) {
-                            _Log "  Template '$tplName' confirmed published on CA"
-                            $addOk = $true
-                            break
-                        }
-                    } catch {}
-
-                    # Try ADCSAdministration first
-                    try {
-                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
-                        _Log "  Add-CATemplate '$tplName' succeeded (attempt $publishRetries)"
+                        PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
+                        _Log "  PSPKI Add-CATemplate '$tplName': ok"
                     } catch {
-                        _Log "  Add-CATemplate failed (attempt $publishRetries): $($_.Exception.Message)"
-                        # PSPKI fallback (two entry points, matching DSC)
                         try {
-                            Start-Service -Name CertSvc -ErrorAction SilentlyContinue
-                            Start-Sleep -Seconds 3
-                            PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
-                            _Log "  PSPKI Add-CATemplate '$tplName' succeeded"
+                            PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $tplName
+                            _Log "  PSPKI Get-CA fallback '$tplName': ok"
                         } catch {
-                            try {
-                                PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $tplName
-                                _Log "  PSPKI Get-CA fallback '$tplName' succeeded"
-                            } catch {
-                                _Log "  All Add-CATemplate methods failed (attempt $publishRetries): $($_.Exception.Message)"
-                            }
+                            _Log "  All Add-CATemplate methods failed for '$tplName': $($_.Exception.Message)"
                         }
                     }
+                }
+            }
 
-                    # Verify
+            # ---- Phase B3: Verify all templates in a single polling loop ----
+            # One cache flush covers all templates; poll until all confirmed
+            # or timeout. Much faster than flush-per-template.
+            Reset-TemplateCache
+            $remaining = [System.Collections.Generic.List[string]]::new($TemplateList)
+            $maxVerifyRetries = 30
+            $verifyAttempt = 0
+            _Log "Verifying all templates are published (max $maxVerifyRetries attempts)..."
+
+            while ($remaining.Count -gt 0 -and $verifyAttempt -lt $maxVerifyRetries) {
+                $verifyAttempt++
+                try {
+                    $published = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue)
+                } catch { $published = @() }
+
+                $confirmed = @()
+                foreach ($tplName in @($remaining)) {
+                    if (@($published | Where-Object { $_.Name -eq $tplName }).Count -gt 0) {
+                        _Log "  Template '$tplName' confirmed published (attempt $verifyAttempt)"
+                        $confirmed += $tplName
+                    }
+                }
+                foreach ($c in $confirmed) { [void]$remaining.Remove($c) }
+                if ($remaining.Count -eq 0) { break }
+
+                # Re-issue Add-CATemplate for anything still missing
+                foreach ($tplName in $remaining) {
                     try {
-                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Name -eq $tplName }).Count
-                        if ($count -gt 0) {
-                            _Log "  Template '$tplName' confirmed published on CA"
-                            $addOk = $true
-                        }
-                    } catch {}
-
-                    if (-not $addOk) {
-                        _Log "  Template '$tplName' NOT yet published; flushing caches and retrying..."
-                        Reset-TemplateCache
+                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction SilentlyContinue
+                    } catch {
+                        try { PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName } catch {}
                     }
                 }
-                if (-not $addOk) {
-                    _Log "FATAL: Could not publish '$tplName' to CA after $maxPublishRetries attempts"
-                    $publishFailed = $true
+
+                _Log "  $($remaining.Count) template(s) not yet visible; flushing cache (attempt $verifyAttempt/$maxVerifyRetries)..."
+                Reset-TemplateCache
+            }
+
+            if ($remaining.Count -gt 0) {
+                foreach ($tplName in $remaining) {
+                    _Log "FATAL: Could not publish '$tplName' to CA after $maxVerifyRetries attempts"
                 }
+                $publishFailed = $true
             }
 
             # ---- Phase C: Final validation ----
