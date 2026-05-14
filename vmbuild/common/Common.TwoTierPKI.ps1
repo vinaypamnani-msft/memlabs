@@ -877,94 +877,65 @@ CertificateTemplate = SubCA
 
         #---------------------------------------------------------------------------
         # STEP 4: Complete Intermediate CA (DC)
-        #  Split into two phases for visibility:
-        #    4a: Install signed cert + activate certsvc (the part that can hang)
-        #    4b-config: Configure CDP/AIA/CRL (fast registry writes + restart)
+        #  Split into micro-phases for visibility and debuggability:
+        #    4a-check:    Verify pre-conditions (cert file exists, CA state)
+        #    4a-install:  certutil -installcert
+        #    4a-activate: Start certsvc + wait for responsiveness
+        #    4-config:    CDP/AIA/CRL registry writes + restart + CRL publish
         #---------------------------------------------------------------------------
         Write-Log "[TwoTierPKI] Step 4: Completing Intermediate CA configuration on $dcVMName..." -NoIndent
         $step4Start = Get-Date
 
-        # --- Step 4a: Install cert and activate CA ---
-        Write-Log "[TwoTierPKI] Step 4a: Installing signed certificate and activating CA service..."
+        # --- Step 4a-check: Pre-condition validation ---
+        Write-Log "[TwoTierPKI] Step 4a-check: Verifying CA state and cert file on $dcVMName..."
         Flush-LogBuffer -All
 
-        $step4aScript = {
+        $step4aCheckScript = {
             param($IntCAName, $IntCAFilesPath, $IntCAServer)
 
             $ErrorActionPreference = 'Stop'
             $report = [System.Collections.Generic.List[string]]::new()
             function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
-            # Helper: wait for certsvc to become responsive after restart.
-            # Verifies both service state AND certutil -ping success, plus
-            # certutil -ca.cert (proves the CA cert chain is functional).
-            function Wait-CertSvcReady {
-                param([int]$TimeoutSec = 90)
-                $deadline = (Get-Date).AddSeconds($TimeoutSec)
-                $pingOk = $false
-                while ((Get-Date) -lt $deadline) {
-                    try {
-                        $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                        if ($svc -and $svc.Status -eq 'Running') {
-                            $null = & certutil.exe -ping 2>&1
-                            if ($LASTEXITCODE -eq 0) {
-                                if (-not $pingOk) { $pingOk = $true }
-                                $tmpCert = [System.IO.Path]::GetTempFileName()
-                                $null = & certutil.exe -ca.cert $tmpCert 2>&1
-                                Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
-                                if ($LASTEXITCODE -eq 0) { return $true }
-                            }
-                        }
-                    } catch {}
-                    Start-Sleep -Seconds 2
-                }
-                return $false
-            }
-
             try {
                 $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
-                _Log "Checking for signed certificate: $cerFile"
+                _Log "Expected cert path: $cerFile"
 
-                # Idempotency: check if CA is already fully operational
-                $alreadyOperational = $false
-                try {
-                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                    if ($svc -and $svc.Status -eq 'Running') {
-                        _Log "certsvc exists and is Running - verifying responsiveness..."
-                        $null = & certutil.exe -ping 2>&1
-                        if ($LASTEXITCODE -eq 0) {
-                            $tmpCert = [System.IO.Path]::GetTempFileName()
-                            $null = & certutil.exe -ca.cert $tmpCert 2>&1
-                            $caReady = ($LASTEXITCODE -eq 0)
-                            Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
-                            if ($caReady) {
-                                $alreadyOperational = $true
-                                _Log "Intermediate CA already operational (certsvc running, ping OK, ca.cert OK)"
-                            } else {
-                                _Log "certsvc running and ping OK but ca.cert failed - cert may not be installed yet"
-                            }
-                        } else {
-                            _Log "certsvc running but ping failed (exit $LASTEXITCODE) - not yet operational"
+                # Check if CA is already fully operational
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq 'Running') {
+                    _Log "certsvc is Running - checking responsiveness..."
+                    $null = & certutil.exe -ping 2>&1
+                    if ($LASTEXITCODE -eq 0) {
+                        $tmpCert = [System.IO.Path]::GetTempFileName()
+                        $null = & certutil.exe -ca.cert $tmpCert 2>&1
+                        $caReady = ($LASTEXITCODE -eq 0)
+                        Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
+                        if ($caReady) {
+                            _Log "CA fully operational (ping OK, ca.cert OK) - no install needed"
+                            return @{ Success = $true; Log = $report.ToArray(); State = 'Operational' }
                         }
-                    } elseif ($svc) {
-                        _Log "certsvc exists but state=$($svc.Status) - cert not yet installed"
+                        _Log "ping OK but ca.cert failed - cert chain not ready"
                     } else {
-                        _Log "certsvc not found - ADCS may not be installed"
+                        _Log "certsvc Running but ping failed (exit $LASTEXITCODE)"
                     }
-                } catch {
-                    _Log "Pre-check exception: $($_.Exception.Message)"
+                    return @{ Success = $true; Log = $report.ToArray(); State = 'RunningButNotReady' }
+                } elseif ($svc) {
+                    _Log "certsvc exists, state=$($svc.Status) - needs cert install"
+                } else {
+                    _Log "certsvc not found - ADCS not installed?"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "certsvc service not found. ADCS may not be installed." }
                 }
 
-                if ($alreadyOperational) {
-                    return @{ Success = $true; Log = $report.ToArray(); AlreadyOperational = $true }
-                }
-
+                # Verify cert file
                 if (-not (Test-Path $cerFile)) {
-                    throw "Signed certificate file not found: $cerFile (Step 3 may not have completed)"
+                    _Log "FATAL: cert file not found: $cerFile"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Signed certificate not found: $cerFile" }
                 }
+                $fileSize = (Get-Item $cerFile).Length
+                _Log "Cert file exists ($fileSize bytes)"
 
-                # Validate the cert file
-                _Log "Validating certificate file..."
+                # Validate it's parseable
                 try {
                     $testCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cerFile)
                     _Log "  Subject: $($testCert.Subject)"
@@ -972,40 +943,10 @@ CertificateTemplate = SubCA
                     _Log "  Thumbprint: $($testCert.Thumbprint)"
                     _Log "  Valid: $($testCert.NotBefore) to $($testCert.NotAfter)"
                 } catch {
-                    throw "Certificate file is not a valid X509 certificate: $($_.Exception.Message)"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Cert file invalid: $($_.Exception.Message)" }
                 }
 
-                # Install the issued certificate
-                _Log "Installing issued certificate via certutil -installcert..."
-                $installOutput = & certutil.exe -installcert $cerFile 2>&1
-                _Log "  certutil -installcert exit code: $LASTEXITCODE"
-                if ($LASTEXITCODE -ne 0) {
-                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
-                    if ($svc) {
-                        _Log "  certsvc exists despite error - may already be installed. Output: $($installOutput | Out-String)"
-                    }
-                    else {
-                        throw "certutil -installcert failed with exit code $LASTEXITCODE. Output: $($installOutput | Out-String)"
-                    }
-                }
-
-                # Activate CA
-                _Log "Starting certsvc to activate CA..."
-                try { Start-Service certsvc -ErrorAction Stop } catch {
-                    _Log "  Start-Service failed ($($_.Exception.Message)), trying Restart..."
-                    Restart-Service certsvc -Force -ErrorAction Stop
-                }
-
-                _Log "Waiting for CA to become fully operational (timeout 90s)..."
-                if (-not (Wait-CertSvcReady -TimeoutSec 90)) {
-                    $svcState = (Get-Service certsvc -ErrorAction SilentlyContinue).Status
-                    $pingOut = & certutil.exe -ping 2>&1
-                    _Log "DIAG: certsvc=$svcState, ping exit=$LASTEXITCODE, output=$($pingOut | Out-String)"
-                    throw "CA service did not become fully responsive within 90s after certificate installation"
-                }
-                _Log "CA service is fully operational."
-
-                return @{ Success = $true; Log = $report.ToArray(); AlreadyOperational = $false }
+                return @{ Success = $true; Log = $report.ToArray(); State = 'NeedsInstall'; CerFile = $cerFile }
             }
             catch {
                 _Log "FAILED: $($_.Exception.Message)"
@@ -1013,25 +954,181 @@ CertificateTemplate = SubCA
             }
         }
 
-        $result4a = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-            -ScriptBlock $step4aScript `
+        $result4aCheck = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+            -ScriptBlock $step4aCheckScript `
             -ArgumentList $intCAName, $intCAFilesPath, $intCAServer `
-            -DisplayName "TwoTierPKI Step 4a: Install cert and activate CA"
+            -DisplayName "TwoTierPKI Step 4a-check: Verify CA state"
 
-        if ($result4a.ScriptBlockFailed -or -not $result4a.ScriptBlockOutput.Success) {
-            $err = if ($result4a.ScriptBlockFailed) { $result4a.ScriptBlockFailed } else { $result4a.ScriptBlockOutput.Error }
-            Write-Log "[TwoTierPKI] Step 4a FAILED: $err" -Failure
-            if ($result4a.ScriptBlockOutput.Log) {
-                foreach ($line in $result4a.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+        if ($result4aCheck.ScriptBlockFailed -or -not $result4aCheck.ScriptBlockOutput.Success) {
+            $err = if ($result4aCheck.ScriptBlockFailed) { $result4aCheck.ScriptBlockFailed } else { $result4aCheck.ScriptBlockOutput.Error }
+            Write-Log "[TwoTierPKI] Step 4a-check FAILED: $err" -Failure
+            if ($result4aCheck.ScriptBlockOutput.Log) {
+                foreach ($line in $result4aCheck.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
             }
             return $false
         }
-        foreach ($line in $result4a.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-        if ($result4a.ScriptBlockOutput.AlreadyOperational) {
-            Write-Log "  [TwoTierPKI] Step 4a: CA already operational - skipping cert install"
-        } else {
-            Write-Log "  [TwoTierPKI] Step 4a: Certificate installed, CA service activated"
+        foreach ($line in $result4aCheck.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+
+        $caState = $result4aCheck.ScriptBlockOutput.State
+        Write-Log "  [TwoTierPKI] Step 4a-check: CA state = $caState"
+
+        if ($caState -eq 'Operational') {
+            Write-Log "  [TwoTierPKI] CA already operational - skipping install and activate"
         }
+        else {
+            # --- Step 4a-install: Install the certificate ---
+            Write-Log "[TwoTierPKI] Step 4a-install: Running certutil -installcert on $dcVMName..."
+            Flush-LogBuffer -All
+
+            $step4aInstallScript = {
+                param($IntCAName, $IntCAFilesPath, $IntCAServer)
+
+                $ErrorActionPreference = 'Stop'
+                $report = [System.Collections.Generic.List[string]]::new()
+                function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+                try {
+                    $cerFile = Join-Path $IntCAFilesPath "${IntCAServer}_${IntCAName}.cer"
+                    _Log "Installing certificate: $cerFile"
+
+                    $installOutput = & certutil.exe -installcert $cerFile 2>&1
+                    _Log "certutil -installcert exit code: $LASTEXITCODE"
+                    if ($installOutput) { _Log "Output: $($installOutput | Out-String)" }
+
+                    if ($LASTEXITCODE -ne 0) {
+                        $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                        if ($svc) {
+                            _Log "certsvc exists despite error - cert may already be installed"
+                        } else {
+                            throw "certutil -installcert failed (exit $LASTEXITCODE)"
+                        }
+                    }
+
+                    # Verify the cert was installed by checking certsvc can be queried
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    _Log "certsvc state after install: $($svc.Status)"
+
+                    return @{ Success = $true; Log = $report.ToArray() }
+                }
+                catch {
+                    _Log "FAILED: $($_.Exception.Message)"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+                }
+            }
+
+            $result4aInstall = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+                -ScriptBlock $step4aInstallScript `
+                -ArgumentList $intCAName, $intCAFilesPath, $intCAServer `
+                -DisplayName "TwoTierPKI Step 4a-install: certutil -installcert"
+
+            if ($result4aInstall.ScriptBlockFailed -or -not $result4aInstall.ScriptBlockOutput.Success) {
+                $err = if ($result4aInstall.ScriptBlockFailed) { $result4aInstall.ScriptBlockFailed } else { $result4aInstall.ScriptBlockOutput.Error }
+                Write-Log "[TwoTierPKI] Step 4a-install FAILED: $err" -Failure
+                if ($result4aInstall.ScriptBlockOutput.Log) {
+                    foreach ($line in $result4aInstall.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+                }
+                return $false
+            }
+            foreach ($line in $result4aInstall.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+            Write-Log "  [TwoTierPKI] Step 4a-install: Certificate installed successfully"
+
+            # --- Step 4a-activate: Start certsvc and wait for readiness ---
+            Write-Log "[TwoTierPKI] Step 4a-activate: Starting certsvc and waiting for CA readiness..."
+            Flush-LogBuffer -All
+
+            $step4aActivateScript = {
+                $ErrorActionPreference = 'Stop'
+                $report = [System.Collections.Generic.List[string]]::new()
+                function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+                try {
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    if (-not $svc) { throw "certsvc service not found" }
+                    _Log "certsvc current state: $($svc.Status)"
+
+                    if ($svc.Status -ne 'Running') {
+                        _Log "Starting certsvc..."
+                        try {
+                            Start-Service certsvc -ErrorAction Stop
+                            _Log "Start-Service succeeded"
+                        } catch {
+                            _Log "Start-Service failed: $($_.Exception.Message) - trying Restart..."
+                            Restart-Service certsvc -Force -ErrorAction Stop
+                            _Log "Restart-Service succeeded"
+                        }
+                    } else {
+                        _Log "certsvc already running"
+                    }
+
+                    # Wait for CA to become fully responsive
+                    _Log "Waiting for CA responsiveness (certutil -ping + ca.cert)..."
+                    $deadline = (Get-Date).AddSeconds(90)
+                    $pingOk = $false
+                    $attempts = 0
+                    while ((Get-Date) -lt $deadline) {
+                        $attempts++
+                        try {
+                            $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                            if ($svc -and $svc.Status -eq 'Running') {
+                                $null = & certutil.exe -ping 2>&1
+                                if ($LASTEXITCODE -eq 0) {
+                                    if (-not $pingOk) {
+                                        $pingOk = $true
+                                        _Log "  Attempt $attempts: ping OK, verifying ca.cert..."
+                                    }
+                                    $tmpCert = [System.IO.Path]::GetTempFileName()
+                                    $null = & certutil.exe -ca.cert $tmpCert 2>&1
+                                    Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
+                                    if ($LASTEXITCODE -eq 0) {
+                                        _Log "  Attempt $attempts: ca.cert OK - CA fully operational"
+                                        return @{ Success = $true; Log = $report.ToArray() }
+                                    }
+                                } else {
+                                    if ($attempts % 5 -eq 0) {
+                                        _Log "  Attempt $attempts: ping failed (exit $LASTEXITCODE)"
+                                    }
+                                }
+                            } else {
+                                if ($attempts % 5 -eq 0) {
+                                    $st = if ($svc) { $svc.Status } else { 'NotFound' }
+                                    _Log "  Attempt $attempts: certsvc=$st"
+                                }
+                            }
+                        } catch {}
+                        Start-Sleep -Seconds 2
+                    }
+
+                    # Timeout - collect diagnostics
+                    $svcState = (Get-Service certsvc -ErrorAction SilentlyContinue).Status
+                    $pingOut = & certutil.exe -ping 2>&1
+                    _Log "TIMEOUT after $attempts attempts. certsvc=$svcState, ping exit=$LASTEXITCODE"
+                    _Log "  Ping output: $($pingOut | Out-String)"
+                    throw "CA did not become fully responsive within 90s ($attempts attempts)"
+                }
+                catch {
+                    _Log "FAILED: $($_.Exception.Message)"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+                }
+            }
+
+            $result4aActivate = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+                -ScriptBlock $step4aActivateScript `
+                -DisplayName "TwoTierPKI Step 4a-activate: Start certsvc"
+
+            if ($result4aActivate.ScriptBlockFailed -or -not $result4aActivate.ScriptBlockOutput.Success) {
+                $err = if ($result4aActivate.ScriptBlockFailed) { $result4aActivate.ScriptBlockFailed } else { $result4aActivate.ScriptBlockOutput.Error }
+                Write-Log "[TwoTierPKI] Step 4a-activate FAILED: $err" -Failure
+                if ($result4aActivate.ScriptBlockOutput.Log) {
+                    foreach ($line in $result4aActivate.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+                }
+                return $false
+            }
+            foreach ($line in $result4aActivate.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+            Write-Log "  [TwoTierPKI] Step 4a-activate: CA service is fully operational"
+        }
+
+        $step4aElapsed = ((Get-Date) - $step4Start).TotalSeconds
+        Write-Log "  [TwoTierPKI] Step 4a complete ($([int]$step4aElapsed)s)"
 
         # --- Step 4 config: Configure CDP/AIA/CRL ---
         Write-Log "[TwoTierPKI] Step 4 config: Configuring CDP, AIA, CRL periods..."
