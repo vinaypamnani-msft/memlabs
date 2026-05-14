@@ -907,15 +907,8 @@ CertificateTemplate = SubCA
                     _Log "certsvc is Running - checking responsiveness..."
                     $null = & certutil.exe -ping 2>&1
                     if ($LASTEXITCODE -eq 0) {
-                        $tmpCert = [System.IO.Path]::GetTempFileName()
-                        $null = & certutil.exe -ca.cert $tmpCert 2>&1
-                        $caReady = ($LASTEXITCODE -eq 0)
-                        Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
-                        if ($caReady) {
-                            _Log "CA fully operational (ping OK, ca.cert OK) - no install needed"
-                            return @{ Success = $true; Log = $report.ToArray(); State = 'Operational' }
-                        }
-                        _Log "ping OK but ca.cert failed - cert chain not ready"
+                        _Log "CA operational (ping OK) - no install needed"
+                        return @{ Success = $true; Log = $report.ToArray(); State = 'Operational' }
                     } else {
                         _Log "certsvc Running but ping failed (exit $LASTEXITCODE)"
                     }
@@ -1080,10 +1073,13 @@ CertificateTemplate = SubCA
                         _Log "certsvc already running"
                     }
 
-                    # Wait for CA to become fully responsive
-                    _Log "Waiting for CA responsiveness (certutil -ping + ca.cert)..."
-                    $deadline = (Get-Date).AddSeconds(90)
-                    $pingOk = $false
+                    # Wait for CA to become responsive (certutil -ping confirms
+                    # the ICertRequest2 RPC interface is alive).
+                    # We intentionally do NOT call certutil -ca.cert here because
+                    # it performs chain/revocation validation which can hang when
+                    # the Root CA's CDP is not yet reachable.
+                    _Log "Waiting for CA responsiveness (certutil -ping)..."
+                    $deadline = (Get-Date).AddSeconds(60)
                     $attempts = 0
                     while ((Get-Date) -lt $deadline) {
                         $attempts++
@@ -1092,17 +1088,8 @@ CertificateTemplate = SubCA
                             if ($svc -and $svc.Status -eq 'Running') {
                                 $null = & certutil.exe -ping 2>&1
                                 if ($LASTEXITCODE -eq 0) {
-                                    if (-not $pingOk) {
-                                        $pingOk = $true
-                                        _Log "  Attempt ${attempts}: ping OK, verifying ca.cert..."
-                                    }
-                                    $tmpCert = [System.IO.Path]::GetTempFileName()
-                                    $null = & certutil.exe -ca.cert $tmpCert 2>&1
-                                    Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
-                                    if ($LASTEXITCODE -eq 0) {
-                                        _Log "  Attempt ${attempts}: ca.cert OK - CA fully operational"
-                                        return @{ Success = $true; Log = $report.ToArray() }
-                                    }
+                                    _Log "  Attempt ${attempts}: ping OK - CA is responsive"
+                                    return @{ Success = $true; Log = $report.ToArray() }
                                 } else {
                                     if ($attempts % 5 -eq 0) {
                                         _Log "  Attempt ${attempts}: ping failed (exit ${LASTEXITCODE})"
@@ -1123,7 +1110,7 @@ CertificateTemplate = SubCA
                     $pingOut = & certutil.exe -ping 2>&1
                     _Log "TIMEOUT after $attempts attempts. certsvc=$svcState, ping exit=$LASTEXITCODE"
                     _Log "  Ping output: $($pingOut | Out-String)"
-                    throw "CA did not become fully responsive within 90s ($attempts attempts)"
+                    throw "CA did not become responsive within 60s ($attempts attempts)"
                 }
                 catch {
                     _Log "FAILED: $($_.Exception.Message)"
@@ -1162,19 +1149,14 @@ CertificateTemplate = SubCA
             function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
             function Wait-CertSvcReady {
-                param([int]$TimeoutSec = 90)
+                param([int]$TimeoutSec = 60)
                 $deadline = (Get-Date).AddSeconds($TimeoutSec)
                 while ((Get-Date) -lt $deadline) {
                     try {
                         $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
                         if ($svc -and $svc.Status -eq 'Running') {
                             $null = & certutil.exe -ping 2>&1
-                            if ($LASTEXITCODE -eq 0) {
-                                $tmpCert = [System.IO.Path]::GetTempFileName()
-                                $null = & certutil.exe -ca.cert $tmpCert 2>&1
-                                Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
-                                if ($LASTEXITCODE -eq 0) { return $true }
-                            }
+                            if ($LASTEXITCODE -eq 0) { return $true }
                         }
                     } catch {}
                     Start-Sleep -Seconds 2
@@ -1258,16 +1240,22 @@ CertificateTemplate = SubCA
 
                 # Copy CA cert to web folder for AIA
                 _Log "Copying CA cert to web folder for AIA..."
-                $caCertPath = [System.IO.Path]::GetTempFileName()
-                $null = & certutil.exe -ca.cert $caCertPath 2>&1
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $caCertPath)) {
-                    $destCert = Join-Path $WebFolderPath "$IntCAName.crt"
-                    Copy-Item -Path $caCertPath -Destination $destCert -Force
-                    _Log "  CA cert copied to $destCert"
+                $destCert = Join-Path $WebFolderPath "$IntCAName.crt"
+                # Get CA cert from local machine store (avoids certutil -ca.cert chain validation hang)
+                $caCert = Get-ChildItem Cert:\LocalMachine\CA | Where-Object { $_.Subject -match $caConfigName } | Select-Object -First 1
+                if (-not $caCert) {
+                    # Fallback: try CertEnroll directory
+                    $certEnroll = Get-ChildItem "C:\Windows\System32\CertSrv\CertEnroll\*.crt" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($certEnroll) {
+                        Copy-Item -Path $certEnroll.FullName -Destination $destCert -Force
+                        _Log "  CA cert copied from CertEnroll to $destCert"
+                    } else {
+                        _Log "WARNING: Could not find CA cert for AIA web folder"
+                    }
                 } else {
-                    _Log "WARNING: Could not export CA cert for AIA web folder"
+                    [System.IO.File]::WriteAllBytes($destCert, $caCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                    _Log "  CA cert exported from store to $destCert"
                 }
-                Remove-Item $caCertPath -Force -ErrorAction SilentlyContinue
 
                 # Final verification
                 _Log "Verifying CA is operational..."
