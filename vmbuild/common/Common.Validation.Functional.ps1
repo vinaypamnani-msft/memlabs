@@ -72,7 +72,7 @@ function Test-VmFunctionality {
             $testsPassed = Test-FileServerFunctionality -VMName $VMName -Domain $domain
         }
         'StandaloneRootCA' {
-            $testsPassed = Test-CAFunctionality -VMName $VMName -Domain $domain
+            $testsPassed = Test-StandaloneRootCAFunctionality -VMName $VMName -Domain $domain
         }
         default {
             # Roles like DomainMember, WorkgroupMember, InternetClient, etc.
@@ -736,6 +736,41 @@ function Test-FileServerFunctionality {
         -ScriptBlock $scriptBlock -DisplayName "Phase11-FileServer-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'FileServer' -Result $result)
+}
+
+function Test-StandaloneRootCAFunctionality {
+    <#
+    .SYNOPSIS
+        Validates Standalone Root CA post-deployment state.
+    .DESCRIPTION
+        The Root CA VM is intentionally shut down after PKI deployment (Step 5).
+        Correct end state is VM=Off. If it's still running, verify CA is operational.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Validating Root CA state" -LogOnly
+
+    # The correct post-deployment state is VM powered off
+    $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
+    if (-not $vm) {
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found" -Failure
+        return $false
+    }
+
+    if ($vm.State -eq 'Off') {
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: OK - VM is Off (expected post-deployment state)" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: PASSED" -LogOnly
+        return $true
+    }
+
+    # VM is unexpectedly running — run the standard CA tests
+    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: VM is $($vm.State) (expected Off) - running CA tests" -LogOnly
+    return (Test-CAFunctionality -VMName $VMName -Domain $Domain)
 }
 
 function Test-CAFunctionality {
