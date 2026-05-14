@@ -227,6 +227,9 @@ function Write-Phase {
         10 {
             Write-Log "Phase $Phase - Run Maintenance" -Activity
         }
+        11 {
+            Write-Log "Phase $Phase - Functional Validation" -Activity
+        }
     }
 }
 
@@ -564,7 +567,7 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 10
+    $maxPhase = 11
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -615,14 +618,25 @@ try {
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
                 }
                 if ($i -eq 2) {
-                    # Two-tier PKI: orchestrate offline root CA + enterprise subordinate CA
-                    if ($deployConfig.cmOptions.UseOfflineRootCA) {
+                    # Two-tier PKI: orchestrate offline root CA + enterprise subordinate CA.
+                    # Triggered when any DC has UseOfflineRoot enabled.
+                    $hasOfflineRoot = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
+                    if ($hasOfflineRoot) {
                         $pkiSuccess = Install-TwoTierPKI -DeployConfig $deployConfig
                         if (-not $pkiSuccess) {
                             Write-Log "[TwoTierPKI] Two-tier PKI deployment failed." -Failure
                             $configured = $false
                             break
                         }
+                    }
+                }
+                if ($i -eq 11) {
+                    # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
+                    if (-not $global:NoSnapshot) {
+                        Merge-Phase8AutoSnapshot -DeployConfig $deployConfig
+                    }
+                    else {
+                        Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
                     }
                 }
             }

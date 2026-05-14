@@ -482,11 +482,22 @@ function Get-AdditionalValidations {
             $newName = Rename-VirtualMachine -vm $property
         }
         "installCA" {
+            if ($value -eq $true) {
+                # Show UseOfflineRoot option when InstallCA is enabled
+                if ($null -eq $property.UseOfflineRoot) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value $false -Force
+                }
+            }
+            else {
+                # Remove UseOfflineRoot when InstallCA is disabled
+                $property.PsObject.Members.Remove("UseOfflineRoot")
+            }
             if ($property.ForestTrust -and $property.ForestTrust -ne "NONE") {
                 $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
                 if ($remoteCA) {
                     Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
                     $property.InstallCA = $false
+                    $property.PsObject.Members.Remove("UseOfflineRoot")
                 }
             }
         }

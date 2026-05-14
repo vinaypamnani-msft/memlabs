@@ -3,7 +3,7 @@
 #
 # Host-driven orchestrator for two-tier PKI (Standalone Offline Root CA +
 # Enterprise Subordinate CA on DC). Called after Phase2 completes when
-# cmOptions.UseOfflineRootCA is enabled.
+# a DC has UseOfflineRoot = $true (and InstallCA = $true).
 #
 # IDEMPOTENT: Every step detects existing state and skips work already done.
 # Safe to re-run after partial failure — will resume from where it left off.

@@ -219,26 +219,24 @@ function Test-ValidCmOptions {
         }
     }
 
-    # Validate UseOfflineRootCA / StandaloneRootCA
+    # Validate UseOfflineRoot / StandaloneRootCA
     $rootCAVMs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "StandaloneRootCA" })
+    $dcUseOfflineRoot = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
     if ($rootCAVMs.Count -gt 1) {
         Add-ValidationMessage -Message "VM Validation: Only one StandaloneRootCA VM is allowed per configuration. Found $($rootCAVMs.Count)." -ReturnObject $ReturnObject -Failure
     }
-    if ($rootCAVMs.Count -ge 1 -and -not $ConfigObject.cmOptions.UsePKI) {
-        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires cmOptions.UsePKI to be enabled." -ReturnObject $ReturnObject -Failure
+    if ($rootCAVMs.Count -ge 1 -and -not $dcUseOfflineRoot) {
+        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires a DC with UseOfflineRoot enabled." -ReturnObject $ReturnObject -Failure
     }
-    if ($rootCAVMs.Count -ge 1 -and -not $ConfigObject.cmOptions.UseOfflineRootCA) {
-        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires cmOptions.UseOfflineRootCA to be enabled." -ReturnObject $ReturnObject -Failure
-    }
-    if ($ConfigObject.cmOptions.UseOfflineRootCA -and $rootCAVMs.Count -eq 0) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.UseOfflineRootCA is enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
+    if ($dcUseOfflineRoot -and $rootCAVMs.Count -eq 0) {
+        Add-ValidationMessage -Message "VM Validation: A DC has UseOfflineRoot enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
     }
     # Two-tier PKI is incompatible with forest-trust subordination on the same DC:
     # a DC can only chain up to one root CA at a time.
-    if ($ConfigObject.cmOptions.UseOfflineRootCA) {
-        $forestTrustDCs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "DC" -and $_.externalDomainJoinSiteCode -and $_.InstallCA })
+    if ($dcUseOfflineRoot) {
+        $forestTrustDCs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "DC" -and $_.externalDomainJoinSiteCode -and $_.InstallCA -and $_.UseOfflineRoot })
         foreach ($ftDC in $forestTrustDCs) {
-            Add-ValidationMessage -Message "VM Validation: DC [$($ftDC.vmName)] has externalDomainJoinSiteCode set (forest-trust subordinate CA) and cannot also be a two-tier PKI subordinate. Disable UseOfflineRootCA or remove externalDomainJoinSiteCode." -ReturnObject $ReturnObject -Failure
+            Add-ValidationMessage -Message "VM Validation: DC [$($ftDC.vmName)] has externalDomainJoinSiteCode set (forest-trust subordinate CA) and cannot also use UseOfflineRoot. Disable UseOfflineRoot or remove externalDomainJoinSiteCode." -ReturnObject $ReturnObject -Failure
         }
     }
 
