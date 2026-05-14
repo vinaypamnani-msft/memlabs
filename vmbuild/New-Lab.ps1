@@ -452,7 +452,12 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    if (-not $StartPhase -or ($StartPhase -and $StartPhase -le 2)) {
+    # Tools are injected in Phase 2. Skip download/verify when we won't run Phase 2.
+    $needTools = $true
+    if ($StartPhase -and $StartPhase -gt 2) { $needTools = $false }
+    if ($Phase -and 2 -notin $Phase) { $needTools = $false }
+
+    if ($needTools) {
         # Download tools
         $success = Get-Tools -WhatIf:$WhatIf
         if (-not $success) {
