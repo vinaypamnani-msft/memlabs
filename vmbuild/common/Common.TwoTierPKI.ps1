@@ -1158,7 +1158,7 @@ CertificateTemplate = SubCA
 
                 _Log "Adding '$tplName' to CA template list..."
                 $publishRetries = 0
-                $maxPublishRetries = 10
+                $maxPublishRetries = 80  # ~80 × 15s = 20 min (matches DSC unbounded loop)
                 $addOk = $false
                 while (-not $addOk -and $publishRetries -lt $maxPublishRetries) {
                     $publishRetries++
