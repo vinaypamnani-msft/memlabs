@@ -67,6 +67,11 @@
             <operator>Matches</operator>
             <value>"FileServer"</value>
           </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"StandaloneRootCA"</value>
+          </rule>
         </ruleGroup>
       </smartGroup>
       <smartGroup>
