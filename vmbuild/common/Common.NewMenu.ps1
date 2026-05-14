@@ -1003,12 +1003,13 @@ Function Update-HelpText {
             $oneLineHelp = $oneLineHelp.Substring(0, $maxWidth - 1) + '…'
         }
 
-        # Border length must also be window-aware: a fixed 95-char dash
-        # run wraps to a 2nd row on narrow terminals (same layout
-        # corruption as a long help text). Reserve 2 cols for the leading
-        # space and the corner.
-        $borderLen = [Math]::Max(10, $host.UI.RawUI.WindowSize.Width - 2)
-        $border    = '─' * $borderLen
+        # Border length: fit the text content but never exceed 50% of
+        # the terminal width or the window width minus 2.  The +5
+        # accounts for the " │🕮  " prefix inside the box.
+        $textWidth   = $oneLineHelp.Length + 5
+        $halfScreen  = [Math]::Floor($host.UI.RawUI.WindowSize.Width / 2)
+        $borderLen   = [Math]::Max(10, [Math]::Min($textWidth, [Math]::Min($halfScreen, $host.UI.RawUI.WindowSize.Width - 2)))
+        $border      = '─' * $borderLen
 
         Set-CursorPosition -X 0 -Y $HelpPosition.Y
         write-host2 (" ╭" + $border) -ForegroundColor MediumOrchid
