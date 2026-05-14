@@ -622,7 +622,7 @@ function Select-StartDomain {
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $CustomOptions = [ordered]@{}
 
-        $notRunning = $vms | Where-Object { $_.State -ne "Running" }
+        $notRunning = $vms | Where-Object { $_.State -ne "Running" -and $_.Role -ne "StandaloneRootCA" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
             Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
         }
