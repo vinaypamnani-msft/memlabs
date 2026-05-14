@@ -1764,7 +1764,7 @@ function Test-CacheValid {
     )
     $LastUpdateTime = [Datetime]::ParseExact($EntryTime, 'MM/dd/yyyy HH:mm', $null)
     $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-    if ($datediff.Hours -lt $MaxHours) {
+    if ($datediff.TotalHours -lt $MaxHours) {
         return $true
     }
     return $false
@@ -1797,7 +1797,7 @@ function Update-VMInformation {
         # VM will never report an IP, and this call dominates init time when many VMs are off
         # (and is the source of the "sometimes fast / sometimes slow" variability).
         $vmIsRunning = ($vm.State -eq 'Running')
-        if ($vmIsRunning -and (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP)) {
+        if ($vmIsRunning -and (($datediff.TotalHours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP)) {
             $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                 if ($null -eq $vmNoteObject.LastKnownIP) {
@@ -1827,7 +1827,10 @@ function Update-VMInformation {
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
         if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                if ($Common.InJob) {
+                    Write-Log "Site code for $vmName is missing in VM Note; skipping PSDirect lookup (background job)." -LogOnly
+                }
+                elseif ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
                         $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
@@ -1855,7 +1858,10 @@ function Update-VMInformation {
             }
 
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                if ($Common.InJob) {
+                    Write-Log "Site code for $vmName (DP/MP) is missing in VM Note; skipping PSDirect lookup (background job)." -LogOnly
+                }
+                elseif ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
                         $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
