@@ -98,11 +98,14 @@ function Install-TwoTierPKI {
     $rootCAFilesPath = "C:\temp\RootCAFiles\"
     $intCAFilesPath = "C:\temp\IntermediateCAFiles\"
 
-    # Host staging folder for cert file exchange
+    # Host staging folder for cert file exchange.
+    # Wipe any leftovers from a previous (possibly failed) run so stale
+    # certs from an old Root CA can never bleed into a fresh deployment.
     $hostStagingPath = Join-Path $env:TEMP "MemLabs_TwoTierPKI_$($DeployConfig.vmOptions.domainName)"
-    if (-not (Test-Path $hostStagingPath)) {
-        New-Item -ItemType Directory -Path $hostStagingPath -Force | Out-Null
+    if (Test-Path $hostStagingPath) {
+        Remove-Item -Path $hostStagingPath -Recurse -Force -ErrorAction SilentlyContinue
     }
+    New-Item -ItemType Directory -Path $hostStagingPath -Force | Out-Null
 
     Write-Log "[TwoTierPKI] Root CA VM: $rootCAVMName | DC VM: $dcVMName"
     Write-Log "[TwoTierPKI] Domain: $domainName | Root CA Name: $rootCAName | Int CA Name: $intCAName"
