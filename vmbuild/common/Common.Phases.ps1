@@ -742,7 +742,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient", "StandaloneRootCA") {
             continue
         }
 
@@ -789,7 +789,7 @@ function Get-Phase4ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
             continue
         }
 
@@ -915,7 +915,7 @@ function Get-Phase6ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -967,7 +967,7 @@ function Get-Phase7ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
             continue
         }
 
