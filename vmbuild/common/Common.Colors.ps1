@@ -262,7 +262,7 @@ function Write-Host2 {
 
     #if ($Global:Common.PS7) {
     if ($ForegroundColor) {
-        $ansi = Get-RGB $ForegroundColor | Convert-RGBtoAnsi
+        $ansi = Get-AnsiColorCached $ForegroundColor
         if ($ansi) {
             $Object = "$($ansi)$Object$($PSStyle.Reset)"
         }

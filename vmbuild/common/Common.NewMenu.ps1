@@ -10,8 +10,8 @@
 
 # Get the current cursor position as a Coordinates object (X, Y) from the console.
 function Get-CursorPosition {
-    $x, $y = $Host.UI.RawUI.CursorPosition -split ',' # Split the cursor position into X and Y coordinates
-    return @{x = $x; y = $y } # Return the cursor position as a hashtable
+    $pos = $Host.UI.RawUI.CursorPosition
+    return @{x = $pos.X; y = $pos.Y }
 }
 
 # Set the cursor position to the specified coordinates (X, Y) in the console.
@@ -25,7 +25,8 @@ function Set-CursorPosition {
     )
 
     # Set the cursor position to the specified coordinates
-    $Host.UI.RawUI.CursorPosition = New-Object System.Management.Automation.Host.Coordinates($X, $Y)
+    # Using ::new() is significantly faster than New-Object in hot paths
+    $Host.UI.RawUI.CursorPosition = [System.Management.Automation.Host.Coordinates]::new($X, $Y)
 }
 
 function Add-MenuItem {
@@ -653,6 +654,7 @@ function Show-Menu {
     )
     $LongestBreakLine = 0
     $Operation = ""
+    $script:_lastHelpText = $null  # Reset help-text cache for new menu display
     While ($true) {
         $found = $false
         $HelpFound = $false
@@ -912,13 +914,25 @@ function Set-PointerDisplayAsPerMenu {
         [switch]$Wait
     )
     [System.Console]::CursorVisible = $false
+
+    # Only update items that actually changed: the previously-selected item
+    # and the newly-selected item. Avoids O(n) cursor repositioning + writes
+    # on every arrow key press.
     for ($i = 0; $i -lt $menuItems.Count; $i++) {
         if (-not ($menuItems[$i].Displayed)) {
             continue
         }
         if ($menuItems[$i].Selectable) {
+            $isTarget = ($i -eq $selectedIndex)
+            $wasSelected = $menuItems[$i].Selected
+
+            # Skip items whose visual state hasn't changed
+            if (-not $MultiSelect -and -not $Wait -and ($isTarget -eq $wasSelected)) {
+                continue
+            }
+
             Set-CursorPosition -x 0 -y $menuItems[$i].CurrentPosition
-            if ($i -eq $selectedIndex) {
+            if ($isTarget) {
                 $menuItems[$i].Selected = $true
                 
                 if ($wait) {
@@ -931,12 +945,11 @@ function Set-PointerDisplayAsPerMenu {
                 }
                 
                 Write-Host $arrow -ForegroundColor $color -NoNewline
-                #Write-Host $arrow -ForegroundColor Yellow
             
             }
             else {
                 $menuItems[$i].Selected = $false
-                Write-Host "   "
+                Write-Host "   " -NoNewline
             }
         }
         if ($MultiSelect) {
@@ -984,12 +997,19 @@ Function Update-HelpText {
         [switch] $wait # HourGlass is showing
     )
 
+    # Skip redraw if help text hasn't changed since last call
+    if (-not $wait -and $script:_lastHelpText -eq $CurrentHelpText) {
+        return
+    }
+    $script:_lastHelpText = $CurrentHelpText
+
     Set-CursorPosition -X $HelpPosition.X -Y $HelpPosition.Y 
 
-    #Write-Host           
-    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
-    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))
-    Write-Host (" " * ($host.UI.RawUI.WindowSize.Width - 2))  
+    # Use ANSI erase-line (ESC[2K) instead of writing Width-2 spaces per line.
+    # This avoids pushing hundreds of characters through the console on each redraw.
+    Write-Host "`e[2K"
+    Write-Host "`e[2K"
+    Write-Host "`e[2K"  
     if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {      
 
         # Truncate the help text so it fits on a single line. The box
