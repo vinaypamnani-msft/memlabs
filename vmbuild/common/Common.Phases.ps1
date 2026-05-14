@@ -512,7 +512,7 @@ function Wait-Phase {
                     $return.Failed++
                 }
                 #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
-                $incrementCount = $true
+                $worstLogLevel = 0
                 foreach ($OutputObject in $jobOutput) {
                     $line = $OutputObject.text
                     if (-not $line) {
@@ -521,30 +521,30 @@ function Wait-Phase {
                     $line = $line.ToString().Trim()
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($incrementCount) {
-                            $return.Failed++
-                        }
+                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                         if ($phase -ge 2 -and $jobName.Contains("[DC]")) {
                             Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
                                 $jobs | Stop-Job
                             }
                             catch {}
+                            $return.Failed++
                             return $return
                         }
                     }
                     elseif ($OutputObject.LogLevel -eq 2) {
                         Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($incrementCount) { $return.Warning++ }
+                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                     }
                     else {
                         Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
-                        # Assume no error/warning was a success
-                        if ($incrementCount) { $return.Success++ }
                     }
-
-                    $incrementCount = $false
                 }
+
+                # Count once per job based on worst severity seen
+                if ($worstLogLevel -ge 3) { $return.Failed++ }
+                elseif ($worstLogLevel -ge 2) { $return.Warning++ }
+                elseif ($jobOutput) { $return.Success++ }
 
                 #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
