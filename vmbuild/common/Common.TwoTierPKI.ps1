@@ -1074,24 +1074,24 @@ CertificateTemplate = SubCA
                                 if ($LASTEXITCODE -eq 0) {
                                     if (-not $pingOk) {
                                         $pingOk = $true
-                                        _Log "  Attempt $attempts: ping OK, verifying ca.cert..."
+                                        _Log "  Attempt ${attempts}: ping OK, verifying ca.cert..."
                                     }
                                     $tmpCert = [System.IO.Path]::GetTempFileName()
                                     $null = & certutil.exe -ca.cert $tmpCert 2>&1
                                     Remove-Item $tmpCert -Force -ErrorAction SilentlyContinue
                                     if ($LASTEXITCODE -eq 0) {
-                                        _Log "  Attempt $attempts: ca.cert OK - CA fully operational"
+                                        _Log "  Attempt ${attempts}: ca.cert OK - CA fully operational"
                                         return @{ Success = $true; Log = $report.ToArray() }
                                     }
                                 } else {
                                     if ($attempts % 5 -eq 0) {
-                                        _Log "  Attempt $attempts: ping failed (exit $LASTEXITCODE)"
+                                        _Log "  Attempt ${attempts}: ping failed (exit ${LASTEXITCODE})"
                                     }
                                 }
                             } else {
                                 if ($attempts % 5 -eq 0) {
                                     $st = if ($svc) { $svc.Status } else { 'NotFound' }
-                                    _Log "  Attempt $attempts: certsvc=$st"
+                                    _Log "  Attempt ${attempts}: certsvc=$st"
                                 }
                             }
                         } catch {}
