@@ -1073,7 +1073,7 @@ CertificateTemplate = SubCA
                 Get-CertificationAuthority |
                     Get-CRLValidityPeriod |
                     Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" `
-                        -DeltaCRL "0 days" -ErrorAction SilentlyContinue | Out-Null
+                        -DeltaCRL "0 days" -RestartCA -ErrorAction SilentlyContinue | Out-Null
             } catch {
                 _Log "WARNING: CRL validity config failed: $($_.Exception.Message)"
             }
