@@ -855,6 +855,7 @@ CertificateTemplate = SubCA
         # STEP 4: Complete Intermediate CA (DC)
         #---------------------------------------------------------------------------
         Write-Log "[TwoTierPKI] Step 4: Completing Intermediate CA configuration on $dcVMName..." -NoIndent
+        $step4Start = Get-Date
 
         $step4Script = {
             param($IntCAName, $DomainName, $WebURL, $WebFolderPath, $IntCAFilesPath, $IntCAServer)
@@ -988,12 +989,13 @@ CertificateTemplate = SubCA
             $err = if ($result4.ScriptBlockFailed) { $result4.ScriptBlockFailed } else { $result4.ScriptBlockOutput.Error }
             Write-Log "[TwoTierPKI] Step 4 FAILED: $err" -Failure
             if ($result4.ScriptBlockOutput.Log) {
-                foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+                foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
             }
             return $false
         }
-        foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-        Write-Log "[TwoTierPKI] Step 4 complete: Intermediate CA operational"
+        foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+        $step4Elapsed = ((Get-Date) - $step4Start).TotalSeconds
+        Write-Log "  [TwoTierPKI] Step 4 complete: Intermediate CA operational ($([int]$step4Elapsed)s)"
     }
 
     #---------------------------------------------------------------------------
@@ -1018,6 +1020,7 @@ CertificateTemplate = SubCA
     $templateList += 'ConfigMgrClientCertificate'
 
     Write-Log "[TwoTierPKI] Step 4b: Importing $($templateList.Count) certificate template(s) on $dcVMName..." -NoIndent
+    $step4bStart = Get-Date
 
     $step4bScript = {
         param($DomainName, $TemplateListString)
@@ -1040,13 +1043,22 @@ CertificateTemplate = SubCA
         }
 
         # Helper: flush template caches (HKLM + HKCU) and restart CertSvc.
+        # Uses active polling (certutil -ping) instead of a fixed sleep;
+        # typically resumes in 3-5s vs the old hardcoded 15s.
         function Reset-TemplateCache {
             foreach ($hive in @('HKLM','HKCU')) {
                 $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
                 Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
             }
             Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 15
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 2
+                try {
+                    $null = & certutil.exe -ping 2>&1
+                    if ($LASTEXITCODE -eq 0) { return }
+                } catch {}
+            }
         }
 
         try {
@@ -1091,7 +1103,6 @@ CertificateTemplate = SubCA
             Import-Module PSPKI -Force -ErrorAction Stop
             # Prime PSPKI cmdlets (mirrors DSC AddCertificateTemplate)
             Get-Command -Module PSPKI | Out-Null
-            Start-Sleep -Seconds 10
 
             # Configure CRL validity once while we have PSPKI loaded
             try {
@@ -1107,7 +1118,10 @@ CertificateTemplate = SubCA
             Reset-TemplateCache
             $publishFailed = $false
 
+            $tplIndex = 0
             foreach ($tplName in $TemplateList) {
+                $tplIndex++
+                _Log "--- Processing template $tplIndex/$($TemplateList.Count): $tplName ---"
                 # Determine the AD group that gets enroll permissions
                 $groupName = switch ($tplName) {
                     'ConfigMgrWebServerCertificate'                   { 'ConfigMgr IIS Servers' }
@@ -1157,12 +1171,9 @@ CertificateTemplate = SubCA
                 }
 
                 # --- Publish pass (mirrors DSC AddCertificateTemplate while loop) ---
-                # Flush caches before checking / adding (DSC pattern)
-                Reset-TemplateCache
-
                 _Log "Adding '$tplName' to CA template list..."
                 $publishRetries = 0
-                $maxPublishRetries = 80  # ~80 × 15s = 20 min (matches DSC unbounded loop)
+                $maxPublishRetries = 30
                 $addOk = $false
                 while (-not $addOk -and $publishRetries -lt $maxPublishRetries) {
                     $publishRetries++
@@ -1187,7 +1198,7 @@ CertificateTemplate = SubCA
                         # PSPKI fallback (two entry points, matching DSC)
                         try {
                             Start-Service -Name CertSvc -ErrorAction SilentlyContinue
-                            Start-Sleep -Seconds 10
+                            Start-Sleep -Seconds 3
                             PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
                             _Log "  PSPKI Add-CATemplate '$tplName' succeeded"
                         } catch {
@@ -1261,12 +1272,13 @@ CertificateTemplate = SubCA
         $err = if ($result4b.ScriptBlockFailed) { $result4b.ScriptBlockFailed } else { $result4b.ScriptBlockOutput.Error }
         Write-Log "[TwoTierPKI] Step 4b FAILED: $err" -Failure
         if ($result4b.ScriptBlockOutput.Log) {
-            foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+            foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
         }
         return $false
     }
-    foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-    Write-Log "[TwoTierPKI] Step 4b complete: Certificate templates ready"
+    foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
+    $step4bElapsed = ((Get-Date) - $step4bStart).TotalSeconds
+    Write-Log "  [TwoTierPKI] Step 4b complete: Certificate templates ready ($([int]$step4bElapsed)s)"
 
     #---------------------------------------------------------------------------
     # STEP 5: Shutdown Root CA VM
