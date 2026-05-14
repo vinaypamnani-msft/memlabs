@@ -56,7 +56,7 @@ function Install-TwoTierPKI {
           Step 2: Prepares the DC as Intermediate CA (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
           Step 3: Signs the CSR on the Root CA (Submit, Approve, Retrieve)
           Step 4: Completes the Intermediate CA (installs cert, configures CDP/AIA, publishes CRL)
-          Step 4b: Imports and publishes certificate templates (reuses TemplateHelpDSC DSC resource classes)
+          Step 4b: Imports and publishes certificate templates (ldifde + PSPKI ACLs)
           Step 5: Shuts down the Root CA VM
 
         IDEMPOTENT: Each step checks whether its work is already done and skips
@@ -1017,87 +1017,226 @@ CertificateTemplate = SubCA
     Write-Log "[TwoTierPKI] Step 4b: Importing $($templateList.Count) certificate template(s) on $dcVMName..." -NoIndent
 
     $step4bScript = {
-        param($DomainName, $TemplateList, $TemplateGroupMap)
+        param($DomainName, $TemplateList)
 
         $ErrorActionPreference = 'Stop'
         $report = [System.Collections.Generic.List[string]]::new()
         function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
 
+        # Helper: look up a template in AD by CN.
+        function Find-TemplateInAD([string]$cn) {
+            try {
+                $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $searchBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+                $ds = New-Object System.DirectoryServices.DirectorySearcher(
+                    [ADSI]"LDAP://$searchBase", "(cn=$cn)")
+                $ds.PropertiesToLoad.AddRange(@('cn','msPKI-Cert-Template-OID'))
+                return $ds.FindOne()
+            } catch { return $null }
+        }
+
+        # Helper: flush template caches (HKLM + HKCU) and restart CertSvc.
+        function Reset-TemplateCache {
+            foreach ($hive in @('HKLM','HKCU')) {
+                $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+            }
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 15
+        }
+
         try {
+            # Build the AD DN path (e.g. DC=yourlab,DC=com)
             $dnPath = 'DC=' + $DomainName.Replace('.', ',DC=')
 
-            # The TemplateHelpDSC module is installed to the PS modules dir
-            # during DSC staging (createGuestDscZip.ps1). It contains the
-            # ImportCertificateTemplate and AddCertificateTemplate DSC
-            # resource classes — the exact same code the single-tier path
-            # uses. We invoke them directly via Test()/Set() so we don't
-            # reimplement their battle-tested retry/recovery logic.
-            _Log "Importing TemplateHelpDSC module..."
-            Import-Module TemplateHelpDSC -Force -ErrorAction Stop
-            _Log "TemplateHelpDSC loaded"
-
-            # ---- Phase A: Import templates into AD via DSC resource ----
+            # ---- Phase A: Import templates into AD via ldifde ----
             foreach ($tplName in $TemplateList) {
-                _Log "ImportCertificateTemplate '$tplName'..."
-                $imp = [ImportCertificateTemplate]::new()
-                $imp.TemplateName = $tplName
-                $imp.DNPath       = $dnPath
+                $found = Find-TemplateInAD $tplName
+                if ($found) {
+                    _Log "Template '$tplName' already exists in AD - skipping import"
+                    continue
+                }
 
-                if ($imp.Test()) {
-                    _Log "  Already in AD - skipping"
+                $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
+                if (-not (Test-Path $ldfSource)) {
+                    _Log "FATAL: LDF file not found: $ldfSource"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
+                }
+
+                # Replace placeholder DN with actual domain DN
+                $ldfTarget = "C:\temp\$tplName.ldf"
+                (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
+                    Set-Content $ldfTarget -Force
+
+                _Log "Importing template '$tplName' via ldifde..."
+                $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
+                _Log "  ldifde exit code: $LASTEXITCODE"
+                if ($output) { _Log "  ldifde output: $($output -join ' ')" }
+
+                # Verify import succeeded
+                $verify = Find-TemplateInAD $tplName
+                if (-not $verify) {
+                    _Log "FATAL: Template '$tplName' NOT found in AD after ldifde import"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Template '$tplName' import failed (not in AD)" }
+                }
+                _Log "  Verified: '$tplName' exists in AD"
+            }
+
+            # ---- Phase B: Set ACLs and add templates to the CA ----
+            _Log "Loading PSPKI module for template ACL/publishing..."
+            Import-Module PSPKI -Force -ErrorAction Stop
+            # Prime PSPKI cmdlets (mirrors DSC AddCertificateTemplate)
+            Get-Command -Module PSPKI | Out-Null
+            Start-Sleep -Seconds 10
+
+            # Configure CRL validity once while we have PSPKI loaded
+            try {
+                Get-CertificationAuthority |
+                    Get-CRLValidityPeriod |
+                    Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" `
+                        -DeltaCRL "0 days" -RestartCA -ErrorAction SilentlyContinue | Out-Null
+            } catch {
+                _Log "WARNING: CRL validity config failed: $($_.Exception.Message)"
+            }
+
+            # Flush template caches and restart CA so it sees newly imported templates
+            Reset-TemplateCache
+            $publishFailed = $false
+
+            foreach ($tplName in $TemplateList) {
+                # Determine the AD group that gets enroll permissions
+                $groupName = switch ($tplName) {
+                    'ConfigMgrWebServerCertificate'                   { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientDistributionPointCertificate'     { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientCertificate'                      { 'Domain Computers' }
+                }
+                $permissions = if ($tplName -eq 'ConfigMgrClientCertificate') {
+                    'Read, Enroll, AutoEnroll'
                 } else {
-                    $imp.Set()
-                    # Verify
-                    if ($imp.Test()) {
-                        _Log "  Imported and verified"
-                    } else {
-                        _Log "FATAL: Import of '$tplName' did not register in AD"
-                        return @{ Success = $false; Log = $report.ToArray(); Error = "Template '$tplName' import failed" }
+                    'Read, Enroll'
+                }
+
+                # --- ACL pass (mirrors DSC AddCertificateTemplate retry loop) ---
+                _Log "Setting ACL on '$tplName' for '$groupName' ($permissions)..."
+                $retries = 0
+                $aclOk = $false
+                while ($retries -lt 10 -and -not $aclOk) {
+                    $retries++
+                    try {
+                        $template = PSPKI\Get-CertificateTemplate -Name $tplName -ErrorAction Stop
+                        $templateAcl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop
+                        $templateAcl = $templateAcl | PSPKI\Add-CertificateTemplateAcl `
+                            -Identity $groupName -AccessType Allow -AccessMask $permissions -ErrorAction Stop
+                        $templateAcl | PSPKI\Set-CertificateTemplateAcl -ErrorAction Stop
+                        $aclOk = $true
+                        _Log "  ACL set successfully"
+                    } catch {
+                        _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
+                        Reset-TemplateCache
+                        # Second chance: retry as a single pipeline (DSC pattern)
+                        try {
+                            PSPKI\Get-CertificateTemplate -Name $tplName |
+                                PSPKI\Get-CertificateTemplateAcl |
+                                PSPKI\Add-CertificateTemplateAcl -Identity $groupName -AccessType Allow -AccessMask $permissions |
+                                PSPKI\Set-CertificateTemplateAcl
+                            $aclOk = $true
+                            _Log "  ACL set on pipeline retry"
+                        } catch {
+                            _Log "  Pipeline retry also failed: $($_.Exception.Message)"
+                        }
                     }
+                }
+                if (-not $aclOk) {
+                    _Log "FATAL: Failed to set ACL on '$tplName' after $retries attempts"
+                    $publishFailed = $true
+                    continue
+                }
+
+                # --- Publish pass (mirrors DSC AddCertificateTemplate while loop) ---
+                # Flush caches before checking / adding (DSC pattern)
+                Reset-TemplateCache
+
+                _Log "Adding '$tplName' to CA template list..."
+                $publishRetries = 0
+                $maxPublishRetries = 10
+                $addOk = $false
+                while (-not $addOk -and $publishRetries -lt $maxPublishRetries) {
+                    $publishRetries++
+
+                    # Check if already published
+                    try {
+                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -eq $tplName }).Count
+                        if ($count -gt 0) {
+                            _Log "  Template '$tplName' confirmed published on CA"
+                            $addOk = $true
+                            break
+                        }
+                    } catch {}
+
+                    # Try ADCSAdministration first
+                    try {
+                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
+                        _Log "  Add-CATemplate '$tplName' succeeded (attempt $publishRetries)"
+                    } catch {
+                        _Log "  Add-CATemplate failed (attempt $publishRetries): $($_.Exception.Message)"
+                        # PSPKI fallback (two entry points, matching DSC)
+                        try {
+                            Start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 10
+                            PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
+                            _Log "  PSPKI Add-CATemplate '$tplName' succeeded"
+                        } catch {
+                            try {
+                                PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $tplName
+                                _Log "  PSPKI Get-CA fallback '$tplName' succeeded"
+                            } catch {
+                                _Log "  All Add-CATemplate methods failed (attempt $publishRetries): $($_.Exception.Message)"
+                            }
+                        }
+                    }
+
+                    # Verify
+                    try {
+                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -eq $tplName }).Count
+                        if ($count -gt 0) {
+                            _Log "  Template '$tplName' confirmed published on CA"
+                            $addOk = $true
+                        }
+                    } catch {}
+
+                    if (-not $addOk) {
+                        _Log "  Template '$tplName' NOT yet published; flushing caches and retrying..."
+                        Reset-TemplateCache
+                    }
+                }
+                if (-not $addOk) {
+                    _Log "FATAL: Could not publish '$tplName' to CA after $maxPublishRetries attempts"
+                    $publishFailed = $true
                 }
             }
 
-            # ---- Phase B: Set ACLs + publish via DSC resource ----
-            foreach ($tplName in $TemplateList) {
-                $info = $TemplateGroupMap[$tplName]
-                _Log "AddCertificateTemplate '$tplName' (group=$($info.Group), perms=$($info.Permissions))..."
-                $add = [AddCertificateTemplate]::new()
-                $add.TemplateName = $tplName
-                $add.GroupName    = $info.Group
-                $add.Permissions  = $info.Permissions
-
-                if ($add.Test()) {
-                    _Log "  Already published on CA - skipping"
-                } else {
-                    $add.Set()
-                    # Verify
-                    if ($add.Test()) {
-                        _Log "  Published and verified"
-                    } else {
-                        _Log "WARNING: '$tplName' may not be fully published (Test returned false after Set)"
-                    }
-                }
-            }
-
-            # ---- Phase C: Final validation via certutil ----
-            _Log "Refreshing enrollment policy..."
+            # ---- Phase C: Final validation ----
+            # Flush caches one last time and refresh enrollment policy
+            Reset-TemplateCache
             try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
 
+            # Verify the CA advertises every required template
             _Log "Validating CA template advertisements..."
             $caOut = & certutil.exe -catemplates 2>&1
-            $anyFailed = $false
             foreach ($tplName in $TemplateList) {
                 if ($caOut -match [regex]::Escape($tplName)) {
                     _Log "  CA advertises '$tplName': OK"
                 } else {
                     _Log "  CA does NOT advertise '$tplName': FAIL"
-                    $anyFailed = $true
+                    $publishFailed = $true
                 }
             }
 
-            if ($anyFailed) {
-                _Log "Step 4b FAILED: one or more templates not advertised by CA"
-                return @{ Success = $false; Log = $report.ToArray(); Error = "Template publish validation failed (see log)" }
+            if ($publishFailed) {
+                _Log "Step 4b FAILED: one or more templates could not be published"
+                return @{ Success = $false; Log = $report.ToArray(); Error = "Template publish/ACL failures (see log)" }
             }
 
             _Log "Step 4b complete. Certificate templates imported and published."
@@ -1109,19 +1248,9 @@ CertificateTemplate = SubCA
         }
     }
 
-    # Build the group/permissions map (mirrors Phase2DC AddCertificateTemplate resources)
-    $templateGroupMap = @{}
-    foreach ($t in $templateList) {
-        $templateGroupMap[$t] = switch ($t) {
-            'ConfigMgrWebServerCertificate'               { @{ Group = 'ConfigMgr IIS Servers'; Permissions = 'Read, Enroll' } }
-            'ConfigMgrClientDistributionPointCertificate'  { @{ Group = 'ConfigMgr IIS Servers'; Permissions = 'Read, Enroll' } }
-            'ConfigMgrClientCertificate'                   { @{ Group = 'Domain Computers';      Permissions = 'Read, Enroll, AutoEnroll' } }
-        }
-    }
-
     $result4b = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
         -ScriptBlock $step4bScript `
-        -ArgumentList $domainName, $templateList, $templateGroupMap `
+        -ArgumentList $domainName, $templateList `
         -DisplayName "TwoTierPKI Step 4b: Import certificate templates"
 
     if ($result4b.ScriptBlockFailed -or -not $result4b.ScriptBlockOutput.Success) {
