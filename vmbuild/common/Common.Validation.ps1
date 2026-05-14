@@ -1643,11 +1643,61 @@ function Test-Configuration {
             Write-Log -SubActivity "Testing URLS"
 
             if (-not $Common.AzureFileList.Urls) {
-                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error                
+                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error
             }
             else {
+                # Build the set of URL keys actually needed by this deployment.
+                # Universal URLs required by every Windows VM (Phase 3).
+                $requiredUrlKeys = @('DotNet', 'VCredist', 'VCredistX86', 'SQLClient', 'OleDB', 'ODBC')
+
+                $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
+                $hasSecondary = $containsSecondary
+
+                # ADK/ADKPE: CAS, Primary, PassiveSite
+                if ($hasSiteServers) {
+                    $requiredUrlKeys += @('ADK', 'ADKPE')
+                }
+
+                # ReportBuilder: CAS, Primary, Secondary, PassiveSite (Phase 8)
+                if ($hasSiteServers -or $hasSecondary) {
+                    $requiredUrlKeys += 'ReportBuilder'
+                }
+
+                # SSMS: any VM with sqlVersion or installSSMS
+                $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion }
+                $hasSSMS = $deployConfig.virtualMachines | Where-Object { $_.installSSMS -eq $true }
+                if ($hasSQL -or $hasSSMS) {
+                    $requiredUrlKeys += 'SSMS'
+                }
+
+                # hallengren: any VM with sqlVersion
+                if ($hasSQL) {
+                    $requiredUrlKeys += 'hallengren'
+                }
+
+                # PBIRS: any VM with installRP
+                $hasRP = $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }
+                if ($hasRP) {
+                    $requiredUrlKeys += 'PBIRS'
+                }
+
+                # Linux: any VM with Linux role
+                $hasLinux = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Linux' }
+                if ($hasLinux) {
+                    $requiredUrlKeys += 'Linux'
+                }
+
+                # PMPC: any VM with InstallPatchMyPC
+                $hasPMPC = $deployConfig.virtualMachines | Where-Object { $_.InstallPatchMyPC -eq $true }
+                if ($hasPMPC) {
+                    $requiredUrlKeys += 'PMPC'
+                }
+
+                # BgInfo is only used during base image creation, skip during deployment.
+
                 $Common.AzureFileList.Urls | ForEach-Object {
                     $_.psobject.properties | ForEach-Object {
+                        if ($_.name -notin $requiredUrlKeys) { return }
                         try {
                             if (-not (Test-URL -url $_.value -name $_.name )) {
                                 Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
@@ -1659,10 +1709,12 @@ function Test-Configuration {
                     }
                 }
             }
-           
 
+            # CM download URLs: only test the version this deployment uses.
+            $cmVersionNeeded = $deployConfig.cmOptions.version
             foreach ($version in $common.AzureFileList.CmVersions) {
                 if (-not $version.filename) {
+                    if ($cmVersionNeeded -and $cmVersionNeeded -notin $version.versions) { continue }
                     try {
                         if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
                             Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
@@ -1674,7 +1726,10 @@ function Test-Configuration {
                 }
             }
 
+            # SQL CU URLs: only test versions used by VMs in the deployment.
+            $sqlVersionsNeeded = @($deployConfig.virtualMachines.sqlVersion | Where-Object { $_ } | Select-Object -Unique)
             foreach ($sql in $common.AzureFileList.ISO) {
+                if ($sqlVersionsNeeded.Count -gt 0 -and $sql.id -notin $sqlVersionsNeeded) { continue }
                 try {
                     if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
                         Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
