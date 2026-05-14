@@ -1085,8 +1085,11 @@ CertificateTemplate = SubCA
             # ---- Phase B: Set ACLs and add templates to the CA ----
             _Log "Loading PSPKI module for template ACL/publishing..."
             Import-Module PSPKI -Force -ErrorAction Stop
+            # Prime PSPKI cmdlets (mirrors DSC AddCertificateTemplate)
+            Get-Command -Module PSPKI | Out-Null
+            Start-Sleep -Seconds 10
 
-            # Configure CRL validity while we have PSPKI loaded
+            # Configure CRL validity once while we have PSPKI loaded
             try {
                 Get-CertificationAuthority |
                     Get-CRLValidityPeriod |
@@ -1113,6 +1116,7 @@ CertificateTemplate = SubCA
                     'Read, Enroll'
                 }
 
+                # --- ACL pass (mirrors DSC AddCertificateTemplate retry loop) ---
                 _Log "Setting ACL on '$tplName' for '$groupName' ($permissions)..."
                 $retries = 0
                 $aclOk = $false
@@ -1129,6 +1133,17 @@ CertificateTemplate = SubCA
                     } catch {
                         _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
                         Reset-TemplateCache
+                        # Second chance: retry as a single pipeline (DSC pattern)
+                        try {
+                            PSPKI\Get-CertificateTemplate -Name $tplName |
+                                PSPKI\Get-CertificateTemplateAcl |
+                                PSPKI\Add-CertificateTemplateAcl -Identity $groupName -AccessType Allow -AccessMask $permissions |
+                                PSPKI\Set-CertificateTemplateAcl
+                            $aclOk = $true
+                            _Log "  ACL set on pipeline retry"
+                        } catch {
+                            _Log "  Pipeline retry also failed: $($_.Exception.Message)"
+                        }
                     }
                 }
                 if (-not $aclOk) {
@@ -1137,45 +1152,68 @@ CertificateTemplate = SubCA
                     continue
                 }
 
-                # Add template to the CA's issued templates list
-                _Log "Adding '$tplName' to CA template list..."
-                $addOk = $false
-                try {
-                    $caTemplates = ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue
-                    if ($caTemplates | Where-Object { $_.Name -eq $tplName }) {
-                        _Log "  Template '$tplName' already published on CA"
-                        $addOk = $true
-                    }
-                } catch {}
+                # --- Publish pass (mirrors DSC AddCertificateTemplate while loop) ---
+                # Flush caches before checking / adding (DSC pattern)
+                Reset-TemplateCache
 
-                if (-not $addOk) {
+                _Log "Adding '$tplName' to CA template list..."
+                $publishRetries = 0
+                $maxPublishRetries = 10
+                $addOk = $false
+                while (-not $addOk -and $publishRetries -lt $maxPublishRetries) {
+                    $publishRetries++
+
+                    # Check if already published
+                    try {
+                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -eq $tplName }).Count
+                        if ($count -gt 0) {
+                            _Log "  Template '$tplName' confirmed published on CA"
+                            $addOk = $true
+                            break
+                        }
+                    } catch {}
+
+                    # Try ADCSAdministration first
                     try {
                         ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
-                        _Log "  Template '$tplName' added to CA via ADCSAdministration"
-                        $addOk = $true
+                        _Log "  Add-CATemplate '$tplName' succeeded (attempt $publishRetries)"
                     } catch {
-                        _Log "  Add-CATemplate failed: $($_.Exception.Message) - trying PSPKI fallback"
+                        _Log "  Add-CATemplate failed (attempt $publishRetries): $($_.Exception.Message)"
+                        # PSPKI fallback (two entry points, matching DSC)
                         try {
+                            Start-Service -Name CertSvc -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 10
                             PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
-                            _Log "  Template '$tplName' added via PSPKI"
-                            $addOk = $true
+                            _Log "  PSPKI Add-CATemplate '$tplName' succeeded"
                         } catch {
-                            _Log "  PSPKI fallback also failed: $($_.Exception.Message)"
+                            try {
+                                PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $tplName
+                                _Log "  PSPKI Get-CA fallback '$tplName' succeeded"
+                            } catch {
+                                _Log "  All Add-CATemplate methods failed (attempt $publishRetries): $($_.Exception.Message)"
+                            }
                         }
                     }
-                    # If both methods failed, try one more time after a cache reset
+
+                    # Verify
+                    try {
+                        $count = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue |
+                            Where-Object { $_.Name -eq $tplName }).Count
+                        if ($count -gt 0) {
+                            _Log "  Template '$tplName' confirmed published on CA"
+                            $addOk = $true
+                        }
+                    } catch {}
+
                     if (-not $addOk) {
-                        _Log "  Resetting cache and retrying Add-CATemplate..."
+                        _Log "  Template '$tplName' NOT yet published; flushing caches and retrying..."
                         Reset-TemplateCache
-                        try {
-                            ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
-                            _Log "  Template '$tplName' added to CA on retry"
-                            $addOk = $true
-                        } catch {
-                            _Log "FATAL: Could not publish '$tplName' to CA: $($_.Exception.Message)"
-                            $publishFailed = $true
-                        }
                     }
+                }
+                if (-not $addOk) {
+                    _Log "FATAL: Could not publish '$tplName' to CA after $maxPublishRetries attempts"
+                    $publishFailed = $true
                 }
             }
 
