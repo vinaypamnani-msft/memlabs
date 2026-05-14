@@ -130,10 +130,26 @@ function Remove-VirtualMachine {
         }
     }
 
-    # -- Remove VM from Hyper-V first --
-    # Remove-VM only removes the VM definition (it does NOT delete VHDX/folder),
-    # so it's fast. Doing this first releases the vmms.exe lock on the .vmcx
-    # configuration file, which otherwise blocks folder deletion.
+    # -- Detach hard drives to prevent checkpoint merge during Remove-VM --
+    # When a VM has checkpoints, Remove-VM triggers an AVHDX merge ("Destroying..."
+    # state) which can take minutes. Detaching the disks first means there is
+    # nothing for Hyper-V to merge, making Remove-VM instantaneous.
+    if (-not $WhatIf) {
+        try {
+            $drives = Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue
+            if ($drives) {
+                $drives | Remove-VMHardDiskDrive -ErrorAction SilentlyContinue
+                Write-Log "VM '$VmName': Detached $($drives.Count) disk(s) to skip merge." -SubActivity
+            }
+        }
+        catch {
+            Write-Log "VM '$VmName': Could not detach disks (non-fatal): $($_.Exception.Message)" -Warning
+        }
+    }
+
+    # -- Remove VM from Hyper-V --
+    # With disks detached, Remove-VM completes instantly (no checkpoint merge).
+    # This also releases the vmms.exe lock on the .vmcx configuration file.
     try {
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf -ErrorAction Stop
         Write-Log "VM '$VmName' removed from Hyper-V." -SubActivity
