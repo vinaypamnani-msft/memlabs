@@ -56,6 +56,7 @@ function Install-TwoTierPKI {
           Step 2: Prepares the DC as Intermediate CA (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
           Step 3: Signs the CSR on the Root CA (Submit, Approve, Retrieve)
           Step 4: Completes the Intermediate CA (installs cert, configures CDP/AIA, publishes CRL)
+          Step 4b: Imports and publishes certificate templates (ldifde + PSPKI ACLs)
           Step 5: Shuts down the Root CA VM
 
         IDEMPOTENT: Each step checks whether its work is already done and skips
@@ -991,6 +992,188 @@ CertificateTemplate = SubCA
         foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
         Write-Log "[TwoTierPKI] Step 4 complete: Intermediate CA operational"
     }
+
+    #---------------------------------------------------------------------------
+    # STEP 4b: Import and publish certificate templates
+    #---------------------------------------------------------------------------
+    # In the single-tier path, Phase2DC DSC handles template import
+    # (ImportCertificateTemplate) and publishing (AddCertificateTemplate).
+    # Both are skipped when SubordinateCA is set, so we do it here after
+    # the Enterprise Sub CA is fully operational.
+
+    # Determine which templates are needed (mirrors Phase2DC logic)
+    $hasIISServers = @($DeployConfig.virtualMachines | Where-Object {
+        ($_.role -in "CAS", "Primary", "Secondary", "PassiveSite") -or
+        $_.InstallSUP -or $_.InstallMP -or $_.InstallDP -or $_.InstallRP
+    }).Count -gt 0
+
+    $templateList = @()
+    if ($hasIISServers) {
+        $templateList += 'ConfigMgrWebServerCertificate'
+        $templateList += 'ConfigMgrClientDistributionPointCertificate'
+    }
+    $templateList += 'ConfigMgrClientCertificate'
+
+    Write-Log "[TwoTierPKI] Step 4b: Importing $($templateList.Count) certificate template(s) on $dcVMName..." -NoIndent
+
+    $step4bScript = {
+        param($DomainName, $TemplateList)
+
+        $ErrorActionPreference = 'Stop'
+        $report = [System.Collections.Generic.List[string]]::new()
+        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+        try {
+            # Build the AD DN path (e.g. DC=yourlab,DC=com)
+            $dnPath = 'DC=' + $DomainName.Replace('.', ',DC=')
+
+            # ---- Phase A: Import templates into AD via ldifde ----
+            foreach ($tplName in $TemplateList) {
+                # Check if template already exists in AD
+                $exists = $false
+                try {
+                    $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                    $searchBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+                    $ds = New-Object System.DirectoryServices.DirectorySearcher(
+                        [ADSI]"LDAP://$searchBase", "(cn=$tplName)")
+                    $found = $ds.FindOne()
+                    if ($found) { $exists = $true }
+                } catch {}
+
+                if ($exists) {
+                    _Log "Template '$tplName' already exists in AD - skipping import"
+                    continue
+                }
+
+                $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
+                if (-not (Test-Path $ldfSource)) {
+                    _Log "WARNING: LDF file not found: $ldfSource - skipping"
+                    continue
+                }
+
+                # Replace placeholder DN with actual domain DN
+                $ldfTarget = "C:\temp\$tplName.ldf"
+                (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
+                    Set-Content $ldfTarget -Force
+
+                _Log "Importing template '$tplName' via ldifde..."
+                $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
+                _Log "  ldifde exit code: $LASTEXITCODE"
+                if ($LASTEXITCODE -ne 0) {
+                    _Log "  ldifde output: $($output -join ' ')"
+                }
+            }
+
+            # ---- Phase B: Set ACLs and add templates to the CA ----
+            _Log "Loading PSPKI module for template ACL/publishing..."
+            Import-Module PSPKI -Force -ErrorAction Stop
+
+            # Configure CRL validity while we have PSPKI loaded
+            try {
+                Get-CertificationAuthority |
+                    Get-CRLValidityPeriod |
+                    Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" `
+                        -DeltaCRL "0 days" -ErrorAction SilentlyContinue | Out-Null
+            } catch {
+                _Log "WARNING: CRL validity config failed: $($_.Exception.Message)"
+            }
+
+            # Flush template cache and restart CA so it sees newly imported templates
+            $regKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+            Remove-ItemProperty -Path $regKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 10
+
+            foreach ($tplName in $TemplateList) {
+                # Determine the AD group that gets enroll permissions
+                $groupName = switch ($tplName) {
+                    'ConfigMgrWebServerCertificate'                   { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientDistributionPointCertificate'     { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientCertificate'                      { 'Domain Computers' }
+                }
+                $permissions = if ($tplName -eq 'ConfigMgrClientCertificate') {
+                    'Read, Enroll, AutoEnroll'
+                } else {
+                    'Read, Enroll'
+                }
+
+                _Log "Setting ACL on '$tplName' for '$groupName' ($permissions)..."
+                $retries = 0
+                $success = $false
+                while ($retries -lt 5 -and -not $success) {
+                    $retries++
+                    try {
+                        $template = PSPKI\Get-CertificateTemplate -Name $tplName -ErrorAction Stop
+                        $templateAcl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop
+                        $templateAcl = $templateAcl | PSPKI\Add-CertificateTemplateAcl `
+                            -Identity $groupName -AccessType Allow -AccessMask $permissions -ErrorAction Stop
+                        $templateAcl | PSPKI\Set-CertificateTemplateAcl -ErrorAction Stop
+                        $success = $true
+                        _Log "  ACL set successfully"
+                    } catch {
+                        _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
+                        $regKey2 = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $regKey2 -Name "Timestamp" -Force -ErrorAction SilentlyContinue
+                        Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 10
+                    }
+                }
+                if (-not $success) {
+                    _Log "WARNING: Failed to set ACL on '$tplName' after $retries attempts"
+                }
+
+                # Add template to the CA's issued templates list
+                _Log "Adding '$tplName' to CA template list..."
+                $alreadyAdded = $false
+                try {
+                    $caTemplates = ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue
+                    if ($caTemplates | Where-Object { $_.Name -eq $tplName }) {
+                        $alreadyAdded = $true
+                    }
+                } catch {}
+
+                if ($alreadyAdded) {
+                    _Log "  Template '$tplName' already published on CA"
+                } else {
+                    try {
+                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
+                        _Log "  Template '$tplName' added to CA"
+                    } catch {
+                        _Log "  Add-CATemplate failed: $($_.Exception.Message) - trying PSPKI fallback"
+                        try {
+                            PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
+                            _Log "  Template '$tplName' added via PSPKI"
+                        } catch {
+                            _Log "  PSPKI fallback also failed: $($_.Exception.Message)"
+                        }
+                    }
+                }
+            }
+
+            _Log "Step 4b complete. Certificate templates imported and published."
+            return @{ Success = $true; Log = $report.ToArray() }
+        }
+        catch {
+            _Log "FAILED: $($_.Exception.Message)"
+            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+        }
+    }
+
+    $result4b = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+        -ScriptBlock $step4bScript `
+        -ArgumentList $domainName, $templateList `
+        -DisplayName "TwoTierPKI Step 4b: Import certificate templates"
+
+    if ($result4b.ScriptBlockFailed -or -not $result4b.ScriptBlockOutput.Success) {
+        $err = if ($result4b.ScriptBlockFailed) { $result4b.ScriptBlockFailed } else { $result4b.ScriptBlockOutput.Error }
+        Write-Log "[TwoTierPKI] Step 4b FAILED: $err" -Failure
+        if ($result4b.ScriptBlockOutput.Log) {
+            foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+        }
+        return $false
+    }
+    foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+    Write-Log "[TwoTierPKI] Step 4b complete: Certificate templates ready"
 
     #---------------------------------------------------------------------------
     # STEP 5: Shutdown Root CA VM
