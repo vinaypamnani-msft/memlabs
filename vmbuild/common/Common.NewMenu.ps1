@@ -1003,12 +1003,13 @@ Function Update-HelpText {
             $oneLineHelp = $oneLineHelp.Substring(0, $maxWidth - 1) + '…'
         }
 
-        # Border length: fit the text content but never exceed 50% of
-        # the terminal width or the window width minus 2.  The +5
-        # accounts for the " │🕮  " prefix inside the box.
+        # Border length: match the text content width, clamped between
+        # 50% of the terminal width (minimum) and window width - 2
+        # (maximum, to avoid wrapping).  The +5 accounts for the
+        # " │🕮  " prefix inside the box.
         $textWidth   = $oneLineHelp.Length + 5
         $halfScreen  = [Math]::Floor($host.UI.RawUI.WindowSize.Width / 2)
-        $borderLen   = [Math]::Max(10, [Math]::Min($textWidth, [Math]::Min($halfScreen, $host.UI.RawUI.WindowSize.Width - 2)))
+        $borderLen   = [Math]::Max($halfScreen, [Math]::Min($textWidth, $host.UI.RawUI.WindowSize.Width - 2))
         $border      = '─' * $borderLen
 
         Set-CursorPosition -X 0 -Y $HelpPosition.Y
