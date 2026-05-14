@@ -162,8 +162,8 @@ Signature="`$Windows NT`$"
 RenewalKeyLength=4096
 RenewalValidityPeriod=Years
 RenewalValidityPeriodUnits=20
-CRLPeriod=Weeks
-CRLPeriodUnits=26
+CRLPeriod=Years
+CRLPeriodUnits=20
 CRLDeltaPeriod=Days
 CRLDeltaPeriodUnits=0
 LoadDefaultTemplates=0
@@ -256,13 +256,13 @@ Empty=True
             & certutil.exe -setreg CA\DSConfigDN $configDN | Out-Null
             if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CA\DSConfigDN returned exit code $LASTEXITCODE" }
 
-            # Set CRL periods (idempotent registry writes)
-            _Log "Setting CRL periods..."
-            & certutil.exe -setreg CA\CRLPeriodUnits 26 | Out-Null
-            & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
+            # Set CRL periods (20-year CRL so Root CA never needs to come back online)
+            _Log "Setting CRL periods (20 years)..."
+            & certutil.exe -setreg CA\CRLPeriodUnits 20 | Out-Null
+            & certutil.exe -setreg CA\CRLPeriod "Years" | Out-Null
             & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 | Out-Null
             & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
-            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 1 | Out-Null
+            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 2 | Out-Null
             & certutil.exe -setreg CA\CRLOverlapPeriod "Weeks" | Out-Null
 
             # Enable auditing
