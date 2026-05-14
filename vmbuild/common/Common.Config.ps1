@@ -3011,7 +3011,7 @@ Function Show-Summary {
     },
     @{Label = "Roles"; Expression = {
             $roles = @()
-            if ($_.InstallCA) { $roles += "CA" }
+            if ($_.InstallCA -or $_.Role -eq 'StandaloneRootCA') { $roles += "CA" }
             if ($_.InstallSUP) { $roles += "SUP" }
             if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }

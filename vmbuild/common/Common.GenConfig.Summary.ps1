@@ -677,7 +677,7 @@ function get-VMString {
         }
     }
 
-    if ($virtualMachine.InstallCA) {
+    if ($virtualMachine.InstallCA -or $virtualMachine.Role -eq 'StandaloneRootCA') {
         $name += " [CA]"
     }
 
