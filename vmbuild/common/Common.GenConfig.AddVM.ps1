@@ -753,7 +753,8 @@ function Add-OfflineRootCAVMIfMissing {
 
     write-log "[OfflineRootCA] DC UseOfflineRoot enabled but no StandaloneRootCA VM found - auto-adding one to domain $domainName"
     $existingNames = @($ConfigToModify.virtualMachines | ForEach-Object { $_.vmName })
-    Add-NewVMForRole -Role 'StandaloneRootCA' -Domain $domainName -ConfigToModify $ConfigToModify -OperatingSystem 'Server 2022' -Quiet:$true | Out-Null
+    $rootOS = if ($ConfigToModify.domainDefaults.DefaultServerOS) { $ConfigToModify.domainDefaults.DefaultServerOS } else { 'Server 2022' }
+    Add-NewVMForRole -Role 'StandaloneRootCA' -Domain $domainName -ConfigToModify $ConfigToModify -OperatingSystem $rootOS -Quiet:$true | Out-Null
     # Tag the VM we just added so Remove-OfflineRootCAVMIfAutoAdded can
     # safely auto-remove it later if the user toggles UseOfflineRoot off.
     # We never tag a user-created VM, so manual additions are preserved.
