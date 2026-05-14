@@ -56,7 +56,7 @@ function Install-TwoTierPKI {
           Step 2: Prepares the DC as Intermediate CA (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
           Step 3: Signs the CSR on the Root CA (Submit, Approve, Retrieve)
           Step 4: Completes the Intermediate CA (installs cert, configures CDP/AIA, publishes CRL)
-          Step 4b: Imports and publishes certificate templates (ldifde + PSPKI ACLs)
+          Step 4b: Imports and publishes certificate templates (ldifde + native AD ACLs)
           Step 5: Shuts down the Root CA VM
 
         IDEMPOTENT: Each step checks whether its work is already done and skips
@@ -1099,17 +1099,20 @@ CertificateTemplate = SubCA
             }
 
             # ---- Phase B: Set ACLs and add templates to the CA ----
-            _Log "Loading PSPKI module for template ACL/publishing..."
-            Import-Module PSPKI -Force -ErrorAction Stop
-            # Prime PSPKI cmdlets (mirrors DSC AddCertificateTemplate)
-            Get-Command -Module PSPKI | Out-Null
+            # All operations use native tools (ADCSAdministration,
+            # DirectoryServices, certutil) - PSPKI is NOT required.
 
-            # Configure CRL validity once while we have PSPKI loaded
+            # Configure CRL validity via certutil registry writes
+            _Log "Configuring CRL validity periods..."
             try {
-                Get-CertificationAuthority |
-                    Get-CRLValidityPeriod |
-                    Set-CRLValidityPeriod -BaseCRL "22 weeks" -BaseCRLOverlap "12 weeks" `
-                        -DeltaCRL "0 days" -RestartCA -ErrorAction SilentlyContinue | Out-Null
+                & certutil.exe -setreg CA\CRLPeriodUnits 22 2>&1 | Out-Null
+                & certutil.exe -setreg CA\CRLPeriod "Weeks" 2>&1 | Out-Null
+                & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 2>&1 | Out-Null
+                & certutil.exe -setreg CA\CRLOverlapPeriod "Weeks" 2>&1 | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 2>&1 | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriod "Days" 2>&1 | Out-Null
+                Restart-Service -Name CertSvc -Force -ErrorAction SilentlyContinue
+                _Log "  CRL validity configured and CertSvc restarted"
             } catch {
                 _Log "WARNING: CRL validity config failed: $($_.Exception.Message)"
             }
@@ -1119,6 +1122,13 @@ CertificateTemplate = SubCA
             $publishFailed = $false
 
             # ---- Phase B1: Set ACLs on all templates ----
+            # Uses .NET DirectoryServices to add Enroll/AutoEnroll ACEs
+            # directly on the certificate template AD objects.
+            $enrollGuid   = [Guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'  # Certificate-Enrollment extended right
+            $autoEnrollGuid = [Guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'  # Certificate-AutoEnrollment extended right
+            $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $tplBaseDN = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+
             $tplIndex = 0
             foreach ($tplName in $TemplateList) {
                 $tplIndex++
@@ -1128,39 +1138,61 @@ CertificateTemplate = SubCA
                     'ConfigMgrClientDistributionPointCertificate'     { 'ConfigMgr IIS Servers' }
                     'ConfigMgrClientCertificate'                      { 'Domain Computers' }
                 }
-                $permissions = if ($tplName -eq 'ConfigMgrClientCertificate') {
-                    'Read, Enroll, AutoEnroll'
-                } else {
-                    'Read, Enroll'
-                }
+                $doAutoEnroll = ($tplName -eq 'ConfigMgrClientCertificate')
 
-                _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName' ($permissions)..."
+                _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName'..."
                 $retries = 0
                 $aclOk = $false
-                while ($retries -lt 10 -and -not $aclOk) {
+                while ($retries -lt 5 -and -not $aclOk) {
                     $retries++
                     try {
-                        $template = PSPKI\Get-CertificateTemplate -Name $tplName -ErrorAction Stop
-                        $templateAcl = $template | PSPKI\Get-CertificateTemplateAcl -ErrorAction Stop
-                        $templateAcl = $templateAcl | PSPKI\Add-CertificateTemplateAcl `
-                            -Identity $groupName -AccessType Allow -AccessMask $permissions -ErrorAction Stop
-                        $templateAcl | PSPKI\Set-CertificateTemplateAcl -ErrorAction Stop
+                        # Resolve the group to a SID
+                        $ntAccount = New-Object System.Security.Principal.NTAccount($groupName)
+                        $groupSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+
+                        # Get template AD object
+                        $tplDN = "CN=$tplName,$tplBaseDN"
+                        $tplEntry = [ADSI]"LDAP://$tplDN"
+                        if (-not $tplEntry.distinguishedName) { throw "Template not found at $tplDN" }
+
+                        $acl = $tplEntry.ObjectSecurity
+
+                        # Add Read (GenericRead) ACE
+                        $readRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                            $groupSid,
+                            [System.DirectoryServices.ActiveDirectoryRights]::GenericRead,
+                            [System.Security.AccessControl.AccessControlType]::Allow
+                        )
+                        $acl.AddAccessRule($readRule)
+
+                        # Add Enroll extended right ACE
+                        $enrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                            $groupSid,
+                            [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+                            [System.Security.AccessControl.AccessControlType]::Allow,
+                            $enrollGuid
+                        )
+                        $acl.AddAccessRule($enrollRule)
+
+                        # Add AutoEnroll extended right ACE (client cert only)
+                        if ($doAutoEnroll) {
+                            $autoEnrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                                $groupSid,
+                                [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+                                [System.Security.AccessControl.AccessControlType]::Allow,
+                                $autoEnrollGuid
+                            )
+                            $acl.AddAccessRule($autoEnrollRule)
+                        }
+
+                        $tplEntry.ObjectSecurity = $acl
+                        $tplEntry.CommitChanges()
                         $aclOk = $true
-                        _Log "  ACL set successfully"
+                        $perms = if ($doAutoEnroll) { 'Read, Enroll, AutoEnroll' } else { 'Read, Enroll' }
+                        _Log "  ACL set successfully ($perms)"
                     } catch {
                         _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
-                        Reset-TemplateCache
-                        # Second chance: retry as a single pipeline (DSC pattern)
-                        try {
-                            PSPKI\Get-CertificateTemplate -Name $tplName |
-                                PSPKI\Get-CertificateTemplateAcl |
-                                PSPKI\Add-CertificateTemplateAcl -Identity $groupName -AccessType Allow -AccessMask $permissions |
-                                PSPKI\Set-CertificateTemplateAcl
-                            $aclOk = $true
-                            _Log "  ACL set on pipeline retry"
-                        } catch {
-                            _Log "  Pipeline retry also failed: $($_.Exception.Message)"
-                        }
+                        Start-Sleep -Seconds 2
                     }
                 }
                 if (-not $aclOk) {
@@ -1184,18 +1216,6 @@ CertificateTemplate = SubCA
                     _Log "  Add-CATemplate '$tplName': ok"
                 } catch {
                     _Log "  Add-CATemplate '$tplName' failed: $($_.Exception.Message) (will retry in verify loop)"
-                    # PSPKI fallback
-                    try {
-                        PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName
-                        _Log "  PSPKI Add-CATemplate '$tplName': ok"
-                    } catch {
-                        try {
-                            PSPKI\Get-CA | PSPKI\Add-CATemplate -Name $tplName
-                            _Log "  PSPKI Get-CA fallback '$tplName': ok"
-                        } catch {
-                            _Log "  All Add-CATemplate methods failed for '$tplName': $($_.Exception.Message)"
-                        }
-                    }
                 }
             }
 
@@ -1228,9 +1248,7 @@ CertificateTemplate = SubCA
                 foreach ($tplName in $remaining) {
                     try {
                         ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction SilentlyContinue
-                    } catch {
-                        try { PSPKI\Get-CertificationAuthority | PSPKI\Add-CATemplate -Name $tplName } catch {}
-                    }
+                    } catch {}
                 }
 
                 _Log "  $($remaining.Count) template(s) not yet visible; flushing cache (attempt $verifyAttempt/$maxVerifyRetries)..."
