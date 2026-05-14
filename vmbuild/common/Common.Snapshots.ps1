@@ -3,6 +3,137 @@
 ############################
 #Common.Snapshots.ps1
 
+function Merge-Phase8AutoSnapshot {
+    <#
+    .SYNOPSIS
+        Merges the Phase 8 auto-snapshot for all VMs in the domain after
+        Phase 11 functional validation passes.
+    .DESCRIPTION
+        Finds all "MemLabs Phase 8 AutoSnapshot" checkpoints in the domain,
+        stops VMs, removes the checkpoints (triggering AVHDX merge), waits
+        for merges to settle, then restarts VMs in correct order.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $domain = $DeployConfig.vmOptions.domainName
+    $snapshotPattern = "MemLabs Phase 8 AutoSnapshot*"
+
+    Write-Log "[Phase 11] Checking for Phase 8 auto-snapshot to merge..." -LogOnly
+
+    # Get all VMs in this domain
+    $vms = Get-List -Type VM -DomainName $domain
+    if (-not $vms) {
+        Write-Log "[Phase 11] No VMs found in domain '$domain'; skipping snapshot merge" -LogOnly
+        return
+    }
+
+    # Find VMs that have the Phase 8 auto-snapshot
+    $vmsWithSnapshot = @()
+    foreach ($vm in $vms) {
+        $snaps = @(Get-VMCheckpoint -VMName $vm.vmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like $snapshotPattern })
+        if ($snaps.Count -gt 0) {
+            $vmsWithSnapshot += @{ VMName = $vm.vmName; Snapshots = $snaps }
+        }
+    }
+
+    if ($vmsWithSnapshot.Count -eq 0) {
+        Write-Log "[Phase 11] No Phase 8 auto-snapshot found on any VM; skipping merge" -LogOnly
+        return
+    }
+
+    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); merging..." -Activity
+
+    # Get critical server list for ordered restart
+    $nodes = $vms | ForEach-Object { $_.vmName }
+    $critList = Get-CriticalVMs -domain $domain -vmNames $nodes
+
+    # Stop all VMs in domain
+    Write-Log "[Phase 11] Stopping VMs for snapshot merge"
+    Invoke-StopVMs -domain $domain -quiet:$true
+
+    # Remove the Phase 8 auto-snapshot from each VM
+    $mergeFailures = 0
+    foreach ($entry in $vmsWithSnapshot) {
+        foreach ($snap in $entry.Snapshots) {
+            Write-Log "[Phase 11] Removing checkpoint '$($snap.Name)' from $($entry.VMName)" -LogOnly
+            try {
+                Remove-VMCheckpoint -VMName $entry.VMName -Name $snap.Name -ErrorAction Stop
+                Write-Log "[Phase 11]   ok" -LogOnly
+            }
+            catch {
+                Write-Log "[Phase 11]   Remove-VMCheckpoint failed: $($_.Exception.Message)" -Warning
+                try {
+                    Remove-VMSnapshot -VMSnapshot $snap -ErrorAction Stop
+                    Write-Log "[Phase 11]   Remove-VMSnapshot fallback ok" -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase 11]   Remove-VMSnapshot also failed: $($_.Exception.Message)" -Failure
+                    $mergeFailures++
+                }
+            }
+
+            # Remove sidecar notes file if present
+            $vmPath = (Get-VM -Name $entry.VMName -ErrorAction SilentlyContinue).Path
+            if ($vmPath) {
+                $notesFile = Join-Path $vmPath ($snap.Name + '.json')
+                if (Test-Path $notesFile) {
+                    Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    # Wait for AVHDX merges to settle (simplified version of Compact-Disks settle loop)
+    $settleTimeoutMin = 30
+    $mergeDeadline = (Get-Date).AddMinutes($settleTimeoutMin)
+    Write-Log "[Phase 11] Waiting for AVHDX merges to settle (max $settleTimeoutMin min)..."
+
+    $allSettled = $false
+    while ((Get-Date) -lt $mergeDeadline) {
+        $pendingCount = 0
+        foreach ($entry in $vmsWithSnapshot) {
+            $hds = @(Get-VMHardDiskDrive -VMName $entry.VMName -ErrorAction SilentlyContinue)
+            $avhdx = @($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' })
+            $chks = @(Get-VMCheckpoint -VMName $entry.VMName -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like $snapshotPattern })
+            $pendingCount += $avhdx.Count + $chks.Count
+        }
+
+        if ($pendingCount -eq 0) {
+            $allSettled = $true
+            break
+        }
+
+        Start-Sleep -Seconds 5
+    }
+
+    if ($allSettled) {
+        Write-Log "[Phase 11] All AVHDX merges settled successfully" -Success
+    }
+    else {
+        Write-Log "[Phase 11] AVHDX merge settle timed out after $settleTimeoutMin min; VMs may still be merging in background" -Warning
+    }
+
+    # Restart VMs in correct order
+    Write-Log "[Phase 11] Restarting VMs after snapshot merge"
+    $startFailures = Invoke-SmartStartVMs -CritList $critList
+    if ($startFailures -ne 0) {
+        Write-Log "[Phase 11] $startFailures VM(s) could not be restarted" -Warning
+    }
+
+    if ($mergeFailures -eq 0) {
+        Write-Log "[Phase 11] Phase 8 auto-snapshot merge completed successfully" -Success
+    }
+    else {
+        Write-Log "[Phase 11] Phase 8 auto-snapshot merge completed with $mergeFailures failure(s)" -Warning
+    }
+}
+
 function Invoke-AutoSnapShotDomain {
     [CmdletBinding()]
     param (

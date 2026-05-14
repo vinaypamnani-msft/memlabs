@@ -243,8 +243,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1 or 10
-        if ($currentItem.hidden -and $Phase -in @(1, 10)) {
+        # Don't touch hidden VM's in Phase 1, 10, or 11
+        if ($currentItem.hidden -and $Phase -in @(1, 10, 11)) {
             continue
         }
 
@@ -303,9 +303,19 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
+        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {
 
-            if ($Phase -eq 10) {         
+            if ($Phase -eq 11) {
+                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient", "DomainMember", "WorkgroupMember", "InternetClient")) {
+                    continue
+                }
+                $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
+            }
+            elseif ($Phase -eq 10) {         
                 if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
                     continue
                 }       

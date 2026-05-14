@@ -46,6 +46,44 @@ $global:Phase10Job = {
     }
 
 }
+
+$global:Phase11Job = {
+    param (
+        [object] $vm,
+        [array] $Dummy,
+        [boolean] $Dummy1,
+        [boolean] $Dummy2,
+        [string] $ScriptRoot
+    )
+
+    try {
+        $global:ScriptBlockName = "Phase11Job"
+        # Dot source common
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+
+        # Get variables from parent scope
+        $currentItem = $using:currentItem
+        $deployConfig = $using:deployConfigCopy
+        $Phase = 11
+
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -OutputStream
+
+        $passed = Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig
+        if ($passed) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
+        }
+        else {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation FAILED for $($currentItem.role)." -OutputStream -Failure
+            throw "Functional validation failed for $($currentItem.vmName) ($($currentItem.role))"
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
+    }
+}
+
 # Initialize disks
 $global:Initialize_Disk = {
     param($letter,
