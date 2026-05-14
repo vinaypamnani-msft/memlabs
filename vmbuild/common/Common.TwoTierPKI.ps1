@@ -262,7 +262,7 @@ Empty=True
             & certutil.exe -setreg CA\CRLPeriod "Years" | Out-Null
             & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 | Out-Null
             & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
-            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 2 | Out-Null
+            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 4 | Out-Null
             & certutil.exe -setreg CA\CRLOverlapPeriod "Weeks" | Out-Null
 
             # Enable auditing
