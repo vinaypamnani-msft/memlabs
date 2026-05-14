@@ -473,16 +473,49 @@ Empty=True
                 Copy-Item -Path $f.FullName -Destination $WebFolderPath -Force
             }
 
-            # Publish root cert to AD (idempotent with -f flag)
+            # Publish root cert to AD (skip if already present by thumbprint)
             _Log "Publishing root cert to AD..."
             $rootCertFile = Join-Path $RootCAFilesPath "$RootCAName.crt"
             if (-not (Test-Path $rootCertFile)) {
                 throw "Root CA certificate not found: $rootCertFile"
             }
-            & certutil.exe -dspublish -f $rootCertFile RootCA | Out-Null
-            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish RootCA exit code $LASTEXITCODE" }
-            & certutil.exe -dspublish -f $rootCertFile NTAuthCA | Out-Null
-            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish NTAuthCA exit code $LASTEXITCODE" }
+
+            # Check if root CA cert is already in AD's Certification Authorities container
+            $rootAlreadyPublished = $false
+            try {
+                $rootCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($rootCertFile)
+                $rootThumbprint = $rootCert.Thumbprint
+                $configCtxLocal = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $caContainer = "CN=Certification Authorities,CN=Public Key Services,CN=Services,$configCtxLocal"
+                $searcher = New-Object System.DirectoryServices.DirectorySearcher(
+                    [ADSI]"LDAP://$caContainer", "(objectClass=certificationAuthority)")
+                $searcher.PropertiesToLoad.Add('cACertificate') | Out-Null
+                $results = $searcher.FindAll()
+                foreach ($entry in $results) {
+                    foreach ($certBytes in $entry.Properties['cacertificate']) {
+                        try {
+                            $adCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(,[byte[]]$certBytes)
+                            if ($adCert.Thumbprint -eq $rootThumbprint) {
+                                $rootAlreadyPublished = $true
+                                break
+                            }
+                        } catch {}
+                    }
+                    if ($rootAlreadyPublished) { break }
+                }
+            } catch {
+                _Log "  Could not check AD for existing root cert: $($_.Exception.Message)"
+            }
+
+            if ($rootAlreadyPublished) {
+                _Log "  Root CA cert already published to AD (thumbprint: $rootThumbprint) - skipping"
+            } else {
+                & certutil.exe -dspublish -f $rootCertFile RootCA | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish RootCA exit code $LASTEXITCODE" }
+                & certutil.exe -dspublish -f $rootCertFile NTAuthCA | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish NTAuthCA exit code $LASTEXITCODE" }
+                _Log "  Root CA cert published to AD"
+            }
 
             # Publish root CRL to AD (idempotent with -f flag)
             _Log "Publishing root CRL to AD..."
