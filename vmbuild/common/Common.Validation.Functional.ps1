@@ -744,7 +744,8 @@ function Test-StandaloneRootCAFunctionality {
         Validates Standalone Root CA post-deployment state.
     .DESCRIPTION
         The Root CA VM is intentionally shut down after PKI deployment (Step 5).
-        Correct end state is VM=Off. If it's still running, verify CA is operational.
+        Phase 10 (maintenance) may start it temporarily. Phase 11 validates the
+        CA if running, then shuts the VM back down to restore correct end state.
     #>
     [CmdletBinding()]
     param(
@@ -755,7 +756,6 @@ function Test-StandaloneRootCAFunctionality {
     $Phase = 11
     Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Validating Root CA state" -LogOnly
 
-    # The correct post-deployment state is VM powered off
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if (-not $vm) {
         Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found" -Failure
@@ -768,9 +768,21 @@ function Test-StandaloneRootCAFunctionality {
         return $true
     }
 
-    # VM is unexpectedly running — run the standard CA tests
-    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: VM is $($vm.State) (expected Off) - running CA tests" -LogOnly
-    return (Test-CAFunctionality -VMName $VMName -Domain $Domain)
+    # VM is running (Phase 10 maintenance started it) — validate CA, then shut down
+    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: VM is $($vm.State) - validating CA before shutdown" -LogOnly
+    $passed = Test-CAFunctionality -VMName $VMName -Domain $Domain
+
+    # Shut down regardless of test result — correct end state is always Off
+    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Shutting down Root CA VM (correct end state = Off)" -LogOnly
+    try {
+        Stop-VM -Name $VMName -Force -ErrorAction Stop
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: VM shut down successfully" -LogOnly
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Failed to shut down VM: $($_.Exception.Message)" -Warning
+    }
+
+    return $passed
 }
 
 function Test-CAFunctionality {
