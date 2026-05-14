@@ -271,6 +271,9 @@ function Start-VM2 {
             until ($i -gt $retryCount -or $running)
 
             if ($running) {
+                # Invalidate the Get-List cache so the next SmartUpdate
+                # sees the updated state without waiting for the throttle.
+                $global:vm_List_LastUpdate = $null
                 Write-Log "${Name}: VM was started." -LogOnly
                 if ($Passthru.IsPresent) {
                     return $true

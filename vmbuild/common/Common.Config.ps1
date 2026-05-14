@@ -2086,6 +2086,7 @@ function Update-VMFromHyperV {
 }
 
 $global:vm_List = $null
+$global:vm_List_LastUpdate = $null
 function Get-List {
 
     [CmdletBinding()]
@@ -2124,6 +2125,7 @@ function Get-List {
 
         if ($FlushCache.IsPresent) {
             $global:vm_List = $null
+            $global:vm_List_LastUpdate = $null
             $global:TestConfigFastCache = $null
             $global:VMStringCache = $null
             return
@@ -2143,10 +2145,19 @@ function Get-List {
         }
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
+            $global:vm_List_LastUpdate = $null
         }
 
         if ($doSmartUpdate) {
             if ($global:vm_List) {
+                # Throttle: skip the expensive Get-VM WMI call if the cache
+                # was refreshed less than 3 seconds ago. Rapid-fire menu
+                # navigation calls get-list -SmartUpdate multiple times in
+                # the same user action; the VM state won't change that fast.
+                if ($global:vm_List_LastUpdate -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
+                    # Skip refresh, use cached data as-is.
+                }
+                else {
                 try {
                     try {
                         $virtualMachines = Get-VM
@@ -2191,6 +2202,8 @@ function Get-List {
                 }
                 finally {
                 }
+                $global:vm_List_LastUpdate = Get-Date
+                } # else (throttle)
             }
         }
 
@@ -2211,6 +2224,7 @@ function Get-List {
                     }
 
                     $global:vm_List = $return
+                    $global:vm_List_LastUpdate = Get-Date
                 }
             }
             finally {

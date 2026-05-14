@@ -659,6 +659,7 @@ function Invoke-SmartStartVMs {
             }
         }
     }
+    $global:vm_List_LastUpdate = $null
     get-list -type VM -SmartUpdate | out-null
     return $failures
 }
@@ -701,6 +702,9 @@ function Invoke-StopVMs {
         get-job | remove-job | Out-Null
     }
     catch {}
+    # Invalidate the Get-List cache so the refresh below picks up
+    # the new VM states without being blocked by the throttle.
+    $global:vm_List_LastUpdate = $null
     get-list -type VM -SmartUpdate | out-null
 }
 
