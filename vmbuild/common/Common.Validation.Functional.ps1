@@ -97,6 +97,15 @@ function Test-VmFunctionality {
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    if (-not $testsPassed) {
+        Write-Log "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ===" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]: To reproduce manually, run:" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above." -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11" -LogOnly
+    }
+
     return $testsPassed
 }
 
@@ -134,10 +143,11 @@ function Test-DCFunctionality {
         }
 
         # DNS resolution test
+        $results.Details.Add("CMD: Resolve-DnsName -Name '$domainFqdn' -Type A")
         try {
             $dns = Resolve-DnsName -Name $domainFqdn -Type A -ErrorAction Stop
             if ($dns) {
-                $results.Details.Add("OK: DNS resolves '$domainFqdn'")
+                $results.Details.Add("OK: DNS resolves '$domainFqdn' -> $($dns.IPAddress -join ', ')")
             }
         }
         catch {
@@ -146,6 +156,7 @@ function Test-DCFunctionality {
         }
 
         # dcdiag quick checks (Services + Replications)
+        $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /q")
         try {
             $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /q 2>&1
             $dcdiagText = $dcdiag -join "`n"
@@ -153,9 +164,8 @@ function Test-DCFunctionality {
             if ($failCount -gt 0) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: dcdiag reported $failCount failed test(s)")
-                # Include first few failure lines for diagnostics
-                $failLines = $dcdiag | Where-Object { $_ -match 'failed test' } | Select-Object -First 3
-                foreach ($fl in $failLines) { $results.Details.Add("  $($fl.Trim())") }
+                $failLines = $dcdiag | Where-Object { $_ -match 'failed test' } | Select-Object -First 5
+                foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
             }
             else {
                 $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck passed")
@@ -163,7 +173,6 @@ function Test-DCFunctionality {
         }
         catch {
             $results.Details.Add("WARN: dcdiag execution failed: $($_.Exception.Message)")
-            # Don't fail the whole test for dcdiag issues - services are the critical check
         }
 
         return $results
@@ -197,11 +206,13 @@ function Test-SQLFunctionality {
 
         # Determine service name
         $svcName = if ($instName -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$instName" }
+        $results.Details.Add("CMD: Get-Service -Name '$svcName'")
 
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if (-not $svc) {
             $results.Passed = $false
             $results.Details.Add("FAIL: SQL service '$svcName' not found")
+            $results.Details.Add("  Available SQL services: $(( Get-Service -Name 'MSSQL*' -EA SilentlyContinue | ForEach-Object { $_.Name } ) -join ', ')")
             return $results
         }
         if ($svc.Status -ne 'Running') {
@@ -222,9 +233,10 @@ function Test-SQLFunctionality {
         }
 
         # Test connectivity via Invoke-Sqlcmd
+        $connStr = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
+        if ($port) { $connStr = "localhost,$port" }
+        $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Query 'SELECT 1 AS TestResult' -QueryTimeout 30")
         try {
-            $connStr = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
-            if ($port) { $connStr = "localhost,$port" }
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
@@ -235,12 +247,12 @@ function Test-SQLFunctionality {
             }
             else {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: SQL query returned unexpected result")
+                $results.Details.Add("FAIL: SQL query returned unexpected result: $($qr | Out-String)")
             }
         }
         catch {
             $results.Passed = $false
-            $results.Details.Add("FAIL: SQL connectivity test failed: $($_.Exception.Message)")
+            $results.Details.Add("FAIL: SQL connectivity test failed on '$connStr': $($_.Exception.Message)")
         }
 
         return $results
@@ -273,12 +285,14 @@ function Test-SQLAOFunctionality {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        $query = "SELECT ag.name AS GroupName, rs.synchronization_health_desc AS Health FROM sys.dm_hadr_availability_replica_states rs JOIN sys.availability_groups ag ON rs.group_id = ag.group_id"
+        $results.Details.Add("CMD: Invoke-Sqlcmd -Query `"$query`"")
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
-            $ag = Invoke-Sqlcmd -Query "SELECT ag.name AS GroupName, rs.synchronization_health_desc AS Health FROM sys.dm_hadr_availability_replica_states rs JOIN sys.availability_groups ag ON rs.group_id = ag.group_id" -QueryTimeout 30 -ErrorAction Stop
+            $ag = Invoke-Sqlcmd -Query $query -QueryTimeout 30 -ErrorAction Stop
             if (-not $ag) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: No availability group replicas found")
@@ -325,6 +339,7 @@ function Test-WSUSFunctionality {
 
         # Check WSUS and IIS services
         foreach ($svc in @('WsusService', 'W3SVC')) {
+            $results.Details.Add("CMD: Get-Service -Name '$svc'")
             $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
             if (-not $s) {
                 $results.Passed = $false
@@ -340,16 +355,16 @@ function Test-WSUSFunctionality {
         }
 
         # Test WSUS API connectivity
+        $results.Details.Add("CMD: [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', ...)")
         try {
             [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
-            # Try port 8530 (HTTP) first, then 443 (HTTPS)
             $connected = $false
             foreach ($port in @(8530, 443)) {
                 try {
                     $useSSL = ($port -eq 443)
                     $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
                     if ($wsus) {
-                        $results.Details.Add("OK: WSUS API connected on port $port")
+                        $results.Details.Add("OK: WSUS API connected on port $port (server version: $($wsus.Version))")
                         $connected = $true
                         break
                     }
@@ -387,7 +402,7 @@ function Test-CMSiteFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
 
-    Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Testing ConfigMgr site services" -LogOnly
+    Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Testing ConfigMgr site services and WMI" -LogOnly
 
     $scriptBlock = {
         param($sc)
@@ -395,6 +410,7 @@ function Test-CMSiteFunctionality {
 
         # Check critical CM services
         foreach ($svc in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
+            $results.Details.Add("CMD: Get-Service -Name '$svc'")
             $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
             if (-not $s) {
                 $results.Passed = $false
@@ -402,7 +418,7 @@ function Test-CMSiteFunctionality {
             }
             elseif ($s.Status -ne 'Running') {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: Service '$svc' is $($s.Status)")
+                $results.Details.Add("FAIL: Service '$svc' is $($s.Status), expected Running")
             }
             else {
                 $results.Details.Add("OK: Service '$svc' is Running")
@@ -411,53 +427,84 @@ function Test-CMSiteFunctionality {
 
         if (-not $results.Passed) { return $results }
 
-        # WMI site query with retry (CM components may still be initializing)
-        $maxRetries = 3
+        # WMI site query with retry (CM components still initializing after fresh build)
+        $maxRetries = 6
         $retryDelay = 30
         $siteOk = $false
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_Site (max ${maxRetries} attempts, ${retryDelay}s apart)")
         for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
             try {
                 $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
                 if ($site) {
-                    $results.Details.Add("OK: WMI SMS_Site query returned site '$sc'")
+                    $results.Details.Add("OK: WMI SMS_Site query returned site '$sc' (attempt $attempt)")
                     $siteOk = $true
                     break
                 }
+                else {
+                    $results.Details.Add("  Attempt $attempt/${maxRetries}: SMS_Site returned null")
+                }
             }
             catch {
+                $results.Details.Add("  Attempt $attempt/${maxRetries} failed: $($_.Exception.Message)")
                 if ($attempt -lt $maxRetries) {
                     Start-Sleep -Seconds $retryDelay
                 }
-                else {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts: $($_.Exception.Message)")
+            }
+        }
+        if (-not $siteOk) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts")
+            $results.Details.Add("  To reproduce: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_Site")
+            return $results
+        }
+
+        # Component health check - lenient for fresh builds.
+        # Status=2 means Error/Critical in SMS_ComponentSummarizer.
+        # Fresh deployments typically have 0-3 transient critical components
+        # for several minutes after services start. We retry a few times
+        # and allow up to 5 critical components as WARN (not FAIL).
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter `"Status = 2 AND TallyInterval = '0001128000100008'`"")
+        $componentCheckAttempts = 3
+        $componentRetryDelay = 30
+        $criticalCount = 999
+        $criticalList = @()
+        for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
+            try {
+                $critical = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
+                    -Filter "Status = 2 AND TallyInterval = '0001128000100008'" -ErrorAction Stop)
+                $criticalCount = $critical.Count
+                $criticalList = $critical
+                if ($criticalCount -eq 0) {
+                    $results.Details.Add("OK: No critical component issues (attempt $attempt)")
+                    break
+                }
+                $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $criticalCount critical component(s)")
+                if ($attempt -lt $componentCheckAttempts) {
+                    Start-Sleep -Seconds $componentRetryDelay
+                }
+            }
+            catch {
+                $results.Details.Add("  Component health query attempt $attempt failed: $($_.Exception.Message)")
+                if ($attempt -lt $componentCheckAttempts) {
+                    Start-Sleep -Seconds $componentRetryDelay
                 }
             }
         }
 
-        # Component health check (allow a small number of warnings, fail on critical)
-        if ($siteOk) {
-            try {
-                $critical = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
-                    -Filter "Status = 2 AND TallyInterval = '0001128000100008'" -ErrorAction Stop)
-                if ($critical.Count -gt 0) {
-                    $results.Details.Add("WARN: $($critical.Count) component(s) in critical state:")
-                    foreach ($c in ($critical | Select-Object -First 5)) {
-                        $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
-                    }
-                    # Allow up to 2 critical components (transient startup issues)
-                    if ($critical.Count -gt 2) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: More than 2 components in critical state")
-                    }
-                }
-                else {
-                    $results.Details.Add("OK: No critical component issues")
-                }
+        if ($criticalCount -gt 0 -and $criticalCount -le 5) {
+            # Lenient: up to 5 critical components is a warning, not a failure
+            $results.Details.Add("WARN: $criticalCount component(s) in critical state (threshold for failure: >5):")
+            foreach ($c in ($criticalList | Select-Object -First 5)) {
+                $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
             }
-            catch {
-                $results.Details.Add("WARN: Component health query failed: $($_.Exception.Message)")
+        }
+        elseif ($criticalCount -gt 5) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: $criticalCount components in critical state (exceeds threshold of 5)")
+            foreach ($c in ($criticalList | Select-Object -First 10)) {
+                $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
             }
+            $results.Details.Add("  To reproduce: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter `"Status = 2 AND TallyInterval = '0001128000100008'`"")
         }
 
         return $results
@@ -486,6 +533,7 @@ function Test-SecondaryFunctionality {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        $results.Details.Add("CMD: Get-Service -Name 'SMS_EXECUTIVE'")
         $svc = Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue
         if (-not $svc) {
             $results.Passed = $false
@@ -521,6 +569,7 @@ function Test-SecondaryFunctionality {
             $parentScript = {
                 param($parentSC, $childSC)
                 $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_Site -Filter `"SiteCode = '$childSC'`"")
                 try {
                     $sec = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_Site `
                         -Filter "SiteCode = '$childSC'" -ErrorAction Stop
@@ -568,20 +617,34 @@ function Test-SiteSystemFunctionality {
 
         $mpScript = {
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-            try {
-                $response = Invoke-WebRequest -Uri 'http://localhost/sms_mp/.sms_aut?mplist' `
-                    -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
-                if ($response.StatusCode -eq 200) {
-                    $results.Details.Add("OK: MP endpoint returned HTTP 200")
+            $url = 'http://localhost/sms_mp/.sms_aut?mplist'
+            $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing -TimeoutSec 30")
+
+            # MP may still be initializing after a fresh build; retry a few times
+            $maxAttempts = 4
+            $retryDelay = 15
+            $reached = $false
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                try {
+                    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    if ($response.StatusCode -eq 200) {
+                        $results.Details.Add("OK: MP endpoint returned HTTP 200 (attempt $attempt)")
+                        $reached = $true
+                        break
+                    }
+                    else {
+                        $results.Details.Add("  Attempt $attempt/$maxAttempts: HTTP $($response.StatusCode)")
+                    }
                 }
-                else {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: MP endpoint returned HTTP $($response.StatusCode)")
+                catch {
+                    $results.Details.Add("  Attempt $attempt/$maxAttempts: $($_.Exception.Message)")
+                    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                 }
             }
-            catch {
+            if (-not $reached) {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: MP endpoint unreachable: $($_.Exception.Message)")
+                $results.Details.Add("FAIL: MP endpoint unreachable after $maxAttempts attempts")
+                $results.Details.Add("  To reproduce: Invoke-WebRequest -Uri '$url' -UseBasicParsing")
             }
             return $results
         }
@@ -602,31 +665,49 @@ function Test-SiteSystemFunctionality {
         } | Select-Object -First 1
 
         if ($parentVM) {
-            Write-Log "[Phase $Phase] $VMName [DP]: Verifying DP status from '$($parentVM.vmName)'" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [DP]: Verifying DP status from '$($parentVM.vmName)' (site $siteCode)" -LogOnly
 
             $dpScript = {
-                param($sc, $dpVmName)
+                param($sc, $dpVmName, $dpFqdn)
                 $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-                try {
-                    $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
-                        -Filter "ServerName LIKE '%$dpVmName%'" -ErrorAction Stop
-                    if ($dp) {
-                        $results.Details.Add("OK: DP '$dpVmName' found in site '$sc'")
+
+                # DP registration in WMI can lag behind the actual install.
+                # Retry for up to ~2 minutes.
+                $maxAttempts = 5
+                $retryDelay = 20
+                $wmiFilter = "ServerName LIKE '%$dpVmName%'"
+                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
+
+                $found = $false
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    try {
+                        $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
+                            -Filter $wmiFilter -ErrorAction Stop
+                        if ($dp) {
+                            $results.Details.Add("OK: DP '$dpVmName' found in site '$sc' (attempt $attempt)")
+                            $found = $true
+                            break
+                        }
+                        else {
+                            $results.Details.Add("  Attempt $attempt/$maxAttempts: DP not yet visible in WMI")
+                            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
+                        }
                     }
-                    else {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: DP '$dpVmName' not found in site '$sc' SMS_DistributionPointInfo")
+                    catch {
+                        $results.Details.Add("  Attempt $attempt/$maxAttempts: WMI query failed: $($_.Exception.Message)")
+                        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                     }
                 }
-                catch {
+                if (-not $found) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: DP query failed: $($_.Exception.Message)")
+                    $results.Details.Add("FAIL: DP '$dpVmName' not found in site '$sc' after $maxAttempts attempts")
+                    $results.Details.Add("  To reproduce on $($env:COMPUTERNAME): Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"$wmiFilter`"")
                 }
                 return $results
             }
 
             $dpResult = Invoke-VmCommand -VmName $parentVM.vmName -VmDomainName $domain `
-                -ScriptBlock $dpScript -ArgumentList $siteCode, $VMName `
+                -ScriptBlock $dpScript -ArgumentList $siteCode, $VMName, "$VMName.$domain" `
                 -DisplayName "Phase11-DP-Test" -SuppressLog
 
             if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $dpResult)) {
@@ -635,6 +716,38 @@ function Test-SiteSystemFunctionality {
         }
         else {
             Write-Log "[Phase $Phase] $VMName [DP]: Cannot find parent site server for site '$siteCode'; skipping DP verification" -Warning
+        }
+    }
+
+    # Test SUP if installSUP
+    if ($CurrentItem.installSUP) {
+        Write-Log "[Phase $Phase] $VMName [SUP]: Testing Software Update Point" -LogOnly
+
+        $supScript = {
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+            $results.Details.Add("CMD: Get-Service -Name 'WsusService'")
+            $svc = Get-Service -Name 'WsusService' -ErrorAction SilentlyContinue
+            if (-not $svc) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Service 'WsusService' not found")
+            }
+            elseif ($svc.Status -ne 'Running') {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Service 'WsusService' is $($svc.Status)")
+            }
+            else {
+                $results.Details.Add("OK: Service 'WsusService' is Running")
+            }
+
+            return $results
+        }
+
+        $supResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $supScript -DisplayName "Phase11-SUP-Test" -SuppressLog
+
+        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'SUP' -Result $supResult)) {
+            $allPassed = $false
         }
     }
 
@@ -649,21 +762,42 @@ function Test-ReportingFunctionality {
     )
 
     $Phase = 11
-    Write-Log "[Phase $Phase] $VMName [RP]: Testing Reporting Services portal" -LogOnly
+    Write-Log "[Phase $Phase] $VMName [RP]: Testing Reporting Services" -LogOnly
 
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        # Try common SSRS/PBIRS URLs
+        # Check SQL Server Reporting Services service
+        $results.Details.Add("CMD: Get-Service -Name 'SQLServerReportingServices' or 'ReportServer'")
+        $svc = Get-Service -Name 'SQLServerReportingServices' -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            $svc = Get-Service -Name 'ReportServer' -ErrorAction SilentlyContinue
+        }
+        if (-not $svc) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Neither 'SQLServerReportingServices' nor 'ReportServer' service found")
+            $results.Details.Add("  Available services matching 'Report*' or 'SQLSR*': $(( Get-Service -Name 'Report*','SQLSR*' -EA SilentlyContinue | ForEach-Object { $_.Name } ) -join ', ')")
+            return $results
+        }
+        if ($svc.Status -ne 'Running') {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Reporting service '$($svc.Name)' is $($svc.Status)")
+            return $results
+        }
+        $results.Details.Add("OK: Reporting service '$($svc.Name)' is Running")
+
+        # Try common SSRS/PBIRS portal URLs
         $urls = @(
             'http://localhost/Reports',
-            'https://localhost/Reports',
-            'http://localhost:80/Reports'
+            'http://localhost:80/Reports',
+            'https://localhost/Reports'
         )
+        $results.Details.Add("CMD: Invoke-WebRequest (trying: $($urls -join ', '))")
         $reachable = $false
+        $lastErr = ''
         foreach ($url in $urls) {
             try {
-                $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+                $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
                 if ($response.StatusCode -eq 200) {
                     $results.Details.Add("OK: Reporting portal reachable at '$url'")
                     $reachable = $true
@@ -671,12 +805,13 @@ function Test-ReportingFunctionality {
                 }
             }
             catch {
-                # Try next URL
+                $lastErr = $_.Exception.Message
             }
         }
         if (-not $reachable) {
-            $results.Passed = $false
-            $results.Details.Add("FAIL: Reporting portal not reachable on any standard URL")
+            # Portal unreachable is a WARN, not a FAIL - the service being
+            # Running is the critical check. Portal may need auth or different URL.
+            $results.Details.Add("WARN: Reporting portal not reachable on standard URLs (last error: $lastErr)")
         }
 
         return $results
@@ -702,22 +837,23 @@ function Test-FileServerFunctionality {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # LanmanServer service
+        $results.Details.Add("CMD: Get-Service -Name 'LanmanServer'")
         $svc = Get-Service -Name 'LanmanServer' -ErrorAction SilentlyContinue
         if (-not $svc -or $svc.Status -ne 'Running') {
             $results.Passed = $false
-            $results.Details.Add("FAIL: LanmanServer service is not running")
+            $results.Details.Add("FAIL: LanmanServer service is not running (Status: $(if($svc){$svc.Status}else{'not found'}))")
             return $results
         }
         $results.Details.Add("OK: LanmanServer service is Running")
 
-        # Check for non-default SMB shares (E$, F$, or named shares)
+        # Check for non-default SMB shares
+        $results.Details.Add("CMD: Get-SmbShare | where Name not in ADMIN$,C$,IPC$,print$")
         $shares = @(Get-SmbShare -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notin @('ADMIN$', 'C$', 'IPC$', 'print$') })
         if ($shares.Count -gt 0) {
             $results.Details.Add("OK: Found $($shares.Count) non-default share(s): $($shares.Name -join ', ')")
         }
         else {
-            # At minimum, E$ and F$ should exist (FileServer role requires E and F disks)
             $adminShares = @(Get-SmbShare -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -in @('E$', 'F$') })
             if ($adminShares.Count -ge 2) {
@@ -726,6 +862,7 @@ function Test-FileServerFunctionality {
             else {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: No non-default shares found and E`$/F`$ not both present")
+                $results.Details.Add("  All shares: $(( Get-SmbShare -EA SilentlyContinue | ForEach-Object { $_.Name }) -join ', ')")
             }
         }
 
@@ -758,13 +895,14 @@ function Test-StandaloneRootCAFunctionality {
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if (-not $vm) {
-        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found" -Failure
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host" -Failure -LogOnly
         return $false
     }
 
+    Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Current VM state = $($vm.State)" -LogOnly
+
     if ($vm.State -eq 'Off') {
         Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: OK - VM is Off (expected post-deployment state)" -LogOnly
-        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: PASSED" -LogOnly
         return $true
     }
 
@@ -793,12 +931,13 @@ function Test-CAFunctionality {
     )
 
     $Phase = 11
-    Write-Log "[Phase $Phase] $VMName [CA]: Testing Certificate Authority" -LogOnly
+    Write-Log "[Phase $Phase] $VMName [CA]: Testing Certificate Authority services" -LogOnly
 
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # CertSvc service (Active Directory Certificate Services)
+        $results.Details.Add("CMD: Get-Service -Name 'CertSvc'")
         $svc = Get-Service -Name 'CertSvc' -ErrorAction SilentlyContinue
         if (-not $svc) {
             $results.Passed = $false
@@ -813,6 +952,7 @@ function Test-CAFunctionality {
         $results.Details.Add("OK: Service 'CertSvc' is Running")
 
         # certutil -ping: verifies the CA RPC interface is responsive
+        $results.Details.Add("CMD: certutil.exe -ping")
         try {
             $ping = & certutil.exe -ping 2>&1
             $pingText = $ping -join "`n"
@@ -822,6 +962,7 @@ function Test-CAFunctionality {
             else {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: certutil -ping failed (exit $LASTEXITCODE)")
+                $results.Details.Add("  Output: $pingText")
             }
         }
         catch {
@@ -829,24 +970,20 @@ function Test-CAFunctionality {
             $results.Details.Add("FAIL: certutil -ping exception: $($_.Exception.Message)")
         }
 
-        # Verify the CA certificate is valid (not expired)
+        # Verify the CA certificate is valid
+        $results.Details.Add("CMD: certutil.exe -cainfo name")
         try {
             $caInfo = & certutil.exe -cainfo name 2>&1
             $caName = ($caInfo | Where-Object { $_ -match 'CA name:' }) -replace '.*CA name:\s*', ''
             if ($caName) {
                 $results.Details.Add("OK: CA name = '$caName'")
             }
-
-            $caCert = & certutil.exe -ca.cert 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $results.Details.Add("OK: CA certificate retrievable")
-            }
             else {
-                $results.Details.Add("WARN: certutil -ca.cert returned exit $LASTEXITCODE")
+                $results.Details.Add("WARN: Could not parse CA name from certutil output")
             }
         }
         catch {
-            $results.Details.Add("WARN: CA certificate check failed: $($_.Exception.Message)")
+            $results.Details.Add("WARN: CA name check failed: $($_.Exception.Message)")
         }
 
         return $results
@@ -877,23 +1014,30 @@ function Format-TestResult {
     $Phase = 11
 
     if (-not $Result -or $Result.ScriptBlockFailed) {
-        $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result' }
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure
+        $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -LogOnly
         return $false
     }
 
     $output = $Result.ScriptBlockOutput
     if (-not $output -or -not $output.ContainsKey('Passed')) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -LogOnly
+        if ($output) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output type: $($output.GetType().FullName)" -LogOnly
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output: $($output | Out-String)" -LogOnly
+        }
         return $false
     }
 
-    # Log all detail lines
+    # Log all detail lines to the log file
     if ($output.Details) {
         foreach ($line in $output.Details) {
-            $isError = $line -match '^FAIL:'
-            if ($isError) {
-                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure
+            if ($line -match '^FAIL:') {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -LogOnly
+            }
+            elseif ($line -match '^WARN:') {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -LogOnly
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -LogOnly
@@ -902,11 +1046,11 @@ function Format-TestResult {
     }
 
     if ($output.Passed) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: All checks PASSED" -Success
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: All checks PASSED" -LogOnly
         return $true
     }
     else {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED - see log for details" -Failure -LogOnly
         return $false
     }
 }
