@@ -112,17 +112,6 @@ function Test-VmFunctionality {
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
-    if (-not $testsPassed) {
-        $guidance = @(
-            "[Phase $Phase] $VMName [$role]: To investigate, connect to the VM:"
-            "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)"
-        )
-        foreach ($g in $guidance) {
-            Write-Log $g -Warning -LogOnly
-            $script:Phase11OutputBuffer.Add(@{ Text = $g; Level = 'Warning' })
-        }
-    }
-
     return $testsPassed
 }
 
@@ -252,7 +241,8 @@ function Test-SQLFunctionality {
         # Test connectivity via Invoke-Sqlcmd
         $connStr = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
         if ($port) { $connStr = "localhost,$port" }
-        $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Query 'SELECT 1 AS TestResult' -QueryTimeout 30")
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Query 'SELECT 1' (as $identity)")
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
@@ -269,7 +259,7 @@ function Test-SQLFunctionality {
         }
         catch {
             $results.Passed = $false
-            $results.Details.Add("FAIL: SQL connectivity test failed on '$connStr': $($_.Exception.Message)")
+            $results.Details.Add("FAIL: SQL connection to '$connStr' as '$identity' failed: $($_.Exception.Message)")
         }
 
         return $results
@@ -471,7 +461,6 @@ function Test-CMSiteFunctionality {
         if (-not $siteOk) {
             $results.Passed = $false
             $results.Details.Add("FAIL: WMI SMS_Site query failed after $maxRetries attempts")
-            $results.Details.Add("  To reproduce: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_Site")
             return $results
         }
 
@@ -521,7 +510,6 @@ function Test-CMSiteFunctionality {
             foreach ($c in ($criticalList | Select-Object -First 10)) {
                 $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
             }
-            $results.Details.Add("  To reproduce: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter `"Status = 2 AND TallyInterval = '0001128000100008'`"")
         }
 
         return $results
@@ -660,8 +648,7 @@ function Test-SiteSystemFunctionality {
             }
             if (-not $reached) {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: MP endpoint unreachable after $maxAttempts attempts")
-                $results.Details.Add("  To reproduce: Invoke-WebRequest -Uri '$url' -UseBasicParsing")
+                $results.Details.Add("FAIL: MP endpoint '$url' unreachable after $maxAttempts attempts")
             }
             return $results
         }
@@ -718,7 +705,6 @@ function Test-SiteSystemFunctionality {
                 if (-not $found) {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: DP '$dpVmName' not found in site '$sc' after $maxAttempts attempts")
-                    $results.Details.Add("  To reproduce on $($env:COMPUTERNAME): Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"$wmiFilter`"")
                 }
                 return $results
             }
@@ -1034,9 +1020,7 @@ function Format-TestResult {
     if (-not $Result -or $Result.ScriptBlockFailed) {
         $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -Warning -LogOnly
         $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg"; Level = 'Failure' })
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)"; Level = 'Warning' })
         return $false
     }
 
