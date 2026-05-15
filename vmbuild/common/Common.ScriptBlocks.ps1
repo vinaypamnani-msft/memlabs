@@ -67,9 +67,27 @@ $global:Phase11Job = {
         $deployConfig = $using:deployConfigCopy
         $Phase = 11
 
+        # Set domain-specific log path (same pattern as VM_Create/VM_Config)
+        try { Flush-LogBuffer -All } catch { }
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -OutputStream
 
         $passed = Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig
+
+        # Emit buffered output lines (failures/warnings collected during test)
+        # This must happen at top-level where -OutputStream goes to job output.
+        if ($script:Phase11OutputBuffer) {
+            foreach ($entry in $script:Phase11OutputBuffer) {
+                switch ($entry.Level) {
+                    'Failure' { Write-Log $entry.Text -OutputStream -Failure }
+                    'Warning' { Write-Log $entry.Text -OutputStream -Warning }
+                    default   { Write-Log $entry.Text -OutputStream }
+                }
+            }
+        }
+
         if ($passed) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
         }

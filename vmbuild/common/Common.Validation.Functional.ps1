@@ -6,6 +6,18 @@
 # Fast, role-specific functional tests run inside each guest VM via
 # Invoke-VmCommand / PSDirect. Called by $global:Phase11Job after
 # the build completes to confirm each VM's assigned role is working.
+#
+# NOTE: Functions in this file must NOT use Write-Log -OutputStream.
+# That flag calls Write-Output which pollutes PowerShell function
+# return values (the caller gets @(PSCustomObject, ..., $false)
+# instead of just $false). Instead, failure/warning lines are
+# accumulated in $script:Phase11OutputBuffer and emitted by the
+# Phase11Job scriptblock at top-level where -OutputStream works.
+
+# Accumulator for lines that should appear in console output.
+# Populated by Format-TestResult and Test-VmFunctionality;
+# read and emitted by Phase11Job after Test-VmFunctionality returns.
+$script:Phase11OutputBuffer = $null
 
 function Test-VmFunctionality {
     <#
@@ -31,6 +43,9 @@ function Test-VmFunctionality {
     $role = $CurrentItem.role
     $domain = $DeployConfig.vmOptions.domainName
     $Phase = 11
+
+    # Reset the output buffer for this VM's test run
+    $script:Phase11OutputBuffer = [System.Collections.Generic.List[hashtable]]::new()
 
     Write-Log "[Phase $Phase] $VMName [$role]: Starting functional validation" -LogOnly
 
@@ -98,12 +113,18 @@ function Test-VmFunctionality {
     }
 
     if (-not $testsPassed) {
-        Write-Log "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ===" -OutputStream -Warning
-        Write-Log "[Phase $Phase] $VMName [$role]: To reproduce manually, run:" -OutputStream -Warning
-        Write-Log "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -OutputStream -Warning
-        Write-Log "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above." -OutputStream -Warning
-        Write-Log "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:" -OutputStream -Warning
-        Write-Log "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11" -OutputStream -Warning
+        $guidance = @(
+            "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ==="
+            "[Phase $Phase] $VMName [$role]: To reproduce manually, run:"
+            "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)"
+            "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above."
+            "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:"
+            "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11"
+        )
+        foreach ($g in $guidance) {
+            Write-Log $g -Warning -LogOnly
+            $script:Phase11OutputBuffer.Add(@{ Text = $g; Level = 'Warning' })
+        }
     }
 
     return $testsPassed
@@ -895,7 +916,8 @@ function Test-StandaloneRootCAFunctionality {
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if (-not $vm) {
-        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host" -Failure -OutputStream
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host"; Level = 'Failure' })
         return $false
     }
 
@@ -1015,29 +1037,34 @@ function Format-TestResult {
 
     if (-not $Result -or $Result.ScriptBlockFailed) {
         $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -OutputStream
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -Warning -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg"; Level = 'Failure' })
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)"; Level = 'Warning' })
         return $false
     }
 
     $output = $Result.ScriptBlockOutput
     if (-not $output -or -not $output.ContainsKey('Passed')) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -OutputStream
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -LogOnly
         if ($output) {
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output type: $($output.GetType().FullName)" -LogOnly
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output: $($output | Out-String)" -LogOnly
         }
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output"; Level = 'Failure' })
         return $false
     }
 
-    # Log all detail lines - failures/warnings go to OutputStream for visibility
+    # Log all detail lines; accumulate failures/warnings for console output
     if ($output.Details) {
         foreach ($line in $output.Details) {
             if ($line -match '^FAIL:') {
-                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -OutputStream
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: $line"; Level = 'Failure' })
             }
             elseif ($line -match '^WARN:') {
-                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -OutputStream
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: $line"; Level = 'Warning' })
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -LogOnly
@@ -1050,7 +1077,8 @@ function Format-TestResult {
         return $true
     }
     else {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure -OutputStream
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAILED"; Level = 'Failure' })
         return $false
     }
 }
