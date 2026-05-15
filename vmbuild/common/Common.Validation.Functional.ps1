@@ -114,12 +114,8 @@ function Test-VmFunctionality {
 
     if (-not $testsPassed) {
         $guidance = @(
-            "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ==="
-            "[Phase $Phase] $VMName [$role]: To reproduce manually, run:"
+            "[Phase $Phase] $VMName [$role]: To investigate, connect to the VM:"
             "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)"
-            "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above."
-            "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:"
-            "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11"
         )
         foreach ($g in $guidance) {
             Write-Log $g -Warning -LogOnly
