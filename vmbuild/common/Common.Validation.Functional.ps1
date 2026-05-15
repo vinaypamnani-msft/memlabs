@@ -98,12 +98,12 @@ function Test-VmFunctionality {
     }
 
     if (-not $testsPassed) {
-        Write-Log "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ===" -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$role]: To reproduce manually, run:" -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above." -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:" -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$role]: === REPRODUCTION GUIDANCE ===" -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$role]: To reproduce manually, run:" -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$role]:   Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$role]: Then run the relevant service/connectivity checks listed above." -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$role]: To re-run Phase 11 only:" -OutputStream -Warning
+        Write-Log "[Phase $Phase] $VMName [$role]:   ./New-Lab.ps1 -Configuration <config> -startPhase 11" -OutputStream -Warning
     }
 
     return $testsPassed
@@ -895,7 +895,7 @@ function Test-StandaloneRootCAFunctionality {
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if (-not $vm) {
-        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host" -Failure -LogOnly
+        Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: FAIL - VM not found on Hyper-V host" -Failure -OutputStream
         return $false
     }
 
@@ -1015,14 +1015,14 @@ function Format-TestResult {
 
     if (-not $Result -or $Result.ScriptBlockFailed) {
         $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -OutputStream
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: To debug PSDirect: Enter-PSSession -VMName '$VMName' -Credential (Get-Credential)" -OutputStream -Warning
         return $false
     }
 
     $output = $Result.ScriptBlockOutput
     if (-not $output -or -not $output.ContainsKey('Passed')) {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Test script returned unexpected output" -Failure -OutputStream
         if ($output) {
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output type: $($output.GetType().FullName)" -LogOnly
             Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Raw output: $($output | Out-String)" -LogOnly
@@ -1030,14 +1030,14 @@ function Format-TestResult {
         return $false
     }
 
-    # Log all detail lines to the log file
+    # Log all detail lines - failures/warnings go to OutputStream for visibility
     if ($output.Details) {
         foreach ($line in $output.Details) {
             if ($line -match '^FAIL:') {
-                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -LogOnly
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Failure -OutputStream
             }
             elseif ($line -match '^WARN:') {
-                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -LogOnly
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -OutputStream
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -LogOnly
@@ -1050,7 +1050,7 @@ function Format-TestResult {
         return $true
     }
     else {
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED - see log for details" -Failure -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure -OutputStream
         return $false
     }
 }
