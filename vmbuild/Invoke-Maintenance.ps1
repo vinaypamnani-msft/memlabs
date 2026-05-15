@@ -293,29 +293,43 @@ function Invoke-WeeklyUpgrades {
         return
     }
 
-    $ps7Flag = Join-Path $env:TEMP 'memlabs_ps7_upgrade.flag'
-    $chocoAllFlag = Join-Path $env:TEMP 'memlabs_choco_all_upgrade.flag'
-    $currentWeek = Get-Date -UFormat '%Y-%V'
+    $ps7Flag = Join-Path $env:ProgramData 'memlabs\ps7_upgrade.timestamp'
+    $chocoAllFlag = Join-Path $env:ProgramData 'memlabs\choco_all_upgrade.timestamp'
+    $now = Get-Date
+    $weeklyInterval = [TimeSpan]::FromDays(7)
 
-    Write-LogMessage "Current week: $currentWeek"
+    # Ensure the directory exists
+    $flagDir = Join-Path $env:ProgramData 'memlabs'
+    if (-not (Test-Path $flagDir)) { New-Item -Path $flagDir -ItemType Directory -Force | Out-Null }
 
     $doPs7Upgrade = $true
     if (Test-Path $ps7Flag) {
-        $lastWeek = Get-Content $ps7Flag -ErrorAction SilentlyContinue
-        Write-LogMessage "Last PowerShell 7 upgrade week: $lastWeek"
-        if ($lastWeek -eq $currentWeek) {
+        $lastRun = Get-Date (Get-Content $ps7Flag -ErrorAction SilentlyContinue)
+        $elapsed = $now - $lastRun
+        Write-LogMessage "Last PowerShell 7 upgrade: $($lastRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$elapsed.TotalDays) days ago)"
+        if ($elapsed -lt $weeklyInterval) {
             $doPs7Upgrade = $false
         }
     }
 
+    $doChocoUpgrade = $true
+    if (Test-Path $chocoAllFlag) {
+        $lastChocoRun = Get-Date (Get-Content $chocoAllFlag -ErrorAction SilentlyContinue)
+        $chocoElapsed = $now - $lastChocoRun
+        Write-LogMessage "Last Chocolatey upgrade all: $($lastChocoRun.ToString('yyyy-MM-dd HH:mm')) ($([int]$chocoElapsed.TotalDays) days ago)"
+        if ($chocoElapsed -lt $weeklyInterval) {
+            $doChocoUpgrade = $false
+        }
+    }
+
     if ($doPs7Upgrade) {
-        Write-LogMessage "Upgrading PowerShell 7 (week $currentWeek)..."
+        Write-LogMessage 'Upgrading PowerShell 7...'
         & choco upgrade pwsh -y
         $chocoRc = $LASTEXITCODE
         Write-LogMessage "choco upgrade pwsh returned exit code: $chocoRc"
 
         if (Test-ChocoSuccessCode -Code $chocoRc) {
-            $currentWeek | Out-File $ps7Flag -Encoding ascii -NoNewline
+            $now.ToString('o') | Out-File $ps7Flag -Encoding ascii -NoNewline
             Write-LogMessage 'PowerShell 7 upgrade completed successfully.'
         }
         else {
@@ -323,34 +337,36 @@ function Invoke-WeeklyUpgrades {
         }
     }
     else {
-        Write-LogMessage "PowerShell 7 upgrade skipped (already checked week $currentWeek)."
-    }
-
-    $doChocoUpgrade = $true
-    if (Test-Path $chocoAllFlag) {
-        $lastChocoWeek = Get-Content $chocoAllFlag -ErrorAction SilentlyContinue
-        Write-LogMessage "Last Chocolatey upgrade week: $lastChocoWeek"
-        if ($lastChocoWeek -eq $currentWeek) {
-            $doChocoUpgrade = $false
-        }
+        Write-LogMessage 'PowerShell 7 upgrade skipped (less than 7 days since last run).'
     }
 
     if ($doChocoUpgrade) {
-        Write-LogMessage "Upgrading all Chocolatey packages (week $currentWeek)..."
-        & choco upgrade all -y --ignore-checksums
-        $chocoRc = $LASTEXITCODE
-        Write-LogMessage "choco upgrade all returned exit code: $chocoRc"
+        # Launch choco upgrade all in a new window so it doesn't block the main script
+        Write-LogMessage 'Launching Chocolatey upgrade all in new window...'
+        $timestamp = $now.ToString('o')
+        $scriptLines = @()
+        $scriptLines += '$Host.UI.RawUI.WindowTitle = "MemLabs - Chocolatey Upgrades"'
+        $scriptLines += "Write-Host 'Upgrading all Chocolatey packages...' -ForegroundColor Cyan"
+        $scriptLines += '& choco upgrade all -y --ignore-checksums'
+        $scriptLines += 'if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {'
+        $scriptLines += "    '$timestamp' | Out-File '$chocoAllFlag' -Encoding ascii -NoNewline"
+        $scriptLines += "    Write-Host 'Chocolatey package upgrade completed successfully.' -ForegroundColor Green"
+        $scriptLines += '} else {'
+        $scriptLines += '    Write-Host "Chocolatey package upgrade failed (exit code: $LASTEXITCODE)." -ForegroundColor Yellow'
+        $scriptLines += '}'
+        $scriptLines += "Write-Host ''"
+        $scriptLines += "Write-Host 'Done. This window will close in 10 seconds...' -ForegroundColor Cyan"
+        $scriptLines += 'Start-Sleep -Seconds 10'
 
-        if (Test-ChocoSuccessCode -Code $chocoRc) {
-            $currentWeek | Out-File $chocoAllFlag -Encoding ascii -NoNewline
-            Write-LogMessage 'Chocolatey package upgrade completed successfully.'
-        }
-        else {
-            Write-LogMessage "Chocolatey package upgrade failed (exit code: $chocoRc)." -Level 'WARNING'
-        }
+        $scriptContent = $scriptLines -join "`n"
+        $chocoScriptPath = Join-Path $env:TEMP 'memlabs_choco_upgrade.ps1'
+        $scriptContent | Out-File $chocoScriptPath -Encoding utf8
+
+        Start-Process pwsh -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $chocoScriptPath -WindowStyle Normal
+        Write-LogMessage 'Chocolatey upgrade all launched in a new window (non-blocking).'
     }
     else {
-        Write-LogMessage "Chocolatey upgrade all skipped (already checked week $currentWeek)."
+        Write-LogMessage 'Chocolatey upgrade all skipped (less than 7 days since last run).'
     }
 
     Write-LogMessage 'Weekly upgrades maintenance completed.'
