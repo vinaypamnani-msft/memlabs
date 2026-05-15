@@ -4869,7 +4869,9 @@ if (-not $Common.Initialized) {
     # that are irrelevant inside Start-Job / ThreadJob workers.
     if ($InJob) {
         $effectiveSkipEnvironmentDetection = $true
-        $effectiveSkipMaintenanceRefresh = $true
+        if (-not $GetLatestHotfixVersion) {
+            $effectiveSkipMaintenanceRefresh = $true
+        }
         $effectiveSkipHostPreparation = $true
         $effectiveSkipVmCacheRefresh = $true
     }
