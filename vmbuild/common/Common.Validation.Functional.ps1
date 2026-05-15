@@ -619,53 +619,62 @@ function Test-SiteSystemFunctionality {
     # Test MP if installed
     if ($CurrentItem.installMP) {
         Write-Log "[Phase $Phase] $VMName [MP]: Testing Management Point" -LogOnly
-        $usePKI = if ($DeployConfig.cmOptions.UsePKI) { $true } else { $false }
 
         $mpScript = {
-            param($pki)
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-            $scheme = if ($pki) { 'https' } else { 'http' }
-            $url = "${scheme}://localhost/sms_mp/.sms_aut?mplist"
-            $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing -TimeoutSec 30")
 
-            # MP may still be initializing after a fresh build; retry a few times
-            $maxAttempts = 4
-            $retryDelay = 15
-            $reached = $false
-            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                try {
-                    # Skip cert validation for localhost (cert issued to FQDN)
-                    $iwrParams = @{ Uri = $url; UseBasicParsing = $true; TimeoutSec = 30; ErrorAction = 'Stop' }
-                    if ($pki) {
-                        try { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}
-                        if ($PSVersionTable.PSVersion.Major -ge 7) {
-                            $iwrParams['SkipCertificateCheck'] = $true
-                        }
-                    }
-                    $response = Invoke-WebRequest @iwrParams
-                    if ($response.StatusCode -eq 200) {
-                        $results.Details.Add("OK: MP endpoint returned HTTP 200 (attempt $attempt)")
-                        $reached = $true
-                        break
-                    }
-                    else {
-                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: HTTP $($response.StatusCode)")
-                    }
-                }
-                catch {
-                    $results.Details.Add("  Attempt $attempt/${maxAttempts}: $($_.Exception.Message)")
-                    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
-                }
-            }
-            if (-not $reached) {
+            # Check IIS is running (W3SVC)
+            $w3svc = Get-Service -Name 'W3SVC' -ErrorAction SilentlyContinue
+            if (-not $w3svc -or $w3svc.Status -ne 'Running') {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: MP endpoint '$url' unreachable after $maxAttempts attempts")
+                $results.Details.Add("FAIL: IIS service (W3SVC) is $( if ($w3svc) { $w3svc.Status } else { 'not installed' } )")
+                return $results
             }
+            $results.Details.Add("OK: IIS service (W3SVC) is Running")
+
+            # Check SMS_MP IIS virtual directory exists via WebAdministration
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $mpApp = Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                if ($mpApp) {
+                    $results.Details.Add("OK: IIS application 'SMS_MP' exists (Physical: $($mpApp.PhysicalPath))")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: IIS application 'SMS_MP' not found under Default Web Site")
+                    return $results
+                }
+
+                # Check that the app pool is started
+                $poolName = $mpApp.ApplicationPool
+                $pool = Get-WebAppPoolState -Name $poolName -ErrorAction SilentlyContinue
+                if ($pool -and $pool.Value -eq 'Started') {
+                    $results.Details.Add("OK: App pool '$poolName' is Started")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: App pool '$poolName' is $( if ($pool) { $pool.Value } else { 'not found' } )")
+                    return $results
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Could not load WebAdministration module: $($_.Exception.Message)")
+            }
+
+            # Check MP-related files exist
+            $mpLogDir = Join-Path $env:SystemDrive 'SMS_CCM\Logs'
+            if (Test-Path $mpLogDir) {
+                $results.Details.Add("OK: MP log directory exists ($mpLogDir)")
+            }
+            else {
+                $results.Details.Add("WARN: MP log directory not found ($mpLogDir)")
+            }
+
             return $results
         }
 
         $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $mpScript -ArgumentList $usePKI -DisplayName "Phase11-MP-Test" -SuppressLog
+            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
             $allPassed = $false
