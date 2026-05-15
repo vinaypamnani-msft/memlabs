@@ -248,7 +248,7 @@ function Test-SQLFunctionality {
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
-            $qr = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -ErrorAction Stop
+            $qr = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
             if ($qr.TestResult -eq 1) {
                 $results.Details.Add("OK: SQL query 'SELECT 1' succeeded on '$connStr'")
             }
@@ -299,7 +299,7 @@ function Test-SQLAOFunctionality {
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
-            $ag = Invoke-Sqlcmd -Query $query -QueryTimeout 30 -ErrorAction Stop
+            $ag = Invoke-Sqlcmd -Query $query -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
             if (-not $ag) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: No availability group replicas found")
