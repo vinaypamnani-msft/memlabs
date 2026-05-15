@@ -696,7 +696,7 @@ function New-RDCManFileFromHyperV {
     if ($killed -or $killedAlready) {
 
         #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
-        Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
         $i = 0
         while ($i -lt 3) {
             Set-RdcManMin
