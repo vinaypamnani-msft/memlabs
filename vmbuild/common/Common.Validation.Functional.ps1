@@ -661,13 +661,14 @@ function Test-SiteSystemFunctionality {
                 $results.Details.Add("WARN: Could not load WebAdministration module: $($_.Exception.Message)")
             }
 
-            # Check MP-related files exist
-            $mpLogDir = Join-Path $env:SystemDrive 'SMS_CCM\Logs'
-            if (Test-Path $mpLogDir) {
-                $results.Details.Add("OK: MP log directory exists ($mpLogDir)")
+            # Verify SMS install location from registry
+            $smsReg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -ErrorAction SilentlyContinue
+            if ($smsReg -and $smsReg.'Installation Directory') {
+                $installDir = $smsReg.'Installation Directory'
+                $results.Details.Add("OK: SMS installed at '$installDir'")
             }
             else {
-                $results.Details.Add("WARN: MP log directory not found ($mpLogDir)")
+                $results.Details.Add("WARN: SMS Identification registry key not found (MP may still be initializing)")
             }
 
             return $results
