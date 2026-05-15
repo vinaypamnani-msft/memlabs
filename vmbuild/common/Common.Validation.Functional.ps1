@@ -619,10 +619,13 @@ function Test-SiteSystemFunctionality {
     # Test MP if installed
     if ($CurrentItem.installMP) {
         Write-Log "[Phase $Phase] $VMName [MP]: Testing Management Point" -LogOnly
+        $usePKI = if ($DeployConfig.cmOptions.UsePKI) { $true } else { $false }
 
         $mpScript = {
+            param($pki)
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-            $url = 'http://localhost/sms_mp/.sms_aut?mplist'
+            $scheme = if ($pki) { 'https' } else { 'http' }
+            $url = "${scheme}://localhost/sms_mp/.sms_aut?mplist"
             $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing -TimeoutSec 30")
 
             # MP may still be initializing after a fresh build; retry a few times
@@ -631,7 +634,15 @@ function Test-SiteSystemFunctionality {
             $reached = $false
             for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
                 try {
-                    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+                    # Skip cert validation for localhost (cert issued to FQDN)
+                    $iwrParams = @{ Uri = $url; UseBasicParsing = $true; TimeoutSec = 30; ErrorAction = 'Stop' }
+                    if ($pki) {
+                        try { [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true } } catch {}
+                        if ($PSVersionTable.PSVersion.Major -ge 7) {
+                            $iwrParams['SkipCertificateCheck'] = $true
+                        }
+                    }
+                    $response = Invoke-WebRequest @iwrParams
                     if ($response.StatusCode -eq 200) {
                         $results.Details.Add("OK: MP endpoint returned HTTP 200 (attempt $attempt)")
                         $reached = $true
@@ -654,7 +665,7 @@ function Test-SiteSystemFunctionality {
         }
 
         $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog
+            -ScriptBlock $mpScript -ArgumentList $usePKI -DisplayName "Phase11-MP-Test" -SuppressLog
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
             $allPassed = $false
