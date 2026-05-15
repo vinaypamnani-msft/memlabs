@@ -112,6 +112,11 @@ function Test-VmFunctionality {
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly)
+    if ($testsPassed -and $role -notin @('OSDClient', 'Linux', 'AADClient', 'StandaloneRootCA')) {
+        $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
+    }
+
     return $testsPassed
 }
 
@@ -1036,6 +1041,41 @@ function Test-CAFunctionality {
         -ScriptBlock $scriptBlock -DisplayName "Phase11-CA-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'CA' -Result $result)
+}
+
+function Test-MaintenanceTasks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName [Maintenance]: Verifying scheduled tasks from Phase 10" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $requiredTasks = @('Disable-IEESC', 'EnableLogMachine')
+        foreach ($taskName in $requiredTasks) {
+            $results.Details.Add("CMD: Get-ScheduledTask -TaskName '$taskName'")
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if (-not $task) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Scheduled task '$taskName' not found (Phase 10 maintenance may not have run)")
+            }
+            else {
+                $results.Details.Add("OK: Scheduled task '$taskName' exists (State: $($task.State))")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
 }
 
 #endregion

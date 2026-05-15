@@ -284,15 +284,27 @@ function Start-VMFixes {
 
     $copyResults = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
+    $fixesAppliedCount = 0
+    $fixesApplicableCount = 0
     foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
+        if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
         $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
         $toStop += $status.VMsToStop
         $success = $status.Success
+        if ($status.Applied) { $fixesAppliedCount++ }
         if (-not $success) {
             $resetVersion = [int]($vmFix.FixVersion) - 1
             Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
             break
         }
+    }
+
+    # If deploying a new VM and fixes were applicable but none actually ran
+    # their script block, something is wrong — do not stamp the version.
+    # (If zero were applicable, e.g. OSDClient/Linux/AADClient, that's expected.)
+    if ($ApplyNewOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
+        Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
+        $success = $false
     }
 
     if ($toStop.Count -ne 0 -and -not $SkipVMShutdown.IsPresent) {
@@ -324,6 +336,7 @@ function Start-VMFix {
 
     $return = [PSCustomObject]@{
         Success   = $false
+        Applied   = $false
         VMsToStop = @()
     }
 
@@ -444,6 +457,7 @@ function Start-VMFix {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
         Set-VMNote -vmName $VMName -vmVersion $fixVersion
         $return.Success = $true
+        $return.Applied = $true
     }
 
     return $return
@@ -1167,12 +1181,15 @@ function Get-VMFixes {
         $applicable = $false
         $applicableRoles = $vmFix.AppliesToRoles
         if (-not $applicableRoles) {
+            # Empty AppliesToRoles means "all roles". Use AllRoles list if available,
+            # otherwise treat as universally applicable (covers InJob where
+            # Set-SupportedOptions is skipped).
             $applicableRoles = $Common.Supported.AllRoles
         }
         if ($vmFix.NotAppliesToRoles -and $vmNote.role -in $vmFix.NotAppliesToRoles) {
             $applicable = $false
         }
-        elseif ($vmNote.role -in $applicableRoles) {
+        elseif (-not $applicableRoles -or $vmNote.role -in $applicableRoles) {
             $applicable = $true
         }
         else {
