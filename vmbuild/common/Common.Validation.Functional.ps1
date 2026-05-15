@@ -633,11 +633,11 @@ function Test-SiteSystemFunctionality {
                         break
                     }
                     else {
-                        $results.Details.Add("  Attempt $attempt/$maxAttempts: HTTP $($response.StatusCode)")
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: HTTP $($response.StatusCode)")
                     }
                 }
                 catch {
-                    $results.Details.Add("  Attempt $attempt/$maxAttempts: $($_.Exception.Message)")
+                    $results.Details.Add("  Attempt $attempt/${maxAttempts}: $($_.Exception.Message)")
                     if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                 }
             }
@@ -689,12 +689,12 @@ function Test-SiteSystemFunctionality {
                             break
                         }
                         else {
-                            $results.Details.Add("  Attempt $attempt/$maxAttempts: DP not yet visible in WMI")
+                            $results.Details.Add("  Attempt $attempt/${maxAttempts}: DP not yet visible in WMI")
                             if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                         }
                     }
                     catch {
-                        $results.Details.Add("  Attempt $attempt/$maxAttempts: WMI query failed: $($_.Exception.Message)")
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
                         if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
                     }
                 }
