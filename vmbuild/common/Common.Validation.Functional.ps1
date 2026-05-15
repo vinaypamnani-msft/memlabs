@@ -205,7 +205,7 @@ function Test-SQLFunctionality {
     $sqlPort = if ($CurrentItem.sqlPort) { $CurrentItem.sqlPort } else { $null }
 
     Write-Log "[Phase $Phase] $VMName [SQL]: Testing SQL Server instance '$instanceName'" -LogOnly
-    $isSQLAO = ($CurrentItem.role -eq 'SQLAO')
+    $isSQLAO = if ($CurrentItem.role -eq 'SQLAO') { '1' } else { '0' }
 
     $scriptBlock = {
         param($instName, $port, $checkAgent)
@@ -232,7 +232,7 @@ function Test-SQLFunctionality {
         # SQL Agent - only check for SQLAO where it's required for failover
         $agentName = if ($instName -eq 'MSSQLSERVER') { 'SQLSERVERAGENT' } else { "SQLAgent`$$instName" }
         $agent = Get-Service -Name $agentName -ErrorAction SilentlyContinue
-        if ($checkAgent) {
+        if ($checkAgent -eq '1') {
             if ($agent -and $agent.Status -eq 'Running') {
                 $results.Details.Add("OK: SQL Agent '$agentName' is Running")
             }
