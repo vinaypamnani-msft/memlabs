@@ -662,7 +662,7 @@ $global:VM_Create = {
                    
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
-            Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
+            Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
             $count = 0
             $label = $null
             $diskNum = 1
@@ -716,7 +716,7 @@ $global:VM_Create = {
             if ($currentItem.sqlVersion -and $createVM) {
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Mounting ISO" -force
 
                 # Determine which SQL version files should be used
                 $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
@@ -733,6 +733,7 @@ $global:VM_Create = {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
 
                 # Copy files from DVD
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -753,12 +754,13 @@ $global:VM_Create = {
 
                 # Eject ISO from guest
                 Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Done" -Completed
             }
             #Copy CM to the VM
             if ($currentItem.CMInstallDir -and $createVM) {
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying CM installation files to the VM" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Mounting ISO" -force
 
                 # Determine which SQL version files should be used
                 $CMFiles = $azureFileList.CMVersions | Where-Object { $deployConfig.cmOptions.version -in $_.versions }
@@ -789,6 +791,7 @@ $global:VM_Create = {
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
 
                     # Copy files from DVD
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Copying from DVD" -force
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -804,6 +807,7 @@ $global:VM_Create = {
 
                     # Eject ISO from guest
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Done" -Completed
                 }
                 else {
                      Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
@@ -812,7 +816,7 @@ $global:VM_Create = {
         }
         
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
-            Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files"
+            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Checking site server" -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if this is the Top Level SiteServer to prepopulate objects"
             $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
 
@@ -823,26 +827,27 @@ $global:VM_Create = {
                     $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
                 }
 
+                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying baselines.zip" -force
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
-                #E:\repos\memlabs\vmbuild\azureFiles \support\baselines.zip
-                #$common.AzureFilesPath
                 $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
-                $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
+                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished copying baselines.zip to the VM."
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying OS ISO files to the VM" -Completed
 
                 $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
 
                 $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
-                
+                $isoIndex = 0
+                $isoTotal = @($isoFiles).Count
+
                 foreach ($isoFile in $isoFiles) {
-                    
+                    $isoIndex++
+
                     # SQL Iso Path
                     $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
+                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Mounting $($isoFile.id) ($isoIndex/$isoTotal)" -force
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
-                    Write-Progress2 -Activity "$($currentItem.vmName): Copying $iso files to the VM" -Completed
                     $IsoPath = Join-Path $Common.AzureFilesPath $Iso
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
@@ -861,7 +866,7 @@ $global:VM_Create = {
                             write-Log "Successfully mounted the dvd from $($dvd.Path)"
                         }
                     }
-                    $dirname = $dirname = (join-path $driveLetter "OSD" $isoFile.id)
+                    $dirname = (join-path $driveLetter "OSD" $isoFile.id)
 
                     $CopyIsoFiles = {
                         param ($dirname)
@@ -869,14 +874,13 @@ $global:VM_Create = {
                         $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
                         Copy-Item -Path "$($cd.DriveLetter):\*" -Destination $dirname -Recurse -Force -Confirm:$false
                     }
-                   
 
                     # Copy files from DVD
+                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying $($isoFile.id) ISO to VM ($isoIndex/$isoTotal)" -force
                     Write-Log "Copying ISO WIM Files to $dirname"
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
-                        #write-Log (Get-VMDvdDrive -VMName $currentItem.vmName)
                         Write-Log "Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
@@ -890,7 +894,7 @@ $global:VM_Create = {
 
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                 }
-                Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed
             }
         }
 
