@@ -205,9 +205,10 @@ function Test-SQLFunctionality {
     $sqlPort = if ($CurrentItem.sqlPort) { $CurrentItem.sqlPort } else { $null }
 
     Write-Log "[Phase $Phase] $VMName [SQL]: Testing SQL Server instance '$instanceName'" -LogOnly
+    $isSQLAO = ($CurrentItem.role -eq 'SQLAO')
 
     $scriptBlock = {
-        param($instName, $port)
+        param($instName, $port, $checkAgent)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # Determine service name
@@ -228,14 +229,26 @@ function Test-SQLFunctionality {
         }
         $results.Details.Add("OK: SQL service '$svcName' is Running")
 
-        # SQL Agent
+        # SQL Agent - only check for SQLAO where it's required for failover
         $agentName = if ($instName -eq 'MSSQLSERVER') { 'SQLSERVERAGENT' } else { "SQLAgent`$$instName" }
         $agent = Get-Service -Name $agentName -ErrorAction SilentlyContinue
-        if ($agent -and $agent.Status -eq 'Running') {
-            $results.Details.Add("OK: SQL Agent '$agentName' is Running")
+        if ($checkAgent) {
+            if ($agent -and $agent.Status -eq 'Running') {
+                $results.Details.Add("OK: SQL Agent '$agentName' is Running")
+            }
+            elseif ($agent) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SQL Agent '$agentName' is $($agent.Status) (required for SQLAO)")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SQL Agent '$agentName' not found (required for SQLAO)")
+            }
         }
-        elseif ($agent) {
-            $results.Details.Add("WARN: SQL Agent '$agentName' is $($agent.Status)")
+        else {
+            if ($agent -and $agent.Status -eq 'Running') {
+                $results.Details.Add("OK: SQL Agent '$agentName' is Running")
+            }
         }
 
         # Test connectivity via Invoke-Sqlcmd
@@ -266,7 +279,7 @@ function Test-SQLFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $instanceName, $sqlPort `
+        -ScriptBlock $scriptBlock -ArgumentList $instanceName, $sqlPort, $isSQLAO `
         -DisplayName "Phase11-SQL-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQL' -Result $result)
@@ -469,6 +482,11 @@ function Test-CMSiteFunctionality {
         # Fresh deployments typically have 0-3 transient critical components
         # for several minutes after services start. We retry a few times
         # and allow up to 5 critical components as WARN (not FAIL).
+        # Exclude known-transient components that are expected on fresh builds.
+        $ignoredComponents = @(
+            'SMS_WSUS_CONFIGURATION_MANAGER'   # Until SUP is fully configured
+            'SMS_SITE_SQL_BACKUP'              # Backup not configured on new sites
+        )
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter `"Status = 2 AND TallyInterval = '0001128000100008'`"")
         $componentCheckAttempts = 3
         $componentRetryDelay = 30
@@ -476,12 +494,16 @@ function Test-CMSiteFunctionality {
         $criticalList = @()
         for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
             try {
-                $critical = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
+                $allCritical = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
                     -Filter "Status = 2 AND TallyInterval = '0001128000100008'" -ErrorAction Stop)
+                $critical = @($allCritical | Where-Object { $_.ComponentName -notin $ignoredComponents })
+                $ignoredCount = $allCritical.Count - $critical.Count
                 $criticalCount = $critical.Count
                 $criticalList = $critical
                 if ($criticalCount -eq 0) {
-                    $results.Details.Add("OK: No critical component issues (attempt $attempt)")
+                    $msg = "OK: No critical component issues (attempt $attempt)"
+                    if ($ignoredCount -gt 0) { $msg += " ($ignoredCount ignored: $($ignoredComponents -join ', '))" }
+                    $results.Details.Add($msg)
                     break
                 }
                 $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $criticalCount critical component(s)")
@@ -499,17 +521,13 @@ function Test-CMSiteFunctionality {
 
         if ($criticalCount -gt 0 -and $criticalCount -le 5) {
             # Lenient: up to 5 critical components is a warning, not a failure
-            $results.Details.Add("WARN: $criticalCount component(s) in critical state (threshold for failure: >5):")
-            foreach ($c in ($criticalList | Select-Object -First 5)) {
-                $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
-            }
+            $names = ($criticalList | ForEach-Object { $_.ComponentName }) -join ', '
+            $results.Details.Add("WARN: $criticalCount component(s) in critical state: $names")
         }
         elseif ($criticalCount -gt 5) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: $criticalCount components in critical state (exceeds threshold of 5)")
-            foreach ($c in ($criticalList | Select-Object -First 10)) {
-                $results.Details.Add("  - $($c.ComponentName): Status=$($c.Status)")
-            }
+            $names = ($criticalList | Select-Object -First 10 | ForEach-Object { $_.ComponentName }) -join ', '
+            $results.Details.Add("FAIL: $criticalCount components in critical state (exceeds threshold of 5): $names")
         }
 
         return $results
