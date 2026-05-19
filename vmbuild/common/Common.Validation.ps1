@@ -211,7 +211,18 @@ function Test-ValidCmOptions {
 
     if ($ConfigObject.cmOptions.usePKI) {
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
-        if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
+        if (-not $ConfigObject.pkiOptions) {
+            $ConfigObject | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{
+                EnablePKI       = $true
+                IssuingCAVM     = ""
+                UseOfflineRoot  = $false
+                OfflineRootCAVM = ""
+            }) -Force
+        }
+        if (-not $ConfigObject.pkiOptions.EnablePKI) {
+            $ConfigObject.pkiOptions.EnablePKI = $true
+        }
+        if ($ConfigObject.pkiOptions.EnablePKI) {
             $caVM = $ConfigObject.pkiOptions.IssuingCAVM
             if ($caVM) {
                 $caVMExists = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
@@ -219,9 +230,6 @@ function Test-ValidCmOptions {
                     Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
                 }
             }
-        }
-        else {
-            Add-ValidationMessage -Message "PKI Validation: cmOptions.UsePKI is enabled but pkiOptions.EnablePKI is not. Enable PKI infrastructure in PKI Settings." -ReturnObject $ReturnObject -Failure
         }
     }
 
