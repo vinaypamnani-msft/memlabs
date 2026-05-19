@@ -1705,16 +1705,52 @@ function Test-NoRRAS {
 
     $router = (Get-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     $routingFeatureInstalled = $false
-    if (Get-Command -Name "Get-WindowsFeature" -ErrorAction SilentlyContinue) {
+
+    # Cache the Get-WindowsFeature result — ServerManager cmdlets ("Collecting
+    # data...") can block for 30-120s on every invocation. The Routing feature
+    # state only changes after explicit install/uninstall, so a cached result
+    # is safe until the next reboot or feature change.
+    $rrasCacheFile = Join-Path $Common.CachePath "rras-feature-state.json"
+    $rrasCacheValid = $false
+    if (Test-Path $rrasCacheFile) {
         try {
-            $routingFeatureInstalled = [bool](Get-WindowsFeature Routing).Installed
+            $rrasCache = Get-Content $rrasCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($rrasCache -and $null -ne $rrasCache.RoutingInstalled) {
+                $rrasCacheAge = ((Get-Date) - [DateTime]::Parse($rrasCache.CheckedUtc)).TotalHours
+                if ($rrasCacheAge -le 24) {
+                    $routingFeatureInstalled = [bool]$rrasCache.RoutingInstalled
+                    $rrasCacheValid = $true
+                    Write-Log "Test-NoRRAS: Using cached Routing feature state (installed=$routingFeatureInstalled, age=$([Math]::Round($rrasCacheAge,1))h)." -LogOnly
+                }
+            }
         }
         catch {
-            Write-Log "Test-NoRRAS: Get-WindowsFeature failed; continuing with router-state checks only. $_" -Warning
+            Write-Log "Test-NoRRAS: Failed reading RRAS cache: $_" -LogOnly
         }
     }
-    else {
-        Write-Log "Test-NoRRAS: Get-WindowsFeature is unavailable; continuing with router-state checks only." -Warning
+
+    if (-not $rrasCacheValid) {
+        if (Get-Command -Name "Get-WindowsFeature" -ErrorAction SilentlyContinue) {
+            try {
+                Write-Log "Test-NoRRAS: Calling Get-WindowsFeature Routing (ServerManager — can be slow)..." -LogOnly
+                $routingFeatureInstalled = [bool](Get-WindowsFeature Routing).Installed
+                Write-Log "Test-NoRRAS: Get-WindowsFeature returned. Routing installed = $routingFeatureInstalled" -LogOnly
+                # Cache the result
+                try {
+                    [PSCustomObject]@{
+                        CheckedUtc       = (Get-Date).ToUniversalTime().ToString("o")
+                        RoutingInstalled = $routingFeatureInstalled
+                    } | ConvertTo-Json | Set-Content -Path $rrasCacheFile -Encoding UTF8
+                }
+                catch {}
+            }
+            catch {
+                Write-Log "Test-NoRRAS: Get-WindowsFeature failed; continuing with router-state checks only. $_" -Warning
+            }
+        }
+        else {
+            Write-Log "Test-NoRRAS: Get-WindowsFeature is unavailable; continuing with router-state checks only." -Warning
+        }
     }
 
     if ($routingFeatureInstalled -or $router -eq 0) {
