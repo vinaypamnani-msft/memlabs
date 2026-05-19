@@ -506,6 +506,17 @@ function New-DeployConfig {
                 }
             }
         }
+
+        # Add prefix to pkiOptions VM references
+        if ($configObject.pkiOptions) {
+            if ($configObject.pkiOptions.IssuingCAVM -and -not $configObject.pkiOptions.IssuingCAVM.StartsWith($configObject.vmOptions.prefix)) {
+                $configObject.pkiOptions.IssuingCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.IssuingCAVM
+            }
+            if ($configObject.pkiOptions.OfflineRootCAVM -and -not $configObject.pkiOptions.OfflineRootCAVM.StartsWith($configObject.vmOptions.prefix)) {
+                $configObject.pkiOptions.OfflineRootCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.OfflineRootCAVM
+            }
+        }
+
         # create params object
 
         $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
