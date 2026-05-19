@@ -113,6 +113,15 @@ function Get-UserConfiguration {
             }) -Force
         }
 
+        # Sync: if cmOptions.UsePKI is true, ensure pkiOptions.EnablePKI is also true
+        if ($config.cmOptions -and $config.cmOptions.UsePKI -and $config.pkiOptions -and -not $config.pkiOptions.EnablePKI) {
+            $config.pkiOptions.EnablePKI = $true
+            if (-not $config.pkiOptions.IssuingCAVM) {
+                $firstDC = $config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                if ($firstDC) { $config.pkiOptions.IssuingCAVM = $firstDC.vmName }
+            }
+        }
+
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force

@@ -220,7 +220,7 @@ function Test-ValidCmOptions {
                 }
             }
         }
-        elseif (-not $ConfigObject.pkiOptions -or -not $ConfigObject.pkiOptions.EnablePKI) {
+        else {
             Add-ValidationMessage -Message "PKI Validation: cmOptions.UsePKI is enabled but pkiOptions.EnablePKI is not. Enable PKI infrastructure in PKI Settings." -ReturnObject $ReturnObject -Failure
         }
     }
