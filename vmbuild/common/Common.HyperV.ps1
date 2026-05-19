@@ -1,16 +1,45 @@
 function Install-HyperV {
-    if ((get-windowsFeature -name Hyper-V).InstallState -ne 'Installed') {  
-
-        Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
-
-        Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
-
-        if ((get-windowsFeature -name Hyper-V).InstallState -eq 'Installed') {
-            Write-Log "Hyper-V and management tools installed successfully." -Success
+    # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
+    # ServerManager that shows "Collecting data..." and can stall for minutes.
+    # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.
+    $hvCacheFile = Join-Path $Common.CachePath "hyperv-feature-state.json"
+    $hvInstalled = $false
+    if (Test-Path $hvCacheFile) {
+        try {
+            $hvCache = Get-Content $hvCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($hvCache -and $hvCache.Installed -eq $true) {
+                $hvAge = ((Get-Date) - [DateTime]::Parse($hvCache.CheckedUtc)).TotalHours
+                if ($hvAge -le 24) {
+                    $hvInstalled = $true
+                    Write-Log "Install-HyperV: Hyper-V already installed (cached, age=$([Math]::Round($hvAge,1))h)." -LogOnly
+                }
+            }
         }
-        else {
-            Write-Log "Failed to install Hyper-V and management tools." -Failure
+        catch {}
+    }
+    if (-not $hvInstalled) {
+        Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
+        if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
+
+            Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+            Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+            if ((Get-WindowsFeature -Name Hyper-V).InstallState -eq 'Installed') {
+                Write-Log "Hyper-V and management tools installed successfully." -Success
+            }
+            else {
+                Write-Log "Failed to install Hyper-V and management tools." -Failure
+            }
         }
+        # Cache the result (installed)
+        try {
+            [PSCustomObject]@{
+                CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                Installed  = $true
+            } | ConvertTo-Json | Set-Content -Path $hvCacheFile -Encoding UTF8
+        }
+        catch {}
     }
 
     if ((get-service -name vmms).Status -ne "Running") {

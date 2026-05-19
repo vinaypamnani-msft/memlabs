@@ -155,6 +155,8 @@ Write-Log "Post-init: VMHost check complete. Proceeding to window resize and con
 
 if (-not $NoWindowResize.IsPresent) {
     try {
+        Write-Log "Post-init: Window resize - loading System.Windows.Forms..." -LogOnly
+        Flush-LogBuffer -All
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
@@ -165,12 +167,17 @@ if (-not $NoWindowResize.IsPresent) {
 
         # Set Window
         Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
-        $parent = (Get-CimInstance win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
+        Write-Log "Post-init: Window resize - getting parent PID..." -LogOnly
+        Flush-LogBuffer -All
+        # Use PS7 .Parent property instead of Get-CimInstance win32_process (which
+        # enumerates ALL processes and can stall when WMI is busy).
+        $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent.Id
         $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
         if ($parent) {
             # set parent, cmd -> ps
             Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
-        }       
+        }
+        Write-Log "Post-init: Window resize complete." -LogOnly
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
@@ -195,10 +202,14 @@ if (-not $Common.PS7) {
           Install-HostToServer2025
 }
 
+Write-Log "Post-init: Set-PS7ProgressWidth..." -LogOnly
+Flush-LogBuffer -All
 Set-PS7ProgressWidth
 
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 
+Write-Log "Post-init: Setting background image and animation..." -LogOnly
+Flush-LogBuffer -All
 if (-not $Common.DevBranch) {
     $image = (Join-Path $PSScriptRoot "MemLabs.png")
     Set-BackgroundImage $image "right" 5 "uniform"
@@ -309,7 +320,11 @@ try {
 
 
     # Verify Hyper-V is installed
+    Write-Log "Post-init: Calling Install-HyperV..." -LogOnly
+    Flush-LogBuffer -All
     Install-HyperV
+    Write-Log "Post-init: Install-HyperV complete." -LogOnly
+    Flush-LogBuffer -All
 
     ### Run maintenance
     if (-not $Configuration) {
