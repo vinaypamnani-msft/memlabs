@@ -1502,6 +1502,9 @@ Function Set-Window {
                 [return: MarshalAs(UnmanagedType.Bool)]
                 public static extern bool IsWindowVisible(IntPtr hWnd);
 
+                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+                public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
                 [DllImport("kernel32.dll")]
                 public static extern IntPtr GetConsoleWindow();
               }
