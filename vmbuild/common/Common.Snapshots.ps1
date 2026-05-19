@@ -20,7 +20,7 @@ function Merge-Phase8AutoSnapshot {
     )
 
     $domain = $DeployConfig.vmOptions.domainName
-    $snapshotPattern = "MemLabs Phase 8 AutoSnapshot*"
+    $snapshotPattern = "*MemLabs Phase 8 AutoSnapshot*"
 
     Write-Log "[Phase 11] Checking for Phase 8 auto-snapshot to merge..." -LogOnly
 
