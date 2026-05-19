@@ -255,6 +255,10 @@ function Select-PKIOptions {
                             if ($existingRoot) {
                                 $pkiOptions.OfflineRootCAVM = $existingRoot.vmName
                             }
+                            else {
+                                # No existing Root CA VM — create one immediately
+                                Add-OfflineRootCAVMIfMissing -ConfigToModify $Global:Config
+                            }
                         }
                     }
                     else {
