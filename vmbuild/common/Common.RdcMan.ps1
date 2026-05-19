@@ -772,7 +772,15 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed -or $killedAlready) {
 
-        #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
+        # Capture current foreground window so we can restore focus after RDCMan starts
+        $getFgW = Add-Type -MemberDefinition @"
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+"@ -Name "FgWindow" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+        $previousFgWindow = $getFgW::GetForegroundWindow()
+
         Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
         $i = 0
         while ($i -lt 3) {
@@ -781,6 +789,11 @@ function New-RDCManFileFromHyperV {
             $i++
         }
         Set-RdcManMin
+
+        # Restore focus to the window that was active before RDCMan launched
+        if ($previousFgWindow -ne [IntPtr]::Zero) {
+            $getFgW::SetForegroundWindow($previousFgWindow) | Out-Null
+        }
     }
 }
 
