@@ -175,6 +175,18 @@ function Install-PKICertificateTemplates {
         try {
             $dnPath = 'DC=' + $DomainName.Replace('.', ',DC=')
 
+            # Ensure ldifde.exe is available (only present by default on DCs;
+            # member servers need RSAT-ADDS-Tools installed)
+            if (-not (Get-Command ldifde.exe -ErrorAction SilentlyContinue)) {
+                _Log "ldifde.exe not found - installing RSAT-ADDS-Tools..."
+                $feat = Install-WindowsFeature RSAT-ADDS-Tools -ErrorAction Stop
+                if ($feat.Success) {
+                    _Log "  RSAT-ADDS-Tools installed successfully"
+                } else {
+                    throw "Failed to install RSAT-ADDS-Tools (needed for ldifde.exe)"
+                }
+            }
+
             # ---- Phase A: Import templates into AD via ldifde ----
             foreach ($tplName in $TemplateList) {
                 $found = Find-TemplateInAD $tplName
