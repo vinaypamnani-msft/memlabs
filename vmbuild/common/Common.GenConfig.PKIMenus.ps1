@@ -153,9 +153,9 @@ function Select-PKIOptions {
         $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "1" -ItemText "$("EnablePKI".PadRight($padding)) = $enableText" -selectable $true -Color1 $enableColor -HelpFunction "Get-PKIHelp"
 
         if ($pkiOptions.EnablePKI) {
-            # --- Item 2: IssuingCAVM ---
+            # --- Item 2: IssuingCA ---
             $caVMText = if ($pkiOptions.IssuingCAVM) { $pkiOptions.IssuingCAVM } else { "(default DC)" }
-            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "2" -ItemText "$("IssuingCAVM".PadRight($padding)) = $caVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
+            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "2" -ItemText "$("IssuingCA".PadRight($padding)) = $caVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
 
             # ── Section: Offline Root CA ──
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -Color1 $Global:Common.Colors.GenConfigHeader
@@ -167,9 +167,9 @@ function Select-PKIOptions {
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "3" -ItemText "$("UseOfflineRoot".PadRight($padding)) = $offlineText" -selectable $true -Color1 $offlineColor -HelpFunction "Get-PKIHelp"
 
             if ($pkiOptions.UseOfflineRoot) {
-                # --- Item 4: OfflineRootCAVM ---
+                # --- Item 4: OfflineRootCA ---
                 $rootVMText = if ($pkiOptions.OfflineRootCAVM) { $pkiOptions.OfflineRootCAVM } else { "(auto-created)" }
-                $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "4" -ItemText "$("OfflineRootCAVM".PadRight($padding)) = $rootVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
+                $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "4" -ItemText "$("OfflineRootCA".PadRight($padding)) = $rootVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
             }
         }
 
@@ -280,9 +280,9 @@ function Get-PKIHelp {
     switch (($text -split "=")[0].Trim()) {
         "EnablePKI" { "Deploy Certificate Authority infrastructure. Works with or without ConfigMgr. Installs an Enterprise CA on the selected VM." }
         "UsePKI for ConfigMgr" { "Use HTTPS for all ConfigMgr roles (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
-        "IssuingCAVM" { "The VM that will host the Issuing (Enterprise) CA. Defaults to the domain controller." }
+        "IssuingCA" { "The VM that will host the Issuing (Enterprise) CA. Defaults to the domain controller." }
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA issues a certificate for an Enterprise Subordinate CA. The Root CA VM is powered off after setup." }
-        "OfflineRootCAVM" { "The standalone workgroup VM that will host the Offline Root CA. Auto-created if not specified." }
+        "OfflineRootCA" { "The standalone workgroup VM that will host the Offline Root CA. Auto-created if not specified." }
         "Done with changes" { "Return to the main menu." }
         default { "" }
     }
