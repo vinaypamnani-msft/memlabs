@@ -381,7 +381,9 @@ function Write-Option {
     # Truncate text to fit terminal width (accounts for prefix already written).
     # Prefix width: 3 (arrow/spaces) + 1 ([) + option.Length + PadRight(4-len) + already at column ~8.
     $prefixLen = 3 + 1 + $option.Length + [Math]::Max(0, 4 - $option.Length)
-    $availWidth = (try { [Console]::WindowWidth } catch { $host.UI.RawUI.WindowSize.Width }) - $prefixLen - 1
+    $termWidth = [Console]::WindowWidth
+    if (-not $termWidth) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+    $availWidth = $termWidth - $prefixLen - 1
     if ($availWidth -gt 0 -and $text -and $text.Contains([char]27)) {
         $ansiPat = [char]27 + '\[[0-9;]*m'
         $plainText = [regex]::Replace($text, $ansiPat, '')
