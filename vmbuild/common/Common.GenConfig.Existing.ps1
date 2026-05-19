@@ -39,7 +39,8 @@ Function Get-DomainStatsLine {
         # Available width for the stats portion.
         # Menu overhead: 3 (arrow/spaces) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
         # Add extra safety margin of 2 for terminal edge/cursor.
-        $termWidth = $host.UI.RawUI.WindowSize.Width
+        $termWidth = try { [Console]::WindowWidth } catch { 0 }
+        if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
         if ($termWidth -le 0) { $termWidth = 120 }
         $maxWidth = $termWidth - 34
 
@@ -108,20 +109,35 @@ function Show-ExistingNetwork2 {
     if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
         $domainList = @()
-        # Max visible chars for the full line text (excluding the [N] prefix added by Write-Option)
-        # Write-Option adds: 3 (arrow) + 5 ([N]  ) = 8 chars before the text
-        $lineMaxWidth = $host.UI.RawUI.WindowSize.Width - 9
-        if ($lineMaxWidth -le 0) { $lineMaxWidth = 111 }
+        # Max visible chars for the full rendered line including prefix.
+        # Write-Option prefix: 3 (arrow/spaces) + [N] + "]  " = 8 chars total.
+        # Use [Console]::WindowWidth as primary (most reliable in Windows Terminal),
+        # fall back to $host.UI.RawUI.WindowSize.Width.
+        $termWidth = try { [Console]::WindowWidth } catch { 0 }
+        if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+        if ($termWidth -le 0) { $termWidth = 120 }
+        $lineMaxWidth = $termWidth - 9
+
+        # Regex pattern to strip ANSI CSI sequences (using literal ESC char)
+        $ansiPattern = [char]27 + '\[[0-9;]*m'
 
         foreach ($item in (Get-DomainList)) {
             $stats = Get-DomainStatsLine -DomainName $item
 
             $line = "$($item.PadRight(22," ")) $stats"
-            # Measure visible width (strip ANSI escape sequences)
-            $plainLine = $line -replace "`e\[[0-9;]*m", ''
+            # Measure visible width by stripping ANSI escape sequences
+            $plainLine = [regex]::Replace($line, $ansiPattern, '')
             if ($plainLine.Length -gt $lineMaxWidth) {
-                # Truncate from the right - find how many chars to keep
-                # Walk the original string tracking visible chars
+                # Too wide - strip trailing [...] segments until it fits
+                # Work on the plain text to find what fits, then rebuild
+                while ($plainLine.Length -gt $lineMaxWidth) {
+                    # Remove the last bracketed segment (space + [...])
+                    $lastBracket = $plainLine.LastIndexOf(' [')
+                    if ($lastBracket -le 23) { break } # Don't cut into domain/core
+                    $plainLine = $plainLine.Substring(0, $lastBracket)
+                }
+                # Now truncate the ANSI-colored line to match the same visible length
+                $targetLen = $plainLine.Length
                 $visCount = 0
                 $cutIdx = $line.Length
                 $inEsc = $false
@@ -132,12 +148,12 @@ function Show-ExistingNetwork2 {
                         continue
                     }
                     $visCount++
-                    if ($visCount -ge $lineMaxWidth) {
+                    if ($visCount -ge $targetLen) {
                         $cutIdx = $ci + 1
                         break
                     }
                 }
-                $line = $line.Substring(0, $cutIdx) + "`e[0m"
+                $line = $line.Substring(0, $cutIdx) + "$([char]27)[0m"
             }
             $domainList += $line
         }
