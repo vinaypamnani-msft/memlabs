@@ -561,11 +561,14 @@ function Select-NewDomainConfig {
     }
 
     # Load saved defaults from previous run if available
+    # DomainName and Network are excluded - they are always auto-generated from available/unused values
     $savedDefaultsPath = Join-Path $Common.ConfigPath "_domainDefaults.json"
+    $nonStickyProps = @('DomainName', 'Network')
     if (Test-Path $savedDefaultsPath) {
         try {
             $savedDefaults = Get-Content -Path $savedDefaultsPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
             foreach ($prop in $savedDefaults.psobject.Properties) {
+                if ($prop.Name -in $nonStickyProps) { continue }
                 if ($null -ne $domainDefaults."$($prop.Name)") {
                     $domainDefaults."$($prop.Name)" = $prop.Value
                 }
