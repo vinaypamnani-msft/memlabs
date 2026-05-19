@@ -1497,6 +1497,9 @@ Function Set-Window {
 
                 [DllImport("User32.dll")]
                 public extern static bool MoveWindow(IntPtr handle, int x, int y, int width, int height, bool redraw);
+
+                [DllImport("kernel32.dll")]
+                public static extern IntPtr GetConsoleWindow();
               }
               public struct RECT
               {
@@ -1512,8 +1515,14 @@ Function Set-Window {
         $Rectangle = New-Object RECT
         $Handle = (Get-Process -id $ProcessID).MainWindowHandle
         if ($Handle -eq [IntPtr]::Zero) {
-            Write-Log "Set-Window: PID $ProcessID has MainWindowHandle=0 (no window). Skipping." -LogOnly -Warning
-            return
+            # Console apps (cmd/pwsh) don't own their window - conhost.exe does.
+            # GetConsoleWindow() returns the actual console window handle.
+            $Handle = [Window]::GetConsoleWindow()
+            if ($Handle -eq [IntPtr]::Zero) {
+                Write-Log "Set-Window: PID $ProcessID has no MainWindowHandle and GetConsoleWindow returned 0. Skipping." -LogOnly -Warning
+                return
+            }
+            Write-Log "Set-Window: PID $ProcessID MainWindowHandle=0, using GetConsoleWindow handle=$Handle" -LogOnly
         }
         $Return = [Window]::GetWindowRect($Handle, [ref]$Rectangle)
         If (-NOT $PSBoundParameters.ContainsKey('Width')) {
