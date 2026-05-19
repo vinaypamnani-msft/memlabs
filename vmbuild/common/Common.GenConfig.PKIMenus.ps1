@@ -89,7 +89,7 @@ function Select-IssuingCAVMMenu {
     }
     switch ($result.ToLowerInvariant()) {
         "n" {
-            $result = Add-NewVMForRole -Role "DomainMember" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -ReturnMachineName:$true
+            $result = Add-NewVMForRole -Role "DomainMember" -Domain $ConfigToModify.vmOptions.DomainName -ConfigToModify $ConfigToModify -Name "IssuingCA" -ReturnMachineName:$true
         }
     }
     return $result
