@@ -222,28 +222,39 @@ if (-not $NoWindowResize.IsPresent) {
 
         Write-Log "Post-init: Window resize - wtDetected=$wtDetected, resizeTarget=$resizeTarget" -LogOnly
 
-        # Strategy 1: FindWindow with WT's registered window class
+        # Strategy 1: If WT detected and ancestor walk found a handle, use Set-Window on it
         if (-not $resizeDone -and $wtDetected) {
-            try {
-                $cascadiaHandle = [Window]::FindWindow("CASCADIA_HOSTING_WINDOW_CLASS", $null)
-                Write-Log "Post-init: Window resize - FindWindow(CASCADIA_HOSTING_WINDOW_CLASS) = $cascadiaHandle" -LogOnly
-                if ($cascadiaHandle -ne [IntPtr]::Zero) {
-                    $rect = New-Object RECT
-                    $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                    $bw = $rect.Right - $rect.Left; $bh = $rect.Bottom - $rect.Top
-                    Write-Log "Post-init: Window resize - CASCADIA before: ${bw}x${bh} at ($($rect.Left),$($rect.Top))" -LogOnly
-                    $moveResult = [Window]::MoveWindow($cascadiaHandle, 20, 20, [int]$width, [int]$height, $true)
-                    Write-Log "Post-init: Window resize - CASCADIA MoveWindow result=$moveResult" -LogOnly
-                    if ($moveResult) {
+            $wtHandle = (Get-Process -Id $resizeTarget -ErrorAction SilentlyContinue).MainWindowHandle
+            Write-Log "Post-init: Window resize - WT PID $resizeTarget MainWindowHandle=$wtHandle" -LogOnly
+            if ($wtHandle -ne [IntPtr]::Zero) {
+                Set-Window -ProcessID $resizeTarget -X 20 -Y 20 -Width $width -Height $height
+                $resizeDone = $true
+            }
+            # If handle is 0, try FindWindow by class name (requires [Window] type to be loaded)
+            if (-not $resizeDone) {
+                try {
+                    # Ensure [Window] type is loaded by calling Set-Window with -Passthru (no-op if handle=0)
+                    Set-Window -ProcessID $PID -Passthru | Out-Null
+                    $cascadiaHandle = [Window]::FindWindow("CASCADIA_HOSTING_WINDOW_CLASS", $null)
+                    Write-Log "Post-init: Window resize - FindWindow(CASCADIA_HOSTING_WINDOW_CLASS) = $cascadiaHandle" -LogOnly
+                    if ($cascadiaHandle -ne [IntPtr]::Zero) {
+                        $rect = New-Object RECT
                         $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                        $aw = $rect.Right - $rect.Left; $ah = $rect.Bottom - $rect.Top
-                        Write-Log "Post-init: Window resize - CASCADIA after: ${aw}x${ah} at ($($rect.Left),$($rect.Top))" -LogOnly
-                        $resizeDone = $true
+                        $bw = $rect.Right - $rect.Left; $bh = $rect.Bottom - $rect.Top
+                        Write-Log "Post-init: Window resize - CASCADIA before: ${bw}x${bh} at ($($rect.Left),$($rect.Top))" -LogOnly
+                        $moveResult = [Window]::MoveWindow($cascadiaHandle, 20, 20, [int]$width, [int]$height, $true)
+                        Write-Log "Post-init: Window resize - CASCADIA MoveWindow result=$moveResult" -LogOnly
+                        if ($moveResult) {
+                            $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
+                            $aw = $rect.Right - $rect.Left; $ah = $rect.Bottom - $rect.Top
+                            Write-Log "Post-init: Window resize - CASCADIA after: ${aw}x${ah} at ($($rect.Left),$($rect.Top))" -LogOnly
+                            $resizeDone = $true
+                        }
                     }
                 }
-            }
-            catch {
-                Write-Log "Post-init: Window resize - FindWindow failed: $_" -LogOnly -Warning
+                catch {
+                    Write-Log "Post-init: Window resize - FindWindow strategy failed: $_" -LogOnly -Warning
+                }
             }
         }
 

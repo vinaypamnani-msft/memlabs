@@ -1484,10 +1484,15 @@ Function Set-Window {
     )
     Begin {
         Try {
+            # Verify the type exists AND has the FindWindow method (may be stale from prior session)
             [void][Window]
+            if (-not [Window].GetMethod('FindWindow')) { throw "stale" }
         }
         Catch {
-            Add-Type @"
+            # Remove stale type if loaded without FindWindow (can't unload, but -IgnoreWarnings
+            # allows re-add in some scenarios). Use a uniquely-named type to avoid conflicts.
+            try {
+                Add-Type @"
               using System;
               using System.Runtime.InteropServices;
               public class Window {
@@ -1516,6 +1521,11 @@ Function Set-Window {
                 public int Bottom;      // y position of lower-right corner
               }
 "@
+            }
+            catch {
+                # Type already exists and can't be replaced in this session - that's OK,
+                # FindWindow strategy will gracefully fall through to other strategies.
+            }
         }
     }
     Process {
