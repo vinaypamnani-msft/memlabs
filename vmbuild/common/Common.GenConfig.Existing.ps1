@@ -37,12 +37,12 @@ Function Get-DomainStatsLine {
         $cReset   = "$esc[0m"
 
         # Available width for the stats portion.
-        # Menu overhead: 3 (arrow/spaces) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
-        # Add extra safety margin of 2 for terminal edge/cursor.
+        # Menu overhead: 3 (arrow) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
+        # Extra margin for scrollbar/padding/cursor that reported width doesn't account for.
         $termWidth = try { [Console]::WindowWidth } catch { 0 }
         if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
         if ($termWidth -le 0) { $termWidth = 120 }
-        $maxWidth = $termWidth - 34
+        $maxWidth = $termWidth - 40
 
         # Build parts with both plain (for measuring) and colorized versions
         $corePlain = "[$($TotalRunningVMs.ToString().PadLeft(2))/$($TotalVMs.ToString().PadLeft(2)) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2))GB/${TotalMaxMem}GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
@@ -110,13 +110,12 @@ function Show-ExistingNetwork2 {
 
         $domainList = @()
         # Max visible chars for the full rendered line including prefix.
-        # Write-Option prefix: 3 (arrow/spaces) + [N] + "]  " = 8 chars total.
-        # Use [Console]::WindowWidth as primary (most reliable in Windows Terminal),
-        # fall back to $host.UI.RawUI.WindowSize.Width.
+        # Write-Option prefix: 3 (arrow) + 5 ([N]  ) = 8 chars.
+        # Extra margin for scrollbar/padding that reported width doesn't account for.
         $termWidth = try { [Console]::WindowWidth } catch { 0 }
         if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
         if ($termWidth -le 0) { $termWidth = 120 }
-        $lineMaxWidth = $termWidth - 9
+        $lineMaxWidth = $termWidth - 14
 
         # Regex pattern to strip ANSI CSI sequences (using literal ESC char)
         $ansiPattern = [char]27 + '\[[0-9;]*m'
