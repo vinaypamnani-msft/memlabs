@@ -448,7 +448,12 @@ function New-RDCManFileFromHyperV {
                 $isServer = $deployedOS -match "Server"
 
                 if ( $null -eq $vm.SqlVersion -and $isServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
+                    if ($vm.InstallCA) {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "InstallCA" -force
+                    }
+                    else {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
+                    }
                 }
                 else {
                     if (-not $isServer) {
