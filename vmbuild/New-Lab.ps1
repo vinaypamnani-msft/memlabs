@@ -167,148 +167,119 @@ if (-not $NoWindowResize.IsPresent) {
         Write-Log "Post-init: Window resize - target ${width}x${height} (screen $($screen.Bounds.Width)x$($screen.Bounds.Height))" -LogOnly
 
         $isWT = [bool]$env:WT_SESSION
-        # Windows 11/Server 2025 may route all console apps through Windows Terminal
-        # even without WT_SESSION set. Detect by checking ancestors or FindWindow.
         $wtDetected = $isWT
         $wtProcessId = $null
-        $resizeTarget = $PID
         $resizeDone = $false
         $myProc = Get-Process -Id $PID -ErrorAction SilentlyContinue
         $myHandle = $myProc.MainWindowHandle
         Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID, MainWindowHandle=$myHandle" -LogOnly
 
-        # Walk ancestors to find the window-owning process (WindowsTerminal or conhost)
-        if ($myHandle -eq [IntPtr]::Zero) {
-            $walker = $myProc
-            $found = $false
-            for ($i = 0; $i -lt 10; $i++) {
-                $walker = $walker.Parent
-                if (-not $walker) { break }
-                $walkHandle = $walker.MainWindowHandle
-                Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$walkHandle" -LogOnly
-                if ($walker.ProcessName -eq 'WindowsTerminal') {
-                    $wtDetected = $true
-                    $wtProcessId = $walker.Id
-                }
-                if ($walkHandle -ne [IntPtr]::Zero) {
-                    $resizeTarget = $walker.Id
-                    $found = $true
-                    Write-Log "Post-init: Window resize - using ancestor $($walker.ProcessName) PID $($walker.Id) as resize target" -LogOnly
-                    break
-                }
+        # Walk ancestors ONLY looking for WindowsTerminal.exe - never resize anything else
+        $walker = $myProc
+        for ($i = 0; $i -lt 5; $i++) {
+            $walker = $walker.Parent
+            if (-not $walker) { break }
+            Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$($walker.MainWindowHandle)" -LogOnly
+            if ($walker.ProcessName -eq 'WindowsTerminal') {
+                $wtDetected = $true
+                $wtProcessId = $walker.Id
+                break
             }
-            # If ancestor walk found WT but no handle (WT may enumerate with handle=0
-            # from a child process), use the WT PID directly
-            if (-not $found -and $wtProcessId) {
-                $resizeTarget = $wtProcessId
-                $found = $true
-                Write-Log "Post-init: Window resize - using WindowsTerminal PID $wtProcessId (handle was 0 from child context)" -LogOnly
-            }
-            if (-not $found) {
-                # Last resort: find the most recently started WindowsTerminal.exe
-                $wtProc = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue |
-                    Sort-Object StartTime -Descending | Select-Object -First 1
-                if ($wtProc) {
-                    $wtDetected = $true
-                    $resizeTarget = $wtProc.Id
-                    $found = $true
-                    Write-Log "Post-init: Window resize - found WindowsTerminal PID $($wtProc.Id) via process search" -LogOnly
-                }
-            }
-            if (-not $found) {
-                Write-Log "Post-init: Window resize - no visible window found via ancestor walk." -LogOnly -Warning
+        }
+        # Also check for WT process if not found in ancestors (default terminal routing)
+        if (-not $wtDetected) {
+            $wtProc = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue |
+                Sort-Object StartTime -Descending | Select-Object -First 1
+            if ($wtProc) {
+                $wtDetected = $true
+                $wtProcessId = $wtProc.Id
+                Write-Log "Post-init: Window resize - found WindowsTerminal PID $($wtProc.Id) via process search" -LogOnly
             }
         }
 
-        Write-Log "Post-init: Window resize - wtDetected=$wtDetected, resizeTarget=$resizeTarget" -LogOnly
+        Write-Log "Post-init: Window resize - wtDetected=$wtDetected, wtProcessId=$wtProcessId" -LogOnly
 
-        # Strategy 1: If WT detected and ancestor walk found a handle, use Set-Window on it
-        if (-not $resizeDone -and $wtDetected) {
-            $wtHandle = (Get-Process -Id $resizeTarget -ErrorAction SilentlyContinue).MainWindowHandle
-            Write-Log "Post-init: Window resize - WT PID $resizeTarget MainWindowHandle=$wtHandle" -LogOnly
+        # === Strategy 1: Windows Terminal - use MoveWindow on WT's MainWindowHandle ===
+        if (-not $resizeDone -and $wtDetected -and $wtProcessId) {
+            $wtHandle = (Get-Process -Id $wtProcessId -ErrorAction SilentlyContinue).MainWindowHandle
+            Write-Log "Post-init: Window resize - WT PID $wtProcessId MainWindowHandle=$wtHandle" -LogOnly
             if ($wtHandle -ne [IntPtr]::Zero) {
-                Set-Window -ProcessID $resizeTarget -X 20 -Y 20 -Width $width -Height $height
+                Set-Window -ProcessID $wtProcessId -X 20 -Y 20 -Width $width -Height $height
                 $resizeDone = $true
             }
-            # If handle is 0, try FindWindow by class name (requires [Window] type to be loaded)
-            if (-not $resizeDone) {
-                try {
-                    # Ensure [Window] type is loaded by calling Set-Window with -Passthru (no-op if handle=0)
-                    Set-Window -ProcessID $PID -Passthru | Out-Null
-                    $cascadiaHandle = [Window]::FindWindow("CASCADIA_HOSTING_WINDOW_CLASS", $null)
-                    Write-Log "Post-init: Window resize - FindWindow(CASCADIA_HOSTING_WINDOW_CLASS) = $cascadiaHandle" -LogOnly
-                    if ($cascadiaHandle -ne [IntPtr]::Zero) {
-                        $rect = New-Object RECT
+        }
+
+        # === Strategy 2: Windows Terminal - FindWindow by class name ===
+        if (-not $resizeDone -and $wtDetected) {
+            try {
+                # Ensure [Window] type is loaded
+                Set-Window -ProcessID $PID -Passthru | Out-Null
+                $cascadiaHandle = [Window]::FindWindow("CASCADIA_HOSTING_WINDOW_CLASS", $null)
+                Write-Log "Post-init: Window resize - FindWindow(CASCADIA_HOSTING_WINDOW_CLASS) = $cascadiaHandle" -LogOnly
+                if ($cascadiaHandle -ne [IntPtr]::Zero) {
+                    $rect = New-Object RECT
+                    $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
+                    $bw = $rect.Right - $rect.Left; $bh = $rect.Bottom - $rect.Top
+                    Write-Log "Post-init: Window resize - CASCADIA before: ${bw}x${bh} at ($($rect.Left),$($rect.Top))" -LogOnly
+                    $moveResult = [Window]::MoveWindow($cascadiaHandle, 20, 20, [int]$width, [int]$height, $true)
+                    Write-Log "Post-init: Window resize - CASCADIA MoveWindow result=$moveResult" -LogOnly
+                    if ($moveResult) {
                         $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                        $bw = $rect.Right - $rect.Left; $bh = $rect.Bottom - $rect.Top
-                        Write-Log "Post-init: Window resize - CASCADIA before: ${bw}x${bh} at ($($rect.Left),$($rect.Top))" -LogOnly
-                        $moveResult = [Window]::MoveWindow($cascadiaHandle, 20, 20, [int]$width, [int]$height, $true)
-                        Write-Log "Post-init: Window resize - CASCADIA MoveWindow result=$moveResult" -LogOnly
-                        if ($moveResult) {
-                            $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                            $aw = $rect.Right - $rect.Left; $ah = $rect.Bottom - $rect.Top
-                            Write-Log "Post-init: Window resize - CASCADIA after: ${aw}x${ah} at ($($rect.Left),$($rect.Top))" -LogOnly
-                            $resizeDone = $true
-                        }
+                        $aw = $rect.Right - $rect.Left; $ah = $rect.Bottom - $rect.Top
+                        Write-Log "Post-init: Window resize - CASCADIA after: ${aw}x${ah} at ($($rect.Left),$($rect.Top))" -LogOnly
+                        $resizeDone = $true
                     }
                 }
-                catch {
-                    Write-Log "Post-init: Window resize - FindWindow strategy failed: $_" -LogOnly -Warning
-                }
+            }
+            catch {
+                Write-Log "Post-init: Window resize - FindWindow strategy failed: $_" -LogOnly -Warning
             }
         }
 
-        # Strategy 2: MoveWindow via MainWindowHandle or GetConsoleWindow (original path)
-        if (-not $resizeDone) {
-            Set-Window -ProcessID $resizeTarget -X 20 -Y 20 -Width $width -Height $height
-        }
-
-        # Strategy 3: VT escape sequence (works in Windows Terminal and modern conhost)
-        # \e[8;rows;cols t resizes the terminal text area. This is the most reliable
-        # fallback for WT tabs where Win32 window handles are inaccessible.
-        if ($wtDetected -and -not $resizeDone) {
-            # Calculate rows/cols from pixel dimensions using current font metrics
+        # === Strategy 3: Windows Terminal - VT escape sequence ===
+        if (-not $resizeDone -and $wtDetected) {
             $charWidth = $host.UI.RawUI.WindowSize.Width
             $charHeight = $host.UI.RawUI.WindowSize.Height
-            $bufWidth = $host.UI.RawUI.BufferSize.Width
-            Write-Log "Post-init: Window resize - current terminal: ${charWidth}x${charHeight} chars, buffer=$bufWidth" -LogOnly
-            # Estimate font size from current window pixel size vs char size
-            # Use target pixels / (current pixels / current chars) = target chars
+            Write-Log "Post-init: Window resize - VT escape: current ${charWidth}x${charHeight} chars" -LogOnly
+            # Ensure [Window] type is loaded for GetConsoleWindow
+            try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
             $consoleHandle = [Window]::GetConsoleWindow()
-            if ($consoleHandle -ne [IntPtr]::Zero) {
+            if ($consoleHandle -ne [IntPtr]::Zero -and $charWidth -gt 0 -and $charHeight -gt 0) {
                 $cRect = New-Object RECT
                 $null = [Window]::GetWindowRect($consoleHandle, [ref]$cRect)
                 $curPixW = $cRect.Right - $cRect.Left
                 $curPixH = $cRect.Bottom - $cRect.Top
-                if ($curPixW -gt 0 -and $curPixH -gt 0 -and $charWidth -gt 0 -and $charHeight -gt 0) {
-                    $targetCols = [Math]::Floor($width / ($curPixW / $charWidth))
-                    $targetRows = [Math]::Floor($height / ($curPixH / $charHeight))
+                if ($curPixW -gt 0 -and $curPixH -gt 0) {
+                    $targetCols = [int][Math]::Floor($width / ($curPixW / $charWidth))
+                    $targetRows = [int][Math]::Floor($height / ($curPixH / $charHeight))
                     Write-Log "Post-init: Window resize - VT escape: targeting ${targetCols}x${targetRows} chars (curPix=${curPixW}x${curPixH})" -LogOnly
                     Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
                     $resizeDone = $true
                 }
             }
             if (-not $resizeDone) {
-                # Simpler fallback: assume typical font produces ~120x40 in target area
-                $targetCols = [Math]::Floor($width / 8)   # ~8px per char at common DPI
-                $targetRows = [Math]::Floor($height / 20)  # ~20px per row
+                $targetCols = [int][Math]::Floor($width / 8)
+                $targetRows = [int][Math]::Floor($height / 20)
                 Write-Log "Post-init: Window resize - VT escape (estimated): targeting ${targetCols}x${targetRows} chars" -LogOnly
                 Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
                 $resizeDone = $true
             }
         }
 
-        Write-Log "Post-init: Window resize - getting parent PID..." -LogOnly
-        Flush-LogBuffer -All
-        # Also resize the parent (cmd.exe) if we're in classic conhost mode
-        if (-not $wtDetected) {
-            $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent.Id
-            $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
-            if ($parent) {
-                Write-Log "Post-init: Window resize - also resizing parent PID $parent" -LogOnly
-                Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
+        # === Strategy 4: Classic conhost - Set-Window on own PID + parent cmd.exe ===
+        # GetConsoleWindow handles the conhost lookup internally.
+        # ONLY if we're NOT in Windows Terminal (avoid pseudoconsole corruption).
+        if (-not $resizeDone -and -not $wtDetected) {
+            Write-Log "Post-init: Window resize - trying classic conhost path (Set-Window on PID $PID)" -LogOnly
+            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
+            $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
+            if ($parent -and $parent.ProcessName -eq 'cmd') {
+                Write-Log "Post-init: Window resize - also resizing parent cmd PID $($parent.Id)" -LogOnly
+                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $width -Height $height
             }
+            $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
         }
+
         Write-Log "Post-init: Window resize - resizeDone=$resizeDone" -LogOnly
     }
     catch {
