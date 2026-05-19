@@ -427,22 +427,53 @@ function Register-LogBufferExitFlush {
     # Start a background timer that flushes log buffers on a threadpool thread.
     # This ensures entries reach disk even when the main thread is blocked in a
     # long-running CIM call (Get-VM, Get-VMNetworkAdapter, Set-VM, etc.).
+    # IMPORTANT: The callback must be pure .NET (no PowerShell ScriptBlocks) —
+    # threadpool threads have no Runspace and will crash the process otherwise.
     if (-not $global:LogFlushTimer) {
+        # Compile a tiny C# class that holds the flush logic. This runs on the
+        # threadpool without needing a PowerShell Runspace.
+        if (-not ([System.Management.Automation.PSTypeName]'MemLabs.LogFlusher').Type) {
+            $smaAssembly = [System.Management.Automation.PSObject].Assembly.Location
+            Add-Type -Language CSharp -ReferencedAssemblies @($smaAssembly) -TypeDefinition @'
+using System;
+using System.Collections;
+using System.IO;
+using System.Management.Automation;
+using System.Text;
+
+namespace MemLabs {
+    public static class LogFlusher {
+        public static void Flush(object state) {
+            try {
+                var buffers = state as Hashtable;
+                if (buffers == null) return;
+                // Snapshot keys to avoid modification during enumeration
+                var keys = new object[buffers.Count];
+                buffers.Keys.CopyTo(keys, 0);
+                foreach (var key in keys) {
+                    var path = key as string;
+                    if (path == null) continue;
+                    var pso = buffers[key] as PSObject;
+                    if (pso == null) continue;
+                    var builderProp = pso.Properties["Builder"];
+                    if (builderProp == null) continue;
+                    var sb = builderProp.Value as StringBuilder;
+                    if (sb == null || sb.Length == 0) continue;
+                    string text = sb.ToString();
+                    sb.Length = 0;
+                    var flushProp = pso.Properties["LastFlushUtc"];
+                    if (flushProp != null) flushProp.Value = DateTime.UtcNow;
+                    File.AppendAllText(path, text, Encoding.UTF8);
+                }
+            } catch { }
+        }
+    }
+}
+'@
+        }
+        [System.Threading.TimerCallback]$flushCallback = [MemLabs.LogFlusher]::Flush
         $global:LogFlushTimer = [System.Threading.Timer]::new(
-            [System.Threading.TimerCallback]{
-                param($state)
-                try {
-                    foreach ($p in @($state.Keys)) {
-                        $entry = $state[$p]
-                        if ($entry -and $entry.Builder.Length -gt 0) {
-                            $text = $entry.Builder.ToString()
-                            $entry.Builder.Length = 0
-                            $entry.LastFlushUtc = [DateTime]::UtcNow
-                            [System.IO.File]::AppendAllText($p, $text, [System.Text.Encoding]::UTF8)
-                        }
-                    }
-                } catch { }
-            },
+            $flushCallback,
             $global:LogBuffers,  # state object passed to callback
             2000,                # initial delay (ms)
             2000                 # period (ms) — flush every 2 seconds
