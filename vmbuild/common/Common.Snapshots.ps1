@@ -10,8 +10,8 @@ function Merge-Phase8AutoSnapshot {
         Phase 11 functional validation passes.
     .DESCRIPTION
         Finds all "MemLabs Phase 8 AutoSnapshot" checkpoints in the domain,
-        stops VMs, removes the checkpoints (triggering AVHDX merge), waits
-        for merges to settle, then restarts VMs in correct order.
+        removes the checkpoints (triggering live AVHDX merge), and waits
+        for merges to settle. VMs remain running throughout.
     #>
     [CmdletBinding()]
     param(
@@ -46,17 +46,9 @@ function Merge-Phase8AutoSnapshot {
         return
     }
 
-    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); merging..." -Activity
+    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); merging (live)..." -Activity
 
-    # Get critical server list for ordered restart
-    $nodes = $vms | ForEach-Object { $_.vmName }
-    $critList = Get-CriticalVMs -domain $domain -vmNames $nodes
-
-    # Stop all VMs in domain
-    Write-Log "[Phase 11] Stopping VMs for snapshot merge"
-    Invoke-StopVMs -domain $domain -quiet:$true
-
-    # Remove the Phase 8 auto-snapshot from each VM
+    # Remove the Phase 8 auto-snapshot from each VM (live merge)
     $mergeFailures = 0
     foreach ($entry in $vmsWithSnapshot) {
         foreach ($snap in $entry.Snapshots) {
@@ -116,14 +108,7 @@ function Merge-Phase8AutoSnapshot {
         Write-Log "[Phase 11] All AVHDX merges settled successfully" -Success
     }
     else {
-        Write-Log "[Phase 11] AVHDX merge settle timed out after $settleTimeoutMin min; VMs may still be merging in background" -Warning
-    }
-
-    # Restart VMs in correct order
-    Write-Log "[Phase 11] Restarting VMs after snapshot merge"
-    $startFailures = Invoke-SmartStartVMs -CritList $critList
-    if ($startFailures -ne 0) {
-        Write-Log "[Phase 11] $startFailures VM(s) could not be restarted" -Warning
+        Write-Log "[Phase 11] AVHDX merge settle timed out after $settleTimeoutMin min; merges may still be running in background" -Warning
     }
 
     if ($mergeFailures -eq 0) {
