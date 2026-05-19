@@ -1793,7 +1793,9 @@ function Get-VMNetworkCached {
     }
 
     # if we didn't return the cache entry, get new data, and add it to cache
+    Write-Log "Get-VMNetworkCached: cache miss for $($vm.Name), calling Get-VMNetworkAdapter..." -LogOnly
     $vmNet = ($vm | Get-VMNetworkAdapter)
+    Write-Log "Get-VMNetworkCached: Get-VMNetworkAdapter returned for $($vm.Name)." -LogOnly
     $vmCacheEntry = [PSCustomObject]@{
         vmId       = $vm.vmID
         SwitchName = $vmNet.SwitchName
@@ -2267,9 +2269,13 @@ function Get-List {
                 if (-not $global:vm_List) {
                     Write-Log "Obtaining '$Type' list and caching it." -Verbose
                     $return = @()
+                    Write-Log "Get-List: calling Get-VM to enumerate all virtual machines..." -LogOnly
                     $virtualMachines = Get-VM
+                    Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
+                    $vmIndex = 0
                     foreach ($vm in $virtualMachines) {
-
+                        $vmIndex++
+                        Write-Log "Get-List: [$vmIndex/$($virtualMachines.Count)] Processing $($vm.Name)..." -LogOnly
                         $vmObject = Get-VMFromHyperV -vm $vm
                         if ($vmObject) {
                             $return += $vmObject

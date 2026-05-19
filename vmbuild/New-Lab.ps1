@@ -114,9 +114,10 @@ if ($global:init_failed) {
 }
 
 
+Write-Log "Post-init: Testing NoRRAS..." -LogOnly
 Test-NoRRAS
 
-
+Write-Log "Post-init: Checking VMHost enhanced session mode..." -LogOnly
 if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
     Set-VMHost -EnableEnhancedSessionMode $True
 }
@@ -331,7 +332,9 @@ try {
 
     # Determine if we need to run Phase 1
     $runPhase1 = $false
+    Write-Log "Calling Get-List to determine existing VMs..." -LogOnly
     $existingVMs = Get-List -Type VM -SmartUpdate
+    Write-Log "Get-List returned $($existingVMs.Count) existing VMs." -LogOnly
     $newVMs = @()
     $newVMs += $userConfig.virtualMachines | Where-Object { -not $_.Hidden -and ($userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName) }
     $count = ($newVMs | Measure-Object).count
