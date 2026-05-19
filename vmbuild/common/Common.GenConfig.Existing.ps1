@@ -29,29 +29,64 @@ Function Get-DomainStatsLine {
         $TotalMaxMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryStartupGB).Sum)
         $TotalDiskUsed = [math]::Round(($ListCache | Measure-Object -Sum DiskUsedGB).Sum)
 
-        $stats += "[$($TotalRunningVMs.ToString().PadLeft(2," "))/$($TotalVMs.ToString().PadLeft(2," ")) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        # ANSI color codes for value highlighting
+        $esc = [char]27
+        $cBracket = "$esc[38;2;105;105;105m"   # DimGray - brackets
+        $cLabel   = "$esc[38;2;176;196;222m"   # LightSteelBlue - labels
+        $cValue   = "$esc[38;2;0;206;209m"     # DarkTurquoise - numeric values
+        $cReset   = "$esc[0m"
+
+        # Available width for the stats portion (terminal width minus menu prefix and domain padding)
+        $maxWidth = $host.UI.RawUI.WindowSize.Width - 32
+
+        # Build parts with both plain (for measuring) and colorized versions
+        $corePlain = "[$($TotalRunningVMs.ToString().PadLeft(2))/$($TotalVMs.ToString().PadLeft(2)) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2))GB/${TotalMaxMem}GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        $coreColor = "${cBracket}[${cValue}$($TotalRunningVMs.ToString().PadLeft(2))${cLabel}/${cValue}$($TotalVMs.ToString().PadLeft(2)) ${cLabel}Running VMs, Mem: ${cValue}$($TotalMem.ToString().PadLeft(2))${cLabel}GB/${cValue}${TotalMaxMem}${cLabel}GB Disk: ${cValue}$([math]::Round($TotalDiskUsed,2))${cLabel}GB${cBracket}]${cReset}"
+
+        $rolePlain = @()
+        $roleColor = @()
         if ($ExistingCasCount -gt 0) {
-            $stats += "[CAS VMs: $ExistingCasCount] "
+            $rolePlain += "[CAS VMs: $ExistingCasCount]"
+            $roleColor += "${cBracket}[${cLabel}CAS VMs: ${cValue}$ExistingCasCount${cBracket}]${cReset}"
         }
         if ($ExistingPriCount -gt 0) {
-            $stats += "[PRI VMs: $ExistingPriCount] "
+            $rolePlain += "[PRI VMs: $ExistingPriCount]"
+            $roleColor += "${cBracket}[${cLabel}PRI VMs: ${cValue}$ExistingPriCount${cBracket}]${cReset}"
         }
         if ($ExistingSecCount -gt 0) {
-            $stats += "[SEC VMs: $ExistingSecCount] "
+            $rolePlain += "[SEC VMs: $ExistingSecCount]"
+            $roleColor += "${cBracket}[${cLabel}SEC VMs: ${cValue}$ExistingSecCount${cBracket}]${cReset}"
         }
         if ($ExistingSQLCount -gt 0) {
-            $stats += "[SQL VMs: $ExistingSQLCount] "
+            $rolePlain += "[SQL VMs: $ExistingSQLCount]"
+            $roleColor += "${cBracket}[${cLabel}SQL VMs: ${cValue}$ExistingSQLCount${cBracket}]${cReset}"
         }
-        #if ($ExistingDPMPCount -gt 0) {
-        #    $stats += "[DP VMs: $ExistingDPMPCount] "
-        #}
+
+        $networkPlain = ""
+        $networkColor = ""
+        if ($ExistingSubnetCount -gt 0) {
+            $networkPlain = "[Networks: $ExistingSubnetCount]"
+            $networkColor = "${cBracket}[${cLabel}Networks: ${cValue}$ExistingSubnetCount${cBracket}]${cReset}"
+        }
+
+        # Assemble with truncation - add parts only if they fit
+        $plainLen = $corePlain.Length
+        $stats = $coreColor
+
+        for ($i = 0; $i -lt $rolePlain.Count; $i++) {
+            if ($plainLen + 1 + $rolePlain[$i].Length -le $maxWidth) {
+                $stats += " $($roleColor[$i])"
+                $plainLen += 1 + $rolePlain[$i].Length
+            }
+            else { break }
+        }
+
+        if ($networkPlain -and ($plainLen + 1 + $networkPlain.Length -le $maxWidth)) {
+            $stats += " $networkColor"
+        }
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
-            $stats = "[No ConfigMgr Roles installed] "
-        }
-
-        if ($ExistingSubnetCount -gt 0) {
-            $stats += "[Number of Networks: $ExistingSubnetCount] "
+            $stats = "${cBracket}[${cLabel}No ConfigMgr Roles installed${cBracket}]${cReset}"
         }
     }
     catch {}
