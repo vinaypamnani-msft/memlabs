@@ -36,8 +36,12 @@ Function Get-DomainStatsLine {
         $cValue   = "$esc[38;2;0;206;209m"     # DarkTurquoise - numeric values
         $cReset   = "$esc[0m"
 
-        # Available width for the stats portion (terminal width minus menu prefix and domain padding)
-        $maxWidth = $host.UI.RawUI.WindowSize.Width - 32
+        # Available width for the stats portion.
+        # Menu overhead: 3 (arrow/spaces) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
+        # Add extra safety margin of 2 for terminal edge/cursor.
+        $termWidth = $host.UI.RawUI.WindowSize.Width
+        if ($termWidth -le 0) { $termWidth = 120 }
+        $maxWidth = $termWidth - 34
 
         # Build parts with both plain (for measuring) and colorized versions
         $corePlain = "[$($TotalRunningVMs.ToString().PadLeft(2))/$($TotalVMs.ToString().PadLeft(2)) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2))GB/${TotalMaxMem}GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
@@ -104,11 +108,38 @@ function Show-ExistingNetwork2 {
     if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
         $domainList = @()
+        # Max visible chars for the full line text (excluding the [N] prefix added by Write-Option)
+        # Write-Option adds: 3 (arrow) + 5 ([N]  ) = 8 chars before the text
+        $lineMaxWidth = $host.UI.RawUI.WindowSize.Width - 9
+        if ($lineMaxWidth -le 0) { $lineMaxWidth = 111 }
 
         foreach ($item in (Get-DomainList)) {
             $stats = Get-DomainStatsLine -DomainName $item
 
-            $domainList += "$($item.PadRight(22," ")) $stats"
+            $line = "$($item.PadRight(22," ")) $stats"
+            # Measure visible width (strip ANSI escape sequences)
+            $plainLine = $line -replace "`e\[[0-9;]*m", ''
+            if ($plainLine.Length -gt $lineMaxWidth) {
+                # Truncate from the right - find how many chars to keep
+                # Walk the original string tracking visible chars
+                $visCount = 0
+                $cutIdx = $line.Length
+                $inEsc = $false
+                for ($ci = 0; $ci -lt $line.Length; $ci++) {
+                    if ($line[$ci] -eq [char]27) { $inEsc = $true }
+                    if ($inEsc) {
+                        if ($line[$ci] -eq 'm') { $inEsc = $false }
+                        continue
+                    }
+                    $visCount++
+                    if ($visCount -ge $lineMaxWidth) {
+                        $cutIdx = $ci + 1
+                        break
+                    }
+                }
+                $line = $line.Substring(0, $cutIdx) + "`e[0m"
+            }
+            $domainList += $line
         }
 
         if ($domainList.Count -eq 0) {
