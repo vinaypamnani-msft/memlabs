@@ -80,9 +80,6 @@ IF ERRORLEVEL 1 (
 REM ============================================================
 REM Determine launch prerequisites after maintenance
 REM ============================================================
-SET WT=0
-where /q wt
-IF NOT ERRORLEVEL 1 SET WT=1
 
 REM Use quoted %ProgramFiles% to avoid "C:\Program not found"
 SET PS7="%ProgramFiles%\PowerShell\7\pwsh.exe"
@@ -101,7 +98,7 @@ REM ============================================================
 :PS7
 timeout 1
 IF "%~1"=="" (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
@@ -109,7 +106,7 @@ IF "%~1"=="" (
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 ) ELSE (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
