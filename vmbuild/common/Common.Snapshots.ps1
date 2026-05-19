@@ -10,8 +10,8 @@ function Merge-Phase8AutoSnapshot {
         Phase 11 functional validation passes.
     .DESCRIPTION
         Finds all "MemLabs Phase 8 AutoSnapshot" checkpoints in the domain,
-        removes the checkpoints (triggering live AVHDX merge), and waits
-        for merges to settle. VMs remain running throughout.
+        verifies sufficient free disk space, then removes the checkpoints
+        (triggering live AVHDX merge in background). VMs remain running.
     #>
     [CmdletBinding()]
     param(
@@ -46,7 +46,29 @@ function Merge-Phase8AutoSnapshot {
         return
     }
 
-    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); merging (live)..." -Activity
+    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); checking free space..." -Activity
+
+    # Pre-flight: verify enough free disk space to absorb the AVHDX chain
+    $insufficient = @()
+    foreach ($entry in $vmsWithSnapshot) {
+        try {
+            $chk = Test-VMCheckpointMergeFreeSpace -VMName $entry.VMName
+        }
+        catch {
+            Write-Log "[Phase 11] Free-space check for $($entry.VMName) failed: $($_.Exception.Message)" -Warning
+            continue
+        }
+        if (-not $chk.Ok) {
+            $insufficient += [PSCustomObject]@{ VMName = $entry.VMName; Reason = $chk.Reason }
+            Write-Log "[Phase 11]   $($entry.VMName): $($chk.Reason)" -Failure
+        }
+    }
+    if ($insufficient.Count -gt 0) {
+        Write-Log "[Phase 11] Aborting snapshot merge: $($insufficient.Count) VM(s) do not have enough free disk space" -Warning
+        return
+    }
+
+    Write-Log "[Phase 11] Free-space check passed; merging (live)..." -SubActivity
 
     # Remove the Phase 8 auto-snapshot from each VM (live merge)
     $mergeFailures = 0
@@ -80,39 +102,8 @@ function Merge-Phase8AutoSnapshot {
         }
     }
 
-    # Wait for AVHDX merges to settle (simplified version of Compact-Disks settle loop)
-    $settleTimeoutMin = 30
-    $mergeDeadline = (Get-Date).AddMinutes($settleTimeoutMin)
-    Write-Log "[Phase 11] Waiting for AVHDX merges to settle (max $settleTimeoutMin min)..."
-
-    $allSettled = $false
-    while ((Get-Date) -lt $mergeDeadline) {
-        $pendingCount = 0
-        foreach ($entry in $vmsWithSnapshot) {
-            $hds = @(Get-VMHardDiskDrive -VMName $entry.VMName -ErrorAction SilentlyContinue)
-            $avhdx = @($hds | Where-Object { $_.Path -and $_.Path -match '\.avhdx?$' })
-            $chks = @(Get-VMCheckpoint -VMName $entry.VMName -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like $snapshotPattern })
-            $pendingCount += $avhdx.Count + $chks.Count
-        }
-
-        if ($pendingCount -eq 0) {
-            $allSettled = $true
-            break
-        }
-
-        Start-Sleep -Seconds 5
-    }
-
-    if ($allSettled) {
-        Write-Log "[Phase 11] All AVHDX merges settled successfully" -Success
-    }
-    else {
-        Write-Log "[Phase 11] AVHDX merge settle timed out after $settleTimeoutMin min; merges may still be running in background" -Warning
-    }
-
     if ($mergeFailures -eq 0) {
-        Write-Log "[Phase 11] Phase 8 auto-snapshot merge completed successfully" -Success
+        Write-Log "[Phase 11] Phase 8 auto-snapshot merge initiated successfully (merging in background)" -Success
     }
     else {
         Write-Log "[Phase 11] Phase 8 auto-snapshot merge completed with $mergeFailures failure(s)" -Warning
