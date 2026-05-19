@@ -167,34 +167,60 @@ if (-not $NoWindowResize.IsPresent) {
         Write-Log "Post-init: Window resize - target ${width}x${height} (screen $($screen.Bounds.Width)x$($screen.Bounds.Height))" -LogOnly
 
         $isWT = [bool]$env:WT_SESSION
-        Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID" -LogOnly
-
-        # In Windows Terminal, pwsh.exe has no MainWindowHandle (it's a tab, not
-        # a window). Walk up the process tree to find WindowsTerminal.exe.
+        # Windows 11 may route all console apps through Windows Terminal even
+        # without WT_SESSION set. Detect by checking if WindowsTerminal.exe
+        # is an ancestor.
+        $wtDetected = $isWT
+        $wtProcessId = $null
         $resizeTarget = $PID
         $myProc = Get-Process -Id $PID -ErrorAction SilentlyContinue
         $myHandle = $myProc.MainWindowHandle
-        Write-Log "Post-init: Window resize - pwsh MainWindowHandle=$myHandle" -LogOnly
+        Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID, MainWindowHandle=$myHandle" -LogOnly
 
-        if ($isWT -and $myHandle -eq [IntPtr]::Zero) {
-            # Climb the process tree looking for the WT window
+        # Walk ancestors to find the window-owning process (WindowsTerminal or conhost)
+        if ($myHandle -eq [IntPtr]::Zero) {
             $walker = $myProc
             $found = $false
             for ($i = 0; $i -lt 10; $i++) {
                 $walker = $walker.Parent
                 if (-not $walker) { break }
-                Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$($walker.MainWindowHandle)" -LogOnly
-                if ($walker.MainWindowHandle -ne [IntPtr]::Zero) {
+                $walkHandle = $walker.MainWindowHandle
+                Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$walkHandle" -LogOnly
+                if ($walker.ProcessName -eq 'WindowsTerminal') {
+                    $wtDetected = $true
+                    $wtProcessId = $walker.Id
+                }
+                if ($walkHandle -ne [IntPtr]::Zero) {
                     $resizeTarget = $walker.Id
                     $found = $true
                     Write-Log "Post-init: Window resize - using ancestor $($walker.ProcessName) PID $($walker.Id) as resize target" -LogOnly
                     break
                 }
             }
+            # If ancestor walk found WT but no handle (WT may enumerate with handle=0
+            # from a child process), use the WT PID directly
+            if (-not $found -and $wtProcessId) {
+                $resizeTarget = $wtProcessId
+                $found = $true
+                Write-Log "Post-init: Window resize - using WindowsTerminal PID $wtProcessId (handle was 0 from child context)" -LogOnly
+            }
             if (-not $found) {
-                Write-Log "Post-init: Window resize - SKIPPED: no ancestor with a window handle found (Windows Terminal tab?)" -LogOnly -Warning
+                # Last resort: find the most recently started WindowsTerminal.exe
+                $wtProc = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue |
+                    Sort-Object StartTime -Descending | Select-Object -First 1
+                if ($wtProc) {
+                    $wtDetected = $true
+                    $resizeTarget = $wtProc.Id
+                    $found = $true
+                    Write-Log "Post-init: Window resize - found WindowsTerminal PID $($wtProc.Id) via process search" -LogOnly
+                }
+            }
+            if (-not $found) {
+                Write-Log "Post-init: Window resize - no visible window found. GetConsoleWindow fallback will be attempted by Set-Window." -LogOnly -Warning
             }
         }
+
+        Write-Log "Post-init: Window resize - wtDetected=$wtDetected, resizeTarget=$resizeTarget" -LogOnly
 
         # Set Window
         Set-Window -ProcessID $resizeTarget -X 20 -Y 20 -Width $width -Height $height
@@ -202,7 +228,7 @@ if (-not $NoWindowResize.IsPresent) {
         Flush-LogBuffer -All
         # Use PS7 .Parent property instead of Get-CimInstance win32_process (which
         # enumerates ALL processes and can stall when WMI is busy).
-        if (-not $isWT) {
+        if (-not $wtDetected) {
             $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent.Id
             $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
             if ($parent) {

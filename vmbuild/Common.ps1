@@ -1495,8 +1495,15 @@ Function Set-Window {
                 [return: MarshalAs(UnmanagedType.Bool)]
                 public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-                [DllImport("User32.dll")]
+                [DllImport("user32.dll")]
                 public extern static bool MoveWindow(IntPtr handle, int x, int y, int width, int height, bool redraw);
+
+                [DllImport("user32.dll")]
+                [return: MarshalAs(UnmanagedType.Bool)]
+                public static extern bool IsWindowVisible(IntPtr hWnd);
+
+                [DllImport("user32.dll")]
+                public static extern bool SetProcessDPIAware();
 
                 [DllImport("kernel32.dll")]
                 public static extern IntPtr GetConsoleWindow();
@@ -1516,25 +1523,51 @@ Function Set-Window {
         $Handle = (Get-Process -id $ProcessID).MainWindowHandle
         if ($Handle -eq [IntPtr]::Zero) {
             # Console apps (cmd/pwsh) don't own their window - conhost.exe does.
-            # GetConsoleWindow() returns the actual console window handle.
+            # GetConsoleWindow() returns the console window handle.
             $Handle = [Window]::GetConsoleWindow()
             if ($Handle -eq [IntPtr]::Zero) {
                 Write-Log "Set-Window: PID $ProcessID has no MainWindowHandle and GetConsoleWindow returned 0. Skipping." -LogOnly -Warning
                 return
             }
-            Write-Log "Set-Window: PID $ProcessID MainWindowHandle=0, using GetConsoleWindow handle=$Handle" -LogOnly
+            # On Windows 11 with default terminal = Windows Terminal, GetConsoleWindow
+            # returns the HIDDEN pseudoconsole (conpty) window. MoveWindow on it corrupts
+            # state (window becomes undraggable) without any visible effect.
+            if (-not [Window]::IsWindowVisible($Handle)) {
+                Write-Log "Set-Window: PID $ProcessID GetConsoleWindow handle=$Handle is NOT visible (pseudoconsole). Skipping MoveWindow." -LogOnly -Warning
+                return
+            }
+            Write-Log "Set-Window: PID $ProcessID MainWindowHandle=0, using GetConsoleWindow handle=$Handle (visible=true)" -LogOnly
         }
+
+        # Ensure DPI awareness so pixel coordinates match between Screen.Bounds and MoveWindow
+        $null = [Window]::SetProcessDPIAware()
+
         $Return = [Window]::GetWindowRect($Handle, [ref]$Rectangle)
+        $beforeW = $Rectangle.Right - $Rectangle.Left
+        $beforeH = $Rectangle.Bottom - $Rectangle.Top
+        Write-Log "Set-Window: PID $ProcessID Handle=$Handle BEFORE=${beforeW}x${beforeH} at ($($Rectangle.Left),$($Rectangle.Top))" -LogOnly
         If (-NOT $PSBoundParameters.ContainsKey('Width')) {
             $Width = $Rectangle.Right - $Rectangle.Left
         }
         If (-NOT $PSBoundParameters.ContainsKey('Height')) {
             $Height = $Rectangle.Bottom - $Rectangle.Top
         }
+        Write-Log "Set-Window: PID $ProcessID requesting MoveWindow($Handle, $X, $Y, $Width, $Height)" -LogOnly
         If ($Return) {
             $Return = [Window]::MoveWindow($Handle, $x, $y, $Width, $Height, $True)
             if (-not $Return) {
-                Write-Log "Set-Window: MoveWindow failed for PID $ProcessID (Handle=$Handle)." -LogOnly -Warning
+                Write-Log "Set-Window: MoveWindow returned FALSE for PID $ProcessID (Handle=$Handle). LastError=$([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -LogOnly -Warning
+            }
+            else {
+                # Verify the window actually moved
+                $VerifyRect = New-Object RECT
+                $null = [Window]::GetWindowRect($Handle, [ref]$VerifyRect)
+                $afterW = $VerifyRect.Right - $VerifyRect.Left
+                $afterH = $VerifyRect.Bottom - $VerifyRect.Top
+                Write-Log "Set-Window: PID $ProcessID AFTER=${afterW}x${afterH} at ($($VerifyRect.Left),$($VerifyRect.Top))" -LogOnly
+                if ($afterW -eq $beforeW -and $afterH -eq $beforeH) {
+                    Write-Log "Set-Window: WARNING - window dimensions unchanged after MoveWindow! Window may be locked or handle is stale." -LogOnly -Warning
+                }
             }
         }
         else {
