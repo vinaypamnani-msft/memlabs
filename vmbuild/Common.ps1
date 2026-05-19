@@ -5379,32 +5379,14 @@ if (-not $Common.Initialized) {
             Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
 
             if (-not $InJob) {
-                if (-not $effectiveSkipVmCacheRefresh) {
-                    # Always warm the VM cache in the background: the foreground
-                    # path serializes Get-VMNetworkAdapter + Invoke-VmCommand per
-                    # VM and blocks startup for 10-60s depending on VM count.
-                    # Background warm-up lets the user interact immediately; any
-                    # code that reads $global:vm_List will trigger a synchronous
-                    # populate on first access if the job hasn't finished yet.
-                    Write-Progress2 "MemLabs initializing" -Status "Starting Background VM Cache Warmup" -PercentComplete $i
-                    Start-Job -Name "MemLabs-VMCacheWarmup" -ScriptBlock {
-                        param($scriptRoot, $devBranch)
-                        Set-Location $scriptRoot
-                        . (Join-Path $scriptRoot "Common.ps1") -InJob -DevBranch:$devBranch -SkipStorageInit -SkipMaintenanceRefresh -SkipEnvironmentDetection -SkipVmCacheRefresh
-                        $list = Get-List -Type VM -ResetCache
-                        # Batch fetch all Hyper-V VMs once instead of one Get-VM call per VM.
-                        $allVMs = @{}
-                        foreach ($hv in (Get-VM)) { $allVMs[$hv.Id.Guid] = $hv }
-                        foreach ($vm in $list) {
-                            $vm2 = $allVMs[$vm.vmId.Guid]
-                            if (-not $vm2) { $vm2 = Get-VM -Id $vm.vmId -ErrorAction SilentlyContinue }
-                            if ($vm2) { Update-VMInformation -vm $vm2 }
-                        }
-                    } -ArgumentList $PSScriptRoot, $devBranch | Out-Null
-                }
-                else {
-                    Write-Log "Skipping VM cache refresh during initialization." -LogOnly
-                }
+                # The background Start-Job warmup was removed: it runs in a
+                # separate process so its $global:vm_List is never shared with
+                # the foreground. The extra Get-VM + Get-VMNetworkAdapter calls
+                # serialize behind vmms.exe and cause the foreground's first
+                # Get-List call (in Test-NoRRAS → Test-Networks) to stall for
+                # minutes. The foreground populates its own cache on first use.
+                Write-Progress2 "MemLabs initializing" -Status "Skipping background VM warmup (foreground will populate on demand)" -PercentComplete $i
+                Write-Log "Skipping background VM cache warmup; foreground will populate on first Get-List call." -LogOnly
                 $i++
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Finalizing" -PercentComplete $i
