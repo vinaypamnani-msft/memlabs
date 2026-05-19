@@ -108,60 +108,58 @@ function Show-ExistingNetwork2 {
 
     if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
-        $domainList = @()
-        # Max visible chars for the full rendered line including prefix.
-        # Write-Option prefix: 3 (arrow) + 5 ([N]  ) = 8 chars.
-        # Extra margin for scrollbar/padding that reported width doesn't account for.
-        $termWidth = try { [Console]::WindowWidth } catch { 0 }
-        if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
-        if ($termWidth -le 0) { $termWidth = 120 }
-        $lineMaxWidth = $termWidth - 14
-
         # Regex pattern to strip ANSI CSI sequences (using literal ESC char)
         $ansiPattern = [char]27 + '\[[0-9;]*m'
+        $domainNames = Get-DomainList
 
-        foreach ($item in (Get-DomainList)) {
-            $stats = Get-DomainStatsLine -DomainName $item
-
-            $line = "$($item.PadRight(22," ")) $stats"
-            # Measure visible width by stripping ANSI escape sequences
-            $plainLine = [regex]::Replace($line, $ansiPattern, '')
-            if ($plainLine.Length -gt $lineMaxWidth) {
-                # Too wide - strip trailing [...] segments until it fits
-                # Work on the plain text to find what fits, then rebuild
-                while ($plainLine.Length -gt $lineMaxWidth) {
-                    # Remove the last bracketed segment (space + [...])
-                    $lastBracket = $plainLine.LastIndexOf(' [')
-                    if ($lastBracket -le 23) { break } # Don't cut into domain/core
-                    $plainLine = $plainLine.Substring(0, $lastBracket)
-                }
-                # Now truncate the ANSI-colored line to match the same visible length
-                $targetLen = $plainLine.Length
-                $visCount = 0
-                $cutIdx = $line.Length
-                $inEsc = $false
-                for ($ci = 0; $ci -lt $line.Length; $ci++) {
-                    if ($line[$ci] -eq [char]27) { $inEsc = $true }
-                    if ($inEsc) {
-                        if ($line[$ci] -eq 'm') { $inEsc = $false }
-                        continue
-                    }
-                    $visCount++
-                    if ($visCount -ge $targetLen) {
-                        $cutIdx = $ci + 1
-                        break
-                    }
-                }
-                $line = $line.Substring(0, $cutIdx) + "$([char]27)[0m"
-            }
-            $domainList += $line
-        }
-
-        if ($domainList.Count -eq 0) {
+        if (-not $domainNames -or $domainNames.Count -eq 0) {
             return Select-NewDomainConfig
         }
 
         while ($true) {
+
+            # Recalculate terminal width and domain list on each iteration
+            # so resizing the window takes effect immediately.
+            $termWidth = try { [Console]::WindowWidth } catch { 0 }
+            if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+            if ($termWidth -le 0) { $termWidth = 120 }
+            $lineMaxWidth = $termWidth - 14
+
+            $domainList = @()
+            foreach ($item in $domainNames) {
+                $stats = Get-DomainStatsLine -DomainName $item
+
+                $line = "$($item.PadRight(22," ")) $stats"
+                # Measure visible width by stripping ANSI escape sequences
+                $plainLine = [regex]::Replace($line, $ansiPattern, '')
+                if ($plainLine.Length -gt $lineMaxWidth) {
+                    # Too wide - strip trailing [...] segments until it fits
+                    while ($plainLine.Length -gt $lineMaxWidth) {
+                        $lastBracket = $plainLine.LastIndexOf(' [')
+                        if ($lastBracket -le 23) { break }
+                        $plainLine = $plainLine.Substring(0, $lastBracket)
+                    }
+                    # Truncate the ANSI-colored line to match the same visible length
+                    $targetLen = $plainLine.Length
+                    $visCount = 0
+                    $cutIdx = $line.Length
+                    $inEsc = $false
+                    for ($ci = 0; $ci -lt $line.Length; $ci++) {
+                        if ($line[$ci] -eq [char]27) { $inEsc = $true }
+                        if ($inEsc) {
+                            if ($line[$ci] -eq 'm') { $inEsc = $false }
+                            continue
+                        }
+                        $visCount++
+                        if ($visCount -ge $targetLen) {
+                            $cutIdx = $ci + 1
+                            break
+                        }
+                    }
+                    $line = $line.Substring(0, $cutIdx) + "$([char]27)[0m"
+                }
+                $domainList += $line
+            }
 
             Write-log -Activity "Create new domain -or- modify existing domain"
             $customOptions = [ordered]@{ "*HF" = "Get-DomainHelpLine" }
