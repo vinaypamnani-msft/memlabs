@@ -144,6 +144,9 @@ function Select-PKIOptions {
         $MenuItems = [System.Collections.ArrayList]@()
         $padding = 30
 
+        # ── Section: Issuing CA ──
+        $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B1" -ItemText "Issuing CA" -selectable $false -Color1 $Global:Common.Colors.GenConfigHelpHighlight
+
         # --- Item 1: EnablePKI ---
         $enableText = if ($pkiOptions.EnablePKI) { "True" } else { "False" }
         $enableColor = if ($pkiOptions.EnablePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
@@ -153,6 +156,9 @@ function Select-PKIOptions {
             # --- Item 2: IssuingCAVM ---
             $caVMText = if ($pkiOptions.IssuingCAVM) { $pkiOptions.IssuingCAVM } else { "(default DC)" }
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "2" -ItemText "$("IssuingCAVM".PadRight($padding)) = $caVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
+
+            # ── Section: Offline Root CA ──
+            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B2" -ItemText "Offline Root CA" -selectable $false -Color1 $Global:Common.Colors.GenConfigHelpHighlight
 
             # --- Item 3: UseOfflineRoot ---
             $offlineText = if ($pkiOptions.UseOfflineRoot) { "True" } else { "False" }
@@ -166,8 +172,11 @@ function Select-PKIOptions {
             }
         }
 
-        # --- Item C: UsePKI for ConfigMgr (only when cmOptions exists) ---
+        # ── Section: ConfigMgr ──
         if ($Global:Config.cmOptions) {
+            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B3" -ItemText "ConfigMgr" -selectable $false -Color1 $Global:Common.Colors.GenConfigHelpHighlight
+
+            # --- Item C: UsePKI for ConfigMgr ---
             $usePKIText = if ($Global:Config.cmOptions.UsePKI) { "True" } else { "False" }
             $usePKIColor = if ($Global:Config.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C" -ItemText "$("UsePKI for ConfigMgr".PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
