@@ -72,6 +72,11 @@
             <operator>Matches</operator>
             <value>"StandaloneRootCA"</value>
           </rule>
+          <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"InstallCA"</value>
+          </rule>
         </ruleGroup>
       </smartGroup>
       <smartGroup>

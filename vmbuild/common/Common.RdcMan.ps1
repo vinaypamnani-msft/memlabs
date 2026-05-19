@@ -506,6 +506,7 @@ function New-RDCManFileFromHyperV {
                 "FileServer"      { $roleTag = "FS" }
                 "OSDClient"       { $roleTag = "OSD" }
                 "Linux"           { $roleTag = "Linux" }
+                "StandaloneRootCA" { $roleTag = "RootCA" }
                 "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
                 "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
                 "WorkgroupMember" { $roleTag = "WG" }
@@ -524,14 +525,21 @@ function New-RDCManFileFromHyperV {
                 if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
             }
 
+            # Certificate Authority tag (Issuing CA via InstallCA property)
+            $caTag = $null
+            if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") {
+                $caTag = "CA"
+            }
+
             # Dedup: skip role tag if VM name already contains it
             if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
                 $roleTag = $null
             }
 
-            # Build bracket tag: [ROLE OS CMver SiteRoles]
+            # Build bracket tag: [ROLE OS CMver SiteRoles CA]
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
+            if ($caTag) { $tagParts += $caTag }
 
             $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
             # Dedup: skip OS tag if VM name already contains it
