@@ -542,6 +542,7 @@ function New-DeployConfig {
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions
+            pkiOptions      = $configObject.pkiOptions
             virtualMachines = $virtualMachines
             parameters      = $params
         }
