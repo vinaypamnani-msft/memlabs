@@ -277,6 +277,21 @@ function Save-RdcManSettingsFile {
 #    }
 #}
 
+function Get-RDCManOSShortName {
+    param([string]$deployedOS)
+    if ([string]::IsNullOrWhiteSpace($deployedOS)) { return $null }
+    switch -Wildcard ($deployedOS) {
+        "Server 2025*"     { return "S25" }
+        "Server 2022*"     { return "S22" }
+        "Server 2019*"     { return "S19" }
+        "Server 2016*"     { return "S16" }
+        "Windows 11*"      { return "W11" }
+        "Windows 10*"      { return "W10" }
+        "Linux*"           { return "Linux" }
+        default            { return $null }
+    }
+}
+
 function New-RDCManFileFromHyperV {
     [CmdletBinding()]
     param(
@@ -417,6 +432,12 @@ function New-RDCManFileFromHyperV {
         # $vmList = (Get-List -Type VM -domain $domain).VmName
         $vmListFull = (Get-List -Type VM -domain $domain)
 
+        $cmVersion = $null
+        $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
+        if ($dcVM.domainDefaults.CMVersion) {
+            $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
+        }
+
         foreach ($vm in $vmListFull) {
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
@@ -471,22 +492,65 @@ function New-RDCManFileFromHyperV {
             else {
                 $name = $($vm.VmName)
             }            
-            $rolename = ""
             $ForceOverwrite = $false
+            $roleTag = $null
             switch ($vm.Role) {
-                #"DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
-                "InternetClient" {
-                    $ForceOverwrite = $true
-                    $rolename = "[Internet] "
-                }
-                "AADClient" {
-                    $ForceOverwrite = $true
-                    $rolename = "[AAD] "
-                }
-                "WorkgroupMember" { $rolename = "[WG] " }
+                "DC"              { $roleTag = "DC" }
+                "BDC"             { $roleTag = "BDC" }
+                "CAS"             { $roleTag = "CAS" }
+                "Primary"         { $roleTag = "PRI" }
+                "Secondary"       { $roleTag = "SEC" }
+                "PassiveSite"     { $roleTag = "Passive" }
+                "SQLAO"           { $roleTag = "SQLAO" }
+                "WSUS"            { $roleTag = "WSUS" }
+                "FileServer"      { $roleTag = "FS" }
+                "OSDClient"       { $roleTag = "OSD" }
+                "Linux"           { $roleTag = "Linux" }
+                "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
+                "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
+                "WorkgroupMember" { $roleTag = "WG" }
                 Default {}
             }
-            $displayName = $rolename + $($vm.VmName)
+
+            # SiteSystem: show actual installed roles instead of generic tag
+            $siteRolesTag = $null
+            if ($vm.Role -eq "SiteSystem") {
+                $sr = @()
+                if ($vm.installMP) { $sr += "MP" }
+                if ($vm.installDP) { $sr += "DP" }
+                if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
+                if ($vm.InstallRP) { $sr += "RP" }
+                if ($vm.InstallSMSProv) { $sr += "SMSProv" }
+                if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
+            }
+
+            # Dedup: skip role tag if VM name already contains it
+            if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
+                $roleTag = $null
+            }
+
+            # Build bracket tag: [ROLE OS CMver SiteRoles]
+            $tagParts = @()
+            if ($roleTag) { $tagParts += $roleTag }
+
+            $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
+            # Dedup: skip OS tag if VM name already contains it
+            if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) {
+                $tagParts += $osShort
+            }
+
+            # CM version for site server roles
+            if ($cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+                $tagParts += $cmVersion
+            }
+
+            # Append site system role flags
+            if ($siteRolesTag) { $tagParts += $siteRolesTag }
+
+            $displayName = $vm.VmName
+            if ($tagParts.Count -gt 0) {
+                $displayName += " [$($tagParts -join ' ')]"
+            }
             if ($vm.SiteCode) {
                 $displayName += " ($($vm.SiteCode)"
                 if ($vm.ParentSiteCode) {
