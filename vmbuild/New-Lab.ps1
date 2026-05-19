@@ -172,28 +172,40 @@ if (-not $NoWindowResize.IsPresent) {
         $resizeDone = $false
         $myProc = Get-Process -Id $PID -ErrorAction SilentlyContinue
         $myHandle = $myProc.MainWindowHandle
-        Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID, MainWindowHandle=$myHandle" -LogOnly
+        $mySessionId = $myProc.SessionId
+        Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID, SessionId=$mySessionId, MainWindowHandle=$myHandle" -LogOnly
 
-        # Walk ancestors ONLY looking for WindowsTerminal.exe - never resize anything else
+        # Walk ancestors ONLY looking for WindowsTerminal - never resize anything else
         $walker = $myProc
         for ($i = 0; $i -lt 5; $i++) {
             $walker = $walker.Parent
             if (-not $walker) { break }
             Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$($walker.MainWindowHandle)" -LogOnly
-            if ($walker.ProcessName -eq 'WindowsTerminal') {
+            if ($walker.ProcessName -match '^(WindowsTerminal|Terminal)$') {
                 $wtDetected = $true
                 $wtProcessId = $walker.Id
                 break
             }
         }
         # Also check for WT process if not found in ancestors (default terminal routing)
+        # Search both 'WindowsTerminal' and 'Terminal' (inbox Server 2025 may use either)
+        # Filter to our session to avoid cross-RDP-session matches
         if (-not $wtDetected) {
-            $wtProc = Get-Process -Name 'WindowsTerminal' -ErrorAction SilentlyContinue |
+            $wtProc = Get-Process -Name 'WindowsTerminal', 'Terminal' -ErrorAction SilentlyContinue |
+                Where-Object { $_.SessionId -eq $mySessionId } |
                 Sort-Object StartTime -Descending | Select-Object -First 1
             if ($wtProc) {
                 $wtDetected = $true
                 $wtProcessId = $wtProc.Id
-                Write-Log "Post-init: Window resize - found WindowsTerminal PID $($wtProc.Id) via process search" -LogOnly
+                Write-Log "Post-init: Window resize - found $($wtProc.ProcessName) PID $($wtProc.Id) via process search (session $mySessionId)" -LogOnly
+            }
+            else {
+                # Log what terminal-related processes exist for diagnostics
+                $termProcs = Get-Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ProcessName -match 'terminal|console|conhost' -and $_.SessionId -eq $mySessionId } |
+                    Select-Object ProcessName, Id, MainWindowHandle
+                $termList = ($termProcs | ForEach-Object { "$($_.ProcessName)($($_.Id))=$($_.MainWindowHandle)" }) -join ', '
+                Write-Log "Post-init: Window resize - no WT found. Terminal-related processes in session ${mySessionId}: $termList" -LogOnly
             }
         }
 
@@ -236,14 +248,29 @@ if (-not $NoWindowResize.IsPresent) {
             }
         }
 
-        # === Strategy 3: Windows Terminal - VT escape sequence ===
-        if (-not $resizeDone -and $wtDetected) {
+        # === Strategy 3: Classic conhost - Set-Window on own PID + parent cmd.exe ===
+        # GetConsoleWindow handles the conhost lookup internally.
+        # ONLY if we're NOT in Windows Terminal (avoid pseudoconsole corruption).
+        if (-not $resizeDone -and -not $wtDetected) {
+            Write-Log "Post-init: Window resize - trying classic conhost path (Set-Window on PID $PID)" -LogOnly
+            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
+            $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
+            if ($parent -and $parent.ProcessName -eq 'cmd') {
+                Write-Log "Post-init: Window resize - also resizing parent cmd PID $($parent.Id)" -LogOnly
+                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $width -Height $height
+            }
+            $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
+        }
+
+        # === Strategy 4 (universal fallback): VT escape sequence ===
+        # \e[8;rows;cols t works in WT and modern conhost (Server 2019+).
+        # Silently ignored by legacy conhost. Safe to always attempt.
+        if (-not $resizeDone) {
             $charWidth = $host.UI.RawUI.WindowSize.Width
             $charHeight = $host.UI.RawUI.WindowSize.Height
-            Write-Log "Post-init: Window resize - VT escape: current ${charWidth}x${charHeight} chars" -LogOnly
-            # Ensure [Window] type is loaded for GetConsoleWindow
+            Write-Log "Post-init: Window resize - VT fallback: current ${charWidth}x${charHeight} chars" -LogOnly
             try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
-            $consoleHandle = [Window]::GetConsoleWindow()
+            $consoleHandle = try { [Window]::GetConsoleWindow() } catch { [IntPtr]::Zero }
             if ($consoleHandle -ne [IntPtr]::Zero -and $charWidth -gt 0 -and $charHeight -gt 0) {
                 $cRect = New-Object RECT
                 $null = [Window]::GetWindowRect($consoleHandle, [ref]$cRect)
@@ -264,20 +291,6 @@ if (-not $NoWindowResize.IsPresent) {
                 Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
                 $resizeDone = $true
             }
-        }
-
-        # === Strategy 4: Classic conhost - Set-Window on own PID + parent cmd.exe ===
-        # GetConsoleWindow handles the conhost lookup internally.
-        # ONLY if we're NOT in Windows Terminal (avoid pseudoconsole corruption).
-        if (-not $resizeDone -and -not $wtDetected) {
-            Write-Log "Post-init: Window resize - trying classic conhost path (Set-Window on PID $PID)" -LogOnly
-            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
-            $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
-            if ($parent -and $parent.ProcessName -eq 'cmd') {
-                Write-Log "Post-init: Window resize - also resizing parent cmd PID $($parent.Id)" -LogOnly
-                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $width -Height $height
-            }
-            $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
         }
 
         Write-Log "Post-init: Window resize - resizeDone=$resizeDone" -LogOnly
