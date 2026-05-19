@@ -623,13 +623,12 @@ try {
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
                 }
                 if ($i -eq 2) {
-                    # Two-tier PKI: orchestrate offline root CA + enterprise subordinate CA.
-                    # Triggered when any DC has UseOfflineRoot enabled.
-                    $hasOfflineRoot = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
-                    if ($hasOfflineRoot) {
-                        $pkiSuccess = Install-TwoTierPKI -DeployConfig $deployConfig
+                    # PKI: orchestrate CA installation post-Phase2 (single-tier or two-tier).
+                    $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA }).Count -gt 0
+                    if ($hasPKI) {
+                        $pkiSuccess = Install-PKI -DeployConfig $deployConfig
                         if (-not $pkiSuccess) {
-                            Write-Log "[TwoTierPKI] Two-tier PKI deployment failed." -Failure
+                            Write-Log "[PKI] PKI deployment failed." -Failure
                             $configured = $false
                             break
                         }

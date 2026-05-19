@@ -490,73 +490,13 @@
         }
 
         if ($ThisVM.InstallCA) {
-
-            # When SubordinateCA is set, the CA installation is handled by the
-            # host-driven two-tier PKI orchestrator after Phase2 completes.
-            # The offline root CA must issue the subordinate cert first.
-            if ($ThisVM.SubordinateCA) {
-                WriteStatus ADCS {
-                    DependsOn = $waitOnDependency
-                    Status    = "Skipping CA install (two-tier PKI - will be configured post-Phase2)"
-                }
-            }
-            else {
-
+            # CA installation is handled by the host-driven PKI orchestrator
+            # (Install-PKI) after Phase2 completes. This ensures consistent
+            # behavior regardless of whether the CA is on a DC or member server.
             WriteStatus ADCS {
                 DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Authority"
+                Status    = "Skipping CA install (will be configured post-Phase2 by PKI orchestrator)"
             }
-
-            if ($ThisVM.ThisParams.RootCA) {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                    #RootCa        = $ThisVM.ThisParams.RootCA
-                }
-            }
-            else {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                }
-            }
-            $nextDepend = "[InstallCA]InstallCA"
-
-            if ($usePKI) {
-                
-                WriteStatus ImportCertificateTemplate {
-                    DependsOn = $nextDepend
-                    Status    = "Importing Template to Domain"
-                }
-
-                $waitOnDependency = @($nextDepend)
-
-                if ($iisCount) {
-                    ImportCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                    ImportCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                ImportCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    DNPath       = $DNName
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientCertificate"
-            }
-            else {
-                $waitOnDependency = $nextDepend
-            }
-            } # end else (not SubordinateCA)
         }
 
        
@@ -674,49 +614,8 @@
         $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
         $waitOnDependency = $nextDepend
         
-
-        if ($ThisVM.InstallCA -and -not $ThisVM.SubordinateCA) {
-
-
-            WriteStatus CertTemplates {
-                DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Templates"
-            }
-
-            ModuleAdd PSPKI {
-                Key             = 'Always'
-                CheckModuleName = 'PSPKI'
-                DependsOn       = $waitOnDependency
-            }
-            $nextDepend = "[ModuleAdd]PSPKI"
-            $waitOnDependency = @("[ModuleAdd]PSPKI")
-            if ($usePKI) {
-                if ($iisCount) {
-                    AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                    AddCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                AddCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    GroupName    = 'Domain Computers'
-                    Permissions  = 'Read, Enroll, AutoEnroll'
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
-            }
-        }
+        # Certificate template import and publishing is handled by the
+        # host-driven PKI orchestrator (Install-PKI) after Phase2 completes.
 
         if ($ThisVM.externalDomainJoinSiteCode -and $ThisVM.externalDomainJoinSiteCode -ne "NONE") {
             [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)

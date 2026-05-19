@@ -245,9 +245,6 @@ function Get-SortedProperties {
     if ($members.Name -contains "InstallSSMS") {
         $sorted += "InstallSSMS"
     }
-    if ($members.Name -contains "InstallCA") {
-        $sorted += "InstallCA"
-    }
 
     if ($members.Name -contains "additionalDisks") {
         $sorted += "AdditionalDisks"
@@ -332,6 +329,9 @@ function Get-SortedProperties {
         "tpmEnabled" {}
         "installSSMS" {}
         "installCA" {}
+        "UseOfflineRoot" {}
+        "SubordinateCA" {}
+        "_autoAddedByOfflineRootCA" {}
         "enablePullDP" {}
         "installSUP" {}
         "installDP" {}
@@ -677,7 +677,13 @@ function get-VMString {
         }
     }
 
-    if ($virtualMachine.InstallCA -or $virtualMachine.Role -eq 'StandaloneRootCA') {
+    if ($virtualMachine.Role -eq 'StandaloneRootCA') {
+        $name += " [CA]"
+    }
+    elseif ($Global:Config.pkiOptions -and $Global:Config.pkiOptions.EnablePKI -and $Global:Config.pkiOptions.IssuingCAVM -eq $virtualMachine.vmName) {
+        $name += " [CA]"
+    }
+    elseif ($virtualMachine.InstallCA) {
         $name += " [CA]"
     }
 

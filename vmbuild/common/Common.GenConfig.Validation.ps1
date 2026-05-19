@@ -353,6 +353,22 @@ function Get-AdditionalValidations {
                 $property.PsObject.Members.Remove("PatchMyPCFileServer")
             }
         }
+        "UsePKI" {
+            # Cascade: when UsePKI is toggled from the CM Options menu, sync pkiOptions
+            if ($Global:Config.pkiOptions) {
+                if ($value -eq $true) {
+                    if (-not $Global:Config.pkiOptions.EnablePKI) {
+                        $Global:Config.pkiOptions.EnablePKI = $true
+                    }
+                    if (-not $Global:Config.pkiOptions.IssuingCAVM) {
+                        $firstDC = $Global:Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                        if ($firstDC) {
+                            $Global:Config.pkiOptions.IssuingCAVM = $firstDC.vmName
+                        }
+                    }
+                }
+            }
+        }
         "installSUP" {
             if ($value -eq $true) {
                 if (-not $property.siteCode) {

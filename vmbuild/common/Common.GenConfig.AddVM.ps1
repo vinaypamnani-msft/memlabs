@@ -574,8 +574,6 @@ function Add-NewVMForRole {
         }
         "DC" {
             $virtualMachine.memory = "4GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE" -force
             $virtualMachine.tpmEnabled = $false
         }
@@ -726,7 +724,7 @@ function Add-NewVMForRole {
 }
 
 function Add-OfflineRootCAVMIfMissing {
-    # When any DC has UseOfflineRoot = $true but no Standalone Offline
+    # When pkiOptions.UseOfflineRoot is enabled but no Standalone Offline
     # Root CA exists - neither in the in-memory config nor already deployed
     # in the target domain - auto-add one so the user doesn't have to.
     [CmdletBinding()]
@@ -738,9 +736,9 @@ function Add-OfflineRootCAVMIfMissing {
     if (-not $ConfigToModify) { return }
     if (-not $ConfigToModify.vmOptions -or -not $ConfigToModify.vmOptions.domainName) { return }
 
-    # Only proceed if a DC has UseOfflineRoot enabled
-    $dcOptionEnabled = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
-    if (-not $dcOptionEnabled) { return }
+    # Only proceed if pkiOptions.UseOfflineRoot is enabled
+    $pkiOpts = $ConfigToModify.pkiOptions
+    if (-not $pkiOpts -or -not $pkiOpts.UseOfflineRoot) { return }
 
     $existsInConfig = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' }).Count -gt 0
     if ($existsInConfig) { return }
@@ -751,7 +749,7 @@ function Add-OfflineRootCAVMIfMissing {
         if ($existsInDomain) { return }
     } catch {}
 
-    write-log "[OfflineRootCA] DC UseOfflineRoot enabled but no StandaloneRootCA VM found - auto-adding one to domain $domainName"
+    write-log "[OfflineRootCA] pkiOptions.UseOfflineRoot enabled but no StandaloneRootCA VM found - auto-adding one to domain $domainName"
     $existingNames = @($ConfigToModify.virtualMachines | ForEach-Object { $_.vmName })
     $rootOS = if ($ConfigToModify.domainDefaults.DefaultServerOS) { $ConfigToModify.domainDefaults.DefaultServerOS } else { 'Server 2022' }
     Add-NewVMForRole -Role 'StandaloneRootCA' -Domain $domainName -ConfigToModify $ConfigToModify -OperatingSystem $rootOS -Quiet:$true | Out-Null
@@ -761,15 +759,19 @@ function Add-OfflineRootCAVMIfMissing {
     $newVM = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' -and $existingNames -notcontains $_.vmName } | Select-Object -First 1
     if ($newVM) {
         $newVM | Add-Member -MemberType NoteProperty -Name '_autoAddedByOfflineRootCA' -Value $true -Force
+        # Also update pkiOptions.OfflineRootCAVM if not already set
+        if ($pkiOpts -and -not $pkiOpts.OfflineRootCAVM) {
+            $pkiOpts.OfflineRootCAVM = $newVM.vmName
+        }
     }
 }
 
 function Remove-OfflineRootCAVMIfAutoAdded {
-    # Counterpart to Add-OfflineRootCAVMIfMissing: when no DC has
-    # UseOfflineRoot enabled, remove any StandaloneRootCA VM that we
-    # previously auto-added. We only remove VMs tagged with
-    # _autoAddedByOfflineRootCA, so user-created Root CA VMs are preserved.
-    # We also skip removal if the VM is already deployed in the domain.
+    # Counterpart to Add-OfflineRootCAVMIfMissing: when pkiOptions.UseOfflineRoot
+    # is disabled, remove any StandaloneRootCA VM that we previously auto-added.
+    # We only remove VMs tagged with _autoAddedByOfflineRootCA, so user-created
+    # Root CA VMs are preserved. We also skip removal if the VM is already
+    # deployed in the domain.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -778,9 +780,11 @@ function Remove-OfflineRootCAVMIfAutoAdded {
 
     if (-not $ConfigToModify) { return }
     if (-not $ConfigToModify.virtualMachines) { return }
-    # Only auto-remove when no DC wants an offline root.
-    $dcOptionOn = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
-    if ($dcOptionOn) { return }
+
+    # Only auto-remove when pkiOptions.UseOfflineRoot is disabled
+    $pkiOpts = $ConfigToModify.pkiOptions
+    $offlineRootEnabled = $pkiOpts -and $pkiOpts.UseOfflineRoot
+    if ($offlineRootEnabled) { return }
 
     $domainName = if ($ConfigToModify.vmOptions) { $ConfigToModify.vmOptions.domainName } else { $null }
     $deployedNames = @()

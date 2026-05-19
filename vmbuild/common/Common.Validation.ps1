@@ -210,33 +210,52 @@ function Test-ValidCmOptions {
     }
 
     if ($ConfigObject.cmOptions.usePKI) {
-        foreach ($vm in $ConfigObject.virtualMachines) {
-            if ($vm.role -eq "DC" ) {
-                if (-not $vm.InstallCA) {
-                    Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI is enabled but no CA is specified for DC [$($vm.vmName)]." -ReturnObject $ReturnObject -Failure
+        # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
+        if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
+            $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+            if ($caVM) {
+                $caVMExists = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
+                if (-not $caVMExists) {
+                    Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
                 }
-            }            
+            }
+        }
+        elseif (-not $ConfigObject.pkiOptions -or -not $ConfigObject.pkiOptions.EnablePKI) {
+            Add-ValidationMessage -Message "PKI Validation: cmOptions.UsePKI is enabled but pkiOptions.EnablePKI is not. Enable PKI infrastructure in PKI Settings." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    # Validate pkiOptions
+    if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
+        # Validate IssuingCAVM references a real VM
+        $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+        if ($caVM) {
+            $caVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
+            if (-not $caVMObj) {
+                Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+            }
         }
     }
 
     # Validate UseOfflineRoot / StandaloneRootCA
     $rootCAVMs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "StandaloneRootCA" })
-    $dcUseOfflineRoot = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA -and $_.UseOfflineRoot }).Count -gt 0
+    $offlineRootEnabled = $ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.UseOfflineRoot
     if ($rootCAVMs.Count -gt 1) {
         Add-ValidationMessage -Message "VM Validation: Only one StandaloneRootCA VM is allowed per configuration. Found $($rootCAVMs.Count)." -ReturnObject $ReturnObject -Failure
     }
-    if ($rootCAVMs.Count -ge 1 -and -not $dcUseOfflineRoot) {
-        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires a DC with UseOfflineRoot enabled." -ReturnObject $ReturnObject -Failure
+    if ($rootCAVMs.Count -ge 1 -and -not $offlineRootEnabled) {
+        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires UseOfflineRoot to be enabled in PKI Settings." -ReturnObject $ReturnObject -Failure
     }
-    if ($dcUseOfflineRoot -and $rootCAVMs.Count -eq 0) {
-        Add-ValidationMessage -Message "VM Validation: A DC has UseOfflineRoot enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
+    if ($offlineRootEnabled -and $rootCAVMs.Count -eq 0) {
+        Add-ValidationMessage -Message "VM Validation: pkiOptions.UseOfflineRoot is enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
     }
-    # Two-tier PKI is incompatible with forest-trust subordination on the same DC:
-    # a DC can only chain up to one root CA at a time.
-    if ($dcUseOfflineRoot) {
-        $forestTrustDCs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "DC" -and $_.externalDomainJoinSiteCode -and $_.InstallCA -and $_.UseOfflineRoot })
-        foreach ($ftDC in $forestTrustDCs) {
-            Add-ValidationMessage -Message "VM Validation: DC [$($ftDC.vmName)] has externalDomainJoinSiteCode set (forest-trust subordinate CA) and cannot also use UseOfflineRoot. Disable UseOfflineRoot or remove externalDomainJoinSiteCode." -ReturnObject $ReturnObject -Failure
+    if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
+        $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $ConfigObject.pkiOptions.OfflineRootCAVM }
+        if (-not $rootVMObj) {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+        }
+        elseif ($rootVMObj.role -ne 'StandaloneRootCA') {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not have the StandaloneRootCA role." -ReturnObject $ReturnObject -Failure
         }
     }
 

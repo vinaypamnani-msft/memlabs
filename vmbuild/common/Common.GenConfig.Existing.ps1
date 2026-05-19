@@ -814,6 +814,12 @@ function New-UserConfig {
     $configGenerated = [PSCustomObject]@{
         #cmOptions       = $newCmOptions
         vmOptions       = $vmOptions
+        pkiOptions      = [PSCustomObject]@{
+            EnablePKI       = $false
+            IssuingCAVM     = ""
+            UseOfflineRoot  = $false
+            OfflineRootCAVM = ""
+        }
         virtualMachines = $()
 
     }

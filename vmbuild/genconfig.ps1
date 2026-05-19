@@ -764,6 +764,9 @@ function Select-MainMenu {
             "c" { 
                 Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" -HelpFunction "Get-GenericHelp"
             }
+            "p" {
+                Select-PKIOptions
+            }
             "d" {
                 Add-ModifiedExistingVMsToConfig
                 $global:DisableSmartUpdate = $false
@@ -847,6 +850,8 @@ function Build-MainMenuOptions {
         $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
     }
+    $preOptions += [ordered]@{ "P" = "PKI Settings `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
 
     $customOptions = [ordered]@{}
     $VMNameToNumberMap = @{}

@@ -87,6 +87,32 @@ function Get-UserConfiguration {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $true -Force
             }
         }
+
+        # --- pkiOptions: migrate from per-VM InstallCA/UseOfflineRoot if missing ---
+        if (-not $config.PSObject.Properties['pkiOptions']) {
+            $enablePKI = $false
+            $issuingCAVM = ""
+            $useOfflineRoot = $false
+            $offlineRootCAVM = ""
+            # Derive from existing per-VM properties
+            $dcWithCA = $config.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA } | Select-Object -First 1
+            if ($dcWithCA) {
+                $enablePKI = $true
+                $issuingCAVM = $dcWithCA.vmName
+                if ($dcWithCA.UseOfflineRoot) {
+                    $useOfflineRoot = $true
+                    $rootVM = $config.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' } | Select-Object -First 1
+                    if ($rootVM) { $offlineRootCAVM = $rootVM.vmName }
+                }
+            }
+            $config | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{
+                EnablePKI       = $enablePKI
+                IssuingCAVM     = $issuingCAVM
+                UseOfflineRoot  = $useOfflineRoot
+                OfflineRootCAVM = $offlineRootCAVM
+            }) -Force
+        }
+
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force
@@ -121,21 +147,35 @@ function Get-UserConfiguration {
                 $vm.role = "SiteSystem"
             }
 
-            if ($vm.role -eq "DC") {
-                if ($null -eq $vm.InstallCA) {
-                    if ($config.cmOptions.UsePKI) {
-                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -force
+            # Derive InstallCA from pkiOptions (authoritative source).
+            # Applies to any domain-joined VM (DC, BDC, or member server).
+            if ($vm.role -notin 'StandaloneRootCA', 'WorkgroupMember', 'AADClient', 'InternetClient') {
+                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI) {
+                    if ($config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force
+                    }
+                    elseif ($null -eq $vm.InstallCA) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $false -Force
                     }
                 }
-                # Add UseOfflineRoot property for DCs with InstallCA (for menu visibility)
-                if ($vm.InstallCA -and $null -eq $vm.UseOfflineRoot) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value $false -force
+                elseif ($vm.role -eq "DC" -and $null -eq $vm.InstallCA) {
+                    # Legacy fallback: no pkiOptions yet, use cmOptions.UsePKI (DC only for compat)
+                    if ($config.cmOptions.UsePKI) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force
+                    }
                 }
-                # Flag DCs as SubordinateCA when UseOfflineRoot is enabled.
+                # Derive UseOfflineRoot from pkiOptions
+                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI -and $config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value ([bool]$config.pkiOptions.UseOfflineRoot) -Force
+                }
+                elseif ($vm.InstallCA -and $null -eq $vm.UseOfflineRoot) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value $false -Force
+                }
+                # Flag as SubordinateCA when UseOfflineRoot is enabled.
                 # Skip forest-trust subordinates (externalDomainJoinSiteCode
                 # uses ThisParams.RootCA to subordinate to a different forest's root).
                 if ($vm.InstallCA -and $vm.UseOfflineRoot -and (-not $vm.externalDomainJoinSiteCode)) {
-                    $vm | Add-Member -MemberType NoteProperty -Name "SubordinateCA" -Value $true -force
+                    $vm | Add-Member -MemberType NoteProperty -Name "SubordinateCA" -Value $true -Force
                 }
             }
             #add missing Properties

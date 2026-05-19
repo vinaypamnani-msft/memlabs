@@ -4810,6 +4810,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1
 . $PSScriptRoot\common\Common.GenConfig.CmMenus.ps1
+. $PSScriptRoot\common\Common.GenConfig.PKIMenus.ps1
 . $PSScriptRoot\common\Common.GenConfig.Existing.ps1
 . $PSScriptRoot\common\Common.GenConfig.ConfigFiles.ps1
 . $PSScriptRoot\common\Common.GenConfig.Summary.ps1
@@ -4822,7 +4823,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
-. $PSScriptRoot\common\Common.TwoTierPKI.ps1
+. $PSScriptRoot\common\Common.PKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
 
 

@@ -42,8 +42,8 @@ function Get-GenericHelp {
         "Version" { "Change the version of CM to install. By default, we select the newest baseline version." }
         "Install" { "Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand" }
         "EVALVersion" { "Install the EVAL license for ConfigMgr.  This will expire in 6 months." }
-        "UsePKI" { "Automatically set up a complete PKI infrastructure, and use HTTPS for all CM roles, including DP/MP/SUP/RP." }
-        "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA on this DC. A StandaloneRootCA VM will be auto-created." }
+        "UsePKI" { "Automatically set up a complete PKI infrastructure, and use HTTPS for all CM roles, including DP/MP/SUP/RP. Also configurable via PKI Settings menu." }
+        "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA. Configured via PKI Settings menu." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
         "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }

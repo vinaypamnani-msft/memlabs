@@ -184,21 +184,6 @@
         }
 
         $nextDepend = "[FileReadAccessShare]DomainSMBShare"
-        
-        if ($ThisVM.InstallCA) {
-
-            WriteStatus ADCS {
-                DependsOn = $nextDepend
-                Status    = "Installing Certificate Authority"
-            }
-
-            InstallCA InstallCA {
-                DependsOn     = $nextDepend
-                HashAlgorithm = "SHA256"
-            }
-
-            $nextDepend = "[InstallCA]InstallCA"
-        }
 
         
         WriteStatus Complete {
