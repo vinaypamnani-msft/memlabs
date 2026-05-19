@@ -1502,9 +1502,6 @@ Function Set-Window {
                 [return: MarshalAs(UnmanagedType.Bool)]
                 public static extern bool IsWindowVisible(IntPtr hWnd);
 
-                [DllImport("user32.dll")]
-                public static extern bool SetProcessDPIAware();
-
                 [DllImport("kernel32.dll")]
                 public static extern IntPtr GetConsoleWindow();
               }
@@ -1538,9 +1535,6 @@ Function Set-Window {
             }
             Write-Log "Set-Window: PID $ProcessID MainWindowHandle=0, using GetConsoleWindow handle=$Handle (visible=true)" -LogOnly
         }
-
-        # Ensure DPI awareness so pixel coordinates match between Screen.Bounds and MoveWindow
-        $null = [Window]::SetProcessDPIAware()
 
         $Return = [Window]::GetWindowRect($Handle, [ref]$Rectangle)
         $beforeW = $Rectangle.Right - $Rectangle.Left
