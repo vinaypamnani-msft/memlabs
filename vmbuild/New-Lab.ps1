@@ -120,9 +120,38 @@ Test-NoRRAS
 
 Write-Log "Post-init: Checking VMHost enhanced session mode..." -LogOnly
 Flush-LogBuffer -All
-if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
-    Set-VMHost -EnableEnhancedSessionMode $True
+# Cache the enhanced session mode check — Get-VMHost is a CIM call that can
+# stall for minutes when vmms.exe is busy. The setting persists across reboots
+# once enabled; only re-check once per 24 hours.
+$esmCacheFile = Join-Path $Common.CachePath "vmhost-esm-state.json"
+$esmNeedsCheck = $true
+if (Test-Path $esmCacheFile) {
+    try {
+        $esmCache = Get-Content $esmCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+        if ($esmCache -and $esmCache.Enabled -eq $true) {
+            $esmAge = ((Get-Date) - [DateTime]::Parse($esmCache.CheckedUtc)).TotalHours
+            if ($esmAge -le 24) {
+                $esmNeedsCheck = $false
+                Write-Log "Post-init: Enhanced session mode already enabled (cached, age=$([Math]::Round($esmAge,1))h)." -LogOnly
+            }
+        }
+    }
+    catch {}
 }
+if ($esmNeedsCheck) {
+    Write-Log "Post-init: Calling Get-VMHost (CIM — may be slow if vmms is busy)..." -LogOnly
+    if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
+        Set-VMHost -EnableEnhancedSessionMode $True
+    }
+    try {
+        [PSCustomObject]@{
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+            Enabled    = $true
+        } | ConvertTo-Json | Set-Content -Path $esmCacheFile -Encoding UTF8
+    }
+    catch {}
+}
+Write-Log "Post-init: VMHost check complete. Proceeding to window resize and config..." -LogOnly
 
 if (-not $NoWindowResize.IsPresent) {
     try {
@@ -284,7 +313,9 @@ try {
 
     ### Run maintenance
     if (-not $Configuration) {
+        Write-Log "Post-init: Starting maintenance..." -LogOnly
         Start-Maintenance
+        Write-Log "Post-init: Maintenance complete." -LogOnly
     }
 
     # Get config
