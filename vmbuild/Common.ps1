@@ -1511,6 +1511,10 @@ Function Set-Window {
     Process {
         $Rectangle = New-Object RECT
         $Handle = (Get-Process -id $ProcessID).MainWindowHandle
+        if ($Handle -eq [IntPtr]::Zero) {
+            Write-Log "Set-Window: PID $ProcessID has MainWindowHandle=0 (no window). Skipping." -LogOnly -Warning
+            return
+        }
         $Return = [Window]::GetWindowRect($Handle, [ref]$Rectangle)
         If (-NOT $PSBoundParameters.ContainsKey('Width')) {
             $Width = $Rectangle.Right - $Rectangle.Left
@@ -1520,6 +1524,12 @@ Function Set-Window {
         }
         If ($Return) {
             $Return = [Window]::MoveWindow($Handle, $x, $y, $Width, $Height, $True)
+            if (-not $Return) {
+                Write-Log "Set-Window: MoveWindow failed for PID $ProcessID (Handle=$Handle)." -LogOnly -Warning
+            }
+        }
+        else {
+            Write-Log "Set-Window: GetWindowRect failed for PID $ProcessID (Handle=$Handle)." -LogOnly -Warning
         }
         If ($PSBoundParameters.ContainsKey('Passthru')) {
             $Rectangle = New-Object RECT
