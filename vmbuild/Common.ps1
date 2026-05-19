@@ -401,6 +401,11 @@ function Register-LogBufferExitFlush {
     try {
         Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
             try {
+                # Stop the background flush timer before final flush
+                if ($global:LogFlushTimer) {
+                    $global:LogFlushTimer.Dispose()
+                    $global:LogFlushTimer = $null
+                }
                 foreach ($p in @($global:LogBuffers.Keys)) {
                     $entry = $global:LogBuffers[$p]
                     if ($entry -and $entry.Builder.Length -gt 0) {
@@ -417,6 +422,31 @@ function Register-LogBufferExitFlush {
     catch {
         # Non-fatal; we still flush at size/age thresholds and on important
         # messages, so worst case is a few buffered lines lost on abrupt exit.
+    }
+
+    # Start a background timer that flushes log buffers on a threadpool thread.
+    # This ensures entries reach disk even when the main thread is blocked in a
+    # long-running CIM call (Get-VM, Get-VMNetworkAdapter, Set-VM, etc.).
+    if (-not $global:LogFlushTimer) {
+        $global:LogFlushTimer = [System.Threading.Timer]::new(
+            [System.Threading.TimerCallback]{
+                param($state)
+                try {
+                    foreach ($p in @($state.Keys)) {
+                        $entry = $state[$p]
+                        if ($entry -and $entry.Builder.Length -gt 0) {
+                            $text = $entry.Builder.ToString()
+                            $entry.Builder.Length = 0
+                            $entry.LastFlushUtc = [DateTime]::UtcNow
+                            [System.IO.File]::AppendAllText($p, $text, [System.Text.Encoding]::UTF8)
+                        }
+                    }
+                } catch { }
+            },
+            $global:LogBuffers,  # state object passed to callback
+            2000,                # initial delay (ms)
+            2000                 # period (ms) — flush every 2 seconds
+        )
     }
 }
 
