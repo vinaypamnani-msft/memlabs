@@ -1,9 +1,13 @@
-﻿###############################################################################
-# Common.TwoTierPKI.ps1
+###############################################################################
+# Common.PKI.ps1
 #
-# Host-driven orchestrator for two-tier PKI (Standalone Offline Root CA +
-# Enterprise Subordinate CA on DC). Called after Phase2 completes when
-# a DC has UseOfflineRoot = $true (and InstallCA = $true).
+# Host-driven PKI orchestrator. Handles both single-tier (Enterprise Root CA)
+# and two-tier (Standalone Offline Root CA + Enterprise Subordinate CA)
+# deployments on any domain-joined VM. Called after Phase2 completes when
+# pkiOptions.EnablePKI is set and a VM has InstallCA = $true.
+#
+# Entry point: Install-PKI (dispatches to Install-SingleTierPKI or
+# Install-TwoTierPKI based on UseOfflineRoot).
 #
 # IDEMPOTENT: Every step detects existing state and skips work already done.
 # Safe to re-run after partial failure — will resume from where it left off.
@@ -44,20 +48,639 @@ function Copy-ItemFromVM {
     }
 }
 
+function Test-PKIStepResult {
+    <#
+    .SYNOPSIS
+        Checks an Invoke-VmCommand result for success/failure, logs output, and returns $true/$false.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [object] $Result,
+        [Parameter(Mandatory)] [string] $StepName,
+        [Parameter(Mandatory)] [string] $LogPrefix,
+        [string] $LogSource = "CA",
+        [switch] $LogOnly,
+        [string] $Indent = ""
+    )
+
+    if ($Result.ScriptBlockFailed -or -not $Result.ScriptBlockOutput.Success) {
+        $err = if ($Result.ScriptBlockFailed) { $Result.ScriptBlockFailed } else { $Result.ScriptBlockOutput.Error }
+        Write-Log "${Indent}[$LogPrefix] $StepName FAILED: $err" -Failure
+        if ($Result.ScriptBlockOutput.Log) {
+            foreach ($line in $Result.ScriptBlockOutput.Log) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+        }
+        return $false
+    }
+    foreach ($line in $Result.ScriptBlockOutput.Log) {
+        if ($LogOnly) { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" -LogOnly }
+        else { Write-Log "${Indent}  [$LogPrefix][$LogSource] $line" }
+    }
+    return $true
+}
+
+function Install-PKIDnsAlias {
+    <#
+    .SYNOPSIS
+        Creates a pki.<domain> DNS CNAME on the DC pointing to the CA VM.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $DcVMName,
+        [Parameter(Mandatory)] [string] $DomainName,
+        [Parameter(Mandatory)] [string] $CAHostAlias
+    )
+
+    Write-Log "[PKI] Creating DNS alias pki.$DomainName -> $CAHostAlias (on DC $DcVMName)..." -LogOnly
+    $null = Invoke-VmCommand -VmName $DcVMName -VmDomainName $DomainName -DisplayName "PKI: Create pki DNS alias" -SuppressLog `
+        -ScriptBlock {
+            param($ZoneName, $HostAlias)
+            try {
+                $existing = Get-DnsServerResourceRecord -ZoneName $ZoneName -Name "pki" -RRType CName -ErrorAction SilentlyContinue
+                if (-not $existing) {
+                    Add-DnsServerResourceRecordCName -ZoneName $ZoneName -Name "pki" -HostNameAlias $HostAlias | Out-Null
+                }
+            }
+            catch {
+                # Non-fatal — CRL distribution still works via direct hostname
+                Write-Warning "DNS alias pki.$ZoneName creation failed: $($_.Exception.Message)"
+            }
+        } -ArgumentList $DomainName, $CAHostAlias
+}
+
+function Install-PKICertificateTemplates {
+    <#
+    .SYNOPSIS
+        Imports and publishes certificate templates on the Issuing CA VM.
+        Shared by both single-tier and two-tier paths.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $CAVMName,
+        [Parameter(Mandatory)] [string] $DomainName,
+        [Parameter(Mandatory)] [object] $DeployConfig,
+        [Parameter(Mandatory)] [string] $LogPrefix
+    )
+
+    # Determine which templates are needed
+    $hasIISServers = @($DeployConfig.virtualMachines | Where-Object {
+        ($_.role -in "CAS", "Primary", "Secondary", "PassiveSite") -or
+        $_.InstallSUP -or $_.InstallMP -or $_.InstallDP -or $_.InstallRP
+    }).Count -gt 0
+
+    $templateList = @()
+    if ($hasIISServers) {
+        $templateList += 'ConfigMgrWebServerCertificate'
+        $templateList += 'ConfigMgrClientDistributionPointCertificate'
+    }
+    $templateList += 'ConfigMgrClientCertificate'
+
+    Write-Log "[$LogPrefix] Importing $($templateList.Count) certificate template(s) on $CAVMName..." -NoIndent
+    $stepStart = Get-Date
+
+    $templateScript = {
+        param($DomainName, $TemplateListString)
+
+        $TemplateList = $TemplateListString -split '\|'
+        $ErrorActionPreference = 'Stop'
+        $report = [System.Collections.Generic.List[string]]::new()
+        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+        function Find-TemplateInAD([string]$cn) {
+            try {
+                $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+                $searchBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+                $ds = New-Object System.DirectoryServices.DirectorySearcher(
+                    [ADSI]"LDAP://$searchBase", "(cn=$cn)")
+                $ds.PropertiesToLoad.AddRange(@('cn','msPKI-Cert-Template-OID'))
+                return $ds.FindOne()
+            } catch { return $null }
+        }
+
+        function Reset-TemplateCache {
+            foreach ($hive in @('HKLM','HKCU')) {
+                $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+            }
+            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 2
+                try {
+                    $null = & certutil.exe -ping 2>&1
+                    if ($LASTEXITCODE -eq 0) { return }
+                } catch {}
+            }
+        }
+
+        try {
+            $dnPath = 'DC=' + $DomainName.Replace('.', ',DC=')
+
+            # ---- Phase A: Import templates into AD via ldifde ----
+            foreach ($tplName in $TemplateList) {
+                $found = Find-TemplateInAD $tplName
+                if ($found) {
+                    _Log "Template '$tplName' already exists in AD - skipping import"
+                    continue
+                }
+
+                $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
+                if (-not (Test-Path $ldfSource)) {
+                    _Log "FATAL: LDF file not found: $ldfSource"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
+                }
+
+                $ldfTarget = "C:\temp\$tplName.ldf"
+                (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
+                    Set-Content $ldfTarget -Force
+
+                _Log "Importing template '$tplName' via ldifde..."
+                $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
+                _Log "  ldifde exit code: $LASTEXITCODE"
+                if ($output) { _Log "  ldifde output: $($output -join ' ')" }
+
+                $verify = Find-TemplateInAD $tplName
+                if (-not $verify) {
+                    _Log "FATAL: Template '$tplName' NOT found in AD after ldifde import"
+                    return @{ Success = $false; Log = $report.ToArray(); Error = "Template '$tplName' import failed (not in AD)" }
+                }
+                _Log "  Verified: '$tplName' exists in AD"
+            }
+
+            # ---- Phase B: Set ACLs and add templates to the CA ----
+            Reset-TemplateCache
+            $publishFailed = $false
+
+            # ---- Phase B1: Set ACLs on templates ----
+            $enrollGuid     = [Guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'
+            $autoEnrollGuid = [Guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
+            $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $tplBaseDN = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
+
+            $tplIndex = 0
+            foreach ($tplName in $TemplateList) {
+                $tplIndex++
+                $groupName = switch ($tplName) {
+                    'ConfigMgrWebServerCertificate'               { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientDistributionPointCertificate' { 'ConfigMgr IIS Servers' }
+                    'ConfigMgrClientCertificate'                  { 'Domain Computers' }
+                }
+                $doAutoEnroll = ($tplName -eq 'ConfigMgrClientCertificate')
+
+                _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName'..."
+                $retries = 0
+                $aclOk = $false
+                while ($retries -lt 5 -and -not $aclOk) {
+                    $retries++
+                    try {
+                        $ntAccount = New-Object System.Security.Principal.NTAccount($groupName)
+                        $groupSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
+
+                        $tplDN = "CN=$tplName,$tplBaseDN"
+                        $tplEntry = [ADSI]"LDAP://$tplDN"
+                        if (-not $tplEntry.distinguishedName) { throw "Template not found at $tplDN" }
+
+                        $acl = $tplEntry.ObjectSecurity
+
+                        $readRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                            $groupSid,
+                            [System.DirectoryServices.ActiveDirectoryRights]::GenericRead,
+                            [System.Security.AccessControl.AccessControlType]::Allow
+                        )
+                        $acl.AddAccessRule($readRule)
+
+                        $enrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                            $groupSid,
+                            [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+                            [System.Security.AccessControl.AccessControlType]::Allow,
+                            $enrollGuid
+                        )
+                        $acl.AddAccessRule($enrollRule)
+
+                        if ($doAutoEnroll) {
+                            $autoEnrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                                $groupSid,
+                                [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
+                                [System.Security.AccessControl.AccessControlType]::Allow,
+                                $autoEnrollGuid
+                            )
+                            $acl.AddAccessRule($autoEnrollRule)
+                        }
+
+                        $tplEntry.ObjectSecurity = $acl
+                        $tplEntry.CommitChanges()
+                        $aclOk = $true
+                        $perms = if ($doAutoEnroll) { 'Read, Enroll, AutoEnroll' } else { 'Read, Enroll' }
+                        _Log "  ACL set successfully ($perms)"
+                    } catch {
+                        _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
+                        Start-Sleep -Seconds 2
+                    }
+                }
+                if (-not $aclOk) {
+                    _Log "FATAL: Failed to set ACL on '$tplName' after $retries attempts"
+                    $publishFailed = $true
+                }
+            }
+
+            if ($publishFailed) {
+                _Log "Aborting: ACL phase failed"
+                return @{ Success = $false; Log = $report.ToArray(); Error = "Template ACL failures (see log)" }
+            }
+
+            # ---- Phase B2: Issue Add-CATemplate for ALL templates ----
+            _Log "Publishing all $($TemplateList.Count) template(s) to CA..."
+            foreach ($tplName in $TemplateList) {
+                try {
+                    ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
+                    _Log "  Add-CATemplate '$tplName': ok"
+                } catch {
+                    _Log "  Add-CATemplate '$tplName' failed: $($_.Exception.Message) (will retry in verify loop)"
+                }
+            }
+
+            # ---- Phase B3: Verify all templates published ----
+            Reset-TemplateCache
+            $remaining = [System.Collections.Generic.List[string]]::new($TemplateList)
+            $maxVerifyRetries = 30
+            $verifyAttempt = 0
+            _Log "Verifying all templates are published (max $maxVerifyRetries attempts)..."
+
+            while ($remaining.Count -gt 0 -and $verifyAttempt -lt $maxVerifyRetries) {
+                $verifyAttempt++
+                try {
+                    $published = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue)
+                } catch { $published = @() }
+
+                $confirmed = @()
+                foreach ($tplName in @($remaining)) {
+                    if (@($published | Where-Object { $_.Name -eq $tplName }).Count -gt 0) {
+                        _Log "  Template '$tplName' confirmed published (attempt $verifyAttempt)"
+                        $confirmed += $tplName
+                    }
+                }
+                foreach ($c in $confirmed) { [void]$remaining.Remove($c) }
+                if ($remaining.Count -eq 0) { break }
+
+                foreach ($tplName in $remaining) {
+                    try {
+                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction SilentlyContinue
+                    } catch {}
+                }
+
+                _Log "  $($remaining.Count) template(s) not yet visible; flushing cache (attempt $verifyAttempt/$maxVerifyRetries)..."
+                Reset-TemplateCache
+            }
+
+            if ($remaining.Count -gt 0) {
+                foreach ($tplName in $remaining) {
+                    _Log "FATAL: Could not publish '$tplName' to CA after $maxVerifyRetries attempts"
+                }
+                $publishFailed = $true
+            }
+
+            # ---- Phase C: Final validation ----
+            Reset-TemplateCache
+            try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
+
+            _Log "Validating CA template advertisements..."
+            $caOut = & certutil.exe -catemplates 2>&1
+            foreach ($tplName in $TemplateList) {
+                if ($caOut -match [regex]::Escape($tplName)) {
+                    _Log "  CA advertises '$tplName': OK"
+                } else {
+                    _Log "  CA does NOT advertise '$tplName': FAIL"
+                    $publishFailed = $true
+                }
+            }
+
+            if ($publishFailed) {
+                _Log "Template publishing FAILED: one or more templates could not be published"
+                return @{ Success = $false; Log = $report.ToArray(); Error = "Template publish/ACL failures (see log)" }
+            }
+
+            _Log "Certificate templates imported and published successfully."
+            return @{ Success = $true; Log = $report.ToArray() }
+        }
+        catch {
+            _Log "FAILED: $($_.Exception.Message)"
+            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+        }
+    }
+
+    Flush-LogBuffer -All
+    $result = Invoke-VmCommand -VmName $CAVMName -VmDomainName $DomainName `
+        -ScriptBlock $templateScript `
+        -ArgumentList $DomainName, ($templateList -join '|') `
+        -DisplayName "$LogPrefix`: Import certificate templates"
+
+    if (-not (Test-PKIStepResult -Result $result -StepName "Certificate template import" -LogPrefix $LogPrefix -LogSource "CA")) {
+        return $false
+    }
+    $elapsed = ((Get-Date) - $stepStart).TotalSeconds
+    Write-Log "  [$LogPrefix] Certificate templates ready ($([int]$elapsed)s)"
+    return $true
+}
+
+function Install-SingleTierPKI {
+    <#
+    .SYNOPSIS
+        Installs a single-tier PKI (Enterprise Root CA) on a domain-joined VM.
+
+    .DESCRIPTION
+        This function runs after Phase2 completes. It:
+          Step 1: Installs ADCS as Enterprise Root CA
+          Step 2: Configures CDP/AIA, IIS CRL virtual directory
+          Step 3: Creates pki.<domain> DNS CNAME on DC
+          Step 4: Imports and publishes certificate templates
+
+        IDEMPOTENT: Each step checks whether its work is already done and skips
+        forward if so. Safe to re-run after partial failure.
+
+    .PARAMETER DeployConfig
+        The deployment configuration object.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$DeployConfig
+    )
+
+    Write-Log "### [SingleTierPKI] Starting single-tier PKI deployment" -NoIndent
+
+    # Resolve VMs
+    $issuingCAVM = $DeployConfig.virtualMachines | Where-Object { $_.InstallCA } | Select-Object -First 1
+    $dcVM = $DeployConfig.virtualMachines | Where-Object { $_.role -eq "DC" } | Select-Object -First 1
+
+    if (-not $issuingCAVM) {
+        Write-Log "[SingleTierPKI] ERROR: No VM with InstallCA flag found in config" -Failure
+        return $false
+    }
+    if (-not $dcVM) {
+        Write-Log "[SingleTierPKI] ERROR: No DC found in config" -Failure
+        return $false
+    }
+
+    $caVMName = $issuingCAVM.vmName
+    $dcVMName = $dcVM.vmName
+    $domainName = $DeployConfig.vmOptions.domainName
+    $domainShort = $domainName.Split(".")[0]
+    $caName = "$domainShort-$caVMName-CA"
+    $webURL = "http://pki.$domainName/crl/"
+    $webFolderPath = "C:\inetpub\wwwroot\CRL\"
+
+    Write-Log "[SingleTierPKI] CA VM: $caVMName | DC VM: $dcVMName"
+    Write-Log "[SingleTierPKI] Domain: $domainName | CA Name: $caName"
+
+    #---------------------------------------------------------------------------
+    # STEP 1: Install Enterprise Root CA + configure CDP/AIA + IIS
+    #---------------------------------------------------------------------------
+    Write-Log "[SingleTierPKI] Step 1: Installing Enterprise Root CA on $caVMName..." -NoIndent
+
+    $singleTierScript = {
+        param($CAName, $DomainName, $WebURL, $WebFolderPath)
+
+        $ErrorActionPreference = 'Stop'
+        $report = [System.Collections.Generic.List[string]]::new()
+        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
+
+        function Wait-CertSvcReady {
+            param([int]$TimeoutSec = 60)
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                    if ($svc -and $svc.Status -eq 'Running') {
+                        $null = & certutil.exe -ping 2>&1
+                        if ($LASTEXITCODE -eq 0) { return $true }
+                    }
+                } catch {}
+                Start-Sleep -Seconds 2
+            }
+            return $false
+        }
+
+        try {
+            # Check if CA is already installed (idempotency)
+            $caAlreadyInstalled = $false
+            try {
+                $svc = Get-Service -Name certsvc -ErrorAction SilentlyContinue
+                if ($svc) {
+                    $caAlreadyInstalled = $true
+                    _Log "CA service already exists (state: $($svc.Status)) - skipping installation"
+                }
+            } catch {}
+
+            if (-not $caAlreadyInstalled) {
+                # Write CAPolicy.inf
+                _Log "Writing CAPolicy.inf..."
+                $caPolicyContent = @"
+[Version]
+Signature="`$Windows NT`$"
+
+[certsrv_server]
+RenewalKeyLength=2048
+RenewalValidityPeriod=Years
+RenewalValidityPeriodUnits=5
+CRLPeriod=Weeks
+CRLPeriodUnits=2
+CRLDeltaPeriod=Days
+CRLDeltaPeriodUnits=1
+LoadDefaultTemplates=0
+"@
+                Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
+
+                # Install ADCS role
+                _Log "Installing ADCS role..."
+                Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools | Out-Null
+
+                # Install Enterprise Root CA
+                _Log "Installing Enterprise Root CA '$CAName'..."
+                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa `
+                    -CACommonName $CAName `
+                    -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+                    -KeyLength 2048 `
+                    -HashAlgorithmName SHA256 `
+                    -ValidityPeriod Years `
+                    -ValidityPeriodUnits 5 `
+                    -Force | Out-Null
+
+                _Log "Waiting for CA service to become ready..."
+                if (-not (Wait-CertSvcReady -TimeoutSec 60)) {
+                    throw "CA service did not become responsive within 60 seconds"
+                }
+                _Log "CA service is ready."
+            }
+            else {
+                # Ensure service is running
+                if ((Get-Service certsvc).Status -ne 'Running') {
+                    Start-Service certsvc
+                    if (-not (Wait-CertSvcReady -TimeoutSec 30)) {
+                        throw "Could not start existing CA service"
+                    }
+                }
+            }
+
+            # Configure CDP/AIA
+            _Log "Configuring CDP extensions..."
+            # Remove default CDP entries and add HTTP-based
+            $cdpBase = "HKLM:\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration\$CAName\CRLDistributionPoint"
+            if (Test-Path $cdpBase) {
+                # Keep only ldap:/// and add HTTP CDP
+                $httpCDP = "${WebURL}<CaName><CRLNameSuffix><DeltaCRLAllowed>.crl"
+                & certutil.exe -setreg CA\CRLPublicationURLs "1:C:\Windows\system32\CertSrv\CertEnroll\%3%8%9.crl\n2:$httpCDP" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CDP returned exit code $LASTEXITCODE" }
+            } else {
+                _Log "WARNING: CDP registry path not found: $cdpBase"
+            }
+
+            _Log "Configuring AIA extensions..."
+            $httpAIA = "${WebURL}<ServerDNSName>_<CaName><CertificateName>.crt"
+            & certutil.exe -setreg CA\CACertPublicationURLs "1:C:\Windows\system32\CertSrv\CertEnroll\%1_%3%4.crt\n2:$httpAIA" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg AIA returned exit code $LASTEXITCODE" }
+
+            # Set CRL periods (lab-appropriate: long CRL, no delta)
+            _Log "Setting CRL periods..."
+            $crlRegFailed = $false
+            & certutil.exe -setreg CA\CRLPeriodUnits 22 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\CRLPeriod "Weeks" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\CRLOverlapPeriod "Hours" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\CRLDeltaPeriod "Days" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\ValidityPeriodUnits 5 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg ValidityPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
+            & certutil.exe -setreg CA\ValidityPeriod "Years" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg ValidityPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+            if ($crlRegFailed) { _Log "WARNING: One or more CRL registry settings failed - check CA config" }
+
+            # Install IIS (idempotent)
+            _Log "Installing IIS Web-Server..."
+            Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
+            Import-Module WebAdministration
+
+            # Create CRL virtual directory
+            _Log "Creating CRL virtual directory..."
+            if (-not (Test-Path $WebFolderPath)) {
+                New-Item -ItemType Directory -Path $WebFolderPath -Force | Out-Null
+            }
+            $existingVDir = Get-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -ErrorAction SilentlyContinue
+            if (-not $existingVDir) {
+                New-WebVirtualDirectory -Site "Default Web Site" -Name "CRL" -PhysicalPath $WebFolderPath | Out-Null
+            }
+
+            # Enable double-escaping
+            _Log "Enabling double-escaping on CRL vdir..."
+            Set-WebConfigurationProperty -PSPath "IIS:\Sites\Default Web Site\CRL" `
+                -Filter "system.webServer/security/requestFiltering" `
+                -Name "allowDoubleEscaping" -Value $true
+
+            # Restart CA to apply CDP/AIA changes and publish CRL
+            _Log "Restarting CertSvc and publishing CRL..."
+            Restart-Service -Name CertSvc -Force
+            if (-not (Wait-CertSvcReady -TimeoutSec 30)) {
+                _Log "WARNING: CertSvc slow to restart"
+            }
+            & certutil.exe -crl 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -crl returned exit code $LASTEXITCODE" }
+            _Log "CRL published."
+
+            # Copy CRL and cert to web folder
+            _Log "Copying CRL and CA cert to web folder..."
+            $certEnrollPath = "C:\Windows\system32\CertSrv\CertEnroll"
+            Get-ChildItem -Path $certEnrollPath -Filter "*.crl" | Copy-Item -Destination $WebFolderPath -Force
+            Get-ChildItem -Path $certEnrollPath -Filter "*.crt" | Copy-Item -Destination $WebFolderPath -Force
+
+            _Log "Single-tier CA installation and configuration complete."
+            return @{ Success = $true; Log = $report.ToArray() }
+        }
+        catch {
+            _Log "FAILED: $($_.Exception.Message)"
+            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
+        }
+    }
+
+    Flush-LogBuffer -All
+    $result = Invoke-VmCommand -VmName $caVMName -VmDomainName $domainName `
+        -ScriptBlock $singleTierScript `
+        -ArgumentList $caName, $domainName, $webURL, $webFolderPath `
+        -DisplayName "SingleTierPKI: Install Enterprise Root CA"
+
+    if (-not (Test-PKIStepResult -Result $result -StepName "CA installation" -LogPrefix "SingleTierPKI" -LogSource "CA" -LogOnly)) {
+        return $false
+    }
+    Write-Log "[SingleTierPKI] Step 1 complete: Enterprise Root CA operational"
+
+    #---------------------------------------------------------------------------
+    # STEP 2: DNS alias
+    #---------------------------------------------------------------------------
+    Install-PKIDnsAlias -DcVMName $dcVMName -DomainName $domainName -CAHostAlias "$caVMName.$domainName"
+
+    #---------------------------------------------------------------------------
+    # STEP 3: Certificate templates
+    #---------------------------------------------------------------------------
+    $templateResult = Install-PKICertificateTemplates -CAVMName $caVMName -DomainName $domainName `
+        -DeployConfig $DeployConfig -LogPrefix "SingleTierPKI"
+    if (-not $templateResult) {
+        return $false
+    }
+
+    Write-Log "### [SingleTierPKI] Single-tier PKI deployment complete!" -NoIndent
+    return $true
+}
+
+function Install-PKI {
+    <#
+    .SYNOPSIS
+        Unified PKI deployment entry point. Dispatches to single-tier or
+        two-tier based on UseOfflineRoot.
+
+    .PARAMETER DeployConfig
+        The deployment configuration object.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$DeployConfig
+    )
+
+    $caVM = $DeployConfig.virtualMachines | Where-Object { $_.InstallCA } | Select-Object -First 1
+    if (-not $caVM) {
+        Write-Log "[PKI] ERROR: No VM with InstallCA found" -Failure
+        return $false
+    }
+
+    if ($caVM.UseOfflineRoot) {
+        return Install-TwoTierPKI -DeployConfig $DeployConfig
+    }
+    else {
+        return Install-SingleTierPKI -DeployConfig $DeployConfig
+    }
+}
+
 function Install-TwoTierPKI {
     <#
     .SYNOPSIS
         Orchestrates a two-tier PKI deployment using an offline root CA and an
-        enterprise subordinate CA on the DC.
+        enterprise subordinate CA on a domain-joined VM.
 
     .DESCRIPTION
         This function runs after Phase2 completes. It:
           Step 1: Configures the Standalone Root CA (installs ADCS, CDP/AIA, exports cert+CRL)
-          Step 2: Prepares the DC as Intermediate CA (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
+          Step 2: Prepares the Issuing CA VM (IIS, CRL vdir, publishes root to AD, installs Sub CA with -OutputCertRequestFile)
+          DNS:    Creates pki.<domain> CNAME on DC pointing to the Issuing CA VM
           Step 3: Signs the CSR on the Root CA (Submit, Approve, Retrieve)
-          Step 4: Completes the Intermediate CA (installs cert, configures CDP/AIA, publishes CRL)
-          Step 4b: Imports and publishes certificate templates (ldifde + native AD ACLs)
-          Step 5: Shuts down the Root CA VM
+          Step 4: Verifies CA state and pre-conditions on Issuing CA
+          Step 5: Installs the subordinate certificate
+          Step 6: Activates the CA service
+          Step 7: Configures CDP/AIA/CRL on the Issuing CA
+          Step 8: Imports and publishes certificate templates (ldifde + native AD ACLs)
+          Step 9: Shuts down the Root CA VM
 
         IDEMPOTENT: Each step checks whether its work is already done and skips
         forward if so. Safe to re-run after partial failure.
@@ -75,24 +698,30 @@ function Install-TwoTierPKI {
 
     # Resolve VMs
     $rootCAVM = $DeployConfig.virtualMachines | Where-Object { $_.role -eq "StandaloneRootCA" } | Select-Object -First 1
-    $dcVM = $DeployConfig.virtualMachines | Where-Object { $_.role -eq "DC" -and $_.SubordinateCA } | Select-Object -First 1
+    $issuingCAVM = $DeployConfig.virtualMachines | Where-Object { $_.SubordinateCA } | Select-Object -First 1
+    $dcVM = $DeployConfig.virtualMachines | Where-Object { $_.role -eq "DC" } | Select-Object -First 1
 
     if (-not $rootCAVM) {
         Write-Log "[TwoTierPKI] ERROR: No StandaloneRootCA VM found in config" -Failure
         return $false
     }
+    if (-not $issuingCAVM) {
+        Write-Log "[TwoTierPKI] ERROR: No VM with SubordinateCA flag found in config" -Failure
+        return $false
+    }
     if (-not $dcVM) {
-        Write-Log "[TwoTierPKI] ERROR: No DC with SubordinateCA flag found in config" -Failure
+        Write-Log "[TwoTierPKI] ERROR: No DC found in config" -Failure
         return $false
     }
 
     $rootCAVMName = $rootCAVM.vmName
+    $issuingCAVMName = $issuingCAVM.vmName
     $dcVMName = $dcVM.vmName
     $domainName = $DeployConfig.vmOptions.domainName
     $domainShort = $domainName.Split(".")[0]
     $rootCAName = "CSSRoot-CA"
-    $intCAName = "$domainShort-$dcVMName-CA"
-    $intCAServer = "$dcVMName.$domainName"
+    $intCAName = "$domainShort-$issuingCAVMName-CA"
+    $intCAServer = "$issuingCAVMName.$domainName"
     $webURL = "http://pki.$domainName/crl/"
     $webFolderPath = "C:\inetpub\wwwroot\CRL\"
     $rootCAFilesPath = "C:\temp\RootCAFiles\"
@@ -101,13 +730,13 @@ function Install-TwoTierPKI {
     # Host staging folder for cert file exchange.
     # Wipe any leftovers from a previous (possibly failed) run so stale
     # certs from an old Root CA can never bleed into a fresh deployment.
-    $hostStagingPath = Join-Path $env:TEMP "MemLabs_TwoTierPKI_$($DeployConfig.vmOptions.domainName)"
+    $hostStagingPath = Join-Path $env:TEMP "MemLabs_PKI_$($DeployConfig.vmOptions.domainName)"
     if (Test-Path $hostStagingPath) {
         Remove-Item -Path $hostStagingPath -Recurse -Force -ErrorAction SilentlyContinue
     }
     New-Item -ItemType Directory -Path $hostStagingPath -Force | Out-Null
 
-    Write-Log "[TwoTierPKI] Root CA VM: $rootCAVMName | DC VM: $dcVMName"
+    Write-Log "[TwoTierPKI] Root CA VM: $rootCAVMName | Issuing CA VM: $issuingCAVMName | DC VM: $dcVMName"
     Write-Log "[TwoTierPKI] Domain: $domainName | Root CA Name: $rootCAName | Int CA Name: $intCAName"
 
     #---------------------------------------------------------------------------
@@ -258,16 +887,25 @@ Empty=True
 
             # Set CRL periods (20-year CRL so Root CA never needs to come back online)
             _Log "Setting CRL periods (20 years)..."
+            $crlRegFailed = $false
             & certutil.exe -setreg CA\CRLPeriodUnits 20 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
             & certutil.exe -setreg CA\CRLPeriod "Years" | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
             & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
             & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
             & certutil.exe -setreg CA\CRLOverlapPeriodUnits 4 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
             & certutil.exe -setreg CA\CRLOverlapPeriod "Weeks" | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+            if ($crlRegFailed) { _Log "WARNING: One or more CRL registry settings failed" }
 
             # Enable auditing
             _Log "Enabling audit..."
             & certutil.exe -setreg CA\AuditFilter 127 | Out-Null
+            if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg AuditFilter exit $LASTEXITCODE" }
 
             # Restart CA service and publish CRL
             _Log "Restarting certsvc and publishing CRL..."
@@ -343,15 +981,9 @@ Empty=True
         -ArgumentList $rootCAName, $domainName, $webURL, $rootCAFilesPath `
         -DisplayName "TwoTierPKI Step 1: Configure Root CA"
 
-    if ($result.ScriptBlockFailed -or -not $result.ScriptBlockOutput.Success) {
-        $err = if ($result.ScriptBlockFailed) { $result.ScriptBlockFailed } else { $result.ScriptBlockOutput.Error }
-        Write-Log "[TwoTierPKI] Step 1 FAILED: $err" -Failure
-        if ($result.ScriptBlockOutput.Log) {
-            foreach ($line in $result.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
-        }
+    if (-not (Test-PKIStepResult -Result $result -StepName "Step 1" -LogPrefix "TwoTierPKI" -LogSource "RootCA" -LogOnly)) {
         return $false
     }
-    foreach ($line in $result.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
     Write-Log "[TwoTierPKI] Step 1 complete: Root CA configured"
 
     #---------------------------------------------------------------------------
@@ -375,14 +1007,14 @@ Empty=True
     Write-Log "[TwoTierPKI] Root CA files copied to host: $hostStagingPath"
 
     #---------------------------------------------------------------------------
-    # STEP 2: Prepare Intermediate CA (DC)
+    # STEP 2: Prepare Intermediate CA
     #---------------------------------------------------------------------------
-    Write-Log "[TwoTierPKI] Step 2: Preparing Intermediate CA on $dcVMName..." -NoIndent
+    Write-Log "[TwoTierPKI] Step 2: Preparing Intermediate CA on $issuingCAVMName..." -NoIndent
 
-    # First, copy root CA files from host to DC
+    # First, copy root CA files from host to Issuing CA VM
     # Ensure the destination directory exists on the remote VM before copying.
     # Copy-Item -ToSession fails with cryptic errors if the target dir is missing.
-    $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create RootCAFiles dir" -SuppressLog `
+    $null = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName -DisplayName "Create RootCAFiles dir" -SuppressLog `
         -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\RootCAFiles" -Force | Out-Null }
     $copyFailed = $false
     foreach ($fileName in $filesToCopy) {
@@ -392,14 +1024,14 @@ Empty=True
             $copyFailed = $true
             continue
         }
-        $copyOk = Copy-ItemSafe -Path $srcOnHost -Destination "C:\temp\RootCAFiles\" -VMName $dcVMName -VMDomainName $domainName
+        $copyOk = Copy-ItemSafe -Path $srcOnHost -Destination "C:\temp\RootCAFiles\" -VMName $issuingCAVMName -VMDomainName $domainName
         if (-not $copyOk) {
-            Write-Log "[TwoTierPKI] ERROR: Failed to copy '$fileName' to DC" -Failure
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy '$fileName' to Issuing CA VM" -Failure
             $copyFailed = $true
         }
     }
     if ($copyFailed) {
-        Write-Log "[TwoTierPKI] ERROR: One or more Root CA files failed to copy to DC" -Failure
+        Write-Log "[TwoTierPKI] ERROR: One or more Root CA files failed to copy to Issuing CA VM" -Failure
         return $false
     }
 
@@ -513,18 +1145,8 @@ Empty=True
                 & certutil.exe -dspublish -f $crl.FullName | Out-Null
             }
 
-            # Create DNS alias pki.<domain> pointing to this DC (idempotent)
-            _Log "Creating DNS alias pki.$DomainName..."
-            $dcHostName = $env:COMPUTERNAME
-            try {
-                $existing = Get-DnsServerResourceRecord -ZoneName $DomainName -Name "pki" -RRType CName -ErrorAction SilentlyContinue
-                if (-not $existing) {
-                    Add-DnsServerResourceRecordCName -ZoneName $DomainName -Name "pki" -HostNameAlias "$dcHostName.$DomainName" | Out-Null
-                }
-            }
-            catch {
-                _Log "  DNS alias creation failed (non-fatal): $($_.Exception.Message)"
-            }
+            # DNS alias pki.<domain> is created in a separate step that targets the DC.
+            # (DnsServer cmdlets are only available on domain controllers.)
 
             # Write CAPolicy.inf for subordinate CA
             _Log "Writing CAPolicy.inf for subordinate CA..."
@@ -637,42 +1259,39 @@ CertificateTemplate = SubCA
     }
 
     Flush-LogBuffer -All
-    $result2 = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
+    $result2 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
         -ScriptBlock $step2Script `
         -ArgumentList $intCAName, $intCAServer, $domainName, $webURL, $webFolderPath, $rootCAName, $rootCAFilesPath, $intCAFilesPath `
         -DisplayName "TwoTierPKI Step 2: Prepare Intermediate CA"
 
-    if ($result2.ScriptBlockFailed -or -not $result2.ScriptBlockOutput.Success) {
-        $err = if ($result2.ScriptBlockFailed) { $result2.ScriptBlockFailed } else { $result2.ScriptBlockOutput.Error }
-        Write-Log "[TwoTierPKI] Step 2 FAILED: $err" -Failure
-        if ($result2.ScriptBlockOutput.Log) {
-            foreach ($line in $result2.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
-        }
+    if (-not (Test-PKIStepResult -Result $result2 -StepName "Step 2" -LogPrefix "TwoTierPKI" -LogSource "CA" -LogOnly)) {
         return $false
     }
-    foreach ($line in $result2.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][DC] $line" -LogOnly }
+
+    # Create DNS alias pki.<domain> pointing to the Issuing CA VM.
+    Install-PKIDnsAlias -DcVMName $dcVMName -DomainName $domainName -CAHostAlias "$issuingCAVMName.$domainName"
 
     # If Sub CA is already fully complete (cert installed, service running), skip Steps 3-4
     if ($result2.ScriptBlockOutput.AlreadyComplete) {
-        Write-Log "[TwoTierPKI] Step 2: Subordinate CA already operational - skipping Steps 3-4"
+        Write-Log "[TwoTierPKI] Step 2: Subordinate CA already operational - skipping Steps 3-7"
     }
     else {
         Write-Log "[TwoTierPKI] Step 2 complete: Intermediate CA prepared, CSR generated"
 
         #---------------------------------------------------------------------------
-        # HOST COPY: CSR from DC → host → Root CA
+        # HOST COPY: CSR from Issuing CA → host → Root CA
         #---------------------------------------------------------------------------
         $reqFileName = [System.IO.Path]::GetFileName($result2.ScriptBlockOutput.ReqFile)
         if ([string]::IsNullOrWhiteSpace($reqFileName)) {
             Write-Log "[TwoTierPKI] ERROR: Step 2 did not return a valid CSR file path" -Failure
             return $false
         }
-        Write-Log "[TwoTierPKI] Copying CSR '$reqFileName' from DC to Root CA via host..." -LogOnly
+        Write-Log "[TwoTierPKI] Copying CSR '$reqFileName' from Issuing CA to Root CA via host..." -LogOnly
 
-        # DC → host
-        $copyResult = Copy-ItemFromVM -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $dcVMName -VMDomainName $domainName
+        # Issuing CA → host
+        $copyResult = Copy-ItemFromVM -Path $result2.ScriptBlockOutput.ReqFile -Destination $hostStagingPath -VMName $issuingCAVMName -VMDomainName $domainName
         if (-not $copyResult) {
-            Write-Log "[TwoTierPKI] ERROR: Failed to copy CSR from DC to host" -Failure
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy CSR from Issuing CA to host" -Failure
             return $false
         }
         # host → Root CA
@@ -838,15 +1457,9 @@ CertificateTemplate = SubCA
             -ArgumentList $intCAFilesPath, $intCAServer, $intCAName, $rootCAName `
             -DisplayName "TwoTierPKI Step 3: Sign CSR on Root CA"
 
-        if ($result3.ScriptBlockFailed -or -not $result3.ScriptBlockOutput.Success) {
-            $err = if ($result3.ScriptBlockFailed) { $result3.ScriptBlockFailed } else { $result3.ScriptBlockOutput.Error }
-            Write-Log "[TwoTierPKI] Step 3 FAILED: $err" -Failure
-            if ($result3.ScriptBlockOutput.Log) {
-                foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
-            }
+        if (-not (Test-PKIStepResult -Result $result3 -StepName "Step 3" -LogPrefix "TwoTierPKI" -LogSource "RootCA" -LogOnly)) {
             return $false
         }
-        foreach ($line in $result3.ScriptBlockOutput.Log) { Write-Log "[TwoTierPKI][RootCA] $line" -LogOnly }
         Write-Log "[TwoTierPKI] Step 3 complete: CSR signed"
 
         #---------------------------------------------------------------------------
@@ -861,36 +1474,34 @@ CertificateTemplate = SubCA
             Write-Log "[TwoTierPKI] ERROR: Failed to copy signed cert from Root CA to host" -Failure
             return $false
         }
-        # host → DC
+        # host → Issuing CA VM
         $cerOnHost = Join-Path $hostStagingPath $cerFileName
         if (-not (Test-Path $cerOnHost)) {
             Write-Log "[TwoTierPKI] ERROR: Signed cert not found on host at $cerOnHost" -Failure
             return $false
         }
-        $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
+        $null = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName -DisplayName "Create IntermediateCAFiles dir" -SuppressLog `
             -ScriptBlock { New-Item -ItemType Directory -Path "C:\temp\IntermediateCAFiles" -Force | Out-Null }
-        $copyOk = Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $dcVMName -VMDomainName $domainName
+        $copyOk = Copy-ItemSafe -Path $cerOnHost -Destination $intCAFilesPath -VMName $issuingCAVMName -VMDomainName $domainName
         if (-not $copyOk) {
-            Write-Log "[TwoTierPKI] ERROR: Failed to copy signed cert to DC" -Failure
+            Write-Log "[TwoTierPKI] ERROR: Failed to copy signed cert to Issuing CA VM" -Failure
             return $false
         }
 
         #---------------------------------------------------------------------------
-        # STEP 4: Complete Intermediate CA (DC)
-        #  Split into micro-phases for visibility and debuggability:
-        #    4a-check:    Verify pre-conditions (cert file exists, CA state)
-        #    4a-install:  certutil -installcert
-        #    4a-activate: Start certsvc + wait for responsiveness
-        #    4-config:    CDP/AIA/CRL registry writes + restart + CRL publish
+        # STEPS 4-7: Complete Intermediate CA
+        #   4: Verify pre-conditions (cert file exists, CA state)
+        #   5: Install subordinate certificate
+        #   6: Activate CA service
+        #   7: Configure CDP/AIA/CRL
         #---------------------------------------------------------------------------
-        Write-Log "[TwoTierPKI] Step 4: Completing Intermediate CA configuration on $dcVMName..." -NoIndent
-        $step4Start = Get-Date
+        $step4to7Start = Get-Date
 
-        # --- Step 4a-check: Pre-condition validation ---
-        Write-Log "[TwoTierPKI] Step 4a-check: Verifying CA state and cert file on $dcVMName..."
+        # --- Step 4: Verify CA state ---
+        Write-Log "[TwoTierPKI] Step 4: Verifying CA state on $issuingCAVMName..." -NoIndent
         Flush-LogBuffer -All
 
-        $step4aCheckScript = {
+        $step4Script = {
             param($IntCAName, $IntCAFilesPath, $IntCAServer)
 
             $ErrorActionPreference = 'Stop'
@@ -947,33 +1558,27 @@ CertificateTemplate = SubCA
             }
         }
 
-        $result4aCheck = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-            -ScriptBlock $step4aCheckScript `
+        $result7 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
+            -ScriptBlock $step4Script `
             -ArgumentList $intCAName, $intCAFilesPath, $intCAServer `
-            -DisplayName "TwoTierPKI Step 4a-check: Verify CA state"
+            -DisplayName "TwoTierPKI Step 4: Verify CA state"
 
-        if ($result4aCheck.ScriptBlockFailed -or -not $result4aCheck.ScriptBlockOutput.Success) {
-            $err = if ($result4aCheck.ScriptBlockFailed) { $result4aCheck.ScriptBlockFailed } else { $result4aCheck.ScriptBlockOutput.Error }
-            Write-Log "[TwoTierPKI] Step 4a-check FAILED: $err" -Failure
-            if ($result4aCheck.ScriptBlockOutput.Log) {
-                foreach ($line in $result4aCheck.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-            }
+        if (-not (Test-PKIStepResult -Result $result7 -StepName "Step 4" -LogPrefix "TwoTierPKI" -LogSource "CA" -Indent "  ")) {
             return $false
         }
-        foreach ($line in $result4aCheck.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
 
-        $caState = $result4aCheck.ScriptBlockOutput.State
-        Write-Log "  [TwoTierPKI] Step 4a-check: CA state = $caState"
+        $caState = $result7.ScriptBlockOutput.State
+        Write-Log "  [TwoTierPKI] Step 4: CA state = $caState"
 
         if ($caState -eq 'Operational') {
-            Write-Log "  [TwoTierPKI] CA already operational - skipping install and activate"
+            Write-Log "  [TwoTierPKI] CA already operational - skipping Steps 5-6"
         }
         else {
-            # --- Step 4a-install: Install the certificate ---
-            Write-Log "[TwoTierPKI] Step 4a-install: Running certutil -installcert on $dcVMName..."
+            # --- Step 5: Install subordinate certificate ---
+            Write-Log "[TwoTierPKI] Step 5: Installing subordinate certificate on $issuingCAVMName..."
             Flush-LogBuffer -All
 
-            $step4aInstallScript = {
+            $step5Script = {
                 param($IntCAName, $IntCAFilesPath, $IntCAServer, $RootCAFilesPath)
 
                 $ErrorActionPreference = 'Stop'
@@ -1029,27 +1634,21 @@ CertificateTemplate = SubCA
                 }
             }
 
-            $result4aInstall = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-                -ScriptBlock $step4aInstallScript `
+            $result5 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
+                -ScriptBlock $step5Script `
                 -ArgumentList $intCAName, $intCAFilesPath, $intCAServer, $rootCAFilesPath `
-                -DisplayName "TwoTierPKI Step 4a-install: certutil -installcert"
+                -DisplayName "TwoTierPKI Step 5: Install subordinate certificate"
 
-            if ($result4aInstall.ScriptBlockFailed -or -not $result4aInstall.ScriptBlockOutput.Success) {
-                $err = if ($result4aInstall.ScriptBlockFailed) { $result4aInstall.ScriptBlockFailed } else { $result4aInstall.ScriptBlockOutput.Error }
-                Write-Log "[TwoTierPKI] Step 4a-install FAILED: $err" -Failure
-                if ($result4aInstall.ScriptBlockOutput.Log) {
-                    foreach ($line in $result4aInstall.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-                }
+            if (-not (Test-PKIStepResult -Result $result5 -StepName "Step 5" -LogPrefix "TwoTierPKI" -LogSource "CA" -Indent "  ")) {
                 return $false
             }
-            foreach ($line in $result4aInstall.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-            Write-Log "  [TwoTierPKI] Step 4a-install: Certificate installed successfully"
+            Write-Log "  [TwoTierPKI] Step 5 complete: Certificate installed"
 
-            # --- Step 4a-activate: Start certsvc and wait for readiness ---
-            Write-Log "[TwoTierPKI] Step 4a-activate: Starting certsvc and waiting for CA readiness..."
+            # --- Step 6: Activate CA service ---
+            Write-Log "[TwoTierPKI] Step 6: Starting certsvc and waiting for CA readiness..."
             Flush-LogBuffer -All
 
-            $step4aActivateScript = {
+            $step6Script = {
                 $ErrorActionPreference = 'Stop'
                 $report = [System.Collections.Generic.List[string]]::new()
                 function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
@@ -1118,30 +1717,24 @@ CertificateTemplate = SubCA
                 }
             }
 
-            $result4aActivate = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-                -ScriptBlock $step4aActivateScript `
-                -DisplayName "TwoTierPKI Step 4a-activate: Start certsvc"
+            $result6 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
+                -ScriptBlock $step6Script `
+                -DisplayName "TwoTierPKI Step 6: Activate CA service"
 
-            if ($result4aActivate.ScriptBlockFailed -or -not $result4aActivate.ScriptBlockOutput.Success) {
-                $err = if ($result4aActivate.ScriptBlockFailed) { $result4aActivate.ScriptBlockFailed } else { $result4aActivate.ScriptBlockOutput.Error }
-                Write-Log "[TwoTierPKI] Step 4a-activate FAILED: $err" -Failure
-                if ($result4aActivate.ScriptBlockOutput.Log) {
-                    foreach ($line in $result4aActivate.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-                }
+            if (-not (Test-PKIStepResult -Result $result6 -StepName "Step 6" -LogPrefix "TwoTierPKI" -LogSource "CA" -Indent "  ")) {
                 return $false
             }
-            foreach ($line in $result4aActivate.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-            Write-Log "  [TwoTierPKI] Step 4a-activate: CA service is fully operational"
+            Write-Log "  [TwoTierPKI] Step 6 complete: CA service is fully operational"
         }
 
-        $step4aElapsed = ((Get-Date) - $step4Start).TotalSeconds
-        Write-Log "  [TwoTierPKI] Step 4a complete ($([int]$step4aElapsed)s)"
+        $step456Elapsed = ((Get-Date) - $step4to7Start).TotalSeconds
+        Write-Log "  [TwoTierPKI] Steps 4-6 complete ($([int]$step456Elapsed)s)"
 
-        # --- Step 4 config: Configure CDP/AIA/CRL ---
-        Write-Log "[TwoTierPKI] Step 4 config: Configuring CDP, AIA, CRL periods..."
+        # --- Step 7: Configure CDP/AIA/CRL ---
+        Write-Log "[TwoTierPKI] Step 7: Configuring CDP, AIA, CRL periods..."
         Flush-LogBuffer -All
 
-        $step4ConfigScript = {
+        $step7Script = {
             param($IntCAName, $DomainName, $WebURL, $WebFolderPath)
 
             $ErrorActionPreference = 'Stop'
@@ -1207,19 +1800,30 @@ CertificateTemplate = SubCA
 
                 # Set CRL periods
                 _Log "Setting CRL periods..."
+                $crlRegFailed = $false
                 & certutil.exe -setreg CA\CRLPeriodUnits 2 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLDeltaPeriodUnits 1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLOverlapPeriod "Hours" | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLOverlapPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\ValidityPeriodUnits 5 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg ValidityPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\ValidityPeriod "Years" | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg ValidityPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
+                if ($crlRegFailed) { _Log "WARNING: One or more CRL registry settings failed" }
                 _Log "  CRL periods set."
 
                 # Enable auditing
                 _Log "Enabling CA audit..."
                 & certutil.exe -setreg CA\AuditFilter 127 | Out-Null
+                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg AuditFilter exit $LASTEXITCODE" }
 
                 # Restart certsvc to apply CDP/AIA/CRL changes
                 _Log "Restarting certsvc to apply configuration..."
@@ -1272,341 +1876,31 @@ CertificateTemplate = SubCA
             }
         }
 
-        $result4 = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-            -ScriptBlock $step4ConfigScript `
+        $result7 = Invoke-VmCommand -VmName $issuingCAVMName -VmDomainName $domainName `
+            -ScriptBlock $step7Script `
             -ArgumentList $intCAName, $domainName, $webURL, $webFolderPath `
-            -DisplayName "TwoTierPKI Step 4: Configure CDP/AIA/CRL"
+            -DisplayName "TwoTierPKI Step 7: Configure CDP/AIA/CRL"
 
-        if ($result4.ScriptBlockFailed -or -not $result4.ScriptBlockOutput.Success) {
-            $err = if ($result4.ScriptBlockFailed) { $result4.ScriptBlockFailed } else { $result4.ScriptBlockOutput.Error }
-            Write-Log "[TwoTierPKI] Step 4 FAILED: $err" -Failure
-            if ($result4.ScriptBlockOutput.Log) {
-                foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-            }
+        if (-not (Test-PKIStepResult -Result $result7 -StepName "Step 7" -LogPrefix "TwoTierPKI" -LogSource "CA" -Indent "  ")) {
             return $false
         }
-        foreach ($line in $result4.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-        $step4Elapsed = ((Get-Date) - $step4Start).TotalSeconds
-        Write-Log "  [TwoTierPKI] Step 4 complete: Intermediate CA operational ($([int]$step4Elapsed)s)"
+        $step7Elapsed = ((Get-Date) - $step4to7Start).TotalSeconds
+        Write-Log "  [TwoTierPKI] Step 7 complete: Intermediate CA operational ($([int]$step7Elapsed)s)"
     }
 
     #---------------------------------------------------------------------------
-    # STEP 4b: Import and publish certificate templates
+    # STEP 8: Import certificate templates (shared helper)
     #---------------------------------------------------------------------------
-    # In the single-tier path, Phase2DC DSC handles template import
-    # (ImportCertificateTemplate) and publishing (AddCertificateTemplate).
-    # Both are skipped when SubordinateCA is set, so we do it here after
-    # the Enterprise Sub CA is fully operational.
-
-    # Determine which templates are needed (mirrors Phase2DC logic)
-    $hasIISServers = @($DeployConfig.virtualMachines | Where-Object {
-        ($_.role -in "CAS", "Primary", "Secondary", "PassiveSite") -or
-        $_.InstallSUP -or $_.InstallMP -or $_.InstallDP -or $_.InstallRP
-    }).Count -gt 0
-
-    $templateList = @()
-    if ($hasIISServers) {
-        $templateList += 'ConfigMgrWebServerCertificate'
-        $templateList += 'ConfigMgrClientDistributionPointCertificate'
-    }
-    $templateList += 'ConfigMgrClientCertificate'
-
-    Write-Log "[TwoTierPKI] Step 4b: Importing $($templateList.Count) certificate template(s) on $dcVMName..." -NoIndent
-    $step4bStart = Get-Date
-
-    $step4bScript = {
-        param($DomainName, $TemplateListString)
-
-        $TemplateList = $TemplateListString -split '\|'
-        $ErrorActionPreference = 'Stop'
-        $report = [System.Collections.Generic.List[string]]::new()
-        function _Log($m) { $report.Add("$(Get-Date -Format 'HH:mm:ss') $m") }
-
-        # Helper: look up a template in AD by CN.
-        function Find-TemplateInAD([string]$cn) {
-            try {
-                $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
-                $searchBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
-                $ds = New-Object System.DirectoryServices.DirectorySearcher(
-                    [ADSI]"LDAP://$searchBase", "(cn=$cn)")
-                $ds.PropertiesToLoad.AddRange(@('cn','msPKI-Cert-Template-OID'))
-                return $ds.FindOne()
-            } catch { return $null }
-        }
-
-        # Helper: flush template caches (HKLM + HKCU) and restart CertSvc.
-        # Uses active polling (certutil -ping) instead of a fixed sleep;
-        # typically resumes in 3-5s vs the old hardcoded 15s.
-        function Reset-TemplateCache {
-            foreach ($hive in @('HKLM','HKCU')) {
-                $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
-                Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
-            }
-            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-            $deadline = (Get-Date).AddSeconds(30)
-            while ((Get-Date) -lt $deadline) {
-                Start-Sleep -Seconds 2
-                try {
-                    $null = & certutil.exe -ping 2>&1
-                    if ($LASTEXITCODE -eq 0) { return }
-                } catch {}
-            }
-        }
-
-        try {
-            # Build the AD DN path (e.g. DC=yourlab,DC=com)
-            $dnPath = 'DC=' + $DomainName.Replace('.', ',DC=')
-
-            # ---- Phase A: Import templates into AD via ldifde ----
-            foreach ($tplName in $TemplateList) {
-                $found = Find-TemplateInAD $tplName
-                if ($found) {
-                    _Log "Template '$tplName' already exists in AD - skipping import"
-                    continue
-                }
-
-                $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
-                if (-not (Test-Path $ldfSource)) {
-                    _Log "FATAL: LDF file not found: $ldfSource"
-                    return @{ Success = $false; Log = $report.ToArray(); Error = "LDF not found: $ldfSource" }
-                }
-
-                # Replace placeholder DN with actual domain DN
-                $ldfTarget = "C:\temp\$tplName.ldf"
-                (Get-Content $ldfSource) -replace 'DC=TEMPLATE,DC=com', $dnPath |
-                    Set-Content $ldfTarget -Force
-
-                _Log "Importing template '$tplName' via ldifde..."
-                $output = & ldifde.exe -i -k -f $ldfTarget 2>&1
-                _Log "  ldifde exit code: $LASTEXITCODE"
-                if ($output) { _Log "  ldifde output: $($output -join ' ')" }
-
-                # Verify import succeeded
-                $verify = Find-TemplateInAD $tplName
-                if (-not $verify) {
-                    _Log "FATAL: Template '$tplName' NOT found in AD after ldifde import"
-                    return @{ Success = $false; Log = $report.ToArray(); Error = "Template '$tplName' import failed (not in AD)" }
-                }
-                _Log "  Verified: '$tplName' exists in AD"
-            }
-
-            # ---- Phase B: Set ACLs and add templates to the CA ----
-            # All operations use native tools (ADCSAdministration,
-            # DirectoryServices, certutil) - PSPKI is NOT required.
-
-            # Configure CRL validity via certutil registry writes
-            _Log "Configuring CRL validity periods..."
-            try {
-                & certutil.exe -setreg CA\CRLPeriodUnits 22 2>&1 | Out-Null
-                & certutil.exe -setreg CA\CRLPeriod "Weeks" 2>&1 | Out-Null
-                & certutil.exe -setreg CA\CRLOverlapPeriodUnits 12 2>&1 | Out-Null
-                & certutil.exe -setreg CA\CRLOverlapPeriod "Weeks" 2>&1 | Out-Null
-                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 2>&1 | Out-Null
-                & certutil.exe -setreg CA\CRLDeltaPeriod "Days" 2>&1 | Out-Null
-                Restart-Service -Name CertSvc -Force -ErrorAction SilentlyContinue
-                _Log "  CRL validity configured and CertSvc restarted"
-            } catch {
-                _Log "WARNING: CRL validity config failed: $($_.Exception.Message)"
-            }
-
-            # Flush template caches and restart CA so it sees newly imported templates
-            Reset-TemplateCache
-            $publishFailed = $false
-
-            # ---- Phase B1: Set ACLs on all templates ----
-            # Uses .NET DirectoryServices to add Enroll/AutoEnroll ACEs
-            # directly on the certificate template AD objects.
-            $enrollGuid   = [Guid]'0e10c968-78fb-11d2-90d4-00c04f79dc55'  # Certificate-Enrollment extended right
-            $autoEnrollGuid = [Guid]'a05b8cc2-17bc-4802-a710-e7c15ab866a2'  # Certificate-AutoEnrollment extended right
-            $configCtx = ([ADSI]"LDAP://RootDSE").configurationNamingContext
-            $tplBaseDN = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$configCtx"
-
-            $tplIndex = 0
-            foreach ($tplName in $TemplateList) {
-                $tplIndex++
-                # Determine the AD group that gets enroll permissions
-                $groupName = switch ($tplName) {
-                    'ConfigMgrWebServerCertificate'                   { 'ConfigMgr IIS Servers' }
-                    'ConfigMgrClientDistributionPointCertificate'     { 'ConfigMgr IIS Servers' }
-                    'ConfigMgrClientCertificate'                      { 'Domain Computers' }
-                }
-                $doAutoEnroll = ($tplName -eq 'ConfigMgrClientCertificate')
-
-                _Log "[$tplIndex/$($TemplateList.Count)] Setting ACL on '$tplName' for '$groupName'..."
-                $retries = 0
-                $aclOk = $false
-                while ($retries -lt 5 -and -not $aclOk) {
-                    $retries++
-                    try {
-                        # Resolve the group to a SID
-                        $ntAccount = New-Object System.Security.Principal.NTAccount($groupName)
-                        $groupSid = $ntAccount.Translate([System.Security.Principal.SecurityIdentifier])
-
-                        # Get template AD object
-                        $tplDN = "CN=$tplName,$tplBaseDN"
-                        $tplEntry = [ADSI]"LDAP://$tplDN"
-                        if (-not $tplEntry.distinguishedName) { throw "Template not found at $tplDN" }
-
-                        $acl = $tplEntry.ObjectSecurity
-
-                        # Add Read (GenericRead) ACE
-                        $readRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
-                            $groupSid,
-                            [System.DirectoryServices.ActiveDirectoryRights]::GenericRead,
-                            [System.Security.AccessControl.AccessControlType]::Allow
-                        )
-                        $acl.AddAccessRule($readRule)
-
-                        # Add Enroll extended right ACE
-                        $enrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
-                            $groupSid,
-                            [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
-                            [System.Security.AccessControl.AccessControlType]::Allow,
-                            $enrollGuid
-                        )
-                        $acl.AddAccessRule($enrollRule)
-
-                        # Add AutoEnroll extended right ACE (client cert only)
-                        if ($doAutoEnroll) {
-                            $autoEnrollRule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
-                                $groupSid,
-                                [System.DirectoryServices.ActiveDirectoryRights]::ExtendedRight,
-                                [System.Security.AccessControl.AccessControlType]::Allow,
-                                $autoEnrollGuid
-                            )
-                            $acl.AddAccessRule($autoEnrollRule)
-                        }
-
-                        $tplEntry.ObjectSecurity = $acl
-                        $tplEntry.CommitChanges()
-                        $aclOk = $true
-                        $perms = if ($doAutoEnroll) { 'Read, Enroll, AutoEnroll' } else { 'Read, Enroll' }
-                        _Log "  ACL set successfully ($perms)"
-                    } catch {
-                        _Log "  ACL attempt $retries failed: $($_.Exception.Message)"
-                        Start-Sleep -Seconds 2
-                    }
-                }
-                if (-not $aclOk) {
-                    _Log "FATAL: Failed to set ACL on '$tplName' after $retries attempts"
-                    $publishFailed = $true
-                }
-            }
-
-            if ($publishFailed) {
-                _Log "Aborting: ACL phase failed"
-                return @{ Success = $false; Log = $report.ToArray(); Error = "Template ACL failures (see log)" }
-            }
-
-            # ---- Phase B2: Issue Add-CATemplate for ALL templates ----
-            # Publish all at once so AD replication and CA cache refresh
-            # happen in parallel rather than serializing per template.
-            _Log "Publishing all $($TemplateList.Count) template(s) to CA..."
-            foreach ($tplName in $TemplateList) {
-                try {
-                    ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction Stop
-                    _Log "  Add-CATemplate '$tplName': ok"
-                } catch {
-                    _Log "  Add-CATemplate '$tplName' failed: $($_.Exception.Message) (will retry in verify loop)"
-                }
-            }
-
-            # ---- Phase B3: Verify all templates in a single polling loop ----
-            # One cache flush covers all templates; poll until all confirmed
-            # or timeout. Much faster than flush-per-template.
-            Reset-TemplateCache
-            $remaining = [System.Collections.Generic.List[string]]::new($TemplateList)
-            $maxVerifyRetries = 30
-            $verifyAttempt = 0
-            _Log "Verifying all templates are published (max $maxVerifyRetries attempts)..."
-
-            while ($remaining.Count -gt 0 -and $verifyAttempt -lt $maxVerifyRetries) {
-                $verifyAttempt++
-                try {
-                    $published = @(ADCSAdministration\Get-CATemplate -ErrorAction SilentlyContinue)
-                } catch { $published = @() }
-
-                $confirmed = @()
-                foreach ($tplName in @($remaining)) {
-                    if (@($published | Where-Object { $_.Name -eq $tplName }).Count -gt 0) {
-                        _Log "  Template '$tplName' confirmed published (attempt $verifyAttempt)"
-                        $confirmed += $tplName
-                    }
-                }
-                foreach ($c in $confirmed) { [void]$remaining.Remove($c) }
-                if ($remaining.Count -eq 0) { break }
-
-                # Re-issue Add-CATemplate for anything still missing
-                foreach ($tplName in $remaining) {
-                    try {
-                        ADCSAdministration\Add-CATemplate -Name $tplName -Force -ErrorAction SilentlyContinue
-                    } catch {}
-                }
-
-                _Log "  $($remaining.Count) template(s) not yet visible; flushing cache (attempt $verifyAttempt/$maxVerifyRetries)..."
-                Reset-TemplateCache
-            }
-
-            if ($remaining.Count -gt 0) {
-                foreach ($tplName in $remaining) {
-                    _Log "FATAL: Could not publish '$tplName' to CA after $maxVerifyRetries attempts"
-                }
-                $publishFailed = $true
-            }
-
-            # ---- Phase C: Final validation ----
-            # Flush caches one last time and refresh enrollment policy
-            Reset-TemplateCache
-            try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
-
-            # Verify the CA advertises every required template
-            _Log "Validating CA template advertisements..."
-            $caOut = & certutil.exe -catemplates 2>&1
-            foreach ($tplName in $TemplateList) {
-                if ($caOut -match [regex]::Escape($tplName)) {
-                    _Log "  CA advertises '$tplName': OK"
-                } else {
-                    _Log "  CA does NOT advertise '$tplName': FAIL"
-                    $publishFailed = $true
-                }
-            }
-
-            if ($publishFailed) {
-                _Log "Step 4b FAILED: one or more templates could not be published"
-                return @{ Success = $false; Log = $report.ToArray(); Error = "Template publish/ACL failures (see log)" }
-            }
-
-            _Log "Step 4b complete. Certificate templates imported and published."
-            return @{ Success = $true; Log = $report.ToArray() }
-        }
-        catch {
-            _Log "FAILED: $($_.Exception.Message)"
-            return @{ Success = $false; Log = $report.ToArray(); Error = $_.Exception.Message }
-        }
-    }
-
-    Flush-LogBuffer -All
-    $result4b = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName `
-        -ScriptBlock $step4bScript `
-        -ArgumentList $domainName, ($templateList -join '|') `
-        -DisplayName "TwoTierPKI Step 4b: Import certificate templates"
-
-    if ($result4b.ScriptBlockFailed -or -not $result4b.ScriptBlockOutput.Success) {
-        $err = if ($result4b.ScriptBlockFailed) { $result4b.ScriptBlockFailed } else { $result4b.ScriptBlockOutput.Error }
-        Write-Log "[TwoTierPKI] Step 4b FAILED: $err" -Failure
-        if ($result4b.ScriptBlockOutput.Log) {
-            foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-        }
+    $templateResult = Install-PKICertificateTemplates -CAVMName $issuingCAVMName -DomainName $domainName `
+        -DeployConfig $DeployConfig -LogPrefix "TwoTierPKI"
+    if (-not $templateResult) {
         return $false
     }
-    foreach ($line in $result4b.ScriptBlockOutput.Log) { Write-Log "  [TwoTierPKI][DC] $line" }
-    $step4bElapsed = ((Get-Date) - $step4bStart).TotalSeconds
-    Write-Log "  [TwoTierPKI] Step 4b complete: Certificate templates ready ($([int]$step4bElapsed)s)"
 
     #---------------------------------------------------------------------------
-    # STEP 5: Shutdown Root CA VM
+    # STEP 9: Shutdown Root CA VM
     #---------------------------------------------------------------------------
-    Write-Log "[TwoTierPKI] Step 5: Shutting down Root CA VM '$rootCAVMName'..."
+    Write-Log "[TwoTierPKI] Step 9: Shutting down Root CA VM '$rootCAVMName'..."
     try {
         $vmState = (Get-VM -Name $rootCAVMName -ErrorAction SilentlyContinue).State
         if ($vmState -eq 'Off') {
