@@ -5337,6 +5337,8 @@ if (-not $Common.Initialized) {
         ### Set supported options
         Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Gathering Supported Options" -PercentComplete 13
+        Write-Log "Init: Setting supported options..." -LogOnly
+        Flush-LogBuffer -All
         if (-not $InJob) {
             Set-SupportedOptions
         }
@@ -5344,6 +5346,8 @@ if (-not $Common.Initialized) {
         # Generate cache
         $i = 14
         if (-not $InJob.IsPresent) {
+            Write-Log "Init: Starting host preparation (DHCP, registry, cache cleanup)..." -LogOnly
+            Flush-LogBuffer -All
 
             if (-not $effectiveSkipHostPreparation) {
                 try {
@@ -5386,7 +5390,8 @@ if (-not $Common.Initialized) {
                 # Get-List call (in Test-NoRRAS → Test-Networks) to stall for
                 # minutes. The foreground populates its own cache on first use.
                 Write-Progress2 "MemLabs initializing" -Status "Skipping background VM warmup (foreground will populate on demand)" -PercentComplete $i
-                Write-Log "Skipping background VM cache warmup; foreground will populate on first Get-List call." -LogOnly
+                Write-Log "Init: Skipping background VM cache warmup; foreground will populate on first Get-List call." -LogOnly
+                Flush-LogBuffer -All
                 $i++
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Finalizing" -PercentComplete $i

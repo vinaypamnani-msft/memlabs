@@ -115,9 +115,11 @@ if ($global:init_failed) {
 
 
 Write-Log "Post-init: Testing NoRRAS..." -LogOnly
+Flush-LogBuffer -All
 Test-NoRRAS
 
 Write-Log "Post-init: Checking VMHost enhanced session mode..." -LogOnly
+Flush-LogBuffer -All
 if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
     Set-VMHost -EnableEnhancedSessionMode $True
 }

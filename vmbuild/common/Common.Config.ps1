@@ -2270,8 +2270,10 @@ function Get-List {
                     Write-Log "Obtaining '$Type' list and caching it." -Verbose
                     $return = @()
                     Write-Log "Get-List: calling Get-VM to enumerate all virtual machines..." -LogOnly
+                    Flush-LogBuffer -All
                     $virtualMachines = Get-VM
                     Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
+                    Flush-LogBuffer -All
                     $vmIndex = 0
                     foreach ($vm in $virtualMachines) {
                         $vmIndex++
