@@ -850,7 +850,7 @@ function Build-MainMenuOptions {
         $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
     }
-    $preOptions += [ordered]@{ "P" = "PKI Settings `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "P" = "PKI Settings      `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
 
     $customOptions = [ordered]@{}
