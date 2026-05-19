@@ -5,10 +5,10 @@
 #
 # Menu items:
 #   [1] EnablePKI          — Deploy CA infrastructure (works with or without CM)
-#   [C] UsePKI for CM      — Use HTTPS for CM roles (only shown when cmOptions exists)
 #   [2] IssuingCAVM        — VM hosting the Issuing CA (shown when EnablePKI = true)
 #   [3] UseOfflineRoot     — Two-tier PKI with offline root CA
 #   [4] OfflineRootCAVM    — VM hosting the Offline Root CA (shown when UseOfflineRoot = true)
+#   [C] UsePKI for CM      — Use HTTPS for CM roles (only shown when cmOptions exists)
 
 function Get-PKIOptionsSummary {
     $options = $Global:Config.pkiOptions
@@ -149,13 +149,6 @@ function Select-PKIOptions {
         $enableColor = if ($pkiOptions.EnablePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
         $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "1" -ItemText "$("EnablePKI".PadRight($padding)) = $enableText" -selectable $true -Color1 $enableColor -HelpFunction "Get-PKIHelp"
 
-        # --- Item C: UsePKI for ConfigMgr (only when cmOptions exists) ---
-        if ($Global:Config.cmOptions) {
-            $usePKIText = if ($Global:Config.cmOptions.UsePKI) { "True" } else { "False" }
-            $usePKIColor = if ($Global:Config.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
-            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C" -ItemText "$("UsePKI for ConfigMgr".PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
-        }
-
         if ($pkiOptions.EnablePKI) {
             # --- Item 2: IssuingCAVM ---
             $caVMText = if ($pkiOptions.IssuingCAVM) { $pkiOptions.IssuingCAVM } else { "(default DC)" }
@@ -171,6 +164,13 @@ function Select-PKIOptions {
                 $rootVMText = if ($pkiOptions.OfflineRootCAVM) { $pkiOptions.OfflineRootCAVM } else { "(auto-created)" }
                 $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "4" -ItemText "$("OfflineRootCAVM".PadRight($padding)) = $rootVMText" -selectable $true -Color1 $Global:Common.Colors.GenConfigVMRemoteServer -HelpFunction "Get-PKIHelp"
             }
+        }
+
+        # --- Item C: UsePKI for ConfigMgr (only when cmOptions exists) ---
+        if ($Global:Config.cmOptions) {
+            $usePKIText = if ($Global:Config.cmOptions.UsePKI) { "True" } else { "False" }
+            $usePKIColor = if ($Global:Config.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
+            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C" -ItemText "$("UsePKI for ConfigMgr".PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
         }
 
         # --- Done ---

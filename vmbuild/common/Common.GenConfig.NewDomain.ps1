@@ -559,6 +559,23 @@ function Select-NewDomainConfig {
         IncludeClients      = $true
         IncludeSSMSOnNONSQL = $true
     }
+
+    # Load saved defaults from previous run if available
+    $savedDefaultsPath = Join-Path $Common.ConfigPath "_domainDefaults.json"
+    if (Test-Path $savedDefaultsPath) {
+        try {
+            $savedDefaults = Get-Content -Path $savedDefaultsPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            foreach ($prop in $savedDefaults.psobject.Properties) {
+                if ($null -ne $domainDefaults."$($prop.Name)") {
+                    $domainDefaults."$($prop.Name)" = $prop.Value
+                }
+            }
+        }
+        catch {
+            Write-Log "Could not load saved domain defaults from _domainDefaults.json. Using built-in defaults." -Warning
+        }
+    }
+
     $newconfig | Add-Member -MemberType NoteProperty -name "domainDefaults" -Value $domainDefaults -Force
 
 
@@ -568,6 +585,15 @@ function Select-NewDomainConfig {
 
     if ($result -eq "ESCAPE") {
         return $result
+    }
+
+    # Save the user-selected defaults for next run
+    try {
+        $newconfig.domainDefaults | ConvertTo-Json -Depth 3 | Out-File -FilePath $savedDefaultsPath -Force -ErrorAction Stop
+        Write-Log "Saved domain defaults to _domainDefaults.json" -LogOnly
+    }
+    catch {
+        Write-Log "Could not save domain defaults to _domainDefaults.json." -Warning
     }
     
  
