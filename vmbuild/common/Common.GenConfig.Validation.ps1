@@ -163,6 +163,19 @@ function Get-AdditionalValidations {
                     Add-ErrorMessage -property $name "Windows 11 must include TPM support"
                     $property.$name = $true
                 }
+                else {
+                    # Remove BitLocker property when TPM is disabled
+                    $property.PsObject.Members.Remove("BitLocker")
+                }
+            }
+            elseif ($value -eq $true) {
+                # Add BitLocker property if BLM is enabled and VM doesn't already have it
+                if ($Global:Config.cmOptions -and $Global:Config.cmOptions.EnableBLM) {
+                    if ($null -eq $property.BitLocker) {
+                        $isClientOS = $property.operatingSystem -and $property.operatingSystem -like "Windows 1*"
+                        $property | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                    }
+                }
             }
         }
 
@@ -351,6 +364,23 @@ function Get-AdditionalValidations {
             }
             else {
                 $property.PsObject.Members.Remove("PatchMyPCFileServer")
+            }
+        }
+        "EnableBLM" {
+            if ($value -eq $true) {
+                # Add BitLocker property to all VMs with TPM enabled
+                foreach ($vm in $Global:Config.virtualMachines) {
+                    if ($vm.tpmEnabled -and $null -eq $vm.BitLocker) {
+                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                        $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                    }
+                }
+            }
+            else {
+                # Remove BitLocker property from all VMs
+                foreach ($vm in $Global:Config.virtualMachines) {
+                    $vm.PsObject.Members.Remove("BitLocker")
+                }
             }
         }
         "UsePKI" {
