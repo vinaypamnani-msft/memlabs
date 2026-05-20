@@ -161,7 +161,9 @@ function Get-UserConfiguration {
 
             # Derive InstallCA from pkiOptions (authoritative source).
             # Applies to any domain-joined VM (DC, BDC, or member server).
-            if ($vm.role -notin 'StandaloneRootCA', 'WorkgroupMember', 'AADClient', 'InternetClient') {
+            # Client OS VMs (Windows 10/11) can never host a CA; skip them entirely.
+            $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+            if ($vm.role -notin 'StandaloneRootCA', 'WorkgroupMember', 'AADClient', 'InternetClient' -and -not $isClientOS) {
                 if ($config.pkiOptions -and $config.pkiOptions.EnablePKI) {
                     if ($config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force

@@ -75,7 +75,7 @@
           <rule>
             <property>Comment</property>
             <operator>Matches</operator>
-            <value>"InstallCA"</value>
+            <value>"IssuingCA"</value>
           </rule>
         </ruleGroup>
       </smartGroup>

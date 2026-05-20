@@ -449,7 +449,7 @@ function New-RDCManFileFromHyperV {
 
                 if ( $null -eq $vm.SqlVersion -and $isServer) {
                     if ($vm.InstallCA) {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "InstallCA" -force
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "IssuingCA" -force
                     }
                     else {
                         $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
@@ -536,15 +536,22 @@ function New-RDCManFileFromHyperV {
                 $caTag = "CA"
             }
 
+            # SUP/WSUS tag for non-SiteSystem VMs with installSUP
+            $supTag = $null
+            if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") {
+                $supTag = "WSUS"
+            }
+
             # Dedup: skip role tag if VM name already contains it
             if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
                 $roleTag = $null
             }
 
-            # Build bracket tag: [ROLE OS CMver SiteRoles CA]
+            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP]
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
             if ($caTag) { $tagParts += $caTag }
+            if ($supTag) { $tagParts += $supTag }
 
             $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
             # Dedup: skip OS tag if VM name already contains it
