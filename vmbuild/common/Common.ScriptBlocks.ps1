@@ -331,7 +331,7 @@ $global:VM_Create = {
             }
 
             $tpmEnabled = $true
-            if ($currentItem.tpmEnabled) {
+            if ($null -ne $currentItem.tpmEnabled) {
                 $tpmEnabled = $currentItem.tpmEnabled
             }
            

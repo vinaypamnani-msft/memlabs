@@ -4032,8 +4032,6 @@ function Install-Tools {
         }
     }
 
-
-    $success = ($result.Failed -eq 0)
     return $success
 }
 
@@ -4052,7 +4050,7 @@ function Copy-ToolToVM {
     $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
     if ($vm.State -ne "Running") {
         Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
-        continue
+        return $false
     }
 
     $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
