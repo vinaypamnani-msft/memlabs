@@ -482,11 +482,6 @@ class InstallODBCDriver {
 
     [bool] Test() {
         Write-Status "DSC Test- Checking deployment status"
-        $_path = $this.ODBCPath
-
-        if (-not (Test-Path -Path $_path)) {
-            return $false
-        }
 
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
@@ -646,15 +641,8 @@ class InstallSqlClient {
     }
 
     [bool] Test() {
-        $_path = $this.Path
-
-        if (-not (Test-Path -Path $_path)) {
-            return $false
-        }
-
         Write-Status "DSC Test- Checking deployment status"
         try {
-            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
             $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
 
             if (Test-Path -Path $RegistryPath) {
@@ -765,8 +753,10 @@ class InstallVCRedist {
                 return $false
             }
 
-            If ($Version.Major -ge "14" -and $Version.Minor -ge "42") {
-                Write-Host "VC Redist 14.42 or greater $($Version.InstalledVersion) is installed"
+            $installed = [version]"$($Version.Major).$($Version.Minor)"
+            $required  = [version]"14.42"
+            If ($installed -ge $required) {
+                Write-Host "VC Redist $required or greater $($Version.InstalledVersion) is installed"
                 return $true
             }
             return $false
@@ -2251,6 +2241,12 @@ class InitializeDisks {
 
         Write-Status "Initializing disks"
 
+        # Move CD-ROM drive to Z: before assigning disk letters
+        if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
+            Write-Status "Moving CD-ROM drive to Z:.."
+            Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
+        }
+
         $_VM = $this.VM | ConvertFrom-Json
         $_Disks = $_VM.additionalDisks
 
@@ -2278,14 +2274,6 @@ class InitializeDisks {
     }
 
     [bool] Test() {
-
-        # TODO: Refine the Test logic, it works now, but it isn't in-line with what we do in Set()
-
-        # Move CD-ROM drive to Z:
-        if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
-            Write-Status "Moving CD-ROM drive to Z:.."
-            Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
-        }
 
         # Check if there are any RAW disks
         Write-Verbose "Testing if any Raw disks are left"
