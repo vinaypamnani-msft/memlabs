@@ -136,50 +136,29 @@ class InstallADK {
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
-        #Install DeploymentTools
+        #Install DeploymentTools and UserStateMigrationTool in a single call
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
-        Write-Status "Installing ADK DeploymentTools to $adkinstallpath"
-        while (!(Test-Path $adkinstallpath)) {
+        $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
+        Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool"
+        while (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
             $cmd = $_adkpath
             $arg1 = "/Features"
             $arg2 = "OptionId.DeploymentTools"
-            $arg3 = "/q"
+            $arg3 = "OptionId.UserStateMigrationTool"
+            $arg4 = "/q"
 
             try {
-                Write-Status "Installing ADK DeploymentTools..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "ADK DeploymentTools Installed Successfully!"
+                Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool..."
+                & $cmd $arg1 $arg2 $arg3 $arg4 | out-null
+                Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
-                throw "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
+                Write-Status "Failed to install ADK DeploymentTools/UserStateMigrationTool with below error: $ErrorMessage"
+                throw "Failed to install ADK DeploymentTools/UserStateMigrationTool with below error: $ErrorMessage"
             }
 
-            Start-Sleep -Seconds 10
-        }
-
-        #Install UserStateMigrationTool
-        $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
-        Write-Status "Installing ADK UserStateMigrationTool to $adkinstallpath"
-        while (!(Test-Path $adkinstallpath)) {
-            $cmd = $_adkpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.UserStateMigrationTool"
-            $arg3 = "/q"
-
-            try {
-                Write-Status "Installing ADK UserStateMigrationTool..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "ADK UserStateMigrationTool Installed Successfully!"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
-                throw "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
-            }
-
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 2
         }
 
         #Install WindowsPreinstallationEnvironment
@@ -202,7 +181,7 @@ class InstallADK {
                 throw "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
             }
 
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 2
         }
     }
 
@@ -272,7 +251,6 @@ class InstallSSMS {
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Status "SSMS Installed Successfully!"
 
-                start-sleep -Seconds 20
                 # Reboot
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
@@ -282,7 +260,6 @@ class InstallSSMS {
                 Write-Status "Failed to install SSMS with below error: $ErrorMessage"
                 throw "Failed to install SSMS with below error: $ErrorMessage"
             }
-            Start-Sleep -Seconds 10
         }
     }
 
@@ -359,7 +336,7 @@ class InstallDotNet4 {
                     break
                 }
             }
-            Start-Sleep -Seconds 60 ## Buffer Wait
+            Start-Sleep -Seconds 10 ## Buffer Wait
             Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
@@ -431,7 +408,6 @@ class InstallReportBuilder {
             Write-Status "Failed to install Report Builder with error: $ErrorMessage"
             throw "Failed to install Report Builder with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
     }
 
     [bool] Test() {
@@ -502,7 +478,6 @@ class InstallODBCDriver {
             Write-Status "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
             throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
     }
 
     [bool] Test() {
@@ -589,7 +564,6 @@ class InstallOleDbDriver {
             Write-Status "Failed to install $packageName with error: $ErrorMessage"
             throw "Failed to install $packageName with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
     }
 
     [bool] Test() {
@@ -669,7 +643,6 @@ class InstallSqlClient {
             Write-Status "Failed to install Sql Client with error: $ErrorMessage"
             throw "Failed to install Sql Client with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 20
     }
 
     [bool] Test() {
@@ -763,7 +736,6 @@ class InstallVCRedist {
             Write-Status "Failed to install VC Redist with error: $ErrorMessage"
             throw "Failed to install VC Redist with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
     }
 
     [bool] Test() {
@@ -897,7 +869,6 @@ class InstallPMPC {
             Write-Status "Failed to install $Name  with error: $ErrorMessage"
             throw "Failed to install $Name  with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
 
         $SettingsXML = Get-Content "C:\Staging\DSC\Phases\PMPC.Settings.Template" -Raw
         $SettingsXML = $SettingsXML.Replace("TEMPLATESITECODE", $this.SiteCode)
@@ -2217,7 +2188,6 @@ class RegisterTaskScheduler {
             }
             Unregister-ScheduledTask -TaskName $($this.TaskName) -Confirm:$false
             Write-Status "Task $($this.TaskName) Removed"
-            Start-Sleep -Seconds 10
         }
 
         $sourceDirectory = "$($this.ScriptPath)\*"
@@ -3859,9 +3829,9 @@ class InstallPBIRS {
                 $rsconfig.SetServiceState($true, $true, $true)
             }
             Write-Status ("Restart PowerBIReportServer Service")
-            Start-Sleep -seconds 10
+            Start-Sleep -Seconds 3
             Restart-Service -Name "PowerBIReportServer" -Force
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 5
             Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer } catch {}
             Write-Status ("Restart PowerBIReportServer Service")
@@ -4120,7 +4090,6 @@ class AddCertificateTemplate {
                 Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -SkipPublisherCheck
             }
             Write-Status "Adding Certificate Template $_TemplateName .." 
-            start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
             #Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."
