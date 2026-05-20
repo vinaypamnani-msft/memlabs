@@ -372,7 +372,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
+            if ($enableSUP) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+            }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS" -force
             $virtualMachine.Memory = "10GB"
@@ -404,7 +408,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
+            if ($enableSUP) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+            }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site" -force
 

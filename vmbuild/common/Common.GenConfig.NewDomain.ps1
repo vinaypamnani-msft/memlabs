@@ -530,6 +530,7 @@ function Get-NewDomainConfigHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "EnableSUPOnSiteServers" { "Enabling this will automatically install the SUP role on CAS/Primary site servers, sharing SQL with the site server" }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -556,8 +557,9 @@ function Select-NewDomainConfig {
         DefaultServerOS     = "Server 2022"
         DefaultSqlVersion   = "Sql Server 2022"
         UseDynamicMemory    = $true
-        IncludeClients      = $true
-        IncludeSSMSOnNONSQL = $true
+        IncludeClients          = $true
+        IncludeSSMSOnNONSQL     = $true
+        EnableSUPOnSiteServers  = $false
     }
 
     # Load saved defaults from previous run if available
