@@ -195,6 +195,18 @@ function Start-PhaseJobs {
         [object]$deployConfig
     )
 
+    # Detect if DSC source files changed since last copy; if so, force re-copy
+    $dscSourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) "DSC"
+    $newestFile = Get-ChildItem -Path "$dscSourcePath\phases" -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newestFile -and $global:DSC_CopiedTime -and $newestFile.LastWriteTime -gt $global:DSC_CopiedTime) {
+        Write-Log "[Phase $Phase] DSC source files modified since last copy; forcing re-copy" -LogOnly
+        $global:DSC_Copied = @()
+    }
+    if (-not $global:DSC_CopiedTime) {
+        $global:DSC_CopiedTime = Get-Date
+    }
+
     $global:preparePhasePercent = 5
     Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
@@ -361,6 +373,7 @@ function Start-PhaseJobs {
             }
             else {
                 $global:DSC_Copied += $currentItem.VmName
+                $global:DSC_CopiedTime = Get-Date
             }
             Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) alreadyCopiedDSC = $alreadyCopiedDSC"
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err

@@ -44,6 +44,12 @@ $firstRun = $true
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
     $firstRun = $false
+    # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
+    if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
+        $Configuration.ScriptWorkflow.Status = "Running"
+        $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    }
 }
 if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
