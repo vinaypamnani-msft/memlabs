@@ -223,6 +223,15 @@ function Get-UserConfiguration {
                     }
                 }
             }
+
+            # BitLocker property: auto-add when BLM is enabled and VM has TPM
+            if ($config.cmOptions -and $config.cmOptions.EnableBLM -and $vm.tpmEnabled) {
+                if ($null -eq $vm.BitLocker) {
+                    # Default true on client OS, false on server OS
+                    $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                    $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                }
+            }
         }
 
         if ($null -ne $config.cmOptions.Version) {

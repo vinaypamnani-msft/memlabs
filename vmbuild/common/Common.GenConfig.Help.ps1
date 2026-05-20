@@ -59,6 +59,7 @@ function Get-GenericHelp {
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
         "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
+        "BitLocker" { "Enable BitLocker encryption on this VM. Moves the computer to the BLM OU so BitLocker GPO applies. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
         "Add Additional Disk" { "Adds another VHDX to this VM" }

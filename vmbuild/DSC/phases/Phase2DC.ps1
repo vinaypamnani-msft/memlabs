@@ -101,6 +101,18 @@
         }
     }
 
+    # BitLocker Management: collect VMs that should be moved to the BLM OU
+    [System.Collections.ArrayList]$blmVMs = @()
+    if ($enableBLM) {
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.BitLocker -eq $true -and -not $vm.Hidden) {
+                [void]$blmVMs.Add($vm.vmName)
+                if (-not $waitOnDomainJoin.Contains($vm.vmName)) {
+                    $waitOnDomainJoin += $vm.vmName
+                }
+            }
+        }
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -704,7 +716,26 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
-      
+
+        # Move BitLocker-enabled VMs to the BLM OU after they join the domain
+        if ($blmVMs.Count -gt 0) {
+            WriteStatus MoveBLMComputers {
+                DependsOn = $waitOnDependency
+                Status    = "Moving BitLocker-targeted VMs to MEMLABS-BitLockerClients OU"
+            }
+
+            $blmOUPath = "OU=MEMLABS-BitLockerClients,$DNName"
+            foreach ($blmVM in $blmVMs) {
+                MoveComputerToOU "MoveBLM_$blmVM" {
+                    ComputerName = $blmVM
+                    TargetOU     = $blmOUPath
+                    Ensure       = "Present"
+                    DependsOn    = "[DelegateControl]Add$blmVM"
+                }
+                $waitOnDependency += "[MoveComputerToOU]MoveBLM_$blmVM"
+            }
+        }
+
         if ($sitecount) {
 
             ADGroup ConfigMgrSiteServers {

@@ -247,6 +247,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "tpmEnabled") {
         $sorted += "tpmEnabled"
     }
+    if ($members.Name -contains "BitLocker") {
+        $sorted += "BitLocker"
+    }
     if ($members.Name -contains "InstallSSMS") {
         $sorted += "InstallSSMS"
     }
@@ -335,6 +338,7 @@ function Get-SortedProperties {
         "remoteSQLVM" {}
         "remoteContentLibVM" {}
         "tpmEnabled" {}
+        "BitLocker" {}
         "installSSMS" {}
         "installCA" {}
         "UseOfflineRoot" {}

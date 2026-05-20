@@ -1647,6 +1647,59 @@ class VerifyComputerJoinDomain {
     }
 }
 
+[DscResource()]
+class MoveComputerToOU {
+    [DscProperty(Key)]
+    [string] $ComputerName
+
+    [DscProperty(Mandatory)]
+    [string] $TargetOU
+
+    [DscProperty(Mandatory)]
+    [Ensure] $Ensure
+
+    [void] Set() {
+        $_ComputerName = $this.ComputerName
+        $_TargetOU = $this.TargetOU
+
+        try {
+            $computer = Get-ADComputer -Identity $_ComputerName -ErrorAction Stop
+            $targetPath = $_TargetOU
+            $currentOU = ($computer.DistinguishedName -split ',', 2)[1]
+
+            if ($currentOU -ne $targetPath) {
+                Write-Status "Moving $_ComputerName from $currentOU to $targetPath"
+                Move-ADObject -Identity $computer.DistinguishedName -TargetPath $targetPath -ErrorAction Stop
+                Write-Status "Successfully moved $_ComputerName to $targetPath"
+            }
+            else {
+                Write-Status "$_ComputerName is already in $targetPath"
+            }
+        }
+        catch {
+            Write-Status "Failed to move $_ComputerName to $_TargetOU. Error: $_"
+        }
+    }
+
+    [bool] Test() {
+        $_ComputerName = $this.ComputerName
+        $_TargetOU = $this.TargetOU
+
+        try {
+            $computer = Get-ADComputer -Identity $_ComputerName -ErrorAction Stop
+            $currentOU = ($computer.DistinguishedName -split ',', 2)[1]
+            return ($currentOU -eq $_TargetOU)
+        }
+        catch {
+            return $false
+        }
+    }
+
+    [MoveComputerToOU] Get() {
+        return $this
+    }
+}
+
 function Write-Status {
     param(
         [String] $Status

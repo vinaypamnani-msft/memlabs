@@ -20,6 +20,7 @@ DscResourcesToExport = @(
     'AddNtfsPermissions',
     'WaitForDomainReady',
     'VerifyComputerJoinDomain',
+    'MoveComputerToOU',
     'WriteStatus',
     'WriteFileOnce',
     'ChangeSqlInstancePort',
