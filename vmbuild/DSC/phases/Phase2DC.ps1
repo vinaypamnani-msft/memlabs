@@ -734,53 +734,55 @@
         }
 
 
-        WriteStatus GroupPolicyStatus {
-            DependsOn = $waitOnDependency
-            Status    = "Installing Auto Enrollment Group Policy"
+        if ($usePKI) {
+            WriteStatus GroupPolicyStatus {
+                DependsOn = $waitOnDependency
+                Status    = "Installing Auto Enrollment Group Policy"
+            }
+
+            $GPOName = "Certificate AutoEnrollment"
+
+            GroupPolicy GroupPolicyConfig {
+                Name      = $GPOName
+                DependsOn = $waitOnDependency
+            }
+
+            GPLink GPLinkConfig {
+                Path      = $DNName
+                GPOName   = $GPOName
+                DependsOn = "[GroupPolicy]GroupPolicyConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig1 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "AEPolicy"
+                ValueType = "DWord"
+                Value     = "7"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig2 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationPercent"
+                ValueType = "DWord"
+                Value     = "10"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig3 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationStoreNames"
+                ValueType = "String"
+                Value     = "MY"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+            $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
+            $waitOnDependency = $nextDepend
         }
 
-        $GPOName = "Certificate AutoEnrollment"
-
-        GroupPolicy GroupPolicyConfig {
-            Name      = $GPOName
-            DependsOn = $waitOnDependency
-        }
-
-        GPLink GPLinkConfig {
-            Path      = $DNName
-            GPOName   = $GPOName
-            DependsOn = "[GroupPolicy]GroupPolicyConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig1 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "AEPolicy"
-            ValueType = "DWord"
-            Value     = "7"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig2 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "OfflineExpirationPercent"
-            ValueType = "DWord"
-            Value     = "10"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig3 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "OfflineExpirationStoreNames"
-            ValueType = "String"
-            Value     = "MY"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-        $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
-        $waitOnDependency = $nextDepend
-        
         # Certificate template import and publishing is handled by the
         # host-driven PKI orchestrator (Install-PKI) after Phase2 completes.
 
