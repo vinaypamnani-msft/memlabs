@@ -160,11 +160,25 @@ if (-not $NoWindowResize.IsPresent) {
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
-        # Target: 200-250 columns, 50-70 rows.
+        # Target columns: fit the longest help text + 6 col prefix + buffer, minimum 170.
         $curCols = $host.UI.RawUI.WindowSize.Width
         $curRows = $host.UI.RawUI.WindowSize.Height
-        $targetCols = 225   # middle of 200-250
-        $targetRows = 60    # middle of 50-70
+        $helpOverhead = 8   # 6 col prefix (` │🕮  `) + 2 buffer
+        $minCols = 170
+        # Scan help file for longest string literal to size the terminal dynamically
+        $helpFile = Join-Path $PSScriptRoot "common\Common.GenConfig.Help.ps1"
+        $longestHelp = 0
+        if (Test-Path $helpFile) {
+            $helpLines = Get-Content $helpFile -ErrorAction SilentlyContinue
+            foreach ($line in $helpLines) {
+                if ($line -match '"([^"]+)"[^"]*\}') {
+                    $len = $Matches[1].Length
+                    if ($len -gt $longestHelp) { $longestHelp = $len }
+                }
+            }
+        }
+        $targetCols = [Math]::Max($minCols, $longestHelp + $helpOverhead)
+        $targetRows = 60
 
         $screenW = $screen.Bounds.Width
         $screenH = $screen.Bounds.Height
