@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Used when calling from New-Lab")]
     [Switch] $InternalUseOnly

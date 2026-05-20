@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Compacts Hyper-V virtual hard disks in parallel with a WPF progress UI.
 

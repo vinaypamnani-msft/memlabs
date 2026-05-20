@@ -1,4 +1,4 @@
-# Common.GenConfig.PKIMenus.ps1
+﻿# Common.GenConfig.PKIMenus.ps1
 #
 # PKI Settings submenu — controls PKI infrastructure deployment independent
 # of ConfigMgr, with an optional CM HTTPS toggle.

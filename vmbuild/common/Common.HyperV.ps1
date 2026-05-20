@@ -1,4 +1,4 @@
-function Install-HyperV {
+﻿function Install-HyperV {
     # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
     # ServerManager that shows "Collecting data..." and can stall for minutes.
     # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.
