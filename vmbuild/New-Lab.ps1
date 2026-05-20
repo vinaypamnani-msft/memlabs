@@ -231,10 +231,16 @@ if (-not $NoWindowResize.IsPresent) {
 
         # --- Calculate target pixel size based on optimal character dimensions ---
         # Measure font metrics: get pixel size of the current window and divide by current char dims
+        # In WT, we must measure from the WT window (what we'll resize), not GetConsoleWindow (pseudoconsole)
         if ($curCols -gt 0 -and $curRows -gt 0) {
             $measureHandle = [IntPtr]::Zero
-            try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
-            try { $measureHandle = [Window]::GetConsoleWindow() } catch {}
+            if ($wtDetected -and $wtProcessId) {
+                $measureHandle = (Get-Process -Id $wtProcessId -ErrorAction SilentlyContinue).MainWindowHandle
+            }
+            if ($measureHandle -eq [IntPtr]::Zero) {
+                try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
+                try { $measureHandle = [Window]::GetConsoleWindow() } catch {}
+            }
             if ($measureHandle -ne [IntPtr]::Zero) {
                 $mRect = New-Object RECT
                 $null = [Window]::GetWindowRect($measureHandle, [ref]$mRect)
@@ -244,7 +250,7 @@ if (-not $NoWindowResize.IsPresent) {
                     $pxPerCol = $curPixW / $curCols
                     $pxPerRow = $curPixH / $curRows
                     $measuredFont = $true
-                    Write-Log "Post-init: Window resize - measured font: ${curPixW}px/${curCols}cols = $([math]::Round($pxPerCol,2))px/col, ${curPixH}px/${curRows}rows = $([math]::Round($pxPerRow,2))px/row" -LogOnly
+                    Write-Log "Post-init: Window resize - measured font from $(if ($wtDetected) {'WT window'} else {'console'}): ${curPixW}px/${curCols}cols = $([math]::Round($pxPerCol,2))px/col, ${curPixH}px/${curRows}rows = $([math]::Round($pxPerRow,2))px/row" -LogOnly
                 }
             }
         }
