@@ -28,10 +28,10 @@ else {
         return
     }
 
-    # dot source functions
-    . $PSScriptRoot\ScriptFunctions.ps1
+    # Connect to the CM site (imports module, sets up PS drive, sets location)
+    . $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
 
-    # Get required values from config
+    # Get additional values from config needed by perfloading
     $DomainFullName = $deployConfig.parameters.domainName
     $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
     $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -39,39 +39,6 @@ else {
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
-    # Read Site Code from registry
-    #Write-DscStatus "$Tag Setting PS Drive for ConfigMgr" -NoStatus
-    $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
-    $ProviderMachineName = $ThisMachineName + "." + $DomainFullName # SMS Provider machine name
-
-    # Get CM module path
-    $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-    $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-    $uiInstallPath = $subKey.GetValue("UI Installation Directory")
-    $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-    $initParams = @{}
-
-    # Import the ConfigurationManager.psd1 module
-    if ($null -eq (Get-Module ConfigurationManager)) {
-        Import-Module $modulePath
-    }
-
-    # Connect to the site's drive if it is not already present
-    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-    $psDriveFailcount = 0
-    while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-        $psDriveFailcount++
-        if ($psDriveFailcount -gt 20) {
-            Write-DscStatus "$Tag Failed to get the PS Drive for site $SiteCode.  Install may have failed. Check C:\ConfigMgrSetup.log" -NoStatus
-            return
-        }
-        Write-DscStatus "$Tag Retry in 10s to Set PS Drive" -NoStatus
-        Start-Sleep -Seconds 10
-        New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
-    }
-
-    # Set the current location to be the site code.
-    Set-Location "$($SiteCode):\" @initParams
 
     #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
     $DPGroupName = "ALL DPS"
@@ -108,72 +75,6 @@ else {
     #Enable Site features:
     Write-DscStatus "$Tag Enabling Site features"
     Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
-
-    # BitLocker Management policy and collection
-    if ($deployConfig.cmOptions.EnableBLM) {
-        Write-DscStatus "$Tag Configuring BitLocker Management"
-
-        # Create collection targeting the BLM OU
-        $blmCollectionName = "MEMLABS-BitLocker Clients"
-        if (-not (Get-CMDeviceCollection -Name $blmCollectionName -ErrorAction SilentlyContinue)) {
-            $blmSchedule = New-CMSchedule -RecurInterval Days -RecurCount 1
-            New-CMDeviceCollection -Name $blmCollectionName -LimitingCollectionId SMS00001 -RefreshSchedule $blmSchedule -RefreshType Periodic | Out-Null
-            $blmQuery = @"
-SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name
-FROM SMS_R_System
-WHERE SMS_R_System.SystemOUName = "$DomainFullName/MEMLABS-BitLockerClients"
-"@
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionName $blmCollectionName -QueryExpression $blmQuery -RuleName "BLM OU Members"
-            Write-DscStatus "$Tag Created collection: $blmCollectionName"
-        }
-
-        # Add direct membership rules for BitLocker VMs (immediate targeting without waiting for OU query)
-        $blmCollection = Get-CMDeviceCollection -Name $blmCollectionName -ErrorAction SilentlyContinue
-        if ($blmCollection) {
-            $blmVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true })
-            foreach ($blmVM in $blmVMs) {
-                $vmResourceName = "$($deployConfig.vmOptions.prefix)$($blmVM.vmName)"
-                $cmDevice = Get-CMDevice -Name $vmResourceName -ErrorAction SilentlyContinue
-                if ($cmDevice) {
-                    $existingRule = Get-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID -ErrorAction SilentlyContinue
-                    if (-not $existingRule) {
-                        Add-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID
-                        Write-DscStatus "$Tag Added $vmResourceName to $blmCollectionName"
-                    }
-                }
-            }
-        }
-
-        # Create BitLocker management policy
-        $blmPolicyName = "MEMLABS-BitLocker Policy"
-        $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
-        if (-not $blmPolicy) {
-            $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy"
-
-            # Configure OS drive encryption settings
-            Set-CMBlmPlannedFailureAction -InputObject $blmPolicy -LockWorkstation
-            Set-CMBlmSetting -InputObject $blmPolicy -OsDrive -Encrypt -EncryptionMethod XtsAes256 -MinimumPinLength 6
-            Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
-        }
-        else {
-            Write-DscStatus "$Tag BitLocker policy already exists, skipping creation"
-        }
-
-        # Ensure policy is deployed to the collection (idempotent)
-        if ($blmPolicy -and $blmCollection) {
-            $existingDeployment = Get-CMSettingDeployment -CMSetting $blmPolicy -ErrorAction SilentlyContinue |
-                Where-Object { $_.CollectionId -eq $blmCollection.CollectionID }
-            if (-not $existingDeployment) {
-                New-CMSettingDeployment -CMSetting $blmPolicy -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue
-                Write-DscStatus "$Tag Deployed BitLocker policy to $blmCollectionName"
-            }
-            else {
-                Write-DscStatus "$Tag BitLocker policy already deployed to $blmCollectionName"
-            }
-        }
-
-        Write-DscStatus "$Tag BitLocker Management configuration complete"
-    }
 
     #Applications and packages
 

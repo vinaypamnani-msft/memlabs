@@ -338,6 +338,13 @@ if ($TopLevelSiteServer) {
 
 }
 
+if ($TopLevelSiteServer) {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+}
+
   # Install Providers
   Write-DscStatus "Running InstallProvider.ps1"
   $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
