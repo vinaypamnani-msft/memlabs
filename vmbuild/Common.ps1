@@ -5557,6 +5557,11 @@ if (-not $Common.Initialized) {
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Finalizing" -PercentComplete $i
 
+                # Start a background ThreadJob to refresh LastKnownIP for running
+                # VMs. This runs after init so it doesn't contend with the
+                # foreground's first Get-List call.
+                Start-VMIPRefreshJob
+
                 # Add HGS Registry key to allow local CA Cert
                 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
             }

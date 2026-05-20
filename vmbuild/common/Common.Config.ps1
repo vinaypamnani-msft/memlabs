@@ -1858,6 +1858,102 @@ function Test-CacheValid {
     return $false
 }
 
+function Start-VMIPRefreshJob {
+    <#
+    .SYNOPSIS
+        Starts a background ThreadJob that refreshes LastKnownIP for running VMs.
+    .DESCRIPTION
+        After the speed improvements removed the init-time Update-VMInformation
+        loop, LastKnownIP is never refreshed. This function starts a lightweight
+        background ThreadJob (PS7 only, in-process) that:
+          1. Enumerates running VMs via Get-VM
+          2. Calls Get-VMNetworkAdapter to obtain IPv4 addresses
+          3. Updates the .network.json cache files with the IP
+          4. Updates the in-memory $global:vm_List entries
+          5. Persists changes to Hyper-V VM Notes via Set-VMNote
+        The job runs at low priority and throttles itself so it doesn't
+        contend with vmms.exe during interactive use.
+    #>
+    if ($global:Common.InJob) { return }
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        Write-Log "Start-VMIPRefreshJob: Start-ThreadJob not available; skipping." -LogOnly
+        return
+    }
+
+    $global:VMIPRefreshJob = Start-ThreadJob -Name "MemLabs-IPRefresh" -ScriptBlock {
+        # ThreadJob shares the process; $global:common, $global:vm_List, and
+        # all dot-sourced functions (Write-Log, Set-VMNote, etc.) are accessible.
+        try {
+            # Wait briefly for the foreground to finish populating vm_List on
+            # its first Get-List call before we start touching VMs.
+            $waitCount = 0
+            while (-not $global:vm_List -and $waitCount -lt 30) {
+                Start-Sleep -Milliseconds 500
+                $waitCount++
+            }
+            if (-not $global:vm_List) { return }
+
+            Write-Log "IPRefreshJob: Starting background IP refresh for running VMs." -LogOnly
+            $virtualMachines = Get-VM | Where-Object { $_.State -eq 'Running' }
+            $updated = 0
+
+            foreach ($vm in $virtualMachines) {
+                try {
+                    $vmNoteObject = $null
+                    if ($vm.Notes) {
+                        $vmNoteObject = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
+                    }
+                    if (-not $vmNoteObject -or [string]::IsNullOrWhiteSpace($vmNoteObject.role)) {
+                        continue  # Not a MemLabs VM
+                    }
+
+                    $netAdapter = $vm | Get-VMNetworkAdapter
+                    $ipAddress = $netAdapter.IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+
+                    if ([string]::IsNullOrWhiteSpace($ipAddress)) { continue }
+
+                    # Update .network.json cache file with IP
+                    $jsonFile = $vm.vmID.ToString() + ".network.json"
+                    $cacheFile = Join-Path $global:common.CachePath $jsonFile
+                    $cacheEntry = [PSCustomObject]@{
+                        vmId       = $vm.vmID
+                        SwitchName = $netAdapter.SwitchName
+                        IPAddress  = $ipAddress
+                        EntryAdded = (Get-Date -Format "MM/dd/yyyy HH:mm")
+                    }
+                    ConvertTo-Json $cacheEntry | Out-File $cacheFile -Force
+
+                    # Update in-memory vm_List entry
+                    $listEntry = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
+                    if ($listEntry) {
+                        $listEntry | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
+                    }
+
+                    # Persist to VM Notes if changed
+                    if ($ipAddress -ne $vmNoteObject.LastKnownIP) {
+                        if ($null -eq $vmNoteObject.LastKnownIP) {
+                            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
+                        }
+                        else {
+                            $vmNoteObject.LastKnownIP = $ipAddress
+                        }
+                        Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                        $updated++
+                    }
+                }
+                catch {
+                    Write-Log "IPRefreshJob: Error updating $($vm.Name): $_" -LogOnly
+                }
+            }
+            Write-Log "IPRefreshJob: Completed. Updated $updated VM(s)." -LogOnly
+        }
+        catch {
+            Write-Log "IPRefreshJob: Fatal error: $_" -LogOnly
+        }
+    }
+    Write-Log "Start-VMIPRefreshJob: Background IP refresh job started." -LogOnly
+}
+
 function Update-VMInformation {
     [CmdletBinding()]
     param (
@@ -2027,6 +2123,12 @@ function Get-VMFromHyperV {
         memoryGB        = $memoryGB
         memoryStartupGB = $memoryStartupGB
         diskUsedGB      = [math]::Round($diskSizeGB, 2)
+    }
+
+    # If the network cache has a cached IP (written by the background IP refresh
+    # job), seed LastKnownIP so it's available before VM Notes are parsed.
+    if ($vmNet.IPAddress) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $vmNet.IPAddress -Force
     }
 
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
