@@ -429,7 +429,9 @@ function Register-LogBufferExitFlush {
     # long-running CIM call (Get-VM, Get-VMNetworkAdapter, Set-VM, etc.).
     # IMPORTANT: The callback must be pure .NET (no PowerShell ScriptBlocks) —
     # threadpool threads have no Runspace and will crash the process otherwise.
-    if (-not $global:LogFlushTimer) {
+    # NOTE: Skip on PS5 — the TimerCallback cast from a static method doesn't
+    # work reliably, and this is not needed for short-lived DSC zip generation.
+    if (-not $global:LogFlushTimer -and $PSVersionTable.PSVersion.Major -ge 7) {
         # Compile a tiny C# class that holds the flush logic. This runs on the
         # threadpool without needing a PowerShell Runspace.
         if (-not ([System.Management.Automation.PSTypeName]'MemLabs.LogFlusher').Type) {
