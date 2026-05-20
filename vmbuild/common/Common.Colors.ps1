@@ -93,7 +93,23 @@ function Get-Animate {
     # Calculate the start position for centering the text
     $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
     $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
-    $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+
+    # Check for pending git changes - show red if uncommitted changes exist
+    $hasPendingChanges = $false
+    try {
+        $gitRoot = $Global:Common.StagingAnswerFilePath
+        if (-not $gitRoot) { $gitRoot = $PSScriptRoot }
+        $gitStatus = & git -C (Split-Path $PSScriptRoot -Parent) status --porcelain 2>$null
+        if ($gitStatus) { $hasPendingChanges = $true }
+    }
+    catch {}
+
+    if ($hasPendingChanges) {
+        $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
+    }
+    else {
+        $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+    }
     $resetCode = "`e[0m"               # Reset ANSI formatting
     # Animation function to reveal characters one at a time
     
