@@ -440,7 +440,7 @@ function Wait-Phase {
 
         $FailRetry = 0
         do {
-            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
+            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
             }
