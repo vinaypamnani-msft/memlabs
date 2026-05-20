@@ -34,7 +34,20 @@ Function Get-DomainStatsLine {
         $cBracket = "$esc[38;2;105;105;105m"   # DimGray - brackets
         $cLabel   = "$esc[38;2;176;196;222m"   # LightSteelBlue - labels
         $cValue   = "$esc[38;2;0;206;209m"     # DarkTurquoise - numeric values
+        $cWarn    = "$esc[38;2;255;255;0m"     # Yellow - partial anomaly
+        $cBad     = "$esc[38;2;255;69;0m"      # OrangeRed - zero/down
         $cReset   = "$esc[0m"
+
+        # Conditional color for running VM count
+        if ($TotalRunningVMs -eq 0) {
+            $cRunning = $cBad
+        }
+        elseif ($TotalRunningVMs -lt $TotalVMs) {
+            $cRunning = $cWarn
+        }
+        else {
+            $cRunning = $cValue
+        }
 
         # Available width for the stats portion.
         # Menu overhead: 3 (arrow) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
@@ -46,7 +59,7 @@ Function Get-DomainStatsLine {
 
         # Build parts with both plain (for measuring) and colorized versions
         $corePlain = "[$($TotalRunningVMs.ToString().PadLeft(2))/$($TotalVMs.ToString().PadLeft(2)) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2))GB/${TotalMaxMem}GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
-        $coreColor = "${cBracket}[${cValue}$($TotalRunningVMs.ToString().PadLeft(2))${cLabel}/${cValue}$($TotalVMs.ToString().PadLeft(2)) ${cLabel}Running VMs, Mem: ${cValue}$($TotalMem.ToString().PadLeft(2))${cLabel}GB/${cValue}${TotalMaxMem}${cLabel}GB Disk: ${cValue}$([math]::Round($TotalDiskUsed,2))${cLabel}GB${cBracket}]${cReset}"
+        $coreColor = "${cBracket}[${cRunning}$($TotalRunningVMs.ToString().PadLeft(2))${cLabel}/${cValue}$($TotalVMs.ToString().PadLeft(2)) ${cLabel}Running VMs, Mem: ${cValue}$($TotalMem.ToString().PadLeft(2))${cLabel}GB/${cValue}${TotalMaxMem}${cLabel}GB Disk: ${cValue}$([math]::Round($TotalDiskUsed,2))${cLabel}GB${cBracket}]${cReset}"
 
         $rolePlain = @()
         $roleColor = @()
