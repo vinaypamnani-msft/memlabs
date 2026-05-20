@@ -1,571 +1,519 @@
-#perfloading.ps1
+# perfloading.ps1
+# Pre-populates a ConfigMgr environment with applications, packages, task sequences,
+# baselines, device collections, ADRs, and related configuration.
+
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
 )
 
 $Tag = "[perfloading]"
-
 $flagFile = "C:\staging\DSC\perfloading.flag"
 
-# Check if the flag file exists
-if (Test-Path $flagFile) {
-    Write-DscStatus "$Tag Flag file exists. Skipping execution."
-}
-else {
+#region Helper Functions
 
-    Write-DscStatus "$Tag Flag file does not exists. start execution."
+function New-DPGroup {
+    <#
+    .SYNOPSIS
+        Creates the "ALL DPS" distribution point group and adds all DPs to it.
+    #>
+    param(
+        [string]$DPGroupName = "ALL DPS"
+    )
 
-    if ( -not $ConfigFilePath) {
-        $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
-    }
+    $existingGroups = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name
 
-    # Read config json
-    $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
-
-
-    if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
+    if ($DPGroupName -in $existingGroups) {
+        Write-DscStatus "$Tag DP group: $DPGroupName already exists"
         return
     }
 
-    # Connect to the CM site (imports module, sets up PS drive, sets location)
-    . $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
+    New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
+    Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
 
-    # Get additional values from config needed by perfloading
-    $DomainFullName = $deployConfig.parameters.domainName
-    $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
-    $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
-    $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
-    $DCName = $DCVM.vmName
-    $CMInstallDir = $ThisVM.CMInstallDir
+    # Add all Distribution Points to the group
+    $DistributionPoints = Get-CMDistributionPoint -AllSite
 
-    #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
-    $DPGroupName = "ALL DPS"
-    $checkDP = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name 
-
-    if ($DPGroupName -eq $checkDP) {
-
-        Write-DscStatus "$Tag DP group: $DPGroupName already exists"
-
-    }
-    else { 
-        $DPGroup = New-CMDistributionPointGroup -Name $DPGroupName -Description "Group containing all Distribution Points" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag DP group: $DPGroupName created successfully"
-
-        # Get all Distribution Points
-        $DistributionPoints = Get-CMDistributionPoint -AllSite
-
-        # Display each Distribution Point's name without the leading '\\'
-        $DistributionPoints | ForEach-Object {
-            $DPPath = $_.NetworkOSPath
-            $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
-            Write-DscStatus "$Tag Distribution Point Name: $DPName"
-            try {
-                Add-CMDistributionPointToGroup -DistributionPointGroupName "ALL DPS" -DistributionPointName $DPName 
-                Write-DscStatus "$Tag Successfully added Distribution Point: $DPName to Group: $($DPGroupName)"
-            }
-            catch {
-                Write-DscStatus "$Tag Failed to add Distribution Point: $DPName to Group: $($DPGroupName). Error: $_"
-            }
+    $DistributionPoints | ForEach-Object {
+        $DPPath = $_.NetworkOSPath
+        $DPName = ($DPPath -replace "^\\\\", "") -split "\\" | Select-Object -First 1
+        Write-DscStatus "$Tag Distribution Point Name: $DPName"
+        try {
+            Add-CMDistributionPointToGroup -DistributionPointGroupName $DPGroupName -DistributionPointName $DPName
+            Write-DscStatus "$Tag Successfully added Distribution Point: $DPName to Group: $DPGroupName"
+        }
+        catch {
+            Write-DscStatus "$Tag Failed to add Distribution Point: $DPName to Group: $DPGroupName. Error: $_"
         }
     }
+}
 
+function Install-Applications {
+    <#
+    .SYNOPSIS
+        Creates applications (app model + package model) from Tools config and deploys them.
+    #>
+    param(
+        [array]$Apps,
+        [string]$ThisMachineName
+    )
 
-    #Enable Site features:
-    Write-DscStatus "$Tag Enabling Site features"
-    Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+    $Apps | ForEach-Object {
+        $appEntry = $_
+        $appName = "MEMLABS-$($appEntry.Name)"
 
-    #Applications and packages
+        # Create source directory
+        Write-DscStatus "$Tag Creating directory c:\Apps\$($appEntry.Name)"
+        New-Item -ItemType Directory -Path "c:\Apps\$($appEntry.Name)" -Force | Out-Null
 
+        # Create hardlink for source file (saves disk space)
+        Write-DscStatus "$Tag Creating hardlink for $($appEntry.Name)"
+        New-Item -ItemType HardLink -Value "c:\tools\$($appEntry.AppMsi)" -Path "C:\Apps\$($appEntry.Name)\$($appEntry.AppMsi)" -Force | Out-Null
 
-    $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
-    $apps | ForEach-Object {
-    
-        Write-DscStatus "$Tag Creating a directory under c:\apps for the application $($_.Name)"
-        #create a directory for the application source files
-        new-item -ItemType Directory -Path "c:\Apps\$($_.Name)" -force
-        Write-DscStatus "$Tag Successfully created directory under c:\apps for the application $($_.Name)"
+        # Create CM Application (App Model)
+        Write-DscStatus "$Tag Creating application: $appName (App Model)"
+        New-CMApplication -Name $appName -Description $appEntry.Description -Publisher $appEntry.Publisher -SoftwareVersion $appEntry.SoftwareVersion -ErrorAction SilentlyContinue
 
+        # Add MSI deployment type
+        Add-CMMsiDeploymentType -ApplicationName $appName `
+            -DeploymentTypeName $appEntry.AppMsi `
+            -ContentLocation "\\$ThisMachineName\c$\Apps\$($appEntry.Name)\$($appEntry.AppMsi)" `
+            -Comment "$($appEntry.Name) MSI deployment type" `
+            -Force -ErrorAction SilentlyContinue
 
-        Write-DscStatus "$Tag Creating a Hardlink under c:\apps for the application $($_.Name) "
-        #create a hardlink for the source file (this is to save space on the C drive)
-        new-item -ItemType HardLink -Value "c:\tools\$($_.AppMsi)" -Path "C:\Apps\$($_.Name)\$($_.AppMsi)" -force
-        Write-DscStatus "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
+        # Distribute and deploy the application
+        Start-CMContentDistribution -ApplicationName $appName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+        New-CMApplicationDeployment -ApplicationName $appName -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+        Write-DscStatus "$Tag Deployed application: $appName to All Systems"
 
-        #creating an application
-        $appname = "MEMLABS-" + "$($_.Name)" 
-        Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
-        New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
-        #remove an application
-        #Remove-CMApplication -Name "MEMLABS-*" -Force
+        # Create CM Package (Package Model)
+        Write-DscStatus "$Tag Creating package: $appName (Package Model)"
+        $Package = New-CMPackage -Name $appName -Path "\\$ThisMachineName\c$\Apps\$($appEntry.Name)" -Description "Package for $($appEntry.Description)"
 
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
-        #create a deployment for each application (tim help on pulling the site server name)
-        Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
+        $CommandLine = "msiexec.exe /i $($appEntry.AppMsi) /qn"
+        New-CMProgram -PackageId $Package.PackageID -StandardProgramName $appEntry.AppMsi -CommandLine $CommandLine
 
-        Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
-        #distribute the content to All DPs
-        Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
-
-        Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
-        #deploy apps to all systems
-        New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
-
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
-        # Create the Package
-        $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-        Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
-        #Remove a package
-        #Remove-CMPackage -Id "CS100023" -Force
-
-        Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
-        $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
-        # Create a Program for the Package
-        New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
-        Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
-
-        Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
-        #Distribute all packages to ALL DPs group
+        # Distribute and deploy the package
         Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
+        New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $appEntry.AppMsi -CollectionName "All Systems" -DeployPurpose Available
+        Write-DscStatus "$Tag Deployed package: $appName to All Systems"
+    }
+}
 
-        Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
-        #Deploy all packages to all systems
-        New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-        Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
+function Set-TwoKeyApproval {
+    <#
+    .SYNOPSIS
+        Disables the TwoKeyApproval (self-approval for author) setting in hierarchy settings.
+    #>
+    param(
+        [string]$SiteCode,
+        [string]$Namespace
+    )
+
+    $className = "SMS_SCI_SiteDefinition"
+
+    $instance = Get-CimInstance -ClassName $className -Namespace $Namespace -Filter "SiteCode like '$SiteCode'"
+
+    if ($null -eq $instance) {
+        Write-DscStatus "$Tag Instance not found. Manually approve the scripts."
+        return
     }
 
+    Write-DscStatus "$Tag Instance found: modifying TwoKeyApproval setting."
+    $propsArray = $instance.Props
+    $propertyFound = $false
 
-    ## Changing the auto-approval setting on Hierarchy settings
-
-    $namespace = "ROOT\SMS\site_$SiteCode"
-    $classname = "SMS_SCI_SiteDefinition"
-
-    Write-DscStatus "$Tag Current namespace is: $namespace and class name is: $classname"
-
-    # Fetch the instance of the class
-    $instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
-
-    if ($instance -ne $null) {
-        Write-DscStatus "$Tag Instance found: modifying existing instance."
-
-        # Get the Props array
-        $propsArray = $instance.Props
-
-        # Locate the TwoKeyApproval property
-        $propertyFound = $false
-        for ($i = 0; $i -lt $propsArray.Length; $i++) {
-            if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
-                $propertyFound = $true
-                Write-DscStatus "$Tag Current property name is: $propsArray[$i].PropertyName and its value is $propsArray[$i].Value"
-                Write-DscStatus "$Tag Setting the value to 0 to override the self-approval for author."
-                $propsArray[$i].Value = 0 # Set your desired value here
-
-                # Update the Props array in the instance
-                $instance.Props = $propsArray
-
-                # Save the modified instance back to the class
-                Set-CimInstance -InputObject $instance
-
-                Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
-                break
-            }
-        }
-
-        if (-not $propertyFound) {
-            Write-DscStatus "$Tag Property 'TwoKeyApproval' not found in existing instance. Adding it."
-      
-            $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $namespace
-            $i = New-CimInstance -CimClass $class -Property @{PropertyName = "TwoKeyApproval"; Value = "0"; Value1 = $null; Value2 = $null }
-            $propsArray += $i
+    for ($i = 0; $i -lt $propsArray.Length; $i++) {
+        if ($propsArray[$i].PropertyName -eq "TwoKeyApproval") {
+            $propertyFound = $true
+            Write-DscStatus "$Tag Current TwoKeyApproval value: $($propsArray[$i].Value). Setting to 0."
+            $propsArray[$i].Value = 0
             $instance.Props = $propsArray
             Set-CimInstance -InputObject $instance
-            Write-DscStatus "$Tag TwoKeyApproval property added and value set successfully."
-
+            Write-DscStatus "$Tag TwoKeyApproval value updated successfully."
+            break
         }
-        
     }
-    else {
-        Write-DscStatus "$Tag Instance not found. Manually approve the scripts"
+
+    if (-not $propertyFound) {
+        Write-DscStatus "$Tag Property 'TwoKeyApproval' not found. Adding it."
+        $class = Get-CimClass -ClassName "SMS_EmbeddedProperty" -Namespace $Namespace
+        $newProp = New-CimInstance -CimClass $class -Property @{
+            PropertyName = "TwoKeyApproval"
+            Value        = "0"
+            Value1       = $null
+            Value2       = $null
+        }
+        $propsArray += $newProp
+        $instance.Props = $propsArray
+        Set-CimInstance -InputObject $instance
+        Write-DscStatus "$Tag TwoKeyApproval property added and value set successfully."
     }
-    Write-DscStatus "$Tag New instance created with TwoKeyApproval set to 0."
+}
 
-
-    ## Scripts ( used our scripts from Wiki)
-
-    # Get all PowerShell script files (.ps1) in the folder and its sub folders
+function Import-CMScripts {
+    <#
+    .SYNOPSIS
+        Imports PowerShell scripts from C:\tools\Scripts into ConfigMgr and auto-approves them.
+    #>
     $ScriptFiles = Get-ChildItem -Path C:\tools\Scripts -Recurse -Filter *.ps1
 
-    # Loop through each script file and import it into SCCM
     foreach ($ScriptFile in $ScriptFiles) {
         $ScriptName = "MEMLABS-" + [System.IO.Path]::GetFileNameWithoutExtension($ScriptFile.FullName)
         $ScriptContent = Get-Content -Path $ScriptFile.FullName -Raw
 
-        # Create a new script in SCCM using New-CMScript
         try {
-
-            #check if script already exists or else create it
             if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
-                $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
+                $script = New-CMScript -ScriptName $ScriptName -ScriptText $ScriptContent -Fast
                 Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
-                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
-
-                ##for testing if you want to remove all the scripts
-                #Remove-CMScript -ForceWildcardHandling -ScriptName * -Force
+                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved"
             }
         }
         catch {
             Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
         }
     }
+}
 
+function Install-BootImagesAndOSD {
+    <#
+    .SYNOPSIS
+        Enables command support on boot images, distributes them, and sets up OSD share.
+    #>
+    param(
+        [string]$DomainFullName,
+        [string]$ThisMachineName
+    )
 
-    ## Task sequences 
-
-    #custom domain name in winPE
+    # Custom domain branding in WinPE
     Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
 
-    # Get all boot images
+    # Enable command support and distribute boot images
     $BootImages = Get-CMBootImage
-
-    # Loop through each boot image and distribute it
     foreach ($BootImage in $BootImages) {
         try {
-            # Enable Command Support for the boot image
             $BootImage | Set-CMBootImage -EnableCommandSupport $true
-            $packageId = $BootImage.PackageID
-            # Distribute the boot image
-            Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
-            Write-DscStatus "$Tag Successfully started distribution for boot image: $($BootImage.Name)"
+            Start-CMContentDistribution -BootImageId $BootImage.PackageID -DistributionPointGroupName "ALL DPS"
+            Write-DscStatus "$Tag Successfully distributed boot image: $($BootImage.Name)"
         }
         catch {
-            Write-DscStatus "$Tag Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
+            Write-DscStatus "$Tag Failed to distribute boot image: $($BootImage.Name). Error: $_"
         }
     }
 
-
-    #Tim is copying the iso directly at phase 1
+    # Create and share OSD folder
     Write-DscStatus "$Tag ISO files are already copied from phase 1"
 
-    $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" | Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
+    $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" |
+        Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
+    Write-DscStatus "$Tag SCCM is installed on drive: $DriveLetter"
 
-    Write-DscStatus "$Tag SCCM is installed on the drive -  $DriveLetter"
-
-    # Define the folder path and share name
     $folderPath = "$DriveLetter\OSD"
     $shareName = "OSD"
 
-    Write-DscStatus "$Tag sharing the OSD folder as - $folderPath"
-
-    # Create the folder if it doesn't exist
     if (-not (Test-Path -Path $folderPath)) {
-        New-Item -ItemType Directory -Path $folderPath
-        Write-DscStatus "$Tag OSD folder does not exist and creating one"
+        New-Item -ItemType Directory -Path $folderPath | Out-Null
+        Write-DscStatus "$Tag Created OSD folder: $folderPath"
     }
 
-    # Create the share with read access for "Everyone"
-    New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+    Write-DscStatus "$Tag Shared $folderPath as $shareName"
 
-    Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
+    return $DriveLetter
+}
 
-    # Verify the share was created
-    #Get-SmbShare -Name $shareName
+function New-OSPackages {
+    <#
+    .SYNOPSIS
+        Creates OS upgrade packages and OS images for Windows 10 and 11.
+    #>
+    param(
+        [string]$ThisMachineName
+    )
 
-
-    #get OS upgrade package 
-    New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
-    New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
+    New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 -ErrorAction SilentlyContinue
+    New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 -ErrorAction SilentlyContinue
     Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
 
-    #get OS package
-    if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
-    if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
-
-    Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
-
-    # Get all Task Sequences with names starting with the specified prefix
-    $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
-
-    if (!$taskSequences) {
-
-        # Define variables for TS
-        #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
-        $win11UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade" | Select-Object -ExpandProperty PackageID
-        $win10UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade" | Select-Object -ExpandProperty PackageID
-        $BootImagePackageID = Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" }  | Select-Object -ExpandProperty PackageID
-        $win11OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
-        $win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
-        $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
-        $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
-        $win11UpgradeOperatingSystempath = "\\$ThisMachineName\osd\Windows 11 24h2"  
-        $win11UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
-        $win10UpgradeOperatingSystemWim = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
-        $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
-        $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
-        $domainshortname = $deployConfig.parameters.domainName -replace "\.com$", ""
-
-        $tstimezone = [System.TimeZoneInfo]::FindSystemTimeZoneById($deployconfig.vmOptions.timeZone)
-        if (Test-Path $cm_svc_file) {
-            # Add cm_svc user as a CM Account
-            $unencrypted = Get-Content $cm_svc_file
-        }
-        #distribute the OS packages and upgrade packages 
-        Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
-        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
-        Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
-     
-
-        # Create the in-place upgrade task sequence
-        New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w11-In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
-        Write-DscStatus "$Tag Successfully created windows 11 in-place upgrade TS"
-        New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w10-In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
-        Write-DscStatus "$Tag Successfully created windows 10 in-place upgrade TS"
-        $AdminName = $deployConfig.vmOptions.adminName
-        ## Build and capture TS
-
-        $buildandcapturewin11 = @{
-            BuildOperatingSystemImage          = $true
-            Name                               = "MEMLABS-w11-Build and capture"
-            Description                        = "MEMLABS auto created"
-            BootImagePackageId                 = $BootImagePackageID
-            HighPerformance                    = $true
-            ApplyAll                           = $false
-            OperatingSystemImagePackageId      = $win11OSimagepackageID
-            OperatingSystemImageIndex          = 3
-            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-            GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            TimeZone                           = $tstimezone
-            JoinDomain                         = "WorkgroupType"
-            WorkgroupName                      = "Workgroup"
-            ClientPackagePackageId             = $ClientPackagePackageId
-            InstallationProperty               = $clientProps
-            ApplicationName                    = "Admin Console"
-            IgnoreInvalidApplication           = $true
-            SoftwareUpdateStyle                = "All"
-            OperatingSystemFilePath            = $win11UpgradeOperatingSystemWim
-            ImageDescription                   = "MEMLABS autocreated"
-            ImageVersion                       = "image version 1"
-            CreatedBy                          = "MEMLABS"
-            OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-        }
-
-        New-CMTaskSequence @buildandcapturewin11
-        Write-DscStatus "$Tag Successfully created MEMLABS-w11-Build and capture TS"
-
-        $buildandcapturewin10 = @{
-            BuildOperatingSystemImage          = $true
-            Name                               = "MEMLABS-w10-Build and capture"
-            Description                        = "MEMLABS auto created"
-            BootImagePackageId                 = $BootImagePackageID
-            HighPerformance                    = $true
-            ApplyAll                           = $false
-            OperatingSystemImagePackageId      = $win10OSimagepackageID
-            OperatingSystemImageIndex          = 3
-            ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-            GeneratePassword                   = $false
-            LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            TimeZone                           = $tstimezone
-            JoinDomain                         = "WorkgroupType"
-            WorkgroupName                      = "workgroup"
-            ClientPackagePackageId             = $ClientPackagePackageId
-            InstallationProperty               = $clientProps
-            ApplicationName                    = "Admin Console"
-            IgnoreInvalidApplication           = $true
-            SoftwareUpdateStyle                = "All"
-            OperatingSystemFilePath            = $win10UpgradeOperatingSystemWim
-            ImageDescription                   = "MEMLABS autocreated"
-            ImageVersion                       = "image version 1"
-            CreatedBy                          = "MEMLABS"
-            OperatingSystemFileAccount         = "$DomainFullName\$AdminName" 
-            OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-        }
-        New-CMTaskSequence @buildandcapturewin10
-        Write-DscStatus "$Tag Successfully created MEMLABS-w10-Build and capture TS"
-        ##Create a task sequence to install an OS image
-
-        $installw11OSimage = @{
-            InstallOperatingSystemImage     = $true
-            Name                            = "MEMLABS-w11-Install OS image"
-            Description                     = "MEMLABS auto created"
-            BootImagePackageId              = $BootImagePackageID
-            HighPerformance                 = $true
-            CaptureNetworkSetting           = $true
-            CaptureUserSetting              = $true
-            SaveLocally                     = $true
-            CaptureLocallyUsingLink         = $true
-            UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
-            CaptureWindowsSetting           = $true
-            ConfigureBitLocker              = $true
-            PartitionAndFormatTarget        = $true
-            ApplyAll                        = $false
-            OperatingSystemImagePackageId   = $win11OSimagepackageID
-            OperatingSystemImageIndex       = 3
-            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-            GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            TimeZone                        = $tstimezone
-            JoinDomain                      = "DomainType"
-            DomainAccount                   = "$DomainFullName\$AdminName"
-            DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            ClientPackagePackageId          = $ClientPackagePackageId
-            InstallationProperty            = $clientProps
-            SoftwareUpdateStyle             = "All"
-        }
-
-        New-CMTaskSequence @installw11OSimage
-        Write-DscStatus "$Tag Successfully created MEMLABS-w11-Install OS image TS"
-
-        $installw10OSimage = @{
-            InstallOperatingSystemImage     = $true
-            Name                            = "MEMLABS-w10-Install OS image"
-            Description                     = "MEMLABS auto created"
-            BootImagePackageId              = $BootImagePackageID
-            HighPerformance                 = $true
-            CaptureNetworkSetting           = $true
-            CaptureUserSetting              = $true
-            SaveLocally                     = $true
-            CaptureLocallyUsingLink         = $true
-            UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
-            CaptureWindowsSetting           = $true
-            ConfigureBitLocker              = $true
-            PartitionAndFormatTarget        = $true
-            ApplyAll                        = $false
-            OperatingSystemImagePackageId   = $win10OSimagepackageID
-            OperatingSystemImageIndex       = 3
-            ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-            GeneratePassword                = $false
-            LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            TimeZone                        = $tstimezone
-            JoinDomain                      = "DomainType"
-            DomainAccount                   = "$DomainFullName\$AdminName"
-            DomainName                      = "$DomainFullName"
-            DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
-            DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
-            ClientPackagePackageId          = $ClientPackagePackageId
-            InstallationProperty            = $clientProps
-            SoftwareUpdateStyle             = "All"
-        }
-
-        New-CMTaskSequence @installw10OSimage
-        Write-DscStatus "$Tag Successfully created MEMLABS-w10-Install OS image TS"
-
-        $customTS = @{
-            CustomTaskSequence = $true
-            Name               = "MEMLABS-Custom TS Example"
-            Description        = "MEMLABS auto created"
-            HighPerformance    = $false
-            BootImagePackageId = $BootImagePackageID
-        }
-
-        New-CMTaskSequence @customTS
-        Write-DscStatus "$Tag Successfully created MEMLABS-Custom TS Example"
-
-        # Get all task sequences with names starting with "MEMLABS"
-        $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
-
-        # Get the "All Unknown Computers" collection
-        $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
-
-        foreach ($ts in $taskSequences) {
-            # Check if a deployment already exists for this task sequence to this collection
-            $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name | Where-Object { $_.PackageID -eq $ts.PackageID }
-
-            if ($existingDeployment) {
-                Write-DscStatus "Skipping $($ts.Name) already deployed to $($unknownCollection.Name)"
-            }
-            else {
-                Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
-
-                New-CMTaskSequenceDeployment `
-                    -TaskSequencePackageId $ts.PackageID `
-                    -CollectionId $unknownCollection.CollectionID `
-                    -DeployPurpose Available `
-                    -MakeAvailableTo ClientsMediaAndPxe
-            }
-
-        }
-
-
+    if (!(Get-CMOperatingSystemImage -Name "windows 11")) {
+        New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100
     }
-    else {
+    if (!(Get-CMOperatingSystemImage -Name "windows 10")) {
+        New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041
+    }
+    Write-DscStatus "$Tag Windows 10 and 11 OS images created"
+}
 
-        Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
+function New-TaskSequences {
+    <#
+    .SYNOPSIS
+        Creates all MEMLABS task sequences (in-place upgrade, build/capture, install OS, custom).
+    #>
+    param(
+        [object]$DeployConfig,
+        [string]$ThisMachineName,
+        [string]$DomainFullName,
+        [string]$DN
+    )
 
+    # Gather package IDs
+    $win11UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 11 upgrade" | Select-Object -ExpandProperty PackageID
+    $win10UpgradePackageID = Get-CMOperatingSystemUpgradePackage -Name "Windows 10 upgrade" | Select-Object -ExpandProperty PackageID
+    $BootImagePackageID = Get-CMBootImage | Where-Object { $_.Name -eq "Boot image (x64)" } | Select-Object -ExpandProperty PackageID
+    $win11OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 11" | Select-Object -ExpandProperty PackageID
+    $win10OSimagepackageID = Get-CMOperatingSystemImage -Name "windows 10" | Select-Object -ExpandProperty PackageID
+    $ClientPackagePackageId = Get-CMPackage -Fast -Name "Configuration Manager Client Package" | Select-Object -ExpandProperty PackageID
+    $UserStateMigrationToolPackageId = Get-CMPackage -Fast -Name "User State Migration Tool for Windows" | Select-Object -ExpandProperty PackageID
+
+    $clientProps = 'CCMDEBUGLOGGING="1" CCMLOGGINGENABLED="TRUE" CCMLOGLEVEL="0" CCMLOGMAXHISTORY="5" CCMLOGMAXSIZE="10000000" SMSCACHESIZE="15000"'
+    $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
+    $AdminName = $DeployConfig.vmOptions.adminName
+    $tstimezone = [System.TimeZoneInfo]::FindSystemTimeZoneById($DeployConfig.vmOptions.timeZone)
+
+    $unencrypted = $null
+    if (Test-Path $cm_svc_file) {
+        $unencrypted = Get-Content $cm_svc_file
     }
 
-    ### CI and baselines 
+    # Distribute OS content
+    Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+    Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName "ALL DPS"
+    Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
+    Write-DscStatus "$Tag Successfully distributed OS Image and upgrade packages"
 
-    #expand archive for importing cab files
-    Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
+    # In-Place Upgrade Task Sequences
+    New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w11-In-Place Upgrade Task Sequence" -UpgradePackageId $win11UpgradePackageID -SoftwareUpdateStyle All
+    Write-DscStatus "$Tag Created Windows 11 in-place upgrade TS"
 
-    # Define the path to the CAB files
-    $baselineFolder = "C:\tools\baselines"
+    New-CMTaskSequence -UpgradeOperatingSystem -Name "MEMLABS-w10-In-Place Upgrade Task Sequence" -UpgradePackageId $win10UpgradePackageID -SoftwareUpdateStyle All
+    Write-DscStatus "$Tag Created Windows 10 in-place upgrade TS"
 
-    # Get all .cab files in the folder
-    $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
+    # Build and Capture - Windows 11
+    $buildandcapturewin11 = @{
+        BuildOperatingSystemImage          = $true
+        Name                               = "MEMLABS-w11-Build and capture"
+        Description                        = "MEMLABS auto created"
+        BootImagePackageId                 = $BootImagePackageID
+        HighPerformance                    = $true
+        ApplyAll                           = $false
+        OperatingSystemImagePackageId      = $win11OSimagepackageID
+        OperatingSystemImageIndex          = 3
+        ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
+        GeneratePassword                   = $false
+        LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        TimeZone                           = $tstimezone
+        JoinDomain                         = "WorkgroupType"
+        WorkgroupName                      = "Workgroup"
+        ClientPackagePackageId             = $ClientPackagePackageId
+        InstallationProperty               = $clientProps
+        ApplicationName                    = "Admin Console"
+        IgnoreInvalidApplication           = $true
+        SoftwareUpdateStyle                = "All"
+        OperatingSystemFilePath            = "\\$ThisMachineName\osd\Windows 11 24h2\sources\install.wim"
+        ImageDescription                   = "MEMLABS autocreated"
+        ImageVersion                       = "image version 1"
+        CreatedBy                          = "MEMLABS"
+        OperatingSystemFileAccount         = "$DomainFullName\$AdminName"
+        OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+    }
+    New-CMTaskSequence @buildandcapturewin11
+    Write-DscStatus "$Tag Created MEMLABS-w11-Build and capture TS"
 
-    ForEach ($ConfigName in $ConfigNames) {
+    # Build and Capture - Windows 10
+    $buildandcapturewin10 = @{
+        BuildOperatingSystemImage          = $true
+        Name                               = "MEMLABS-w10-Build and capture"
+        Description                        = "MEMLABS auto created"
+        BootImagePackageId                 = $BootImagePackageID
+        HighPerformance                    = $true
+        ApplyAll                           = $false
+        OperatingSystemImagePackageId      = $win10OSimagepackageID
+        OperatingSystemImageIndex          = 3
+        ProductKey                         = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
+        GeneratePassword                   = $false
+        LocalAdminPassword                 = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        TimeZone                           = $tstimezone
+        JoinDomain                         = "WorkgroupType"
+        WorkgroupName                      = "Workgroup"
+        ClientPackagePackageId             = $ClientPackagePackageId
+        InstallationProperty               = $clientProps
+        ApplicationName                    = "Admin Console"
+        IgnoreInvalidApplication           = $true
+        SoftwareUpdateStyle                = "All"
+        OperatingSystemFilePath            = "\\$ThisMachineName\osd\Windows 10 22h2\sources\install.wim"
+        ImageDescription                   = "MEMLABS autocreated"
+        ImageVersion                       = "image version 1"
+        CreatedBy                          = "MEMLABS"
+        OperatingSystemFileAccount         = "$DomainFullName\$AdminName"
+        OperatingSystemFileAccountPassword = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+    }
+    New-CMTaskSequence @buildandcapturewin10
+    Write-DscStatus "$Tag Created MEMLABS-w10-Build and capture TS"
 
+    # Install OS Image - Windows 11
+    $installw11OSimage = @{
+        InstallOperatingSystemImage     = $true
+        Name                            = "MEMLABS-w11-Install OS image"
+        Description                     = "MEMLABS auto created"
+        BootImagePackageId              = $BootImagePackageID
+        HighPerformance                 = $true
+        CaptureNetworkSetting           = $true
+        CaptureUserSetting              = $true
+        SaveLocally                     = $true
+        CaptureLocallyUsingLink         = $true
+        UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
+        CaptureWindowsSetting           = $true
+        ConfigureBitLocker              = $true
+        PartitionAndFormatTarget        = $true
+        ApplyAll                        = $false
+        OperatingSystemImagePackageId   = $win11OSimagepackageID
+        OperatingSystemImageIndex       = 3
+        ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
+        GeneratePassword                = $false
+        LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        TimeZone                        = $tstimezone
+        JoinDomain                      = "DomainType"
+        DomainAccount                   = "$DomainFullName\$AdminName"
+        DomainName                      = "$DomainFullName"
+        DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
+        DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        ClientPackagePackageId          = $ClientPackagePackageId
+        InstallationProperty            = $clientProps
+        SoftwareUpdateStyle             = "All"
+    }
+    New-CMTaskSequence @installw11OSimage
+    Write-DscStatus "$Tag Created MEMLABS-w11-Install OS image TS"
 
-        $baselinename = [System.IO.Path]::GetFileNameWithoutExtension($ConfigName.Name)
+    # Install OS Image - Windows 10
+    $installw10OSimage = @{
+        InstallOperatingSystemImage     = $true
+        Name                            = "MEMLABS-w10-Install OS image"
+        Description                     = "MEMLABS auto created"
+        BootImagePackageId              = $BootImagePackageID
+        HighPerformance                 = $true
+        CaptureNetworkSetting           = $true
+        CaptureUserSetting              = $true
+        SaveLocally                     = $true
+        CaptureLocallyUsingLink         = $true
+        UserStateMigrationToolPackageId = $UserStateMigrationToolPackageId
+        CaptureWindowsSetting           = $true
+        ConfigureBitLocker              = $true
+        PartitionAndFormatTarget        = $true
+        ApplyAll                        = $false
+        OperatingSystemImagePackageId   = $win10OSimagepackageID
+        OperatingSystemImageIndex       = 3
+        ProductKey                      = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
+        GeneratePassword                = $false
+        LocalAdminPassword              = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        TimeZone                        = $tstimezone
+        JoinDomain                      = "DomainType"
+        DomainAccount                   = "$DomainFullName\$AdminName"
+        DomainName                      = "$DomainFullName"
+        DomainOrganizationUnit          = "LDAP://OU=MEMLABS-OSDComputers,$DN"
+        DomainPassword                  = ConvertTo-SecureString -String "$unencrypted" -AsPlainText -Force
+        ClientPackagePackageId          = $ClientPackagePackageId
+        InstallationProperty            = $clientProps
+        SoftwareUpdateStyle             = "All"
+    }
+    New-CMTaskSequence @installw10OSimage
+    Write-DscStatus "$Tag Created MEMLABS-w10-Install OS image TS"
 
-        if (!(Get-CMBaseline -Fast -Name $baselinename)) {
+    # Custom Task Sequence
+    $customTS = @{
+        CustomTaskSequence = $true
+        Name               = "MEMLABS-Custom TS Example"
+        Description        = "MEMLABS auto created"
+        HighPerformance    = $false
+        BootImagePackageId = $BootImagePackageID
+    }
+    New-CMTaskSequence @customTS
+    Write-DscStatus "$Tag Created MEMLABS-Custom TS Example"
 
-            # Create a configuration item (we are importing the cab files directly here)
-            $filename = $baselineFolder + "\" + $ConfigName.Name
-            Write-DscStatus "$Tag Importing cab from $filename location"
-            Import-CMConfigurationItem -FileName $filename -Force
-            Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
-    
-            # Create the configuration baseline
-            New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
-            Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
+    # Deploy all MEMLABS task sequences to "All Unknown Computers"
+    $taskSequences = Get-CMTaskSequence -Fast | Where-Object { $_.Name -like "MEMLABS*" }
+    $unknownCollection = Get-CMDeviceCollection -Name "All Unknown Computers"
 
-            # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
-            $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
-            Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
-            Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
+    foreach ($ts in $taskSequences) {
+        $existingDeployment = Get-CMDeployment -CollectionName $unknownCollection.Name |
+            Where-Object { $_.PackageID -eq $ts.PackageID }
 
-            # Deploy the configuration baseline to a collection
-
-            New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
-            Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
-
+        if ($existingDeployment) {
+            Write-DscStatus "$Tag Skipping $($ts.Name) - already deployed to $($unknownCollection.Name)"
         }
         else {
-            Write-DscStatus "Baseline $baselinename are already in place"
-
+            Write-DscStatus "$Tag Deploying Task Sequence: $($ts.Name)"
+            New-CMTaskSequenceDeployment `
+                -TaskSequencePackageId $ts.PackageID `
+                -CollectionId $unknownCollection.CollectionID `
+                -DeployPurpose Available `
+                -MakeAvailableTo ClientsMediaAndPxe
         }
     }
+}
 
-    #we have to make powershell bypass for the baselines to work as expected
-    $customclientsetting = "MEMLABS-powershellbypass"
- 
-    if (!(Get-CMClientSetting -Name $customclientsetting)) {
-        New-CMClientSetting -Name $customclientsetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag $customclientsetting client setting created"
+function Import-Baselines {
+    <#
+    .SYNOPSIS
+        Imports configuration baselines from CAB files and deploys them.
+    #>
+    Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
 
-        # Enable the PowerShell Execution Policy setting
-        Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customclientsetting
-        Write-DscStatus "$Tag Powershell policy successfully changed for $customclientsetting client setting "
+    $baselineFolder = "C:\tools\baselines"
+    $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
 
-        New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
-        Write-DscStatus "$Tag Deployed the client setting to all systems collection"
+    foreach ($ConfigName in $ConfigNames) {
+        $baselineName = [System.IO.Path]::GetFileNameWithoutExtension($ConfigName.Name)
+
+        if (Get-CMBaseline -Fast -Name $baselineName) {
+            Write-DscStatus "$Tag Baseline $baselineName already exists, skipping."
+            continue
+        }
+
+        $filename = Join-Path $baselineFolder $ConfigName.Name
+        Write-DscStatus "$Tag Importing cab: $filename"
+        Import-CMConfigurationItem -FileName $filename -Force
+        Write-DscStatus "$Tag Created Configuration Item: $baselineName"
+
+        New-CMBaseline -Name $baselineName -Description "MEMLABS auto imported"
+        Write-DscStatus "$Tag Created Configuration Baseline: $baselineName"
+
+        $ciinfo = Get-CMConfigurationItem -Name $baselineName -Fast
+        Set-CMBaseline -Name $baselineName -AddOSConfigurationItem $ciinfo.CI_ID
+        Write-DscStatus "$Tag Linked CI to Baseline: $baselineName"
+
+        New-CMBaselineDeployment -Name $baselineName -CollectionName "All Systems" -EnableEnforcement $true
+        Write-DscStatus "$Tag Deployed baseline: $baselineName to All Systems"
+    }
+}
+
+function Set-PowerShellBypassClientSetting {
+    <#
+    .SYNOPSIS
+        Creates a client setting to set PowerShell execution policy to Bypass (needed for baselines).
+    #>
+    $customClientSetting = "MEMLABS-powershellbypass"
+
+    if (Get-CMClientSetting -Name $customClientSetting) {
+        Write-DscStatus "$Tag Client setting $customClientSetting already exists."
+        return
     }
 
-    # Define additional device collection information
-    $Collections += @(
+    New-CMClientSetting -Name $customClientSetting -Description "Client settings for making powershell execution policy as bypass" -Type Device -ErrorAction SilentlyContinue
+    Set-CMClientSettingComputerAgent -PowerShellExecutionPolicy Bypass -Name $customClientSetting
+    New-CMClientSettingDeployment -Name $customClientSetting -CollectionId SMS00001
+    Write-DscStatus "$Tag Created and deployed client setting: $customClientSetting"
+}
+
+function New-DeviceCollections {
+    <#
+    .SYNOPSIS
+        Creates MEMLABS device collections with query-based membership rules.
+    #>
+    param(
+        [string]$SiteCode
+    )
+
+    $Collections = @(
         @{
             Name  = "MEMLABS-Windows 7 Devices"
             Query = @"
@@ -682,7 +630,7 @@ WHERE SMS_R_System.ResourceDomainORWorkgroup = 'XYZ'
         @{
             Name  = "MEMLABS-All Devices with BitLocker Disabled"
             Query = @"
-select SMS_R_System.Name, SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter, SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus 
+select SMS_R_System.Name, SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter, SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus
 from SMS_R_System inner join SMS_G_System_ENCRYPTABLE_VOLUME on SMS_G_System_ENCRYPTABLE_VOLUME.ResourceId = SMS_R_System.ResourceId
 where SMS_G_System_ENCRYPTABLE_VOLUME.DriveLetter = "C:" and SMS_G_System_ENCRYPTABLE_VOLUME.ProtectionStatus = 1 order by SMS_R_System.Name
 "@
@@ -703,7 +651,7 @@ SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SM
 FROM SMS_R_System
 WHERE DATEDIFF(day, SMS_R_SYSTEM.LastLogonTimestamp, GETDATE()) > 90
 "@
-        }
+        },
         @{
             Name  = "MEMLABS-Devices Missing Critical Updates"
             Query = @"
@@ -716,8 +664,8 @@ WHERE SMS_G_System_UPDATE_STATUS.Status = 2 AND SMS_G_System_UPDATE_STATUS.Updat
         @{
             Name  = "MEMLABS-Devices Online Now"
             Query = @"
-select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,
-SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.ResourceId in
+select SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier,
+SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client from SMS_R_System where SMS_R_System.ResourceId in
 (select resourceid from SMS_CollectionMemberClientBaselineStatus where SMS_CollectionMemberClientBaselineStatus.CNIsOnline = 1)
 "@
         },
@@ -779,8 +727,7 @@ FROM SMS_R_System
 INNER JOIN SMS_G_System_NETWORK_ADAPTER_CONFIGURATION ON SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.ResourceID = SMS_R_System.ResourceId
 WHERE SMS_G_System_NETWORK_ADAPTER_CONFIGURATION.DefaultIPGateway IS NULL
 "@
-        }
-
+        },
         @{
             Name  = "MEMLABS-Windows 10 Devices"
             Query = @"
@@ -892,453 +839,571 @@ WHERE SMS_G_System_OPERATING_SYSTEM.Version = '10.0.22621'
         @{
             Name  = "MEMLABS-All Non client Devices"
             Query = @"
-select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName 
+select Name, SMSAssignedSites, IPAddresses, IPSubnets, OperatingSystemNameandVersion, ResourceDomainORWorkgroup, LastLogonUserDomain, LastLogonUserName, SMSUniqueIdentifier, ResourceId, ResourceType, NetbiosName
 from sms_r_system where Client = 0 or Client is null
 "@
         },
         @{
             Name  = "MEMLABS-All Servers"
             Query = @"
-select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
-from SMS_R_System 
-where SMS_R_System.OperatingSystemNameandVersion like "%Server%" order by SMS_R_System.Name          
+select SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+from SMS_R_System
+where SMS_R_System.OperatingSystemNameandVersion like "%Server%" order by SMS_R_System.Name
 "@
         },
         @{
             Name  = "MEMLABS-All Workstations"
             Query = @"
-select SMS_R_SYSTEM.ResourceID,SMS_R_SYSTEM.ResourceType,SMS_R_SYSTEM.Name,SMS_R_SYSTEM.SMSUniqueIdentifier,SMS_R_SYSTEM.ResourceDomainORWorkgroup,SMS_R_SYSTEM.Client 
-from SMS_R_System 
-where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by SMS_R_System.Name      
+select SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name, SMS_R_SYSTEM.SMSUniqueIdentifier, SMS_R_SYSTEM.ResourceDomainORWorkgroup, SMS_R_SYSTEM.Client
+from SMS_R_System
+where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by SMS_R_System.Name
 "@
         }
     )
 
-
-        # Check if MEMLABS folder exists under Device Collections
+    # Create MEMLABS folder under Device Collections
     $folder = Get-CMFolder -FolderPath "\DeviceCollection\MEMLABS"
-
     if (-not $folder) {
-        # Create MEMLABS folder if it does not exist
         New-CMFolder -Name "MEMLABS" -ParentFolderPath "\DeviceCollection"
-        Write-DscStatus "$Tag MEMLABS folder created under Device Collections."
+        Write-DscStatus "$Tag Created MEMLABS folder under Device Collections."
     }
     else {
         Write-DscStatus "$Tag MEMLABS folder already exists under Device Collections."
     }
 
-
-    # Loop through each collection and create it in SCCM
+    # Create each collection
     foreach ($Collection in $Collections) {
         $CollectionName = $Collection.Name
         $Query = $Collection.Query
-    
-        if (-not (Get-CMDeviceCollection -Name $CollectionName)) {
-            # Create the device collection
-            $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
 
-            Write-DscStatus "$Tag Created collection: $CollectionName"
-
-            # Add a query rule to the collection
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
-    
-            Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
-
-            
-
-            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
-
-            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
-
-            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
-
+        if (Get-CMDeviceCollection -Name $CollectionName) {
+            continue
         }
+
+        $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+        Write-DscStatus "$Tag Created collection: $CollectionName"
+
+        Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
+        Write-DscStatus "$Tag Added query rule: $CollectionName Rule"
+
+        Move-CMObject -FolderPath "$SiteCode`:\DeviceCollection\MEMLABS" -ObjectId $NewCollection.CollectionID
+        Write-DscStatus "$Tag Moved collection to MEMLABS folder"
+    }
+}
+
+function Install-EndpointProtectionAndClientSettings {
+    <#
+    .SYNOPSIS
+        Installs the Endpoint Protection role and creates Defender/Updates client settings.
+    #>
+    param(
+        [string]$SiteCode,
+        [string]$ProviderMachineName
+    )
+
+    # Endpoint Protection Point
+    if (!(Get-CMEndpointProtectionPoint -AllSite)) {
+        Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
+        Write-DscStatus "$Tag Endpoint protection role installed"
     }
 
-    #install Endpoint protection role in hierarchy to support defender updates
-    if (!(Get-CMEndpointProtectionPoint -AllSite)) {
-    
-        # this is needed for defender updates and management
-        Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
-        Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
-    }
-    
+    # Defender client setting
     if (!(Get-CMClientSetting -Name MEMLABS-Defender)) {
         New-CMClientSetting -Name MEMLABS-Defender -Description "Defender execution policy" -Type Device -ErrorAction SilentlyContinue
-        Set-CMClientSettingEndpointProtection -Name MEMLABS-Defender -Enable $true -DisableFirstSignatureUpdate $true -ForceRebootHr $true -InstallEndpointProtectionClient $true -OverrideMaintenanceWindow $true -DefenderAgent MdeDownlevel -SuppressReboot $true -PersistInstallation $true 
+        Set-CMClientSettingEndpointProtection -Name MEMLABS-Defender -Enable $true -DisableFirstSignatureUpdate $true `
+            -ForceRebootHr $true -InstallEndpointProtectionClient $true -OverrideMaintenanceWindow $true `
+            -DefenderAgent MdeDownlevel -SuppressReboot $true -PersistInstallation $true
         New-CMClientSettingDeployment -Name MEMLABS-Defender -CollectionId SMS00001
-        Write-DscStatus "$Tag Client setting to support Defender patching is enabled"   
+        Write-DscStatus "$Tag Defender client setting created and deployed"
     }
-    
+
+    # Updates client setting
     if (!(Get-CMClientSetting -Name MEMLABS-Updates)) {
         New-CMClientSetting -Name MEMLABS-Updates -Description "Updates M365 policy" -Type Device -ErrorAction SilentlyContinue
-        Set-CMClientSettingSoftwareUpdate -EnableInstallation $true -Name MEMLABS-Updates -EnableThirdPartyUpdates $true -Office365ManagementType $true -EnableDeltaDownload $true -EnableDynamicUpdate $true -Enable $true
+        Set-CMClientSettingSoftwareUpdate -EnableInstallation $true -Name MEMLABS-Updates `
+            -EnableThirdPartyUpdates $true -Office365ManagementType $true `
+            -EnableDeltaDownload $true -EnableDynamicUpdate $true -Enable $true
         New-CMClientSettingDeployment -Name MEMLABS-Updates -CollectionId SMS00001
-        Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
+        Write-DscStatus "$Tag Updates client setting created and deployed"
     }
-    
-    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
+}
 
-    if ($deployConfig.cmOptions.OfflineSUP) {
+function Test-SyncSucceeded {
+    <#
+    .SYNOPSIS
+        Waits for a WSUS sync to complete successfully, with timeout.
+    .OUTPUTS
+        $true if sync succeeded, $false otherwise.
+    #>
+    param(
+        [string]$SiteCode
+    )
+
+    $syncFinished = $syncTimeout = $syncFailed = $false
+    $i = 0
+
+    do {
+        $syncState = Get-CMSoftwareUpdateSyncStatus |
+            Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } |
+            Select-Object -First 1
+
+        if (-not $syncState.WSUSServerName) {
+            Start-Sleep -Seconds 120
+            $syncState = Get-CMSoftwareUpdateSyncStatus |
+                Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } |
+                Select-Object -First 1
+
+            if (-not $syncState.WSUSServerName) {
+                Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected."
+                $syncFailed = $true
+                return $false
+            }
+        }
+
+        if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
+            Write-DscStatus "$Tag SUM Sync not running on $($syncState.WSUSServerName). Triggering sync."
+            Sync-CMSoftwareUpdate
+            Start-Sleep -Seconds 120
+        }
+        else {
+            $syncStateString = switch ($syncState.LastSyncState) {
+                6700 { "WSUS Sync Manager Error" }
+                6701 { "WSUS Synchronization Started" }
+                6702 { "WSUS Synchronization Done" }
+                6703 { "WSUS Synchronization Failed" }
+                6704 { "WSUS Synchronization In Progress - Synchronizing WSUS Server" }
+                6705 { "WSUS Synchronization In Progress - Synchronizing SMS Database" }
+                6706 { "WSUS Synchronization In Progress - Synchronizing Internet facing WSUS Server" }
+                6707 { "Content of WSUS Server is out of sync with upstream server" }
+                6709 { "SMS Legacy Update Synchronization started" }
+                6710 { "SMS Legacy Update Synchronization done" }
+                6711 { "SMS Legacy Update Synchronization failed" }
+                default { "Unknown" }
+            }
+            Write-DscStatus "$Tag SUM Sync: State $($syncState.LastSyncState) - $syncStateString [$($syncState.WSUSServerName)]"
+
+            if ($syncState.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag SUM Sync finished successfully."
+                return $true
+            }
+
+            $i++
+            Start-Sleep -Seconds 60
+
+            if ($i -gt 60) {
+                $syncTimeout = $true
+                Write-DscStatus "$Tag SUM Sync timed out."
+                return $false
+            }
+        }
+    } until ($syncFinished -or $syncTimeout -or $syncFailed)
+
+    return $false
+}
+
+function Invoke-FinalFullSync {
+    <#
+    .SYNOPSIS
+        Drops a full.syn file to trigger a full WSUS synchronization.
+    #>
+    param(
+        [string]$CMInstallDir
+    )
+
+    $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
+    $filePath = Join-Path $folderPath "full.syn"
+    Write-DscStatus "$Tag Checking $folderPath to drop full.syn for full synchronization"
+
+    if (Test-Path $folderPath) {
+        try {
+            New-Item -Path $filePath -ItemType File -Force | Out-Null
+            Write-DscStatus "$Tag File 'full.syn' created at $folderPath"
+        }
+        catch {
+            Write-DscStatus "$Tag Error creating 'full.syn': $_"
+        }
+    }
+    else {
+        Write-DscStatus "$Tag Folder not found: $folderPath"
+    }
+}
+
+function Set-SUPProductsAndClassifications {
+    <#
+    .SYNOPSIS
+        Configures SUP products, classifications, and creates ADRs for patching.
+    #>
+    param(
+        [object]$DeployConfig,
+        [string]$SiteCode,
+        [string]$CMInstallDir,
+        [string]$ThisMachineName,
+        [string]$DriveLetter,
+        [string]$ProviderMachineName
+    )
+
+    $Sups = $DeployConfig.virtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $SiteCode }
+
+    if ($DeployConfig.cmOptions.OfflineSUP) {
         $Sups = $false
-        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"        
+        Write-DscStatus "$Tag Offline SUP requested, skipping SUP product check"
     }
 
     if (-not $Sups) {
-        Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
+        Write-DscStatus "$Tag No SUP installed for this site, skipping SUP product check and sync"
+        return
     }
 
-    if ($Sups) {
+    # Determine which products to subscribe to
+    $productClassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+        Where-Object { $_.IsSubscribed } |
+        Select-Object -ExpandProperty LocalizedCategoryInstanceName
 
-        # Get the Software Update Point Component
-        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-    
-        # Get unique operating systems
-        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
+    $products = ($DeployConfig.virtualMachines.operatingSystem | Select-Object -Unique) +
+                ($DeployConfig.virtualMachines.sqlversion | Select-Object -Unique)
 
-        Write-DscStatus "$Tag the OS for this SCCM site are $products"
-    
-        # Rename products based on conditions
-        $products = $products -replace "^Server 2016$", "Windows Server 2016"
-        $products = $products -replace "^Server 2019$", "Windows Server 2019"
-        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
-        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
-        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
-        $products = $products -replace "^Windows 11.*$", "Windows 11"
-        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
-        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
-        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
-        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
-    
-        # Add additional products for defender and Office 365
-        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
-        $products += "Microsoft Defender for Endpoint"
-    
-        # Add double quotes around each product name as few products have commas in their name
-        $products = @($products | ForEach-Object { "$_" })
+    Write-DscStatus "$Tag OS products for this site: $products"
 
-        Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
-    
-        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
+    # Map product names to SUP naming convention
+    $products = $products -replace "^Server 2016$", "Windows Server 2016"
+    $products = $products -replace "^Server 2019$", "Windows Server 2019"
+    $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
+    $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
+    $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
+    $products = $products -replace "^Windows 11.*$", "Windows 11"
+    $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
+    $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
+    $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
+    $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
 
-        Write-DscStatus "$Tag Are there any products not checked on SUP product? $missingproducts - if yes, please continue"
-        function Check-SyncSucceeded {
-            param (
-                [string]$SiteCode
-            )
-     
-            $syncFinished = $syncTimeout = $syncFailed = $false
-            $i = 0
-     
-            do {                    
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-    
-                if (-not $($syncState.WSUSServerName)) {
-                    start-sleep -Seconds 120
-                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-                     if (-not $($syncState.WSUSServerName)) {
-                        Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
-                        $syncFailed = $true
-                        return $false
-                     }                 
-                }
+    # Add Defender and Office products
+    $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
+    $products += "Microsoft Defender for Endpoint"
+    $products = @($products | ForEach-Object { "$_" })
 
-                if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                    Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
-                    Sync-CMSoftwareUpdate
-                    Start-Sleep -Seconds 120
-                } 
-                else {
-                    $syncStateString = "Unknown"
-                    switch ($($syncState.LastSyncState)) {
-                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                        "6701" { $syncStateString = "WSUS Synchronization Started" }
-                        "6702" { $syncStateString = "WSUS Synchronization Done" }
-                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                    }
-                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
-     
-                    if ($syncState.LastSyncState -eq 6702) {
-                        Write-DscStatus "SUM Sync finished successfully."
-                        return $true
-                    }
-     
-                    if (-not $syncFinished) {
-                        $i++
-                        Start-Sleep -Seconds 60
-                    }
-     
-                    if ($i -gt 60) {
-                        $syncTimeout = $true
-                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                        return $false
-                    }
-                }
-            }  until ($syncFinished -or $syncTimeout -or $syncFailed)
-     
-            return $false
-        }
+    Write-DscStatus "$Tag Mapped product names: $products"
 
-        function Invoke-finalfullsync {
-            $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
-            $filePath = Join-Path $folderPath "full.syn"
-            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to initialize a full synchronization"
-    
-            # Ensure the folder exists; create it if it doesn't
-            if (Test-Path $folderPath) {
-           
-                try {
-                    # Create the "full.syn" file (overwrites if it exists)
-                    New-Item -Path $filePath -ItemType File -Force | Out-Null
-                    Write-DscStatus "$Tag File 'full.syn' created successfully at $folderPath"
-                }
-                catch {
-                    Write-DscStatus "$Tag Error creating 'full.syn': $_"
-                }
+    # Identify missing products
+    $missingProducts = $products | Where-Object { $_ -notin $productClassifications }
+
+    Write-DscStatus "$Tag Missing products to enable: $missingProducts"
+
+    if (-not $missingProducts) {
+        Write-DscStatus "$Tag SUP products and classifications are already enabled."
+    }
+    else {
+        Write-DscStatus "$Tag Triggering sync to refresh product catalog"
+        Invoke-FinalFullSync -CMInstallDir $CMInstallDir
+        $syncSuccess = Test-SyncSucceeded -SiteCode $SiteCode
+
+        if ($syncSuccess) {
+            Write-DscStatus "$Tag Enabling missing products: $products"
+            $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+            $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+
+            # Determine language
+            $lang = $DeployConfig.vmOptions.locale
+            $addLang = switch ($lang) {
+                "en-us" { "English" }
+                "ja-jp" { "Japanese" }
+                "es-es" { "Spanish" }
+                "de-de" { "German" }
+                "fr-fr" { "French" }
+                default { "English" }
+            }
+            Write-DscStatus "$Tag Locale language: $addLang"
+
+            $parameters = @{
+                InputObject                  = $supComp
+                SynchronizeAction            = 'SynchronizeFromMicrosoftUpdate'
+                AddUpdateClassification      = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+                Schedule                     = $schedule
+                EnableSyncFailureAlert       = $true
+                ImmediatelyExpireSupersedence = $false
+                AddLanguageUpdateFile        = $addLang
+                AddLanguageSummaryDetails    = $addLang
+                EnableCallWsusCleanupWizard  = $true
+                WaitMonth                    = 3
+                EnableThirdPartyUpdates      = $true
+                EnableManualCertManagement   = $false
+                AddProduct                   = $products
             }
 
-        }
+            Set-CMSoftwareUpdatePointComponent @parameters
 
-    
-        # Check if product classifications are already enabled for Critical updates or definition updates
-        if (!$missingproducts) {
-            Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
+            # Remove unwanted product family
+            Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+
+            $updatedClassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+                Where-Object { $_.IsSubscribed } |
+                Select-Object -ExpandProperty LocalizedCategoryInstanceName
+            Write-DscStatus "$Tag Updated subscribed products: $updatedClassifications"
+            Write-DscStatus "$Tag Running final sync after enabling products"
+            Invoke-FinalFullSync -CMInstallDir $CMInstallDir
         }
         else {
-            Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
-            Invoke-finalfullsync
-            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
-
-            if ($syncSuccess) {
-
-                Write-DscStatus "$Tag Found missing $products, enabling them now"
-                $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-                $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
-    
-                # Get the language setting
-                $lang = $deployConfig.vmOptions.locale
-    
-                # Define language mappings
-                switch ($lang) {
-                    "en-us" { $addLang = "English" }
-                    "ja-jp" { $addLang = "Japanese" }
-                    "es-es" { $addLang = "Spanish" }
-                    "de-de" { $addLang = "German" }
-                    "fr-fr" { $addLang = "French" }
-                    default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
-                }
-    
-                # Output the result
-                Write-DscStatus "$Tag the locale language is $addLang"
-    
-                $parameters = @{
-                    InputObject                   = $supComp
-                    #DefaultWsusServer            = 'sup.contoso.com'
-                    SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-                    #ReportingEvent               = 'CreateAllWsusReportingEvents'
-                    #RemoveUpdateClassification   = "Update Rollups"
-                    AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-                    Schedule                      = $schedule
-                    EnableSyncFailureAlert        = $true
-                    ImmediatelyExpireSupersedence = $false
-                    AddLanguageUpdateFile         = $addLang
-                    AddLanguageSummaryDetails     = $addLang
-                    #RemoveLanguageUpdateFile     = $removeLang
-                    #RemoveLanguageSummaryDetails = $removeLang
-                    EnableCallWsusCleanupWizard   = $true
-                    WaitMonth                     = 3
-                    EnableThirdPartyUpdates       = $true
-                    EnableManualCertManagement    = $false
-                    AddProduct                    = $products
-                }
-    
-                Set-CMSoftwareUpdatePointComponent @parameters
-    
-    
-                #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-                Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-                Write-DscStatus "$Tag $productclassifications before enabling"
-                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-                Write-DscStatus "$Tag $productclassifications1 after enabling"
-                Write-DscStatus "$Tag !!Final !! sync after enabling products and classifications" 
-                Invoke-finalfullsync
-
-            }
-            else {
-
-                Write-DscStatus "$Tag we were not able to sync the products and classifications so ADRs will not be created"
-                Invoke-finalfullsync
-            }
+            Write-DscStatus "$Tag Sync failed - ADRs will not be created"
+            Invoke-FinalFullSync -CMInstallDir $CMInstallDir
+            return
         }
-       
-        # Define the collection where the updates will be deployed
-        $TargetCollection = Get-CMDeviceCollection -Name "All systems"
-    
-        # Define ADR Names
-        $ADRNames = @{
-            "Client"   = "MEMLABS-ADR-Windows-10/11"
-            "Server"   = "MEMLABS-ADR-Windows-Servers"
-            "Defender" = "MEMLABS-ADR-Windows-defender"
-            "office"   = "MEMLABS-ADR-O365patching"
-        }
-
-        # Define the folder path and share name
-        $folderPath1 = "$DriveLetter\updatePkgs"
-        $shareName1 = "updatePkgs"
-
-        Write-DscStatus "$Tag sharing the updatePkgs folder as - $folderPath1"
-
-        # Create the folder if it doesn't exist
-        if (-not (Test-Path -Path $folderPath1)) {
-            New-Item -ItemType Directory -Path $folderPath1
-            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "windows10-11")
-            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windowsserver")
-            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windows_defender")
-            New-Item -ItemType Directory -Path (Join-Path $folderPath1 "O365") 
-            Write-DscStatus "$Tag updatePkgs folder does not exist and creating one"
-        }
-
-        # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
-
-        Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
-
-        # Define Deployment Packages
-        $Packages = @(
-            @{ Name = "MEMLABS-W10-11-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows10-11"; Description = "Windows 10 and 11 Security Updates" },
-            @{ Name = "MEMLABS-Win-Server-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windowsserver"; Description = "Windows Server Security Updates" },
-            @{ Name = "MEMLABS-Defender-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows_defender"; Description = "Windows Defender Updates" },
-            @{ Name = "MEMLABS-ADR-O365patching-pkg"; Path = "\\$ThisMachineName\updatePkgs\O365"; Description = "O365 Updates" }
-        )
-    
-        # Function to Create Software Update Deployment Package
-        function New-SCCMUpdatePackage {
-            param (
-                [string]$PackageName,
-                [string]$PackagePath,
-                [string]$PackageDescription
-            )
-    
-            if (!(Get-CMSoftwareUpdateDeploymentPackage -Name $PackageName)) {
-                Write-DscStatus "$Tag Creating package: $PackageName"
-                try {
-                    New-CMSoftwareUpdateDeploymentPackage -Name $PackageName -Path $PackagePath -Description $PackageDescription
-                    Write-DscStatus "$Tag Successfully created package: $PackageName"
-                    Start-CMContentDistribution -DeploymentPackageName $PackageName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Successfully distributed MEMLABS $PackageName to all DPs"
-                    New-CMSoftwareUpdateGroup -Name $PackageName -Description $PackageDescription
-                    Write-DscStatus "$Tag Successfully created SUG $PackageName"
-                
-                }
-                catch {
-                    Write-DscStatus "$Tag Failed to create package: $PackageName. Error: $_"
-                }
-            }
-            else {
-                Write-DscStatus "$Tag Package already exists: $PackageName"
-            }
-        }
-    
-        # Loop through each package and create it if it doesn't exist
-        foreach ($pkg in $Packages) {
-            New-SCCMUpdatePackage -PackageName $pkg.Name -PackagePath $pkg.Path -PackageDescription $pkg.Description
-        }
-    
-        # Create the ADR schedules
-        $patchTueSchedule = New-CMSchedule -Start (Get-Date) -DayOfWeek Tuesday -WeekOrder Second -RecurCount 1 -OffsetDay 2
-        $dailySchedule = New-CMSchedule -DurationInterval Days -DurationCount 0 -RecurInterval Days -RecurCount 1
-    
-        if (!(Get-CMSoftwareUpdateAutoDeploymentRule -Fast | Select-Object Name)) {
-    
-            $maxAttempts = 3
-            $attempt = 0
-            $success = $false
-        
-            while (-not $success -and $attempt -lt $maxAttempts) {
-                try {
-                    New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Client `
-                        -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false `
-                        -Product "windows 11", "Windows 10, version 1903 and later" -Architecture X64 `
-                        -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-                        -DeploymentPackageName $Packages[0].Name -Description "MEMLABS autocreated ADR for win 10/11 patching" `
-                        -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-                    Write-DscStatus "$Tag ADR created successfully for Windows 10 and 11 Security Updates"
-                    $success = $true
-                }
-                catch {
-                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates"
-                    Check-SyncSucceeded -SiteCode $SiteCode
-                    $attempt++
-                    Write-DscStatus "$Tag Retrying ADR creation, attempt $attempt of $maxAttempts"
-                    Start-Sleep -Seconds 10  # Pause before retrying
-                }
-            }
-        
-            if (-not $success) {
-                Write-DscStatus "$Tag ADR creation failed after $maxAttempts attempts."
-            }
-        
-            try {
-                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Server `
-                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
-                    -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-                    -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-    
-                Write-DscStatus "$Tag ADR created successfully for Windows server Updates"
-            }
-            catch {
-                Write-DscStatus "$Tag An error occurred while creating the ADR for win server patching"
-            }
-            try {
-                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Defender `
-                    -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false -Product $products -Architecture X64 `
-                    -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
-                    -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-                Write-DscStatus "$Tag ADR created successfully for Defender Security Updates"
-            }
-            catch {
-                Write-DscStatus "$Tag An error occurred while creating the ADR for Defender Security Updates"
-            }
-
-            try {
-                New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.office `
-                    -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
-                    -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
-                    -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
-        
-                Write-DscStatus "$Tag ADR created successfully for O365 Updates"
-            }
-            catch {
-                Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
-            }
-            ##this sync will take a long time as it will almost pull 3k-5k updates down so don't wait for the process to finish
-            Invoke-finalfullsync
-        }
-
     }
 
-    $collection = Get-CMCollection -Name "All Unknown Computers"
-    if ($Collection -and $Collection.CollectionID) {
-        Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID
-    }    
-
-    # Create the flag file
-    New-Item -ItemType File -Path $flagFile -Force | Out-Null
-    Write-DscStatus "$Tag $flagFile the perf loading the environment created"
-
-    Write-DscStatus "$Tag Completed the perf loading the environment"
-    Write-DscStatus "$Tag ******************************************" -NoStatus
-    Write-DscStatus "$Tag ******************************************" -NoStatus
-
-
-
+    # Create ADRs and deployment packages
+    New-ADRsAndPackages -DeployConfig $DeployConfig -SiteCode $SiteCode -ThisMachineName $ThisMachineName `
+        -DriveLetter $DriveLetter -Products $products -CMInstallDir $CMInstallDir
 }
+
+function New-ADRsAndPackages {
+    <#
+    .SYNOPSIS
+        Creates software update deployment packages and Automatic Deployment Rules.
+    #>
+    param(
+        [object]$DeployConfig,
+        [string]$SiteCode,
+        [string]$ThisMachineName,
+        [string]$DriveLetter,
+        [array]$Products,
+        [string]$CMInstallDir
+    )
+
+    $TargetCollection = Get-CMDeviceCollection -Name "All systems"
+
+    $ADRNames = @{
+        "Client"   = "MEMLABS-ADR-Windows-10/11"
+        "Server"   = "MEMLABS-ADR-Windows-Servers"
+        "Defender" = "MEMLABS-ADR-Windows-defender"
+        "Office"   = "MEMLABS-ADR-O365patching"
+    }
+
+    # Create and share updatePkgs folder
+    $folderPath1 = "$DriveLetter\updatePkgs"
+    $shareName1 = "updatePkgs"
+
+    if (-not (Test-Path -Path $folderPath1)) {
+        New-Item -ItemType Directory -Path $folderPath1 | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $folderPath1 "windows10-11") | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windowsserver") | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $folderPath1 "Windows_defender") | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $folderPath1 "O365") | Out-Null
+        Write-DscStatus "$Tag Created updatePkgs folder structure"
+    }
+
+    New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+    Write-DscStatus "$Tag Shared $folderPath1 as $shareName1"
+
+    # Define Deployment Packages
+    $Packages = @(
+        @{ Name = "MEMLABS-W10-11-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows10-11"; Description = "Windows 10 and 11 Security Updates" },
+        @{ Name = "MEMLABS-Win-Server-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windowsserver"; Description = "Windows Server Security Updates" },
+        @{ Name = "MEMLABS-Defender-CU-pkg"; Path = "\\$ThisMachineName\updatePkgs\Windows_defender"; Description = "Windows Defender Updates" },
+        @{ Name = "MEMLABS-ADR-O365patching-pkg"; Path = "\\$ThisMachineName\updatePkgs\O365"; Description = "O365 Updates" }
+    )
+
+    # Create each package
+    foreach ($pkg in $Packages) {
+        if (!(Get-CMSoftwareUpdateDeploymentPackage -Name $pkg.Name)) {
+            Write-DscStatus "$Tag Creating package: $($pkg.Name)"
+            try {
+                New-CMSoftwareUpdateDeploymentPackage -Name $pkg.Name -Path $pkg.Path -Description $pkg.Description
+                Start-CMContentDistribution -DeploymentPackageName $pkg.Name -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+                New-CMSoftwareUpdateGroup -Name $pkg.Name -Description $pkg.Description
+                Write-DscStatus "$Tag Created and distributed package: $($pkg.Name)"
+            }
+            catch {
+                Write-DscStatus "$Tag Failed to create package: $($pkg.Name). Error: $_"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag Package already exists: $($pkg.Name)"
+        }
+    }
+
+    # Create ADRs
+    if (Get-CMSoftwareUpdateAutoDeploymentRule -Fast | Select-Object -ExpandProperty Name) {
+        Write-DscStatus "$Tag ADRs already exist, skipping creation"
+        return
+    }
+
+    $patchTueSchedule = New-CMSchedule -Start (Get-Date) -DayOfWeek Tuesday -WeekOrder Second -RecurCount 1 -OffsetDay 2
+    $dailySchedule = New-CMSchedule -DurationInterval Days -DurationCount 0 -RecurInterval Days -RecurCount 1
+
+    # ADR for Windows 10/11
+    $maxAttempts = 3
+    $attempt = 0
+    $success = $false
+
+    while (-not $success -and $attempt -lt $maxAttempts) {
+        try {
+            New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Client `
+                -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false `
+                -Product "windows 11", "Windows 10, version 1903 and later" -Architecture X64 `
+                -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+                -DeploymentPackageName $Packages[0].Name -Description "MEMLABS autocreated ADR for win 10/11 patching" `
+                -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+            Write-DscStatus "$Tag ADR created: Windows 10/11 Security Updates"
+            $success = $true
+        }
+        catch {
+            $attempt++
+            Write-DscStatus "$Tag ADR creation failed for Windows 10/11 (attempt $attempt of $maxAttempts). Error: $_"
+            Test-SyncSucceeded -SiteCode $SiteCode
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    if (-not $success) {
+        Write-DscStatus "$Tag ADR creation failed after $maxAttempts attempts for Windows 10/11."
+    }
+
+    # ADR for Windows Servers
+    try {
+        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Server `
+            -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false `
+            -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" `
+            -Architecture X64 -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+            -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" `
+            -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        Write-DscStatus "$Tag ADR created: Windows Server Updates"
+    }
+    catch {
+        Write-DscStatus "$Tag Failed to create ADR for Windows Server. Error: $_"
+    }
+
+    # ADR for Defender
+    try {
+        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Defender `
+            -DateReleasedOrRevised Last7Days -UpdateClassification "Definition updates" -Superseded $false `
+            -Product $Products -Architecture X64 -Schedule $dailySchedule -RunType RunTheRuleOnSchedule `
+            -DeploymentPackageName $Packages[2].Name -Description "MEMLABS autocreated ADR for definition updates patching" `
+            -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        Write-DscStatus "$Tag ADR created: Defender Definition Updates"
+    }
+    catch {
+        Write-DscStatus "$Tag Failed to create ADR for Defender. Error: $_"
+    }
+
+    # ADR for Office 365
+    try {
+        New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Office `
+            -DateReleasedOrRevised Last7Days -Titles "-preview", "Microsoft 365 Apps Update" -Superseded $false `
+            -Product "Microsoft 365 Apps/Office 2019/Office LTSC" `
+            -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
+            -DeploymentPackageName $Packages[3].Name -Description "MEMLABS autocreated ADR for O365 updates patching" `
+            -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
+        Write-DscStatus "$Tag ADR created: O365 Updates"
+    }
+    catch {
+        Write-DscStatus "$Tag Failed to create ADR for O365. Error: $_"
+    }
+
+    # Final sync (will pull 3k-5k updates - don't wait)
+    Invoke-FinalFullSync -CMInstallDir $CMInstallDir
+}
+
+#endregion Helper Functions
+
+#region Main Execution
+
+# Check flag file for idempotency
+if (Test-Path $flagFile) {
+    Write-DscStatus "$Tag Flag file exists. Skipping execution."
+    return
+}
+
+Write-DscStatus "$Tag Flag file does not exist. Starting execution."
+
+if (-not $ConfigFilePath) {
+    $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
+}
+
+# Read config
+$deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
+
+if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
+    return
+}
+
+# Connect to the CM site (imports module, sets up PS drive, sets location)
+. $PSScriptRoot\Connect-CMSite.ps1 -Tag $Tag
+
+# Extract values from config
+$DomainFullName = $deployConfig.parameters.domainName
+$DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')
+$ThisMachineName = $deployConfig.parameters.ThisMachineName
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$DCVM = $deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }
+$DCName = $DCVM.vmName
+$CMInstallDir = $ThisVM.CMInstallDir
+
+# Step 1: Create DP Group
+New-DPGroup
+
+# Step 2: Enable Site Features
+Write-DscStatus "$Tag Enabling site features"
+Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+
+# Step 3: Applications and Packages
+$apps = $deployConfig.Tools | Where-Object { $_.Appinstall -eq $true }
+if ($apps) {
+    Install-Applications -Apps $apps -ThisMachineName $ThisMachineName
+}
+
+# Step 4: Set TwoKeyApproval (auto-approval for scripts)
+$namespace = "ROOT\SMS\site_$SiteCode"
+Set-TwoKeyApproval -SiteCode $SiteCode -Namespace $namespace
+
+# Step 5: Import Scripts
+Import-CMScripts
+
+# Step 6: Task Sequences
+$taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
+
+if (!$taskSequences) {
+    # Set up boot images and OSD share
+    $DriveLetter = Install-BootImagesAndOSD -DomainFullName $DomainFullName -ThisMachineName $ThisMachineName
+
+    # Create OS packages
+    New-OSPackages -ThisMachineName $ThisMachineName
+
+    # Create task sequences
+    New-TaskSequences -DeployConfig $deployConfig -ThisMachineName $ThisMachineName -DomainFullName $DomainFullName -DN $DN
+}
+else {
+    Write-DscStatus "$Tag Task sequences already exist, skipping creation"
+
+    # Still need drive letter for later steps
+    $DriveLetter = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" |
+        Select-Object -ExpandProperty "Installation Directory" | Split-Path -Qualifier
+}
+
+# Step 7: Configuration Baselines
+Import-Baselines
+
+# Step 8: PowerShell Bypass Client Setting
+Set-PowerShellBypassClientSetting
+
+# Step 9: Device Collections
+New-DeviceCollections -SiteCode $SiteCode
+
+# Step 10: Endpoint Protection and Client Settings
+Install-EndpointProtectionAndClientSettings -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
+
+# Step 11: SUP Products and ADRs
+Set-SUPProductsAndClassifications -DeployConfig $deployConfig -SiteCode $SiteCode `
+    -CMInstallDir $CMInstallDir -ThisMachineName $ThisMachineName `
+    -DriveLetter $DriveLetter -ProviderMachineName $ProviderMachineName
+
+# Step 12: Refresh Unknown Computers collection
+$collection = Get-CMCollection -Name "All Unknown Computers"
+if ($collection -and $collection.CollectionID) {
+    Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID
+}
+
+# Create flag file to prevent re-execution
+New-Item -ItemType File -Path $flagFile -Force | Out-Null
+Write-DscStatus "$Tag Perf loading completed successfully"
+Write-DscStatus "$Tag ******************************************" -NoStatus
+Write-DscStatus "$Tag ******************************************" -NoStatus
+
+#endregion Main Execution
