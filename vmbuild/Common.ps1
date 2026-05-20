@@ -1171,6 +1171,11 @@ function Copy-ItemSafe {
                 $result = Receive-Job $job
                 write-log "[Copy-ItemSafe] returned: $result" -LogOnly
                 remove-job $job | out-null
+                if ($result -eq $false) {
+                    Write-Log "[Copy-ItemSafe] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
+                    $retries--
+                    continue
+                }
                 return $true
             }
             else {
