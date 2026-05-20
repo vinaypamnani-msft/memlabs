@@ -78,8 +78,8 @@ configuration Phase3
             $AddIISCert = $true
         }
 
-        $DCVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
-        if (-not $DCVM.InstallCA) {
+        $caVM = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+        if (-not $caVM) {
             $AddIISCert = $false
         }
 

@@ -563,7 +563,7 @@ Function Get-ForestTrustMenu {
         $property."$name" = $result
 
         if ($result -ne "NONE") {
-            $remoteCA = (get-list -type vm -DomainName $result | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+            $remoteCA = (get-list -type vm -DomainName $result | Where-Object { $_.InstallCA })
             if ($remoteCA) {
                 Write-OrangePoint "Domain $result already has a CA. Disabling CA in this domain"
                 $property.InstallCA = $false

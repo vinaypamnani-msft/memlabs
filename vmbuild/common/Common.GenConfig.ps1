@@ -828,11 +828,11 @@ function ConvertTo-DeployConfigEx {
 
                 if ($thisVM.externalDomainJoinSiteCode) {
 
-                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
-                    if ($OtherDC.InstallCA) {
+                    $OtherCAVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.InstallCA })
+                    if ($OtherCAVM) {
                         #ADA-DC1.adatum.com\adatum-ADA-DC1-CA
                         $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
-                        $OtherRootCA = "$($OtherDc.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherDc.VmName)-CA"
+                        $OtherRootCA = "$($OtherCAVM.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherCAVM.VmName)-CA"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
                     }
 
@@ -844,7 +844,8 @@ function ConvertTo-DeployConfigEx {
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                         $ExternalTopLevelSiteServer = $ExternalSiteServer
-                        $otherDC = "$($OtherDc.VmName).$($ThisVM.ForestTrust)"
+                        $OtherDCVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
+                        $otherDC = "$($OtherDCVM.VmName).$($ThisVM.ForestTrust)"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "OtherDC" -Value $otherDC -Force
 
                         $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force

@@ -509,7 +509,7 @@ function Get-AdditionalValidations {
                 $property.PsObject.Members.Remove("UseOfflineRoot")
             }
             if ($property.ForestTrust -and $property.ForestTrust -ne "NONE") {
-                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.InstallCA })
                 if ($remoteCA) {
                     Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
                     $property.InstallCA = $false

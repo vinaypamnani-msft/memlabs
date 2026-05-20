@@ -13,7 +13,8 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $isCas = $ThisVM.Role -eq "CAS"
-$DCName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }).vmName
+$CAVMName = ($deployConfig.virtualMachines | Where-Object { $_.InstallCA }).vmName
+$DomainShort = $DomainFullName.Split(".")[0]
 # Read Site Code from registry
 
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -67,7 +68,7 @@ if ($enabled) {
     Write-DscStatus "HTTPS Already Enabled.. Done." 
     return
 }
-$CAName = $DCName + "-CA"
+$CAName = "$DomainShort-$CAVMName-CA"
 $CertPath = "c:\temp\rootca.cer"
 
 if (-not (Test-Path $CertPath)) {
