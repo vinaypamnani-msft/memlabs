@@ -165,15 +165,21 @@ if (-not $NoWindowResize.IsPresent) {
         $curRows = $host.UI.RawUI.WindowSize.Height
         $helpOverhead = 8   # 6 col prefix (` │🕮  `) + 2 buffer
         $minCols = 170
-        # Scan help file for longest string literal to size the terminal dynamically
-        $helpFile = Join-Path $PSScriptRoot "common\Common.GenConfig.Help.ps1"
+        # Scan help files for longest string literal to size the terminal dynamically
         $longestHelp = 0
-        if (Test-Path $helpFile) {
-            $helpLines = Get-Content $helpFile -ErrorAction SilentlyContinue
-            foreach ($line in $helpLines) {
-                if ($line -match '"([^"]+)"[^"]*\}') {
-                    $len = $Matches[1].Length
-                    if ($len -gt $longestHelp) { $longestHelp = $len }
+        $helpFiles = @(
+            (Join-Path $PSScriptRoot "common\Common.GenConfig.Help.ps1"),
+            (Join-Path $PSScriptRoot "genconfig.ps1")
+        )
+        foreach ($helpFile in $helpFiles) {
+            if (Test-Path $helpFile) {
+                $helpLines = Get-Content $helpFile -ErrorAction SilentlyContinue
+                foreach ($line in $helpLines) {
+                    # Match "H..." = "help text" pattern (genconfig) or "text" } pattern (Help.ps1)
+                    if ($line -match '"H\w+"\s*=\s*"([^"]+)"' -or $line -match '"([^"]+)"[^"]*\}') {
+                        $len = $Matches[1].Length
+                        if ($len -gt $longestHelp) { $longestHelp = $len }
+                    }
                 }
             }
         }
