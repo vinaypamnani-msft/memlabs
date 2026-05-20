@@ -209,6 +209,29 @@ function Test-ValidCmOptions {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
+    # EnableBLM
+    if ($null -ne $ConfigObject.cmOptions.EnableBLM -and $ConfigObject.cmOptions.EnableBLM -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.EnableBLM has an invalid value [$($ConfigObject.cmOptions.EnableBLM)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    }
+
+    if ($ConfigObject.cmOptions.EnableBLM) {
+        # BLM requires ConfigMgr 2002 or later
+        $blmMinVersion = "2002"
+        $cmVer = $ConfigObject.cmOptions.Version
+        if ($cmVer -and $cmVer -ne "current-branch" -and $cmVer -ne "tech-preview" -and $cmVer -lt $blmMinVersion) {
+            Add-ValidationMessage -Message "CM Options Validation: BitLocker Management requires ConfigMgr version 2002 or later. Current version is [$cmVer]." -ReturnObject $ReturnObject -Failure
+        }
+
+        # Warn if no client VMs have tpmEnabled
+        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -in ("DomainMember", "InternetClient", "AADClient") -and -not $_.Hidden }
+        if ($clientVMs) {
+            $noTPM = $clientVMs | Where-Object { $_.tpmEnabled -eq $false }
+            if ($noTPM) {
+                Add-ValidationMessage -Message "BLM Warning: The following client VMs have tpmEnabled=false and will require a startup password for BitLocker: $($noTPM.vmName -join ', '). Consider enabling vTPM for unattended encryption." -ReturnObject $ReturnObject -Warning
+            }
+        }
+    }
+
     if ($ConfigObject.cmOptions.usePKI) {
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
         if (-not $ConfigObject.pkiOptions) {

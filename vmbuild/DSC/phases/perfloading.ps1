@@ -109,6 +109,48 @@ else {
     Write-DscStatus "$Tag Enabling Site features"
     Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
 
+    # BitLocker Management policy and collection
+    if ($deployConfig.cmOptions.EnableBLM) {
+        Write-DscStatus "$Tag Configuring BitLocker Management"
+
+        # Create collection targeting the BLM OU
+        $blmCollectionName = "MEMLABS-BitLocker Clients"
+        if (-not (Get-CMDeviceCollection -Name $blmCollectionName -ErrorAction SilentlyContinue)) {
+            $blmSchedule = New-CMSchedule -RecurInterval Days -RecurCount 1
+            New-CMDeviceCollection -Name $blmCollectionName -LimitingCollectionId SMS00001 -RefreshSchedule $blmSchedule -RefreshType Periodic | Out-Null
+            $blmQuery = @"
+SELECT SMS_R_SYSTEM.ResourceID, SMS_R_SYSTEM.ResourceType, SMS_R_SYSTEM.Name
+FROM SMS_R_System
+WHERE SMS_R_System.SystemOUName = "$DomainFullName/MEMLABS-BitLockerClients"
+"@
+            Add-CMDeviceCollectionQueryMembershipRule -CollectionName $blmCollectionName -QueryExpression $blmQuery -RuleName "BLM OU Members"
+            Write-DscStatus "$Tag Created collection: $blmCollectionName"
+        }
+
+        # Create BitLocker management policy
+        $blmPolicyName = "MEMLABS-BitLocker Policy"
+        $existingPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
+        if (-not $existingPolicy) {
+            $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy"
+
+            # Configure OS drive encryption settings
+            Set-CMBlmPlannedFailureAction -InputObject $blmPolicy -LockWorkstation
+            Set-CMBlmSetting -InputObject $blmPolicy -OsDrive -Encrypt -EncryptionMethod XtsAes256 -MinimumPinLength 6
+
+            # Deploy policy to the BLM collection
+            $blmCollection = Get-CMDeviceCollection -Name $blmCollectionName
+            if ($blmCollection) {
+                New-CMSettingDeployment -CMSetting $blmPolicy -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue
+                Write-DscStatus "$Tag Deployed BitLocker policy to $blmCollectionName"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag BitLocker policy already exists, skipping"
+        }
+
+        Write-DscStatus "$Tag BitLocker Management configuration complete"
+    }
+
     #Applications and packages
 
 

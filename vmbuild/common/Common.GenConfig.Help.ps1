@@ -47,6 +47,7 @@ function Get-GenericHelp {
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
         "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
+        "EnableBLM" { "Enable BitLocker Management. Configures GPO, enables the BLM site feature, and deploys a BitLocker policy to encrypt client OS drives via the MP recovery service." }
         "PrePopulateObjects" { "This setting will pre-populate a number of objects in the CM database, such as packages, scripts, OSD Task Sequences, Baselines, etc." }
 
         # VM

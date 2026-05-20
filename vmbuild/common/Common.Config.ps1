@@ -80,6 +80,9 @@ function Get-UserConfiguration {
             if ($null -eq ($config.cmOptions.OfflineSUP)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSUP" -Value $false -Force
             }
+            if ($null -eq ($config.cmOptions.EnableBLM)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EnableBLM" -Value $false -Force
+            }
             if ($null -eq ($config.cmOptions.Version)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value "current-branch" -Force
             }

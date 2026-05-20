@@ -85,6 +85,11 @@ function get-CMOptionsSummary {
         $tokens += (Format-OptionToken -Color "DimGray" -Text "SUP ") + (Format-OptionToken -Color "Tan" -Text "Offline")
     }
 
+    # BLM badge — only shown when EnableBLM is set (non-default)
+    if ($options.EnableBLM) {
+        $tokens += (Format-OptionToken -Color "DimGray" -Text "BLM ") + (Format-OptionToken -Color "ForestGreen" -Text "✓")
+    }
+
     $Output = $tokens -join $sep
 
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 38)
@@ -291,6 +296,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "PrePopulateObjects") {
         $sorted += "PrePopulateObjects"
     }
+    if ($members.Name -contains "EnableBLM") {
+        $sorted += "EnableBLM"
+    }
   
     switch ($members.Name) {
         "vmName" {  }
@@ -346,6 +354,7 @@ function Get-SortedProperties {
         "OfflineSUP" {}
         "pushClientToDomainMembers" {}
         "PrePopulateObjects" {}
+        "EnableBLM" {}
 
 
         Default { $sorted += $_ }
