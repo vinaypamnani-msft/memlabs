@@ -25,6 +25,11 @@
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
 
+    $usePKI = $false
+    if ($deployConfig.cmOptions -and $deployConfig.cmOptions.UsePKI) {
+        $usePKI = $deployConfig.cmOptions.UsePKI
+    }
+
     $RealDC = $deployConfig.virtualMachines | Where-Object { $_.role -in ("DC") }
 
     $DCIPAddr = $RealDC.thisParams.DCIPAddress
@@ -76,12 +81,14 @@
 
         $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
 
-        UpdateCAPrefs UpdateCAPrefs {
-            DependsOn     = $nextDepend
-            RootCa        = $ThisVM.vmName
-        }
+        if ($usePKI) {
+            UpdateCAPrefs UpdateCAPrefs {
+                DependsOn     = $nextDepend
+                RootCa        = $ThisVM.vmName
+            }
 
-        $nextDepend = "[UpdateCAPrefs]UpdateCAPrefs"
+            $nextDepend = "[UpdateCAPrefs]UpdateCAPrefs"
+        }
 
         AddToAdminGroup AddRemoteAdmins {
             DomainName   = ($deployConfig.vmOptions.domainName)
@@ -118,38 +125,40 @@
             }
         }
 
-        $waitOnDependency = @()
-        if ($iisCount) {
-            AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                GroupName    = "$DomainName\ConfigMgr IIS Servers"
-                Permissions  = 'Read, Enroll'
-                PermissionsOnly = $true
-                SkipIfNotExist = $true
-                DependsOn    = $nextDepend
-            }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+        $waitOnDependency = @($nextDepend)
+        if ($usePKI) {
+            if ($iisCount) {
+                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                    GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    Permissions  = 'Read, Enroll'
+                    PermissionsOnly = $true
+                    SkipIfNotExist = $true
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-            AddCertificateTemplate ConfigMgrWebServerCertificate {
-                TemplateName = "ConfigMgrWebServerCertificate"
-                GroupName    = "$DomainName\ConfigMgr IIS Servers"
-                Permissions  = 'Read, Enroll'
+                AddCertificateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    Permissions  = 'Read, Enroll'
+                    PermissionsOnly = $true
+                    SkipIfNotExist = $true
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+            }
+
+            AddCertificateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                GroupName    = "$DomainName\Domain Computers"
+                Permissions  = 'Read, Enroll, AutoEnroll'
                 PermissionsOnly = $true
                 SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
-        
-        AddCertificateTemplate ConfigMgrClientCertificate {
-            TemplateName = "ConfigMgrClientCertificate"
-            GroupName    = "$DomainName\Domain Computers"
-            Permissions  = 'Read, Enroll, AutoEnroll'
-            PermissionsOnly = $true
-            SkipIfNotExist = $true
-            DependsOn    = $nextDepend
-        }
-        $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
 
 
        
