@@ -2783,7 +2783,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "6"
+    [string] $Version = "7"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2796,7 +2796,6 @@ class InstallFeatureForSCCM {
             dism / online / Enable-Feature / FeatureName:TelnetClient
         }
         catch {}
-        #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
         # Server OS?
         $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -2819,126 +2818,102 @@ class InstallFeatureForSCCM {
             #
             #
             #
-            Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
-            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
 
-            if ($_Role -contains "DC" -or $_Role -contains "BDC") {
-                #Moved to All Servers
-                #Install-WindowsFeature RSAT-AD-PowerShell
-            }
-            else {
-                # Always install IIS unless we are on a DC
-  
+            # Collect all features into a single list, then install once for speed.
+            $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-                # Always install BITS
-                Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"
-                Install-WindowsFeature BITS, BITS-IIS-Ext
-                
-                Write-Status "Installing Windows Features: Web-WMI, Web-Metabase"
-                Install-WindowsFeature Web-WMI, Web-Metabase
+            # All servers
+            [void]$features.Add("Web-Windows-Auth")
+            [void]$features.Add("Web-ISAPI-Ext")
+            [void]$features.Add("RSAT-AD-PowerShell")
+            [void]$features.Add("AD-Domain-Services")
+
+            if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
+                # Non-DC servers get BITS and IIS metabase
+                [void]$features.Add("BITS")
+                [void]$features.Add("BITS-IIS-Ext")
+                [void]$features.Add("Web-WMI")
+                [void]$features.Add("Web-Metabase")
 
                 if ($_Role -notcontains "DomainMember") {
-                    Write-Status "Installing Windows Features: Rdc"
-                    Install-WindowsFeature -Name "Rdc"
+                    [void]$features.Add("Rdc")
                 }
             }
 
-
-
-            Write-Status "Installing Windows Features: RSAT-AD-PowerShell"
-            Install-WindowsFeature RSAT-AD-PowerShell
-
-            Write-Status "Installing Windows Features: AD-Domain-Services"
-            $result = Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
-            if ($result.RestartNeeded -eq "Yes") {
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                $global:DSCMachineStatus = 1
-            }
-            
-          
             if ($_Role -contains "SQLAO") {
-                Write-Status "Installing Windows Features: Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell"
-                Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
+                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Site Server") {
-                Write-Status "Installing Windows Features: Net-Framework-Core"
-                Install-WindowsFeature Net-Framework-Core
-
-                Write-Status "Installing Windows Features: NET-Framework-45-Core"
-                Install-WindowsFeature "NET-Framework-45-Core"
-
-                Write-Status "Installing Windows Features: Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext"
-                Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
-
-                Write-Status "Installing Windows Features: Web-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools"
-                #Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                #Server 2025 no longer supports Web-Lgcy-Mgmt-Console.. Probably not needed anywhere..
-                Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                #Install-WindowsFeature BITS, BITS-IIS-Ext
-
-                Write-Status "Installing Windows Features: Rdc"
-                Install-WindowsFeature -Name "Rdc"
-
-                Write-Status "Installing Windows Features: UpdateServices-UI"
-                Install-WindowsFeature -Name UpdateServices-UI
-                #Install-WindowsFeature -Name WDS
+                foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
+                    "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
+                    "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
+                    "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Application Catalog website point") {
-                #IIS
-                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-            }
-            if ($_Role -contains "Application Catalog web service point") {
-                #IIS
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-            }
-            if ($_Role -contains "Asset Intelligence synchronization point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "Certificate registration point") {
-                #IIS
-                Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
-            }
-            if ($_Role -contains "Distribution point") {
-                #IIS
-                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-                Install-WindowsFeature Web-WMI, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
 
-            if ($_Role -contains "Endpoint Protection point") {
-                #.NET 3.5 SP1 is installed
+            if ($_Role -contains "Application Catalog web service point") {
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            if ($_Role -contains "Certificate registration point") {
+                foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            if ($_Role -contains "Distribution point") {
+                foreach ($f in @("Web-WMI", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
 
             if ($_Role -contains "Enrollment point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Enrollment proxy point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Fallback status point") {
-                Install-WindowsFeature Web-Metabase
+                [void]$features.Add("Web-Metabase")
             }
+
             if ($_Role -contains "Management point") {
-                #BITS
-                Install-WindowsFeature BITS, BITS-IIS-Ext
-                #IIS
-                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-                Install-WindowsFeature Web-WMI, Web-Metabase
+                foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
-            if ($_Role -contains "Reporting services point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "Service connection point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "WSUS") {
-                #Write-Status "Installing Windows Features: WSUS Stuff.. This should nto be used anymore."
-                #Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
-            }
+
             if ($_Role -contains "State migration point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            # Install all collected features in a single call
+            $featureList = @($features)
+            Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
+            $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
+            if ($result.RestartNeeded -eq "Yes") {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
             }
         }
 
