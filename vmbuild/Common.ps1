@@ -3657,7 +3657,7 @@ function Get-VmSession {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
                 $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-                $cacheKey = $VmName + "-WORKGROUP"
+                $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
@@ -3667,7 +3667,7 @@ function Get-VmSession {
 
                         $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
                         $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$($VM.Domain)"
+                        $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
                         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
                     if (-not $ps) {
