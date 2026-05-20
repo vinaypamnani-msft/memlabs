@@ -782,46 +782,6 @@ class InstallVCRedist {
 }
 
 [DscResource()]
-class InstallAndConfigWSUS {
-    [DscProperty(Key)]
-    [string] $WSUSPath
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $_WSUSPath = $this.WSUSPath
-        if (!(Test-Path -Path $_WSUSPath)) {
-            New-Item -Path $_WSUSPath -ItemType Directory
-        }
-        Write-Status "Installing WSUS..."
-        Install-WindowsFeature -Name UpdateServices, UpdateServices-WidDB -IncludeManagementTools
-        Write-Status "Finished installing WSUS..."
-
-        Write-Status "Starting the postinstall for WSUS..."
-        Set-Location "C:\Program Files\Update Services\Tools"
-        .\wsusutil.exe postinstall CONTENT_DIR=C:\WSUS
-        Write-Status "Finished the postinstall for WSUS"
-    }
-
-    [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
-        if ((Get-WindowsFeature -Name UpdateServices).installed -eq 'True') {
-            return $true
-        }
-        return $false
-    }
-
-    [InstallAndConfigWSUS] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
 class InstallPMPC {
     [DscProperty(Key)]
     [string] $Path
@@ -1683,38 +1643,6 @@ class VerifyComputerJoinDomain {
     }
 
     [VerifyComputerJoinDomain] Get() {
-        return $this
-    }
-}
-
-[DscResource()]
-class SetDNS {
-    [DscProperty(key)]
-    [string] $DNSIPAddress
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
-        Write-Status "Set dns: $_DNSIPAddress for $($dnsset.InterfaceAlias)"
-        Set-DnsClientServerAddress -InterfaceIndex $dnsset.InterfaceIndex -ServerAddresses $_DNSIPAddress
-    }
-
-    [bool] Test() {
-        $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
-        if ($dnsset.ServerAddresses -contains $_DNSIPAddress) {
-            return $true
-        }
-        return $false
-    }
-
-    [SetDNS] Get() {
         return $this
     }
 }
@@ -3016,55 +2944,6 @@ class FileReadAccessShare {
 }
 
 [DscResource()]
-class InstallCA {
-    [DscProperty(Key)]
-    [string] $HashAlgorithm
-
-    [DscProperty()]
-    [string] $RootCA
-
-    [void] Set() {
-        try {
-            $_HashAlgorithm = $this.HashAlgorithm
-            #Install CA
-            Import-Module ServerManager
-            Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
-
-            if ($this.RootCA) {
-                Write-Status "Installing Root CA with Hash Algorithm $_HashAlgorithm"
-                Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa  -ParentCA $($this.RootCA) -force
-            }
-            else {
-                Write-Status "Installing Non-Root CA with Hash Algorithm $_HashAlgorithm"
-                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
-            }
-
-            $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
-            "Finished" >> $StatusPath
-
-            Write-Status "Finished installing CA."
-        }
-        catch {
-            Write-Status "Failed to install CA."
-        }
-    }
-
-    [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
-    }
-
-    [InstallCA] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
 class UpdateCAPrefs {
     [DscProperty(Key)]
     [string] $RootCA
@@ -3875,72 +3754,6 @@ class InstallPBIRS {
     }
 
     [InstallPBIRS] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
-class ImportCertificateTemplate {
-    [DscProperty(Key)]
-    [string]$TemplateName
-
-    [DscProperty(Mandatory)]
-    [string]$DNPath
-
-    [void] Set() {
-
-        $_TemplateName = $this.TemplateName
-        $_DNPath = $this.DNPath
-
-
-        Write-Status "Adding Certificate Template $_TemplateName"
-
-        $StatusLog = "C:\staging\DSC\DSC_Log.log"
-
-        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
-        if (!(Test-Path -Path $_Path -PathType Leaf)) {
-            throw "Could not find $_Path"
-        }
-        $TargetFile = "c:\temp\$_TemplateName.ldf"
-        Write-Status "TargetFile $TargetFile source: $_Path"
-        (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
-        Write-Status "Running ldifde -i -k -f $TargetFile"
-        ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
-    }
-
-    [bool] Test() {
-
-        $_TemplateName = $this.TemplateName
-        try {
-            $ConfigContext = ([ADSI]"LDAP://RootDSE").configurationNamingContext
-            $ConfigContext = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigContext"
-            $filter = "(cn=$_TemplateName)"
-            $ds = New-object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$ConfigContext", $filter)
-            $found = $ds.Findone()
-            if ($found) {
-                return $true
-            }
-            return $false
-        }
-        catch {
-            Write-Verbose "$_"
-            Write-Verbose " -- Restart-Service -Name CertSvc"
-            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
-            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-            start-sleep -seconds 60
-            Write-Verbose " -- ADCSAdministration\get-Catemplate"
-            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
-        }
-        if ($count -gt 0) {
-            return $true
-        }
-
-        return $false
-    }
-
-    [ImportCertificateTemplate] Get() {
         return $this
     }
 
