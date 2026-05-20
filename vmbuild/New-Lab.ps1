@@ -160,29 +160,24 @@ if (-not $NoWindowResize.IsPresent) {
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
-        # Target: 200-250 columns, 50-70 rows. Calculate pixel size from current font metrics.
+        # Target: 200-250 columns, 50-70 rows.
         $curCols = $host.UI.RawUI.WindowSize.Width
         $curRows = $host.UI.RawUI.WindowSize.Height
         $targetCols = 225   # middle of 200-250
         $targetRows = 60    # middle of 50-70
 
-        # Estimate pixels per char from current window size
-        # Default assumption if we can't measure: 8px/col, 16px/row (typical Cascadia Mono 12pt)
-        $pxPerCol = 8
-        $pxPerRow = 16
-
-        # Try to get actual current window pixel size for accurate font measurement
-        $measuredFont = $false
-        # We'll measure after WT detection so we can use GetWindowRect on the right handle
-
-        # Calculate desired pixel size from font estimate (will refine after WT detection)
         $screenW = $screen.Bounds.Width
         $screenH = $screen.Bounds.Height
-        # Cap at 90% of screen so the window isn't edge-to-edge
-        $maxWidth = [int]($screenW * 0.92)
-        $maxHeight = [int]($screenH * 0.92)
 
-        Write-Log "Post-init: Window resize - screen ${screenW}x${screenH}, current terminal ${curCols}x${curRows} chars" -LogOnly
+        # Cap target chars so window won't exceed ~92% of screen.
+        # Use conservative 10px/col and 20px/row (upper bound for typical fonts).
+        # This only caps on very small screens; on 1920+ it won't trigger.
+        $maxCols = [int][Math]::Floor(($screenW * 0.92) / 10)
+        $maxRows = [int][Math]::Floor(($screenH * 0.92) / 20)
+        $targetCols = [Math]::Min($targetCols, $maxCols)
+        $targetRows = [Math]::Min($targetRows, $maxRows)
+
+        Write-Log "Post-init: Window resize - screen ${screenW}x${screenH}, current ${curCols}x${curRows} chars, target ${targetCols}x${targetRows} chars" -LogOnly
 
         $isWT = [bool]$env:WT_SESSION
         $wtDetected = $isWT
@@ -206,8 +201,6 @@ if (-not $NoWindowResize.IsPresent) {
             }
         }
         # Also check for WT process if not found in ancestors (default terminal routing)
-        # Search both 'WindowsTerminal' and 'Terminal' (inbox Server 2025 may use either)
-        # Filter to our session to avoid cross-RDP-session matches
         if (-not $wtDetected) {
             $wtProc = Get-Process -Name 'WindowsTerminal', 'Terminal' -ErrorAction SilentlyContinue |
                 Where-Object { $_.SessionId -eq $mySessionId } |
@@ -218,114 +211,64 @@ if (-not $NoWindowResize.IsPresent) {
                 Write-Log "Post-init: Window resize - found $($wtProc.ProcessName) PID $($wtProc.Id) via process search (session $mySessionId)" -LogOnly
             }
             else {
-                # Log what terminal-related processes exist for diagnostics
                 $termProcs = Get-Process -ErrorAction SilentlyContinue |
                     Where-Object { $_.ProcessName -match 'terminal|console|conhost' -and $_.SessionId -eq $mySessionId } |
                     Select-Object ProcessName, Id, MainWindowHandle
                 $termList = ($termProcs | ForEach-Object { "$($_.ProcessName)($($_.Id))=$($_.MainWindowHandle)" }) -join ', '
-                Write-Log "Post-init: Window resize - no WT found. Terminal-related processes in session ${mySessionId}: $termList" -LogOnly
+                Write-Log "Post-init: Window resize - no WT found. Terminal-related in session ${mySessionId}: $termList" -LogOnly
             }
         }
 
         Write-Log "Post-init: Window resize - wtDetected=$wtDetected, wtProcessId=$wtProcessId" -LogOnly
 
-        # --- Calculate target pixel size based on optimal character dimensions ---
-        # Measure font metrics: get pixel size of the current window and divide by current char dims
-        # In WT, we must measure from the WT window (what we'll resize), not GetConsoleWindow (pseudoconsole)
-        if ($curCols -gt 0 -and $curRows -gt 0) {
-            $measureHandle = [IntPtr]::Zero
-            if ($wtDetected -and $wtProcessId) {
-                $measureHandle = (Get-Process -Id $wtProcessId -ErrorAction SilentlyContinue).MainWindowHandle
-            }
-            if ($measureHandle -eq [IntPtr]::Zero) {
-                try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
-                try { $measureHandle = [Window]::GetConsoleWindow() } catch {}
-            }
-            if ($measureHandle -ne [IntPtr]::Zero) {
-                $mRect = New-Object RECT
-                $null = [Window]::GetWindowRect($measureHandle, [ref]$mRect)
-                $curPixW = $mRect.Right - $mRect.Left
-                $curPixH = $mRect.Bottom - $mRect.Top
-                if ($curPixW -gt 0 -and $curPixH -gt 0) {
-                    $pxPerCol = $curPixW / $curCols
-                    $pxPerRow = $curPixH / $curRows
-                    $measuredFont = $true
-                    Write-Log "Post-init: Window resize - measured font from $(if ($wtDetected) {'WT window'} else {'console'}): ${curPixW}px/${curCols}cols = $([math]::Round($pxPerCol,2))px/col, ${curPixH}px/${curRows}rows = $([math]::Round($pxPerRow,2))px/row" -LogOnly
-                }
-            }
-        }
-        # Calculate desired pixel size for target character dimensions
-        $desiredWidth = [int]($targetCols * $pxPerCol)
-        $desiredHeight = [int]($targetRows * $pxPerRow)
-        # Use the smaller of desired size vs screen cap
-        $width = [Math]::Min($desiredWidth, $maxWidth)
-        $height = [Math]::Min($desiredHeight, $maxHeight)
-        # If capped by screen, adjust target chars to what actually fits
-        if ($width -lt $desiredWidth) { $targetCols = [int][Math]::Floor($width / $pxPerCol) }
-        if ($height -lt $desiredHeight) { $targetRows = [int][Math]::Floor($height / $pxPerRow) }
-        Write-Log "Post-init: Window resize - target ${targetCols}cols x ${targetRows}rows = ${desiredWidth}x${desiredHeight}px, capped to ${width}x${height} (max ${maxWidth}x${maxHeight})" -LogOnly
+        # --- Primary sizing: VT escape sets exact character dimensions ---
+        # \e[8;rows;cols t tells the terminal to resize to fit those chars.
+        # Works in WT and modern conhost. WT adjusts the window pixel size automatically.
+        Write-Log "Post-init: Window resize - sending VT escape for ${targetCols}x${targetRows} chars" -LogOnly
+        Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
 
-        # === Strategy 1: Windows Terminal - use MoveWindow on WT's MainWindowHandle ===
-        if (-not $resizeDone -and $wtDetected -and $wtProcessId) {
+        # --- Positioning: MoveWindow to (20,20) after VT resize ---
+        if ($wtDetected -and $wtProcessId) {
             $wtHandle = (Get-Process -Id $wtProcessId -ErrorAction SilentlyContinue).MainWindowHandle
             Write-Log "Post-init: Window resize - WT PID $wtProcessId MainWindowHandle=$wtHandle" -LogOnly
             if ($wtHandle -ne [IntPtr]::Zero) {
-                Set-Window -ProcessID $wtProcessId -X 20 -Y 20 -Width $width -Height $height
+                # Ensure [Window] type is loaded
+                try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
+                # Read current WT window size (post-VT-resize) and reposition to (20,20)
+                $wtRect = New-Object RECT
+                $null = [Window]::GetWindowRect($wtHandle, [ref]$wtRect)
+                $wtW = $wtRect.Right - $wtRect.Left
+                $wtH = $wtRect.Bottom - $wtRect.Top
+                Write-Log "Post-init: Window resize - WT window now ${wtW}x${wtH} at ($($wtRect.Left),$($wtRect.Top))" -LogOnly
+                if ($wtW -gt 0 -and $wtH -gt 0) {
+                    $null = [Window]::MoveWindow($wtHandle, 20, 20, $wtW, $wtH, $true)
+                    Write-Log "Post-init: Window resize - repositioned WT to (20,20)" -LogOnly
+                }
                 $resizeDone = $true
             }
         }
 
-        # === Strategy 2: Windows Terminal - FindWindow by class name ===
-        if (-not $resizeDone -and $wtDetected) {
-            try {
-                # Ensure [Window] type is loaded
-                Set-Window -ProcessID $PID -Passthru | Out-Null
-                $cascadiaHandle = [Window]::FindWindow("CASCADIA_HOSTING_WINDOW_CLASS", $null)
-                Write-Log "Post-init: Window resize - FindWindow(CASCADIA_HOSTING_WINDOW_CLASS) = $cascadiaHandle" -LogOnly
-                if ($cascadiaHandle -ne [IntPtr]::Zero) {
-                    $rect = New-Object RECT
-                    $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                    $bw = $rect.Right - $rect.Left; $bh = $rect.Bottom - $rect.Top
-                    Write-Log "Post-init: Window resize - CASCADIA before: ${bw}x${bh} at ($($rect.Left),$($rect.Top))" -LogOnly
-                    $moveResult = [Window]::MoveWindow($cascadiaHandle, 20, 20, [int]$width, [int]$height, $true)
-                    Write-Log "Post-init: Window resize - CASCADIA MoveWindow result=$moveResult" -LogOnly
-                    if ($moveResult) {
-                        $null = [Window]::GetWindowRect($cascadiaHandle, [ref]$rect)
-                        $aw = $rect.Right - $rect.Left; $ah = $rect.Bottom - $rect.Top
-                        Write-Log "Post-init: Window resize - CASCADIA after: ${aw}x${ah} at ($($rect.Left),$($rect.Top))" -LogOnly
-                        $resizeDone = $true
-                    }
-                }
-            }
-            catch {
-                Write-Log "Post-init: Window resize - FindWindow strategy failed: $_" -LogOnly -Warning
-            }
-        }
-
-        # === Strategy 3: Classic conhost - Set-Window on own PID + parent cmd.exe ===
-        # GetConsoleWindow handles the conhost lookup internally.
-        # ONLY if we're NOT in Windows Terminal (avoid pseudoconsole corruption).
+        # === Fallback for non-WT (classic conhost) ===
         if (-not $resizeDone -and -not $wtDetected) {
-            Write-Log "Post-init: Window resize - trying classic conhost path (Set-Window on PID $PID)" -LogOnly
-            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
+            # VT escape already sent above; also try Set-Window for positioning
+            Write-Log "Post-init: Window resize - classic conhost path, positioning via Set-Window" -LogOnly
+            $fallbackW = [int]($targetCols * 10)  # conservative pixel estimate
+            $fallbackH = [int]($targetRows * 20)
+            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $fallbackW -Height $fallbackH
             $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
             if ($parent -and $parent.ProcessName -eq 'cmd') {
-                Write-Log "Post-init: Window resize - also resizing parent cmd PID $($parent.Id)" -LogOnly
-                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $width -Height $height
+                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $fallbackW -Height $fallbackH
             }
             $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
-        }
-
-        # === Strategy 4 (universal fallback): VT escape sequence ===
-        # \e[8;rows;cols t works in WT and modern conhost (Server 2019+).
-        # Silently ignored by legacy conhost. Safe to always attempt.
-        if (-not $resizeDone) {
-            Write-Log "Post-init: Window resize - VT fallback: targeting ${targetCols}x${targetRows} chars" -LogOnly
-            Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
             $resizeDone = $true
         }
 
-        Write-Log "Post-init: Window resize - resizeDone=$resizeDone" -LogOnly
+        if (-not $resizeDone) { $resizeDone = $true } # VT escape was sent regardless
+
+        # Log final char dimensions
+        $finalCols = $host.UI.RawUI.WindowSize.Width
+        $finalRows = $host.UI.RawUI.WindowSize.Height
+        Write-Log "Post-init: Window resize - resizeDone=$resizeDone, final ${finalCols}x${finalRows} chars" -LogOnly
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
