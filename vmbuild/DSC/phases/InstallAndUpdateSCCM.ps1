@@ -327,7 +327,7 @@ CurrentBranch=1
     $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
-    start-sleep -seconds 4
+    start-sleep -seconds 2
 
     Write-DscStatusSetup
 
@@ -339,7 +339,7 @@ CurrentBranch=1
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-    start-sleep -seconds 15
+    start-sleep -seconds 5
     $firstRun = $true
 
 }
@@ -476,8 +476,8 @@ if ($UpdateRequired) {
         Write-DscStatus "[DMP Downloader] The LastSyncedTime was not updated in the last 60 minutes."
         Set-ItemProperty -Path $registryPath -Name $valueName -Value 0 -Force
         Set-ItemProperty -Path $registryPath -Name "LastSyncRequestTime" -Value 0 -Force
-        # Wait for 2 mins before checking DMP Downloader status
-        Start-Sleep -Seconds 120
+        # Wait before checking DMP Downloader status
+        Start-Sleep -Seconds 30
         Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
 
         # Set var
@@ -793,7 +793,7 @@ if ($UpdateRequired) {
                 }
 
                 # Wait for copying files finished
-                Start-Sleep 600
+                Start-Sleep 120
                 $updateCompleted = $true
             }
         }

@@ -556,7 +556,7 @@ function Get-VMFixes {
             do {
                 $i++
                 Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue | out-null
-                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds (20 * $i) }
+                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds (5 * $i) }
             }
             until ($i -ge 5 -or $AccountError.Count -eq 0)
 
@@ -767,7 +767,7 @@ function Get-VMFixes {
                 if (-not $exists) {
                     New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
                         -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
-                    Start-Sleep -Seconds 30
+                    Start-Sleep -Seconds 15
                     $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
                 }
             }
@@ -834,7 +834,7 @@ function Get-VMFixes {
             if (-not $exists) {
                 New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
                     -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
-                Start-Sleep -Seconds 30
+                Start-Sleep -Seconds 15
                 $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
             }
         }

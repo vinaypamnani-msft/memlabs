@@ -855,7 +855,7 @@ function Checkpoint-VM2 {
             Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
         }
         catch {
-            start-sleep -Seconds 20
+            start-sleep -Seconds 10
             $snapshots = Get-VMSnapshot -VM $vm
             foreach ($snapshot in $snapshots) {
                 if ($snapshot.Name -eq $SnapshotName) {
