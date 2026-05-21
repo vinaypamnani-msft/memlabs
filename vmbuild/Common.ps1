@@ -991,6 +991,23 @@ function Get-File {
                     return $true
                 }
 
+                # File missing after BITS reported success — gather diagnostics
+                $diagParts = @()
+                if (-not (Test-Path $destinationDirectory)) {
+                    $diagParts += "destination directory MISSING"
+                }
+                else {
+                    $dirFiles = @(Get-ChildItem -LiteralPath $destinationDirectory -ErrorAction SilentlyContinue)
+                    $diagParts += "directory exists ($($dirFiles.Count) files)"
+                }
+                try {
+                    $drive = Get-PSDrive -Name (Split-Path $Destination -Qualifier).TrimEnd(':') -ErrorAction Stop
+                    $diagParts += "drive free: $([Math]::Round($drive.Free / 1GB, 2))GB"
+                }
+                catch { $diagParts += "drive free: unknown" }
+                $diagMsg = $diagParts -join "; "
+                Write-Log "Get-File: BITS returned success but file missing. Diagnostics: $diagMsg" -Warning
+
                 if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
                     Write-Log "Get-File: Transfer reported success but '$Destination' is missing. Waiting 30 seconds before retry ($copyAttempt/$copyAttempts)." -Warning
                     Start-Sleep -Seconds 30
@@ -1110,6 +1127,11 @@ function Copy-ItemSafe {
                 $result = Receive-Job $job
                 write-log "[Copy-ItemSafe] returned: $result" -LogOnly
                 remove-job $job | out-null
+                if ($result -eq $false) {
+                    Write-Log "[Copy-ItemSafe] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
+                    $retries--
+                    continue
+                }
                 return $true
             }
             else {
