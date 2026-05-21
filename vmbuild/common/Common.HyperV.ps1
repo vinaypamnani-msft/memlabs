@@ -350,6 +350,38 @@ function Start-VM2 {
         }
     }
 }
+function Test-TcpPort {
+    # Hard-timeout TCP probe using TcpClient + WaitHandle. Test-NetConnection can hang
+    # well past its own timeouts (DNS reverse lookups, ICMP fallbacks, etc.), so avoid it.
+    param(
+        [Parameter(Mandatory)] [string]$ComputerName,
+        [Parameter(Mandatory)] [int]$Port,
+        [int]$TimeoutMs = 3000,
+        [int]$Retries = 3,
+        [int]$RetryDelayMs = 1000
+    )
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        $client = $null
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            $iar = $client.BeginConnect($ComputerName, $Port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                try {
+                    $client.EndConnect($iar)
+                    if ($client.Connected) { return $true }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally {
+            if ($client) { try { $client.Close() } catch { } }
+        }
+        if ($attempt -lt $Retries) { Start-Sleep -Milliseconds $RetryDelayMs }
+    }
+    return $false
+}
+
 function Test-VmResponsive {
     param(
         [string]$VmName,
@@ -378,17 +410,9 @@ function Test-VmResponsive {
             return $false
         }
         
-        # Test RDP port with timeout using job
-        $job = Start-Job -ScriptBlock {
-            param($computerName)
-            Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-        } -ArgumentList $VmName
-        
-        $testNet = Wait-Job -Job $job -Timeout $TimeoutSeconds | Receive-Job
-        Remove-Job -Job $job -Force
-        
-        if ($null -eq $testNet -or -not $testNet) {
-            Write-Log "VM $VmName RDP port test failed or timed out" -Warning
+        # Test RDP port with hard timeout + retry (Test-NetConnection can hang indefinitely)
+        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs 3000 -Retries 3 -RetryDelayMs 1000)) {
+            Write-Log "VM $VmName RDP port test failed after retries" -Warning
             return $false
         }
         

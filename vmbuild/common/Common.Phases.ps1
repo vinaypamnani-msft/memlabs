@@ -697,17 +697,11 @@ function Get-ConfigurationData {
                 else {
                     Write-Log "[Phase $Phase]: $($dc.NodeName): VM is responsive" -LogOnly
         
-                    # Your existing RDP-specific test if needed
-                    $job = Start-Job -ScriptBlock {
-                        param($computerName)
-                        Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-                    } -ArgumentList $dc.NodeName
+                    # RDP port probe with hard timeout + retry (Test-NetConnection can hang)
+                    $testNet = Test-TcpPort -ComputerName $dc.NodeName -Port 3389 -TimeoutMs 3000 -Retries 3 -RetryDelayMs 1000
         
-                    $testNet = Wait-Job -Job $job -Timeout 10 | Receive-Job
-                    Remove-Job -Job $job -Force
-        
-                    if ($null -eq $testNet -or -not $testNet) {
-                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible. Attempting soft restart." -Warning
+                    if (-not $testNet) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible after retries. Attempting soft restart." -Warning
                         Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                         Start-Sleep -Seconds 20
                     }
