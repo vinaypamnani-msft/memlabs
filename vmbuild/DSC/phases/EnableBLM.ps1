@@ -80,9 +80,7 @@ if (-not $blmPolicy) {
     Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
 }
 else {
-    # Update existing policy with correct encryption settings
-    $blmPolicy | Set-CMBlmSetting -Policies $blmPolicies
-    Write-DscStatus "$Tag Updated BitLocker policy with encryption settings: $blmPolicyName"
+    Write-DscStatus "$Tag BitLocker policy already exists, skipping creation"
 }
 
 # Ensure policy is deployed to the collection (idempotent)
