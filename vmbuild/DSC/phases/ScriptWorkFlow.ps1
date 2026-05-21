@@ -371,18 +371,18 @@ else {
 }
 
 if ($TopLevelSiteServer) {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+}
+
+if ($TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
-}
-
-if ($TopLevelSiteServer) {
-    Write-DscStatus "Running EnableBLM.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
 }
 
   # Install Providers
