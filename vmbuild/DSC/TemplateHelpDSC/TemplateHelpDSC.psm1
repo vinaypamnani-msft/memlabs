@@ -3851,20 +3851,44 @@ class InstallRootCertificate {
         if (-not (Test-Path $_FileName)) {
             Write-Status "Install Root Cert"
 
-            $cmd = "certutil.exe"
-            $arg1 = "-config"
-            $arg2 = $this.CAName
-            $arg3 = "-ca.cert"
-            $arg4 = $_FileName
-            & $cmd $arg1 $arg2 $arg3 $arg4
+            # Get the full certificate chain from the CA (works for both single-tier and two-tier PKI)
+            $chainFile = "C:\Temp\ca_chain.p7b"
+            certutil.exe -config $this.CAName -ca.chain $chainFile
 
+            # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
+            $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+            $chainCerts.Import($chainFile)
+
+            $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
+            $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+
+            if (-not $rootCert) {
+                Write-Status "WARNING: Could not find root CA in chain, falling back to -ca.cert"
+                certutil.exe -config $this.CAName -ca.cert $_FileName
+            }
+            else {
+                [System.IO.File]::WriteAllBytes($_FileName, $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                Write-Status "Exported root CA '$($rootCert.Subject)' to $_FileName"
+            }
+
+            # Publish root CA cert as RootCA and NtauthCA
             Write-Status "Running certutil.exe -dspublish -f $_FileName RootCA"
             certutil.exe -dspublish -f $_FileName RootCA
             Write-Status "Running certutil.exe -dspublish -f $_FileName NtauthCA"
             certutil.exe -dspublish -f $_FileName NtauthCA
-            Write-Status "Running certutil.exe -dspublish -f $_FileName SubCA"
-            certutil.exe -dspublish -f $_FileName SubCA
 
+            # If two-tier PKI, publish the subordinate CA cert as SubCA
+            if ($subCACert) {
+                $subCACertFile = "C:\Temp\subCA.cer"
+                [System.IO.File]::WriteAllBytes($subCACertFile, $subCACert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                Write-Status "Two-tier PKI: publishing subordinate CA '$($subCACert.Subject)' as SubCA"
+                certutil.exe -dspublish -f $subCACertFile SubCA
+            }
+            else {
+                # Single-tier: the CA is the root, publish as SubCA too
+                Write-Status "Running certutil.exe -dspublish -f $_FileName SubCA"
+                certutil.exe -dspublish -f $_FileName SubCA
+            }
         }
 
 
