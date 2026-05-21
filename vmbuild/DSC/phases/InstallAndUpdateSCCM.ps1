@@ -88,10 +88,12 @@ if (!(Test-Path C:\$CM\Redist)) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
-# Reset upgrade action (in case called again in add to existing scenario)
-$Configuration.UpgradeSCCM.Status = 'NotStart'
-$Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+# Reset upgrade action (in case called again in add to existing scenario), but not if already completed
+if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
+    $Configuration.UpgradeSCCM.Status = 'NotStart'
+    $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+}
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
@@ -337,7 +339,7 @@ CurrentBranch=1
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-    start-sleep -seconds 60
+    start-sleep -seconds 15
     $firstRun = $true
 
 }
@@ -389,7 +391,7 @@ if (-not $exists) {
         $i++
         New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
             -SecurityScopeName "All", "All Systems", "All Users and User Groups"
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 10
         $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
     }
     until ($exists -or $i -gt 10)
@@ -422,7 +424,18 @@ if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
 
 
 if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
-    $UpdateRequired = $false
+    # Verify the update is actually installed before skipping
+    $targetVersion = $deployConfig.cmOptions.version
+    $installedUpdate = Get-CMSiteUpdate -Fast | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $targetVersion" }
+    if ($installedUpdate) {
+        Write-DscStatus "Update 'Configuration Manager $targetVersion' verified as installed. Skipping upgrade."
+        $UpdateRequired = $false
+    }
+    else {
+        Write-DscStatus "UpgradeSCCM marked Completed but update 'Configuration Manager $targetVersion' not found in installed state. Re-running upgrade."
+        $Configuration.UpgradeSCCM.Status = 'NotStart'
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    }
 }
 
 if ($UpdateRequired) {

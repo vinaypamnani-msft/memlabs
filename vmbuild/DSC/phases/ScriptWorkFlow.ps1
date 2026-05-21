@@ -331,11 +331,19 @@ if ($scenario -eq "Hierarchy") {
 }
 
 if ($containsPassive) {
-    # Install Passive Site Server
-    Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $DomainFullName = $deployConfig.vmOptions.domainName
+    $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+    $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+    if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists) {
+        Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
+    }
 }
 
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"

@@ -176,6 +176,15 @@ foreach ($clientName in $ClientNameList) {
     }    
 }
 
+# If all clients already have the agent installed, skip the rest
+if ($ClientNameList.Count -eq 0) {
+    Write-DscStatus "[ClientPush] All clients already have the agent installed. Skipping."
+    $Configuration.InstallClient.Status = 'Completed'
+    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 $CollectionName = "All Systems"
 if ($ClientNames) {
     Write-DscStatus "Waiting for $($ClientNameList -join ',') to appear in '$CollectionName'"
