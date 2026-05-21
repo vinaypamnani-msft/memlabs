@@ -969,20 +969,36 @@ else {
                 $PSSiteCode = $PSVM.siteCode
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-                
+
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-                    #If the percent is 100, print out the Linkstatus and states for troubleshooting, otherwise print out the percentage
-                    if ($replicationStatus.GlobalInitPercentage -eq 100) {
-                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode LinkStatus: $($replicationStatus.LinkStatus), Site1ToSite2GlobalState: $($replicationStatus.Site1ToSite2GlobalState), Site2ToSite1GlobalState: $($replicationStatus.Site2ToSite1GlobalState), Site2ToSite1SiteState: $($replicationStatus.Site2ToSite1SiteState)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    # Map numeric states to friendly names for readability
+                    $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed" }
+                    $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
+                    $g12Name = $stateMap[[int]$replicationStatus.Site1ToSite2GlobalState]; if (-not $g12Name) { $g12Name = "$($replicationStatus.Site1ToSite2GlobalState)" }
+                    $g21Name = $stateMap[[int]$replicationStatus.Site2ToSite1GlobalState]; if (-not $g21Name) { $g21Name = "$($replicationStatus.Site2ToSite1GlobalState)" }
+                    $s21Name = $stateMap[[int]$replicationStatus.Site2ToSite1SiteState]; if (-not $s21Name) { $s21Name = "$($replicationStatus.Site2ToSite1SiteState)" }
+
+                    if ($replicationStatus.GlobalInitPercentage -ge 100) {
+                        # Init complete but link not yet active - show which states are pending
+                        $pending = @()
+                        if ($replicationStatus.LinkStatus -ne 2) { $pending += "Link=$linkName" }
+                        if ($replicationStatus.Site1ToSite2GlobalState -ne 2) { $pending += "Global($SiteCode->$PSSiteCode)=$g12Name" }
+                        if ($replicationStatus.Site2ToSite1GlobalState -ne 2) { $pending += "Global($PSSiteCode->$SiteCode)=$g21Name" }
+                        if ($replicationStatus.Site2ToSite1SiteState -ne 2) { $pending += "Site($PSSiteCode->$SiteCode)=$s21Name" }
+                        $pendingStr = $pending -join ", "
+                        Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds 30
                     }
                     else {
-                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        $pct = $replicationStatus.GlobalInitPercentage
+                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct%" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds 30
                     }
-                    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
                     Start-Sleep -Seconds 30
                 }
                 else {
-                    Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -MachineName $PSVM.VmName
+                    Write-DscStatus "Replication link is Active" -MachineName $PSVM.VmName
+                    Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active"
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'

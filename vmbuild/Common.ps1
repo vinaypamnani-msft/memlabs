@@ -867,39 +867,16 @@ function Get-File {
 
     # Display name for source
     $sourceDisplay = $Source
-    $bearerToken = $null
 
     # ---- Add auth if source is a storage URL ----
     if ($Source -and $StorageConfig.StorageLocation -and $Source -like "$($StorageConfig.StorageLocation)*") {
         $sourceDisplay = Split-Path $sourceDisplay -Leaf
 
-        if ($StorageConfig.UseBearerAuth) {
-            # Bearer auth — URL stays clean, token injected via curl headers
-            $bearerToken = Get-StorageToken
-            if ($null -eq $bearerToken) {
-                Write-Log "Get-File: Failed to get bearer token from Get-StorageToken." -Failure
-                return $false
-            }
+        # SAS auth — append token as query string
+        $Source = "$Source`?$($StorageConfig.StorageToken)"
 
-            # BITS does not support custom auth headers — force curl
-            if ($UseBITS.IsPresent) {
-                Write-Log "Get-File: UseBITS is not supported with bearer auth, falling back to curl." -LogOnly
-                $UseBITS = $false
-            }
-
-            # CDN edge nodes do not honour Azure bearer tokens — skip
-            if ($UseCDN.IsPresent) {
-                Write-Log "Get-File: UseCDN is not supported with bearer auth, ignoring." -LogOnly
-            }
-
-        }
-        else {
-            # SAS auth — append token as query string
-            $Source = "$Source`?$($StorageConfig.StorageToken)"
-
-            if ($UseCDN.IsPresent) {
-                $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
-            }
+        if ($UseCDN.IsPresent) {
+            $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
         }
     }
 
@@ -919,11 +896,6 @@ function Get-File {
     if (-not $Action) {
         Write-Log "Get-File: Action must be specified." -Failure
         return $false
-    }
-
-    # Copying implies a local path — bearer auth on a local copy makes no sense
-    if ($Action -eq "Copying" -and $StorageConfig.UseBearerAuth -and $bearerToken) {
-        Write-Log "Get-File: Action 'Copying' should not be used with bearer auth. Use 'Downloading' instead." -Warning
     }
 
     # ---- Build transfer arguments ----
@@ -991,8 +963,6 @@ function Get-File {
         # ---- Perform transfer ----
         if ($Action -eq "Downloading") {
             if ($UseBITS) {
-                # Note: UseBITS is forced to $false earlier when bearer auth is active
-                # so this block will never run with a bearer token
                 try {
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
                 }
@@ -1004,9 +974,6 @@ function Get-File {
                 }
             }
             else {
-                if ($StorageConfig.UseBearerAuth -and $bearerToken) {
-                    $HashArguments["BearerToken"] = $bearerToken.AccessToken
-                }
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
                     Write-Log "Get-File: Failed to download '$sourceDisplay' using curl." -Failure
@@ -1259,8 +1226,6 @@ function Start-CurlTransfer {
         [Parameter(Mandatory = $false)]
         [string] $DisplayName,
         [Parameter(Mandatory = $false)]
-        [string] $BearerToken,
-        [Parameter(Mandatory = $false)]
         [switch]$Silent
     )
 
@@ -1283,15 +1248,6 @@ function Start-CurlTransfer {
         return $false
     }
 
-    # ---- Build auth headers ----
-    $authArgs = @()
-    if (-not [string]::IsNullOrWhiteSpace($BearerToken)) {
-        $authArgs = @(
-            "-H", "Authorization: Bearer $BearerToken",
-            "-H", "x-ms-version: 2020-04-08"
-        )
-    }
-
     $maxRetries = 10
     $retryCount = 0
     $success = $false
@@ -1304,9 +1260,6 @@ function Start-CurlTransfer {
         $curlArguments = @("-L", "-C", "-")
         if ($Silent) {
             $curlArguments = @("-s") + $curlArguments
-        }
-        if ($authArgs.Count -gt 0) {
-            $curlArguments += $authArgs
         }
         $curlArguments += @("-o", $Destination, "$Source")
 
@@ -5427,7 +5380,6 @@ if (-not $Common.Initialized) {
         $global:StorageConfig = [PSCustomObject]@{
             StorageLocation = $null
             StorageToken    = $null
-            UseBearerAuth   = $false
         }
         $global:DSC_Copied = @()
 
