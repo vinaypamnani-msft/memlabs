@@ -13,7 +13,8 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $isCas = $ThisVM.Role -eq "CAS"
-$CAVMName = ($deployConfig.virtualMachines | Where-Object { $_.InstallCA }).vmName
+$CAVM = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+$CAVMName = $CAVM.vmName
 $DomainShort = $DomainFullName.Split(".")[0]
 # Read Site Code from registry
 
@@ -72,8 +73,25 @@ $CAName = "$DomainShort-$CAVMName-CA"
 $CertPath = "c:\temp\rootca.cer"
 
 if (-not (Test-Path $CertPath)) {
-    Get-Item  Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
-    Write-DscStatus "Exported root CA to $CertPath"
+    if ($CAVM.SubordinateCA) {
+        # Two-tier PKI: ConfigMgr validates client certs against the ROOT of the chain.
+        # Export the root CA cert, not the issuing (subordinate) CA cert.
+        $issuingCACert = Get-Item Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Select-Object -First 1
+        if ($issuingCACert) {
+            $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+            [void]$chain.Build($issuingCACert)
+            $rootCert = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+            $rootCert | Export-Certificate -FilePath $CertPath -Force
+            Write-DscStatus "Exported root CA '$($rootCert.Subject)' to $CertPath (two-tier PKI)"
+        }
+        else {
+            Write-DscStatus "WARNING: Could not find issuing CA cert matching '$CAName' in Intermediate store"
+        }
+    }
+    else {
+        Get-Item Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
+        Write-DscStatus "Exported root CA to $CertPath"
+    }
 }
 
 
