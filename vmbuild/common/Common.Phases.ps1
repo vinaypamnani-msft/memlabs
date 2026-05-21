@@ -610,7 +610,21 @@ function Get-ConfigurationData {
                     $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
                 }
 
-                if (-not $snapshot) {
+                # Skip auto-snapshot if all phase 8 VMs are already successfully deployed (re-run)
+                $phase8Nodes = $cd.AllNodes | Where-Object { $_.NodeName -ne "*" }
+                $allAlreadyDeployed = $true
+                foreach ($node in $phase8Nodes) {
+                    $vmNote = Get-VMNote -VMName $node.NodeName
+                    if (-not $vmNote -or $vmNote.success -ne $true) {
+                        $allAlreadyDeployed = $false
+                        break
+                    }
+                }
+
+                if ($allAlreadyDeployed) {
+                    Write-Log "[Phase 8] Skipping auto-snapshot: all VMs already deployed (re-run)" -LogOnly
+                }
+                elseif (-not $snapshot) {
                     $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
