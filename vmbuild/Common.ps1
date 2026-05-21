@@ -2270,6 +2270,13 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force
         }
 
+        # Store cmOptions on the top-level site server (CAS or standalone Primary) so new
+        # deployments to this domain can detect features like EnableBLM from the VM note.
+        if ($null -ne $DeployConfig.cmOptions -and $ThisVm.role -in @('CAS', 'Primary') -and -not $ThisVm.parentSiteCode) {
+            Write-Log "Writing out cmOptions on top-level site server (EnableBLM: $($DeployConfig.cmOptions.EnableBLM))"
+            $vmNote | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $($DeployConfig.cmOptions) -Force
+        }
+
         Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
 
     }

@@ -101,12 +101,10 @@
         }
     }
 
-    # BitLocker Management: collect VMs that should be moved to the BLM OU
-    [System.Collections.ArrayList]$blmVMs = @()
+    # BitLocker Management: ensure DC waits for BLM client VMs to domain-join
     if ($enableBLM) {
         foreach ($vm in $deployConfig.virtualMachines) {
             if ($vm.BitLocker -eq $true -and -not $vm.Hidden) {
-                [void]$blmVMs.Add($vm.vmName)
                 if (-not $waitOnDomainJoin.Contains($vm.vmName)) {
                     $waitOnDomainJoin += $vm.vmName
                 }
@@ -505,168 +503,7 @@
             }
         }
 
-        if ($enableBLM) {
-            WriteStatus BLMConfig {
-                DependsOn = $waitOnDependency
-                Status    = "Configuring BitLocker Management OU and Group Policy"
-            }
 
-            ADOrganizationalUnit 'MEMLABS-BitLockerClients'
-            {
-                Name                            = "MEMLABS-BitLockerClients"
-                Path                            = $DNName
-                ProtectedFromAccidentalDeletion = $false
-                Description                     = "MEMLABS BitLocker Management target computers"
-                Ensure                          = 'Present'
-                DependsOn                       = $waitOnDependency
-            }
-
-            $blmGPOName = "BitLocker Drive Encryption"
-
-            GroupPolicy BLMGroupPolicy {
-                Name      = $blmGPOName
-                DependsOn = "[ADOrganizationalUnit]MEMLABS-BitLockerClients"
-            }
-
-            GPLink BLMGPLink {
-                Path      = "OU=MEMLABS-BitLockerClients,$DNName"
-                GPOName   = $blmGPOName
-                DependsOn = "[GroupPolicy]BLMGroupPolicy"
-            }
-
-            # OS Drive encryption method: XTS-AES 256
-            GPRegistryValue BLMEncryptionMethod {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "EncryptionMethodWithXtsOs"
-                ValueType = "DWord"
-                Value     = "7"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            # Require TPM (value 2 = require TPM)
-            GPRegistryValue BLMUseTPM {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "UseAdvancedStartup"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMRequireTPM {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "EnableBDEWithNoTPM"
-                ValueType = "DWord"
-                Value     = "0"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMUseTPMOnly {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "UseTPM"
-                ValueType = "DWord"
-                Value     = "2"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            # No PIN or startup key required (unattended boot)
-            GPRegistryValue BLMNoTPMPIN {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "UseTPMPIN"
-                ValueType = "DWord"
-                Value     = "0"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMNoTPMKey {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "UseTPMKey"
-                ValueType = "DWord"
-                Value     = "0"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMNoTPMKeyPIN {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "UseTPMKeyPIN"
-                ValueType = "DWord"
-                Value     = "0"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            # Store recovery info in Active Directory
-            GPRegistryValue BLMADBackup {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "ActiveDirectoryBackup"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMRequireADBackup {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "RequireActiveDirectoryBackup"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            # OS Recovery options
-            GPRegistryValue BLMOSRecovery {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "OSRecovery"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMOSRecoveryPassword {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "OSRecoveryPassword"
-                ValueType = "DWord"
-                Value     = "2"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMOSRecoveryKey {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "OSRecoveryKey"
-                ValueType = "DWord"
-                Value     = "0"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMOSActiveDirectoryBackup {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "OSActiveDirectoryBackup"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            GPRegistryValue BLMOSActiveDirectoryInfoToStore {
-                Name      = $blmGPOName
-                Key       = "HKLM\SOFTWARE\Policies\Microsoft\FVE"
-                ValueName = "OSActiveDirectoryInfoToStore"
-                ValueType = "DWord"
-                Value     = "1"
-                DependsOn = "[GPLink]BLMGPLink"
-            }
-
-            $waitOnDependency = "[GPRegistryValue]BLMOSActiveDirectoryInfoToStore"
-        }
 
         if ($ThisVM.InstallCA) {
             # CA installation is handled by the host-driven PKI orchestrator
@@ -717,24 +554,7 @@
             $waitOnDependency += "[DelegateControl]Add$server"
         }
 
-        # Move BitLocker-enabled VMs to the BLM OU after they join the domain
-        if ($blmVMs.Count -gt 0) {
-            WriteStatus MoveBLMComputers {
-                DependsOn = $waitOnDependency
-                Status    = "Moving BitLocker-targeted VMs to MEMLABS-BitLockerClients OU"
-            }
 
-            $blmOUPath = "OU=MEMLABS-BitLockerClients,$DNName"
-            foreach ($blmVM in $blmVMs) {
-                MoveComputerToOU "MoveBLM_$blmVM" {
-                    ComputerName = $blmVM
-                    TargetOU     = $blmOUPath
-                    Ensure       = "Present"
-                    DependsOn    = "[DelegateControl]Add$blmVM"
-                }
-                $waitOnDependency += "[MoveComputerToOU]MoveBLM_$blmVM"
-            }
-        }
 
         if ($sitecount) {
 

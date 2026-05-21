@@ -112,6 +112,12 @@ function Test-VmFunctionality {
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
+    # BitLocker Management: validate policy exists and is deployed (top-level site only)
+    $hasBLMVMs = @($DeployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true }).Count -gt 0
+    if ($testsPassed -and ($DeployConfig.cmOptions.EnableBLM -or $hasBLMVMs) -and $role -in @('CAS', 'Primary') -and -not $CurrentItem.parentSiteCode) {
+        $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly)
     if ($testsPassed -and $role -notin @('OSDClient', 'Linux', 'AADClient', 'StandaloneRootCA')) {
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
@@ -543,6 +549,86 @@ function Test-CMSiteFunctionality {
         -DisplayName "Phase11-CM-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel "CM-$siteCode" -Result $result)
+}
+
+function Test-BLMFunctionality {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+
+    Write-Log "[Phase $Phase] $VMName [BLM]: Testing BitLocker Management policy and deployment" -LogOnly
+
+    $scriptBlock = {
+        param($sc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        # Import ConfigMgr module and connect to site
+        try {
+            $results.Details.Add("CMD: Importing ConfigMgr module and connecting to site $sc")
+            $smsProvider = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Identification" -ErrorAction Stop).SMSProviderServer
+            Import-Module (Join-Path (Split-Path $env:SMS_ADMIN_UI_PATH -Parent) 'ConfigurationManager.psd1') -ErrorAction Stop
+            $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProvider -ErrorAction SilentlyContinue
+            Push-Location "${sc}:\"
+            $results.Details.Add("OK: Connected to site $sc on $smsProvider")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Could not connect to CM site: $($_.Exception.Message)")
+            return $results
+        }
+
+        # Check BitLocker policy exists
+        $policyName = "MEMLABS-BitLocker Policy"
+        $results.Details.Add("CMD: Get-CMBlmSetting -Name '$policyName'")
+        $blmPolicy = Get-CMBlmSetting -Name $policyName -ErrorAction SilentlyContinue
+        if (-not $blmPolicy) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: BitLocker policy '$policyName' not found")
+            Pop-Location
+            return $results
+        }
+        $results.Details.Add("OK: BitLocker policy '$policyName' exists")
+
+        # Check collection exists
+        $collectionName = "MEMLABS-BitLocker Clients"
+        $results.Details.Add("CMD: Get-CMDeviceCollection -Name '$collectionName'")
+        $blmCollection = Get-CMDeviceCollection -Name $collectionName -ErrorAction SilentlyContinue
+        if (-not $blmCollection) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Collection '$collectionName' not found")
+            Pop-Location
+            return $results
+        }
+        $results.Details.Add("OK: Collection '$collectionName' exists (ID: $($blmCollection.CollectionID))")
+
+        # Check policy is deployed to the collection
+        $results.Details.Add("CMD: Get-CMSettingDeployment -CMSetting blmPolicy | Where CollectionId")
+        $deployment = Get-CMSettingDeployment -CMSetting $blmPolicy -ErrorAction SilentlyContinue |
+            Where-Object { $_.CollectionId -eq $blmCollection.CollectionID }
+        if (-not $deployment) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: BitLocker policy is not deployed to '$collectionName'")
+            Pop-Location
+            return $results
+        }
+        $results.Details.Add("OK: BitLocker policy is deployed to '$collectionName'")
+
+        Pop-Location
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode `
+        -DisplayName "Phase11-BLM-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel "BLM" -Result $result)
 }
 
 function Test-SecondaryFunctionality {

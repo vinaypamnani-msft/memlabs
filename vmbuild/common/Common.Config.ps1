@@ -132,6 +132,28 @@ function Get-UserConfiguration {
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
+        # Determine if BLM is enabled for this domain (from config or existing site server's VM note)
+        $blmEnabledForDomain = $false
+        if ($config.cmOptions -and $config.cmOptions.EnableBLM) {
+            $blmEnabledForDomain = $true
+        }
+        elseif ($config.vmOptions.domainName) {
+            # No cmOptions.EnableBLM in this config — check existing top-level site server
+            try {
+                $existingSiteVMs = Get-List -Type VM -DomainName $config.vmOptions.domainName
+                $topLevelSite = $existingSiteVMs | Where-Object {
+                    $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+                } | Select-Object -First 1
+                if ($topLevelSite -and $topLevelSite.cmOptions.EnableBLM) {
+                    $blmEnabledForDomain = $true
+                    Write-Log "BLM enabled for domain '$($config.vmOptions.domainName)' (from existing site server '$($topLevelSite.vmName)' VM note)" -Verbose
+                }
+            }
+            catch {
+                # Non-fatal; Get-List may not be available in all contexts
+            }
+        }
+
         foreach ($vm in $config.VirtualMachines) {
 
             if ($null -ne $vm.SQLInstanceName) {
@@ -227,7 +249,7 @@ function Get-UserConfiguration {
             }
 
             # BitLocker property: auto-add when BLM is enabled and VM has TPM
-            if ($config.cmOptions -and $config.cmOptions.EnableBLM -and $vm.tpmEnabled) {
+            if ($blmEnabledForDomain -and $vm.tpmEnabled) {
                 if ($null -eq $vm.BitLocker) {
                     # Default true on client OS, false on server OS
                     $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
