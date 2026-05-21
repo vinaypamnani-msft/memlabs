@@ -179,28 +179,4 @@ else {
     Write-DscStatus "$Tag Skipping policy creation/deployment (cmOptions.EnableBLM not set; policy should already exist from original build)"
 }
 
-# Enable BitLocker Management client agent via custom client setting
-$blmClientSettingName = "MEMLABS-BitLocker"
-Write-DscStatus "$Tag Checking if client setting '$blmClientSettingName' exists..."
-$existingClientSetting = Get-CMClientSetting -Name $blmClientSettingName -ErrorAction SilentlyContinue
-if (-not $existingClientSetting) {
-    Write-DscStatus "$Tag Creating client setting '$blmClientSettingName'..."
-    New-CMClientSetting -Name $blmClientSettingName -Description "Enable BitLocker Management agent on targeted clients" -Type Device -ErrorAction SilentlyContinue
-    Set-CMClientSettingBitLockerManagement -Name $blmClientSettingName -Enable $true
-    Write-DscStatus "$Tag Enabled BitLocker Management agent in client setting"
-
-    if ($blmCollection) {
-        New-CMClientSettingDeployment -Name $blmClientSettingName -CollectionId $blmCollection.CollectionID
-        Write-DscStatus "$Tag Deployed client setting '$blmClientSettingName' to '$blmCollectionName'"
-    }
-    else {
-        # Fall back to All Systems if collection wasn't created
-        New-CMClientSettingDeployment -Name $blmClientSettingName -CollectionId SMS00001
-        Write-DscStatus "$Tag Deployed client setting '$blmClientSettingName' to All Systems (collection was null)"
-    }
-}
-else {
-    Write-DscStatus "$Tag Client setting '$blmClientSettingName' already exists, skipping"
-}
-
 Write-DscStatus "$Tag BitLocker Management configuration complete"
