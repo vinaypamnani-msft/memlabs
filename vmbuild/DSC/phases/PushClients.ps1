@@ -230,17 +230,6 @@ if ($PackageSuccess -eq 0) {
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 }
-$alreadyPushed = @()
-$machinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
-foreach ($client in $ClientNameList) {
-
-    if ($machinelist -contains $client) {
-        continue
-    }
-    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-    $alreadyPushed += $client
-}
-
 $installedmachinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
@@ -249,9 +238,6 @@ foreach ($client in $ClientNameList) {
         continue
     }
     if ($installedmachinelist -contains $client) {
-        continue
-    }
-    if ($alreadyPushed -contains $client) {
         continue
     }
     
