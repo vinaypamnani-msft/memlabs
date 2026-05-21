@@ -2212,6 +2212,8 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
+        [int]$Phase,
+        [Parameter(Mandatory = $false)]
         [switch]$UpdateVersion,
         [Parameter(Mandatory = $false)]
         [bool]$Force = $false
@@ -2237,6 +2239,18 @@ function New-VmNote {
             network              = $network
             prefix               = $DeployConfig.vmOptions.prefix
             memLabsDeployVersion = $Common.MemLabsVersion
+        }
+
+        # Track the last phase that completed successfully on this VM
+        if ($Successful -and $Phase -gt 0) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $Phase -Force
+        }
+        else {
+            # Preserve existing lastPhaseComplete from previous successful phase
+            $existingNote = Get-VMNote -VMName $VmName
+            if ($existingNote -and $existingNote.lastPhaseComplete) {
+                $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingNote.lastPhaseComplete -Force
+            }
         }
 
         if ($UpdateVersion.IsPresent) {

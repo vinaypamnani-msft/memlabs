@@ -610,12 +610,12 @@ function Get-ConfigurationData {
                     $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
                 }
 
-                # Skip auto-snapshot if all phase 8 VMs are already successfully deployed (re-run)
+                # Skip auto-snapshot if all phase 8 VMs already completed phase 8+ (re-run)
                 $phase8Nodes = $cd.AllNodes | Where-Object { $_.NodeName -ne "*" }
                 $allAlreadyDeployed = $true
                 foreach ($node in $phase8Nodes) {
                     $vmNote = Get-VMNote -VMName $node.NodeName
-                    if (-not $vmNote -or $vmNote.success -ne $true) {
+                    if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
                         $allAlreadyDeployed = $false
                         break
                     }

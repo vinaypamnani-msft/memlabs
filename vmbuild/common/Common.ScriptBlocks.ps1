@@ -2475,7 +2475,7 @@ $global:VM_Config = {
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
         }
 
         if (-not $complete) {
