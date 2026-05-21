@@ -224,10 +224,6 @@ function New-VhdxFile {
         return $false
     }
 
-    Write-Log "Installing and importing WindowsImageTools module."
-    Install-Module -Name WindowsImageTools
-    Import-Module WindowsImageTools
-
     $unattendPath = Join-Path $Common.StagingAnswerFilePath $unattendFile
     $unattendPathToInject = Join-Path $Common.TempPath $unattendFile
 
@@ -272,26 +268,74 @@ function New-VhdxFile {
         $filesToInject += $item.FullName
     }
 
-    # Convert WIM to VHDX
-    # Probably better to add an option to use without unattend/filesToInject, but we always need it so don't care ATM.
+    # Create VHDX with native commands (explicit 512-byte sectors for BitLocker compatibility)
     try {
-        Convert-Wim2VHD -Path $VhdxPath `
-            -SourcePath $WimPath `
-            -Index ($selectedImage.ImageIndex) `
-            -Size 127GB `
-            -DiskLayout UEFI `
-            -Dynamic `
-            -Unattend $unattendPathToInject `
-            -filesToInject $filesToInject `
-            -Confirm:$False
+        # Create VHDX with 512n sector size to ensure BitLocker works in Hyper-V guests
+        Write-Log "Creating VHDX with 512-byte sector sizes..."
+        New-VHD -Path $VhdxPath -SizeBytes 127GB -Dynamic -LogicalSectorSizeBytes 512 -PhysicalSectorSizeBytes 512 | Out-Null
 
-        Write-Log "Converted WIM to VHDX." -Success
+        # Mount and partition
+        Write-Log "Mounting and partitioning VHDX (UEFI layout)..."
+        $vhdMount = Mount-VHD -Path $VhdxPath -Passthru
+        $diskNumber = $vhdMount.DiskNumber
+
+        Initialize-Disk -Number $diskNumber -PartitionStyle GPT
+
+        # Create UEFI partition layout: EFI System (260MB), MSR (128MB), Windows (remainder), Recovery (900MB)
+        $efiPartition = New-Partition -DiskNumber $diskNumber -Size 260MB -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+        New-Partition -DiskNumber $diskNumber -Size 128MB -GptType '{e3c9e316-0b5c-4db8-817d-f92df00215ae}' | Out-Null
+        $winPartition = New-Partition -DiskNumber $diskNumber -Size 125GB
+        $recPartition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -GptType '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
+
+        # Format partitions
+        Format-Volume -Partition $efiPartition -FileSystem FAT32 -NewFileSystemLabel "System" -Confirm:$false | Out-Null
+        Format-Volume -Partition $winPartition -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false | Out-Null
+        Format-Volume -Partition $recPartition -FileSystem NTFS -NewFileSystemLabel "Recovery" -Confirm:$false | Out-Null
+
+        # Assign drive letters for image apply
+        $efiPartition | Add-PartitionAccessPath -AssignDriveLetter
+        $winPartition | Add-PartitionAccessPath -AssignDriveLetter
+        $efiPartition = $efiPartition | Get-Partition
+        $winPartition = $winPartition | Get-Partition
+        $efiLetter = $efiPartition.DriveLetter
+        $winLetter = $winPartition.DriveLetter
+
+        # Apply Windows image
+        Write-Log "Applying WIM image (Index $($selectedImage.ImageIndex)) to ${winLetter}:\..."
+        Expand-WindowsImage -ImagePath $WimPath -Index $selectedImage.ImageIndex -ApplyPath "${winLetter}:\" | Out-Null
+
+        # Configure BCD boot
+        Write-Log "Configuring UEFI boot..."
+        $bcdResult = & bcdboot "${winLetter}:\Windows" /s "${efiLetter}:" /f UEFI 2>&1
+        Write-Log "bcdboot: $bcdResult"
+
+        # Inject unattend file
+        Write-Log "Injecting unattend file..."
+        $panther = "${winLetter}:\Windows\Panther"
+        if (-not (Test-Path $panther)) { New-Item -Path $panther -ItemType Directory -Force | Out-Null }
+        Copy-Item -Path $unattendPathToInject -Destination "$panther\unattend.xml" -Force
+
+        # Inject files
+        foreach ($injectDir in $filesToInject) {
+            $destDir = "${winLetter}:\$($injectDir | Split-Path -Leaf)"
+            Write-Log "Injecting directory: $($injectDir | Split-Path -Leaf)"
+            Copy-Item -Path $injectDir -Destination $destDir -Recurse -Force
+        }
+
+        # Remove drive letters and dismount
+        $efiPartition | Remove-PartitionAccessPath -AccessPath "${efiLetter}:\"
+        $winPartition | Remove-PartitionAccessPath -AccessPath "${winLetter}:\"
+        Dismount-VHD -Path $VhdxPath
+
+        Write-Log "Created VHDX with native 512-byte sectors." -Success
         return $true
-
     }
     catch {
-        Write-Log "Failed to Convert WIM to VHDX. $($_)" -Failure
+        Write-Log "Failed to create VHDX. $($_)" -Failure
         Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        # Ensure cleanup on failure
+        try { Dismount-VHD -Path $VhdxPath -ErrorAction SilentlyContinue } catch {}
+        if (Test-Path $VhdxPath) { Remove-Item $VhdxPath -Force -ErrorAction SilentlyContinue }
         return $false
     }
     finally {
