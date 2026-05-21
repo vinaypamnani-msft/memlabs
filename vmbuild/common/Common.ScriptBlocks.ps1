@@ -1339,7 +1339,7 @@ $global:VM_Config = {
             catch {
 
                 if (Test-Path $extractPath) {
-                    Start-Sleep -Seconds 60
+                    Start-Sleep -Seconds 10
                     Remove-Item -Path $extractPath -Force -Recurse | Out-Null
                 }
 
@@ -1385,23 +1385,18 @@ $global:VM_Config = {
 
                 }
 
-                Start-Sleep 10
-
                 foreach ($folder in $modules) {
                     try {
 
                         "Copying $($folder.FullName) to WindowsPowerShell\Modules." | Out-File $log -Append
 
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
-                        "Import-Module $($folder.Name)" | Out-File $log -Append
-                        Import-Module $folder.Name -Force
                     }
                     catch {
                         "Failed to copy $($folder.Name) to WindowsPowerShell\Modules. Retrying once after killing WMIPRvSe.exe hosting DSC modules." | Out-File $log -Append
                         Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-                        Start-Sleep -Seconds 60
+                        Start-Sleep -Seconds 10
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction SilentlyContinue
-                        Import-Module $folder.Name -Force
                     }
                 }
                 #Create the zip flag

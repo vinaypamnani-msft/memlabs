@@ -81,6 +81,7 @@ if ($blmCollection) {
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
 if ($blmEnabled) {
     # Ensure SQL encryption certificate exists (required for BLM recovery key escrow)
+    # Reference: https://learn.microsoft.com/en-us/mem/configmgr/protect/deploy-use/bitlocker/encrypt-recovery-data
     $cmDbName = "CM_$SiteCode"
     Write-DscStatus "$Tag Ensuring SQL encryption certificate exists for database '$cmDbName'..."
     try {
@@ -89,10 +90,20 @@ if ($blmEnabled) {
         $masterKeyPass = if (Test-Path $cm_svc_file) { (Get-Content $cm_svc_file).Trim() } else { 'oMm$Bl!2024x' }
         $sqlCertQuery = @"
 USE [$cmDbName];
-IF NOT EXISTS (SELECT 1 FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$masterKeyPass';
-IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = 'BitLockerManagement_CERT')
-    CREATE CERTIFICATE BitLockerManagement_CERT WITH SUBJECT = 'BitLocker Management';
+IF NOT EXISTS (SELECT name FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+BEGIN
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$masterKeyPass'
+END
+
+IF NOT EXISTS (SELECT name FROM sys.certificates WHERE name = 'BitLockerManagement_CERT')
+BEGIN
+    CREATE CERTIFICATE BitLockerManagement_CERT AUTHORIZATION RecoveryAndHardwareCore
+    WITH SUBJECT = 'BitLocker Management',
+    EXPIRY_DATE = '20391022'
+
+    GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareRead
+    GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite
+END
 "@
         Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance "." -TrustServerCertificate -ErrorAction Stop
         Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName"
