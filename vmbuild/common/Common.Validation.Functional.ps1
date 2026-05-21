@@ -114,7 +114,7 @@ function Test-VmFunctionality {
 
     # BitLocker Management: validate policy exists and is deployed (top-level site only)
     $hasBLMVMs = @($DeployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true }).Count -gt 0
-    if ($testsPassed -and ($DeployConfig.cmOptions.EnableBLM -or $hasBLMVMs) -and $role -in @('CAS', 'Primary') -and -not $CurrentItem.parentSiteCode) {
+    if ($testsPassed -and ($DeployConfig.cmOptions.EnableBLM -or $hasBLMVMs) -and $role -eq 'Primary') {
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
