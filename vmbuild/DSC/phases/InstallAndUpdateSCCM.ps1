@@ -909,33 +909,46 @@ else {
                 $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
 
             }
-            # Waiting for PS ready to use
-            $Configuration.$propName.Status = 'Running'
-            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            # Only mark Running if not already Completed
+            if ($Configuration.$propName.Status -ne 'Completed') {
+                $Configuration.$propName.Status = 'Running'
+                $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            }
             Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
-        #Wait for all Primaries to get added
-        foreach ($PSVM in $PSVMs) {
 
-            $PSSiteCode = $PSVM.siteCode
-            $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-            Write-DscStatus "Waiting for Primary site installation to finish"
-            while (!$PSSystemServer) {
-                Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
-                Start-Sleep -Seconds 30
-                $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+        # Build wait list excluding already-completed primaries
+        $waitList = @()
+        foreach ($PSVM in $PSVMs) {
+            $propName = "PSReadyToUse" + $PSVM.VmName
+            if ($Configuration.$propName.Status -eq 'Completed') {
+                Write-DscStatus "Replication link for $($PSVM.VmName) already verified. Skipping."
+                continue
             }
+            $waitList += $PSVM.vmName
         }
 
-        Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
-
-
-        $waitList = @($PSVMs.vmName)
-
-        while ( $true) {
-            if ($waitlist.Count -eq 0) {
-                break
+        if ($waitList.Count -eq 0) {
+            Write-DscStatus "All replication links already active. Skipping wait."
+        }
+        else {
+            #Wait for primaries that still need verification
+            foreach ($PSVM in $PSVMs) {
+                if ($waitList -notcontains $PSVM.vmName) { continue }
+                $PSSiteCode = $PSVM.siteCode
+                $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+                Write-DscStatus "Waiting for Primary site installation to finish"
+                while (!$PSSystemServer) {
+                    Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
+                    Start-Sleep -Seconds 30
+                    $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+                }
             }
+
+            Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
+        }
+
+        while ($waitList.Count -gt 0) {
             foreach ($PSVM in $PSVMs) {
                 if ($waitList -notcontains $PSVM.VmName) {
                     continue
@@ -956,13 +969,12 @@ else {
                     Start-Sleep -Seconds 30
                 }
                 else {
-                    Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -MachineName $PSVM.VmName
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                    Start-Sleep -Seconds 30
                 }
             }
         }

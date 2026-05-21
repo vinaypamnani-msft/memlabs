@@ -13,14 +13,12 @@ $global:Phase10Job = {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         if ($NewVMS) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
         }
-        $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
      
         # Get variables from parent scope
         $currentItem = $using:currentItem
@@ -130,7 +128,7 @@ $global:Initialize_Disk = {
         try {
             (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
             Get-Disk | Update-Disk
-            start-sleep -Seconds 30
+            start-sleep -Seconds 10
         }
         catch {}
         $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
@@ -143,7 +141,7 @@ $global:Initialize_Disk = {
             try {
                 (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
                 Get-Disk | Update-Disk
-                start-sleep -Seconds 30
+                start-sleep -Seconds 10
             }
             catch {}
             $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null 
@@ -289,10 +287,10 @@ $global:VM_Create = {
 
             if ($restart) {
                 if ($vm.Role -ne "DC") {
-                    start-sleep -seconds 60
+                    start-sleep -seconds 15
                 }
                 start-vm2 -name $vm.VmName
-                start-sleep -Seconds 60
+                start-sleep -Seconds 20
             }
         }
 
@@ -466,7 +464,7 @@ $global:VM_Create = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            start-sleep -seconds 60
+            start-sleep -seconds 20
             $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
             if (-not $ps) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
@@ -477,7 +475,7 @@ $global:VM_Create = {
         if ($Migrate) {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to online. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -487,7 +485,7 @@ $global:VM_Create = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to read-write. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -544,10 +542,10 @@ $global:VM_Create = {
         # Set PS Execution Policy (required on client OS)
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 60
+            start-sleep -seconds 15
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
                 if ($result.ScriptBlockFailed) {
                     if (-not $currentItem.operatingSystem -like "*Server*") {
@@ -729,8 +727,7 @@ $global:VM_Create = {
                 Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
                 # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force; New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
 
                 # Copy files from DVD
                 Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
@@ -1572,7 +1569,7 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
         $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 60
+            start-sleep -seconds 20
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -1984,7 +1981,7 @@ $global:VM_Config = {
                         }
                     }
 
-                    Start-Sleep -Seconds 6
+                    Start-Sleep -Seconds 3
                 } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
@@ -2092,8 +2089,8 @@ $global:VM_Config = {
 
                     if (-not $rebooted -and $dscStatus.ScriptBlockOutput.RebootRequested -eq $true) {
                         # Reboot the machine
-                        start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 90 seconds to see if it reboots itself."
+                        start-sleep -Seconds 30 # Wait 30 seconds and re-request.. maybe its going to reboot itself.
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 30 seconds to see if it reboots itself."
                         $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                             $ProgressPreference = 'SilentlyContinue'
                             try { 
@@ -2346,40 +2343,14 @@ $global:VM_Config = {
                     }
 
                     $bailEarly = $false
-                    if ($complete) {
-                        #~~===================== Failed Configuration Manager Server Setup =====================
-                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup" -Context 0, 0 } -SuppressLog
-                        if ($result.ScriptBlockOutput.Line) {
-                            $failEntry = $result.ScriptBlockOutput.Line
-                            $bailEarly = $true
+                    # Check ConfigMgrSetup.log for fatal errors in a single PSDirect call
+                    $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
+                        if (Test-Path C:\ConfigMgrSetup.log) {
+                            Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights|Prereq check didn't pass" | Select-Object -First 1
                         }
                     }
-
-                    # ~Setup has encountered fatal errors
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    
-                    #~Setup could not install SQL RMO, ConfigMgr installation cannot be completed.
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ConfigMgr installation cannot be completed." -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    #ERROR: Computer account doesn't have administrative rights to the SQL Server~
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have administrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Prereq check didn't pass, site installation will be stopped. Please check ConfigMgrPrereq.log for results." -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
+                    if ($cmLogCheck.ScriptBlockOutput.Line) {
+                        $failEntry = $cmLogCheck.ScriptBlockOutput.Line
                         $bailEarly = $true
                     }
 

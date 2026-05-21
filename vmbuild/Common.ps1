@@ -3334,7 +3334,7 @@ function Wait-ForVm {
         $vmTest = Get-VM2 -Fallback -Name $VmName
         if ($vmTest.State -ne "Running") {
             start-vm2 -name $vmName
-            start-sleep -seconds 30
+            start-sleep -seconds 15
         }
         if (-not $vmTest) {
             Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
@@ -3346,17 +3346,22 @@ function Wait-ForVm {
         $restarted = $false
         do {
             $count++
-            Start-Sleep -Seconds 5
+            if ($count -gt 1) {
+                Start-Sleep -Seconds 3
+            }
             try {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
-            $vmTest = Get-VM2 -Fallback -Name $VmName
-            if ($vmTest.State -ne "Running") {
-                stop-vm2 -name $vmName
-                start-sleep -seconds 30
-                start-vm2 -name $vmName
-                start-sleep -seconds 30
+            # Only check VM state every 3rd iteration or on first attempt
+            if ($count -eq 1 -or $count % 3 -eq 0) {
+                $vmTest = Get-VM2 -Fallback -Name $VmName
+                if ($vmTest.State -ne "Running") {
+                    stop-vm2 -name $vmName
+                    start-sleep -seconds 15
+                    start-vm2 -name $vmName
+                    start-sleep -seconds 20
+                }
             }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -3365,7 +3370,7 @@ function Wait-ForVm {
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
-            else {
+            elseif ($count -gt 1) {
                 $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path "C:\" } -SuppressLog
                 $readytest = $true -eq $outtest.ScriptBlockOutput
 
@@ -3378,9 +3383,9 @@ function Wait-ForVm {
                         if (-not $restarted) {
                             Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
                             stop-vm2 -name $vmName
-                            start-sleep -seconds 30
+                            start-sleep -seconds 15
                             start-vm2 -name $vmName
-                            start-sleep -seconds 30
+                            start-sleep -seconds 20
                             $restarted = $true
                         }
                     }
@@ -3665,7 +3670,7 @@ function Get-VmSession {
         $ps = $null
         $failCount++
         if ($failCount -gt 2) {
-            start-sleep -seconds 15
+            start-sleep -seconds 5
         }
 
         if ($failCount -gt 3) {
