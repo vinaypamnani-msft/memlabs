@@ -97,12 +97,28 @@ END
 
 IF NOT EXISTS (SELECT name FROM sys.certificates WHERE name = 'BitLockerManagement_CERT')
 BEGIN
+    -- Create cert with correct authorization per MS docs
     CREATE CERTIFICATE BitLockerManagement_CERT AUTHORIZATION RecoveryAndHardwareCore
     WITH SUBJECT = 'BitLocker Management',
     EXPIRY_DATE = '20391022'
 
     GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareRead
     GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite
+END
+ELSE
+BEGIN
+    -- Cert exists: fix authorization and grants if needed (never drop existing cert)
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.certificates c
+        JOIN sys.database_principals p ON c.principal_id = p.principal_id
+        WHERE c.name = 'BitLockerManagement_CERT' AND p.name = 'RecoveryAndHardwareCore')
+    BEGIN
+        ALTER AUTHORIZATION ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareCore
+    END
+
+    GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareRead
+    GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite
+END
 END
 "@
         Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance "." -TrustServerCertificate -ErrorAction Stop
