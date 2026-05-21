@@ -57,19 +57,32 @@ if ($blmCollection) {
     }
 }
 
-# Create BitLocker management policy
+# Build BitLocker policy objects for drive encryption
+$blmPolicies = @()
+# Setup tab: XTS-AES 256 encryption for OS and Fixed drives (Windows 10+)
+$blmPolicies += New-CMBLEncryptionMethodWithXts -PolicyState Enabled -OSDriveEncryptionMethod AesXts256 -FixedDriveEncryptionMethod AesXts256
+# OS Drive tab: Require encryption with TPM-only protector
+$blmPolicies += New-CMBMSOSDEncryptionPolicy -PolicyState Enabled -Protector TpmOnly
+# OS Drive tab: Enforce OS drive encryption immediately
+$blmPolicies += New-CMUseOsEnforcePolicy -PolicyState Enabled -GracePeriodDays 0
+# Fixed Drive tab: Require encryption with auto-unlock
+$blmPolicies += New-CMBMSFDVEncryptionPolicy -PolicyState Enabled -AutoUnlock Require
+# Fixed Drive tab: Enforce fixed drive encryption immediately
+$blmPolicies += New-CMUseFddEnforcePolicy -PolicyState Enabled -GracePeriodDays 0
+# Client Management tab: Check compliance every 90 minutes, escrow recovery password and package
+$blmPolicies += New-CMBMSClientConfigureCheckIntervalPolicy -PolicyState Enabled -ClientWakeupFrequencyMinutes 90 -KeyRecoveryOption PasswordAndPackage
+
+# Create or update BitLocker management policy
 $blmPolicyName = "MEMLABS-BitLocker Policy"
 $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
 if (-not $blmPolicy) {
-    $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy"
-
-    # Configure OS drive encryption settings
-    Set-CMBlmPlannedFailureAction -InputObject $blmPolicy -LockWorkstation
-    Set-CMBlmSetting -InputObject $blmPolicy -OsDrive -Encrypt -EncryptionMethod XtsAes256 -MinimumPinLength 6
+    $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy" -Policies $blmPolicies
     Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
 }
 else {
-    Write-DscStatus "$Tag BitLocker policy already exists, skipping creation"
+    # Update existing policy with correct encryption settings
+    $blmPolicy | Set-CMBlmSetting -Policies $blmPolicies
+    Write-DscStatus "$Tag Updated BitLocker policy with encryption settings: $blmPolicyName"
 }
 
 # Ensure policy is deployed to the collection (idempotent)
