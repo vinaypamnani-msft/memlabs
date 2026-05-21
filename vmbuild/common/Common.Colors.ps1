@@ -94,19 +94,20 @@ function Get-Animate {
     $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
     $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
 
-    # Show red if on a non-main branch (pending changes to merge) or dirty working tree
+    # Show red if local branch is behind remote (unpulled changes) or has uncommitted edits
     $hasPendingChanges = $false
-    if ($Global:Common.DevBranch) {
-        $hasPendingChanges = $true
-    }
-    else {
-        try {
-            $repoDir = Split-Path $Global:Common.CachePath
+    try {
+        $repoDir = Split-Path $Global:Common.CachePath
+        # Check for commits on remote not yet pulled
+        $behind = & git -C $repoDir rev-list HEAD..@{u} --count 2>$null
+        if ($behind -and [int]$behind -gt 0) { $hasPendingChanges = $true }
+        # Check for uncommitted local changes
+        if (-not $hasPendingChanges) {
             $gitStatus = & git -C $repoDir status --porcelain 2>$null
             if ($gitStatus) { $hasPendingChanges = $true }
         }
-        catch {}
     }
+    catch {}
 
     if ($hasPendingChanges) {
         $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
