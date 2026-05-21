@@ -667,7 +667,7 @@ function Get-ConfigurationData {
         }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
-        if ($dc) {
+        if ($dc -and -not $global:StartPhase) {
 
             $global:preparePhasePercent++
             Start-Sleep -Milliseconds 251

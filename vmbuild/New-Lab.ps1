@@ -735,6 +735,7 @@ try {
     # Define phases
     $start = 1
     $maxPhase = 11
+    $global:StartPhase = $StartPhase
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
