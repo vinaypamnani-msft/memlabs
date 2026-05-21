@@ -94,14 +94,19 @@ function Get-Animate {
     $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
     $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
 
-    # Check for pending git changes - show red if uncommitted changes exist
+    # Show red if on a non-main branch (pending changes to merge) or dirty working tree
     $hasPendingChanges = $false
-    try {
-        $repoDir = Split-Path $Global:Common.CachePath
-        $gitStatus = & git -C $repoDir status --porcelain 2>$null
-        if ($gitStatus) { $hasPendingChanges = $true }
+    if ($Global:Common.DevBranch) {
+        $hasPendingChanges = $true
     }
-    catch {}
+    else {
+        try {
+            $repoDir = Split-Path $Global:Common.CachePath
+            $gitStatus = & git -C $repoDir status --porcelain 2>$null
+            if ($gitStatus) { $hasPendingChanges = $true }
+        }
+        catch {}
+    }
 
     if ($hasPendingChanges) {
         $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
