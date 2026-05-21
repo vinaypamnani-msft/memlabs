@@ -4962,6 +4962,10 @@ Function Set-TitleBar {
         $VersionString = "DevLabs $($global:Common.MemLabsVersion)"
     }
 
+    if ($global:Common.OfflineMode) {
+        $VersionString += " (Offline Mode)"
+    }
+
     if ($Global:ConfigFile) {
         $config = [System.Io.Path]::GetFileNameWithoutExtension(($Global:configfile))
         $VersionString = $config + " - " + $VersionString

@@ -177,14 +177,28 @@ function Add-NewVMForRole {
         }
         elseif ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
+            if (-not $OSList -or $OSList.Count -eq 0) {
+                Write-Host
+                Write-RedX "No supported operating systems available for role '$role'. If running in Offline Mode, ensure base images are downloaded first."
+                return
+            }
             $operatingSystem = "Windows 10 Latest (64-bit)"
             if ($ConfigToModify.domainDefaults.DefaultClientOS) {
-                $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
+                if ($OSList -contains $ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
+                }
+                else {
+                    Write-Log "Default client OS '$($ConfigToModify.domainDefaults.DefaultClientOS)' is not available (Offline Mode?). Prompting for selection." -Warning
+                    $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $operatingSystem
+                    if ($OperatingSystem -eq "ESCAPE" -or $OperatingSystem -eq "NOITEMS") {
+                        return
+                    }
+                }
             }
             else {          
                 Write-Log -Verbose "No Default OS defined" 
                 $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM"  -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $operatingSystem
-                if ($OperatingSystem -eq "ESCAPE") {
+                if ($OperatingSystem -eq "ESCAPE" -or $OperatingSystem -eq "NOITEMS") {
                     return
                 }
             }
