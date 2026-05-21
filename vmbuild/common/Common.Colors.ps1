@@ -97,12 +97,12 @@ function Get-Animate {
     # Check for pending git changes - show red if uncommitted changes exist
     $hasPendingChanges = $false
     try {
-        $gitRoot = $Global:Common.StagingAnswerFilePath
-        if (-not $gitRoot) { $gitRoot = $PSScriptRoot }
-        $gitStatus = & git -C (Split-Path $PSScriptRoot -Parent) status --porcelain 2>$null
-        if ($gitStatus) { $hasPendingChanges = $true }
+        Push-Location (Split-Path $Global:Common.CachePath)
+        $gitStatus = git status --porcelain 2>&1
+        Pop-Location
+        if ($LASTEXITCODE -eq 0 -and $gitStatus) { $hasPendingChanges = $true }
     }
-    catch {}
+    catch { Pop-Location -ErrorAction SilentlyContinue }
 
     if ($hasPendingChanges) {
         $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
