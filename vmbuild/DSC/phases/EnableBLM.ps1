@@ -80,6 +80,30 @@ if ($blmCollection) {
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
 if ($blmEnabled) {
+    # Ensure SQL encryption certificate exists (required for BLM recovery key escrow)
+    $cmDbName = "CM_$SiteCode"
+    Write-DscStatus "$Tag Ensuring SQL encryption certificate exists for database '$cmDbName'..."
+    try {
+        Push-Location $env:SystemDrive
+        $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
+        $masterKeyPass = if (Test-Path $cm_svc_file) { (Get-Content $cm_svc_file).Trim() } else { 'oMm$Bl!2024x' }
+        $sqlCertQuery = @"
+USE [$cmDbName];
+IF NOT EXISTS (SELECT 1 FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '$masterKeyPass';
+IF NOT EXISTS (SELECT 1 FROM sys.certificates WHERE name = 'BitLockerManagement_CERT')
+    CREATE CERTIFICATE BitLockerManagement_CERT WITH SUBJECT = 'BitLocker Management';
+"@
+        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance "." -TrustServerCertificate -ErrorAction Stop
+        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName"
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: SQL cert creation failed: $($_.Exception.Message)"
+    }
+    finally {
+        Pop-Location
+    }
+
     Write-DscStatus "$Tag Building BitLocker policy objects..."
     $blmPolicies = @()
     $blmPolicies += New-CMBLEncryptionMethodWithXts -PolicyState Enabled -OSDriveEncryptionMethod AesXts256 -FixedDriveEncryptionMethod AesXts256
