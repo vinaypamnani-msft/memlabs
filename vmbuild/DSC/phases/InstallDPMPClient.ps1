@@ -97,6 +97,55 @@ $DPNames = $DPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $PullDPNames = $PullDPs.ServerName | Where-Object { $_ -and $_.Trim() }
 $MPNames = $MPs.ServerName | Where-Object { $_ -and $_.Trim() }
 
+# Quick check: verify all expected DPs and MPs are already installed
+$allInstalled = $true
+foreach ($DP in $DPs) {
+    if ([string]::IsNullOrWhiteSpace($DP.ServerName)) { continue }
+    $DPFQDN = $DP.ServerName.Trim() + "." + $DomainFullName
+    if (-not (Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $DP.ServerSiteCode)) {
+        $allInstalled = $false
+        break
+    }
+}
+if ($allInstalled) {
+    foreach ($PDP in $PullDPs) {
+        if ([string]::IsNullOrWhiteSpace($PDP.ServerName)) { continue }
+        $DPFQDN = $PDP.ServerName.Trim() + "." + $DomainFullName
+        if (-not (Get-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $PDP.ServerSiteCode)) {
+            $allInstalled = $false
+            break
+        }
+    }
+}
+if ($allInstalled) {
+    foreach ($MP in $MPs) {
+        if ([string]::IsNullOrWhiteSpace($MP.ServerName)) { continue }
+        $MPFQDN = $MP.ServerName.Trim() + "." + $DomainFullName
+        if (-not (Get-CMManagementPoint -SiteSystemServerName $MPFQDN)) {
+            $allInstalled = $false
+            break
+        }
+    }
+}
+# Also verify at least 1 DP and 1 MP exist in the site
+if ($allInstalled) {
+    $dpCount = (Get-CMDistributionPoint -SiteCode $SiteCode | Measure-Object).Count
+    $mpCount = (Get-CMManagementPoint -SiteCode $SiteCode | Measure-Object).Count
+    if ($dpCount -eq 0 -or $mpCount -eq 0) {
+        $allInstalled = $false
+    }
+}
+
+if ($allInstalled) {
+    Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
+    $Configuration.InstallDP.Status = 'Completed'
+    $Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration.InstallMP.Status = 'Completed'
+    $Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
 Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
@@ -155,3 +204,9 @@ if ($mpCount -eq 0) {
     Install-MP -ServerFQDN ($ThisMachineName + "." + $DomainFullName) -ServerSiteCode $SiteCode -usePKI:$usePKI
 }
 
+# Mark completed
+$Configuration.InstallDP.Status = 'Completed'
+$Configuration.InstallDP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration.InstallMP.Status = 'Completed'
+$Configuration.InstallMP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force

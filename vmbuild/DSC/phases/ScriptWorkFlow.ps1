@@ -192,12 +192,14 @@ $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# Force AD Replication
-$domainControllers = Get-ADDomainController -Filter *
-if ($domainControllers.Count -gt 1) {
-    Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
-    $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
-    Start-Sleep -Seconds 3
+# Force AD Replication (only on first run)
+if ($firstRun) {
+    $domainControllers = Get-ADDomainController -Filter *
+    if ($domainControllers.Count -gt 1) {
+        Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
+        $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+        Start-Sleep -Seconds 3
+    }
 }
 
 if ($scenario -eq "MultiDomain") {
@@ -223,10 +225,15 @@ if ($scenario -eq "Standalone") {
     . $ScriptFile $ConfigFilePath $LogPath
 
     #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    if ($Configuration.InstallDP.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+    }
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
@@ -236,11 +243,15 @@ if ($scenario -eq "Standalone") {
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
-
-    Write-DscStatus "$scenario Running InstallRoles.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    if ($Configuration.InstallSUP.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+    }
 
     #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
@@ -260,10 +271,15 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
-        Write-DscStatus "$scenario Running InstallRoles.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        if ($Configuration.InstallSUP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallRoles.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
 
     }
     elseif ($CurrentRole -eq "Primary") {
@@ -277,10 +293,15 @@ if ($scenario -eq "Hierarchy") {
         }
 
         #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        if ($Configuration.InstallDP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+        }
                
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
@@ -290,10 +311,15 @@ if ($scenario -eq "Hierarchy") {
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
-        Write-DscStatus "$scenario Running InstallRoles.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        if ($Configuration.InstallSUP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallRoles.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
 
          #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
         Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"

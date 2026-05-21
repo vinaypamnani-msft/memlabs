@@ -205,7 +205,6 @@ function Install-DP {
         else {
             Write-DscStatus "DP Role detected on $DPFQDN SiteCode: $ServerSiteCode"
             $dpinstalled = $true
-
         }
 
         if ($i -gt 10) {
@@ -213,7 +212,9 @@ function Install-DP {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if (-not $dpinstalled -and -not $installFailure) {
+            Start-Sleep -Seconds 10
+        }
 
     } until ($dpinstalled -or $installFailure)
 
@@ -296,7 +297,9 @@ function Install-PullDP {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if (-not $dpinstalled -and -not $installFailure) {
+            Start-Sleep -Seconds 10
+        }
 
     } until ($dpinstalled -or $installFailure)
 }
@@ -347,7 +350,9 @@ function Install-MP {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if (-not $mpinstalled -and -not $installFailure) {
+            Start-Sleep -Seconds 10
+        }
 
     } until ($mpinstalled -or $installFailure)
 }
@@ -394,7 +399,9 @@ function Install-SUP {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if (-not $installed -and -not $installFailure) {
+            Start-Sleep -Seconds 10
+        }
 
     } until ($installed -or $installFailure)
 }
@@ -485,7 +492,9 @@ function Install-SRP {
             $installFailure = $true
         }
 
-        Start-Sleep -Seconds 10
+        if (-not $installed -and -not $installFailure) {
+            Start-Sleep -Seconds 10
+        }
 
     } until ($installed -or $installFailure)
 }

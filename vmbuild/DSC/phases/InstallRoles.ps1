@@ -179,6 +179,31 @@ if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 }
 
+# Quick check: if all SUPs are already installed, skip the entire install+sync
+$allSUPsInstalled = $true
+foreach ($SUP in $SUPs) {
+    if ([string]::IsNullOrWhiteSpace($SUP.ServerName)) { continue }
+    $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
+    if (-not (Get-CMSoftwareUpdatePoint -SiteSystemServerName $SUPFQDN)) {
+        $allSUPsInstalled = $false
+        break
+    }
+}
+if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
+    Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+if ($SUPs.Count -eq 0) {
+    Write-DscStatus "No SUPs configured. Skipping SUP install."
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 # Check if a SUP Exists on this site
 $configureSUP = $false
 $existingSUPs = Get-CMSoftwareUpdatePoint -SiteCode $SiteCode

@@ -67,6 +67,37 @@ Write-DscStatus "Client push candidates are '$ClientNames'"
 # Create Boundary groups
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
+
+# Quick check: if all boundary groups, boundaries, and discovery are already configured, skip
+$allBGsExist = $true
+foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+    if (-not (Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue)) {
+        $allBGsExist = $false
+        break
+    }
+}
+if ($allBGsExist) {
+    foreach ($bg in $bgs) {
+        if (-not (Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue)) {
+            $allBGsExist = $false
+            break
+        }
+    }
+}
+if ($allBGsExist) {
+    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    if ($adiscovery.Value1.ToLower() -eq "active" -and $adsgdiscovery.Value1.ToLower() -eq "active") {
+        Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
+        # Still handle client push path
+        if ($ThisVm.thisParams.PassiveNode -or -not $pushClients) {
+            $Configuration.InstallClient.Status = 'NotRequested'
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+        return
+    }
+}
+
 Write-DscStatus "Create $bgsCount Boundary Groups for site $SiteCode"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
