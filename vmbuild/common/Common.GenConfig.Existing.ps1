@@ -812,16 +812,19 @@ function Select-ExistingSubnets {
             else {
                 Write-Log -Activity -NoNewLine "Select a network"
                 if ($CurrentNetworkIsValid) {
-                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue -Split
+                    $response = Get-Menu2 -MenuName "Existing Network Selection" -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue -Split
                 }
                 else {
-                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -Split
+                    $response = Get-Menu2 -MenuName "Existing Network Selection" -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -Split
                 }
             }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
                 continue
+            }
+            if ($response -eq "ESCAPE") {
+                return $null
             }
             write-Verbose "response $response"
 
@@ -847,7 +850,11 @@ function Select-ExistingSubnets {
                         $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetList -Domain $domain
                     }
                     Write-Log -Activity -NoNewLine "New Network menu"
-                    $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1) -Split
+                    $network = Get-Menu2 -MenuName "New Network Selection" -Prompt "Select New Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1) -Split
+                    if ($network -eq "ESCAPE") {
+                        $network = $null
+                        break
+                    }
                     if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }

@@ -328,7 +328,10 @@ function select-timezone {
     $timezone = Get-Menu2 -MenuName "Timezone Selection" -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
     if ($timezone -eq "F") {
         Write-Log -Activity "Full Timezone Selection" -NoNewLine
-        $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
+        $timezone = Get-Menu2 -MenuName "Full Timezone Selection" -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
+        if ($timezone -eq "ESCAPE") {
+            $timezone = $ConfigToCheck.vmOptions.timezone
+        }
     }
     return $timezone
 }
