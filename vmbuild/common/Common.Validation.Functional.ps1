@@ -572,8 +572,11 @@ function Test-BLMFunctionality {
         # Import ConfigMgr module and connect to site
         try {
             $results.Details.Add("CMD: Importing ConfigMgr module and connecting to site $sc")
-            $smsProvider = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Identification" -ErrorAction Stop).SMSProviderServer
-            Import-Module (Join-Path (Split-Path $env:SMS_ADMIN_UI_PATH -Parent) 'ConfigurationManager.psd1') -ErrorAction Stop
+            $smsProvider = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+            $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+            $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+            Import-Module (Join-Path $uiInstallPath "bin\ConfigurationManager.psd1") -ErrorAction Stop
             $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProvider -ErrorAction SilentlyContinue
             Push-Location "${sc}:\"
             $results.Details.Add("OK: Connected to site $sc on $smsProvider")
