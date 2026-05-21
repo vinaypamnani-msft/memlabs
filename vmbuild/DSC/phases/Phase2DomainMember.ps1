@@ -123,9 +123,39 @@
             Role      = $firewallRoles
         }
 
-        WriteStatus Complete {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Complete!"
+        # Pre-seed TPM protector for BitLocker VMs
+        # Windows 11 24H2 on Hyper-V 512e disks cannot add a NumericalPassword as the first protector.
+        # The ConfigMgr BLM handler calls ProtectKeyWithNumericalPassword first, which fails with 0x8007001f.
+        # Pre-adding a TPM protector works around this by ensuring the volume already has a protector.
+        if ($ThisVM.BitLocker -eq $true) {
+            WriteStatus SeedTPM {
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                Status    = "Adding TPM protector for BitLocker"
+            }
+
+            Script SeedTPMProtector {
+                DependsOn  = "[WriteStatus]SeedTPM"
+                GetScript  = { @{ Result = (Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue).KeyProtector.Count } }
+                TestScript = {
+                    $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+                    return ($vol -and $vol.KeyProtector.Count -gt 0)
+                }
+                SetScript  = {
+                    $result = manage-bde -protectors -add C: -TPM 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "Failed to add TPM protector: $result" }
+                }
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[Script]SeedTPMProtector"
+                Status    = "Complete!"
+            }
+        }
+        else {
+            WriteStatus Complete {
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                Status    = "Complete!"
+            }
         }
     }
 }
