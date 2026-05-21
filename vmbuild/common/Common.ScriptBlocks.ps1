@@ -1065,7 +1065,7 @@ $global:VM_Config = {
             }
         }
 
-        if ($Phase -ge 2) {
+        if ($Phase -eq 2) {
             $retryCount = 0
             $success = $false
           
