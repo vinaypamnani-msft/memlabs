@@ -235,6 +235,20 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
     }
 
+    # Start AD Discovery early so DDRs have maximum processing time before PushClients
+    try {
+        Set-Location $LogPath
+        . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+        $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+        Invoke-CMSystemDiscovery
+        Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+    }
+    catch {
+        Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+    }
+    Set-Location $LogPath
+
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
@@ -302,6 +316,20 @@ if ($scenario -eq "Hierarchy") {
         else {
             Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
         }
+
+        # Start AD Discovery early so DDRs have maximum processing time before PushClients
+        try {
+            Set-Location $LogPath
+            . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+            Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+            Invoke-CMSystemDiscovery
+            Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+        }
+        catch {
+            Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+        }
+        Set-Location $LogPath
                
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
@@ -370,6 +398,13 @@ else {
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
 }
 
+if ($CurrentRole -eq "Primary") {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+}
+
 if ($TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
@@ -397,13 +432,6 @@ if ($ThisVM.role -ne "CAS") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
     Write-DscStatus "Complete!"
-}
-
-if ($CurrentRole -eq "Primary") {
-    Write-DscStatus "Running EnableBLM.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
 }
 
 

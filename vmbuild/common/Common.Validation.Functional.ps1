@@ -744,10 +744,16 @@ function Test-SiteSystemFunctionality {
             }
             $results.Details.Add("OK: IIS service (W3SVC) is Running")
 
-            # Check SMS_MP IIS virtual directory exists via WebAdministration
+            # Check SMS_MP IIS virtual directory exists via WebAdministration (retry up to 5 times, 60s apart)
             try {
                 Import-Module WebAdministration -ErrorAction Stop
-                $mpApp = Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                $mpApp = $null
+                $maxAttempts = 5
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    $mpApp = Get-WebApplication -Site 'Default Web Site' -Name 'SMS_MP' -ErrorAction SilentlyContinue
+                    if ($mpApp) { break }
+                    if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds 60 }
+                }
                 if ($mpApp) {
                     $results.Details.Add("OK: IIS application 'SMS_MP' exists (Physical: $($mpApp.PhysicalPath))")
                 }

@@ -1,10 +1,9 @@
-#Enable-LogMachine.ps1
-
+# Enable-LogMachine.ps1
+# Idempotent: checks actual shortcut/assoc existence, not flag files.
 
 function Add-Permissions {
-    param(
-        [string]$folderPath
-    )
+    param([string]$folderPath)
+    if (-not (Test-Path $folderPath)) { return }
     $acl = Get-Acl $folderPath
     $permission = "Read"
     $inheritance = "ContainerInherit, ObjectInherit"
@@ -13,217 +12,169 @@ function Add-Permissions {
     $acl.SetAccessRule($accessRule)
     Set-Acl $folderPath $acl
 }
-$fixFlag = "EnableLogMachine.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
 
-if (-not (Test-Path $flagPath)) {
-    Add-Permissions -folderPath "C:\Windows\System32\Configuration"
-    Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
-    $prg = "C:\tools\LogMachine\LogMachine.exe"
-    $ext = '.log'
-    & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
-    & cmd /c "assoc $ext=LogMachine.LOG"
-    $ext = '.lo_'
-    & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
-    & cmd /c "assoc $ext=LogMachine.LOG"
-    $ext = '.errlog'
-    & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
-    & cmd /c "assoc $ext=LogMachine.LOG"
-    "LogMachine Enabled" | Out-File $flagPath -Force
+function New-Shortcut {
+    param(
+        [string]$LinkPath,
+        [string]$TargetPath,
+        [string]$Arguments,
+        [string]$IconLocation
+    )
+    if (Test-Path $LinkPath) { return $false }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($LinkPath)
+    $shortcut.TargetPath = $TargetPath
+    if ($Arguments) { $shortcut.Arguments = $Arguments }
+    if ($IconLocation) { $shortcut.IconLocation = $IconLocation }
+    $shortcut.Save()
+    return (Test-Path $LinkPath)
 }
 
-
-$CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
-if ($CMInstallDir) {
-    $CMlogs = (Join-Path $CMInstallDir "Logs")
-}
-
-$UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
-if ($UIInstallDir) {
-    $CMExe = (Join-Path $UIInstallDir "bin")
-    $CMexe = (Join-Path $CMexe "Microsoft.ConfigurationManagement.exe")
-}
-else {
-    $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "UI Installation Directory"  -ErrorAction SilentlyContinue
-    if ($UIInstallDir) {
-        $CMExe = (Join-Path $UIInstallDir "bin")
-        $CMexe = (Join-Path $CMexe "Microsoft.ConfigurationManagement.exe")
+# --- LogMachine file associations ---
+$prg = "C:\tools\LogMachine\LogMachine.exe"
+if (Test-Path $prg) {
+    $currentAssoc = & cmd /c "assoc .log" 2>$null
+    if ($currentAssoc -notlike "*LogMachine*") {
+        Add-Permissions -folderPath "C:\Windows\System32\Configuration"
+        Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
+        & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
+        & cmd /c "assoc .log=LogMachine.LOG"
+        & cmd /c "assoc .lo_=LogMachine.LOG"
+        & cmd /c "assoc .errlog=LogMachine.LOG"
     }
 }
 
-$ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "SMSCFGRC"  -ErrorAction SilentlyContinue
+# --- Gather paths ---
+$CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
+if ($CMInstallDir) {
+    $CMlogs = Join-Path $CMInstallDir "Logs"
+}
 
-$ClientPath = Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\CcmExec"  -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "ImagePath" -ErrorAction SilentlyContinue | split-path -parent  -ErrorAction SilentlyContinue
+$UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
+if (-not $UIInstallDir) {
+    $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
+}
+if ($UIInstallDir) {
+    $CMexe = Join-Path $UIInstallDir "bin\Microsoft.ConfigurationManagement.exe"
+}
 
+$ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty "SMSCFGRC" -ErrorAction SilentlyContinue
+
+$ClientPath = Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\CcmExec" -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty "ImagePath" -ErrorAction SilentlyContinue | Split-Path -Parent -ErrorAction SilentlyContinue
 if ($ClientPath) {
-    $ClientlogsPath = (Join-Path $ClientPath "Logs")
+    $ClientlogsPath = Join-Path $ClientPath "Logs"
 }
 
 $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
 
-$fixFlag = "ClientShortcuts.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-
-    $sccmAppletPath = "C:\Windows\System32\control.exe"
-
-    if ($ControlPanel) {
-        # Create the MECM Control Panel Applet shortcut
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\SCCM Control Panel Applet.lnk")
-        $shortcut.TargetPath = $sccmAppletPath
-        $shortcut.Arguments = "smscfgrc"
-        $shortcut.IconLocation = $ControlPanel
-        $shortcut.Save()
-
-    }
-    if (($ClientLogsPath -and (Test-Path $ClientlogsPath))) {
-        # Create the Logs shortcut
-        Add-Permissions -folderPath $ClientlogsPath
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\Client Logs.lnk")
-        $shortcut.TargetPath = $ClientlogsPath
-        $shortcut.Save()
-        
-        "Shortcuts Enabled" | Out-File $flagPath -Force
-
-
-    }
+# --- Client shortcuts ---
+if ($ControlPanel) {
+    New-Shortcut -LinkPath "$desktopPath\SCCM Control Panel Applet.lnk" `
+        -TargetPath "C:\Windows\System32\control.exe" `
+        -Arguments "smscfgrc" -IconLocation $ControlPanel
 }
 
-$fixFlag = "ServerShortcuts2.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Check if the new path exists
-    if ($CMLogs -and (Test-Path $CMlogs)) {
-        # Create the new shortcut if the path exists
+if ($ClientlogsPath -and (Test-Path $ClientlogsPath)) {
+    Add-Permissions -folderPath $ClientlogsPath
+    New-Shortcut -LinkPath "$desktopPath\Client Logs.lnk" -TargetPath $ClientlogsPath
+}
+
+# --- ConfigMgr Logs shortcut (server or MP/WSUS role) ---
+if (-not (Test-Path "$desktopPath\ConfigMgr Logs.lnk")) {
+    if ($CMlogs -and (Test-Path $CMlogs)) {
         Add-Permissions -folderPath $CMlogs
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
-        $shortcut.TargetPath = $CMlogs
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
+        New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $CMlogs
     }
     else {
-        $fixFlag = "MPLogshortcuts.done"
-        $flagPath = Join-Path $env:USERPROFILE $fixFlag
-        if (-not (Test-Path $flagPath)) {
-            # Define the paths
-            $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_MP_CONTROL_MANAGER' -Name 'TraceFileName').TraceFileName)
-            if (-not $MPLogs) {
-                $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_WSUS_CONTROL_MANAGER' -Name 'TraceFileName').TraceFileName)
+        # Try MP or WSUS tracing path
+        $MPLogs = $null
+        try {
+            $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_MP_CONTROL_MANAGER' -Name 'TraceFileName' -ErrorAction Stop).TraceFileName)
+        }
+        catch {}
+        if (-not $MPLogs) {
+            try {
+                $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_WSUS_CONTROL_MANAGER' -Name 'TraceFileName' -ErrorAction Stop).TraceFileName)
             }
-            # Check if the new path exists
-            if (Test-Path $MPLogs) {
-                # Create the new shortcut if the path exists
-                Add-Permissions -folderPath $MPLogs
-                $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Logs.lnk")
-                $shortcut.TargetPath = $MPLogs
-                $shortcut.Save()
-                "Shortcuts Enabled" | Out-File $flagPath -Force
-            }
+            catch {}
+        }
+        if ($MPLogs -and (Test-Path $MPLogs)) {
+            Add-Permissions -folderPath $MPLogs
+            New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $MPLogs
         }
     }
 }
 
-$fixFlag = "ServerShortcuts3.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Check if the new path exists
-    if ($CMexe -and (Test-Path $CMexe)) {
-        # Create the new shortcut if the path exists
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Console.lnk")
-        $shortcut.TargetPath = $CMexe
-        $shortcut.Arguments = "sms:debugview"
-        $shortcut.Save()
+# --- ConfigMgr Console + PowerShell shortcuts ---
+if ($CMexe -and (Test-Path $CMexe)) {
+    New-Shortcut -LinkPath "$desktopPath\ConfigMgr Console.lnk" `
+        -TargetPath $CMexe -Arguments "sms:debugview"
 
-        $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\ConfigMgr Powershell.lnk")
-        $shortcut2.TargetPath = "powershell"
-        $shortcut2.Arguments = "-NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
-        $shortcut2.Save()
-
-        $bytes = [System.IO.File]::ReadAllBytes("$desktopPath\ConfigMgr Powershell.lnk")
-        # Set byte 21 (0x15) bit 6 (0x20) ON
-        $bytes[0x15] = $bytes[0x15] -bor 0x20
-        [System.IO.File]::WriteAllBytes("$desktopPath\ConfigMgr Powershell.lnk", $bytes)
-
-        "Shortcuts Enabled" | Out-File $flagPath -Force
+    $psLink = "$desktopPath\ConfigMgr Powershell.lnk"
+    if (-not (Test-Path $psLink)) {
+        New-Shortcut -LinkPath $psLink `
+            -TargetPath "powershell" `
+            -Arguments "-NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
+        if (Test-Path $psLink) {
+            # Set RunAsAdmin flag in .lnk header
+            $bytes = [System.IO.File]::ReadAllBytes($psLink)
+            $bytes[0x15] = $bytes[0x15] -bor 0x20
+            [System.IO.File]::WriteAllBytes($psLink, $bytes)
+        }
     }
 }
 
-$fixFlag = "IISShortcuts.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $IISLogs = "C:\inetpub\logs"
-    # Check if the new path exists
-    if (Test-Path $IISLogs) {
-        # Create the new shortcut if the path exists
-        Add-Permissions -folderPath $IISLogs    
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\IIS Logs.lnk")
-        $shortcut.TargetPath = $IISLogs
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
-    }
+# --- IIS shortcuts ---
+$IISLogs = "C:\inetpub\logs"
+if (Test-Path $IISLogs) {
+    Add-Permissions -folderPath $IISLogs
+    New-Shortcut -LinkPath "$desktopPath\IIS Logs.lnk" -TargetPath $IISLogs
 }
-
-$fixFlag = "IISShortcuts2.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
 
 $inetMgr = "$env:windir\system32\inetsrv\InetMgr.exe"
-if (-not (Test-Path $flagPath)) {
-    if ($inetMgr -and (Test-Path $inetMgr)) {
-        $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\IIS InetMgr.lnk")
-        $shortcut2.TargetPath = $inetMgr       
-        $shortcut2.Save()       
-    }
-
+if (Test-Path $inetMgr) {
+    New-Shortcut -LinkPath "$desktopPath\IIS InetMgr.lnk" -TargetPath $inetMgr
 }
 
-
-$fixFlag = "WSUSShortcuts2.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-
+# --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
-if (-not (Test-Path $flagPath)) {
-    if ($inetMgr -and (Test-Path $wsus)) {
-        $shortcut2 = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\WSUS Console.lnk")
-        $shortcut2.TargetPath = $wsus       
-        $shortcut2.Save()       
-    }
+if (Test-Path $wsus) {
+    New-Shortcut -LinkPath "$desktopPath\WSUS Console.lnk" -TargetPath $wsus
 }
 
-$fixFlag = "WSUSShortcuts.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $WSUSLogs = "C:\Program Files\Update Services\LogFiles"
-    # Check if the new path exists
-    if (Test-Path $WSUSLogs) {
-        # Create the new shortcut if the path exists
-        Add-Permissions -folderPath $WSUSLogs
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\WSUS Logs.lnk")
-        $shortcut.TargetPath = $WSUSLogs
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
-    }
+$WSUSLogs = "C:\Program Files\Update Services\LogFiles"
+if (Test-Path $WSUSLogs) {
+    Add-Permissions -folderPath $WSUSLogs
+    New-Shortcut -LinkPath "$desktopPath\WSUS Logs.lnk" -TargetPath $WSUSLogs
 }
 
-
-$fixFlag = "DPLogshortcuts.done"
-$flagPath = Join-Path $env:USERPROFILE $fixFlag
-if (-not (Test-Path $flagPath)) {
-    # Define the paths
-    $val = (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\CLSID\{1798F365-5C8D-47e7-80E3-EAF234320077}\InprocServer32' -Name '(default)').'(default)'
-    $DPLogs = Join-Path (Split-Path (Split-Path $val -Parent) -Parent) 'logs'
-
-    # Check if the new path exists
-    if (Test-Path $DPLogs) {
-        # Create the new shortcut if the path exists
-        Add-Permissions -folderPath $DPLogs 
-        $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut("$desktopPath\DP Logs.lnk")
-        $shortcut.TargetPath = $DPLogs
-        $shortcut.Save()
-        "Shortcuts Enabled" | Out-File $flagPath -Force
+# --- DP Logs shortcut ---
+if (-not (Test-Path "$desktopPath\DP Logs.lnk")) {
+    try {
+        $val = (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\CLSID\{1798F365-5C8D-47e7-80E3-EAF234320077}\InprocServer32' -Name '(default)' -ErrorAction Stop).'(default)'
+        $DPLogs = Join-Path (Split-Path (Split-Path $val -Parent) -Parent) 'logs'
+        if (Test-Path $DPLogs) {
+            Add-Permissions -folderPath $DPLogs
+            New-Shortcut -LinkPath "$desktopPath\DP Logs.lnk" -TargetPath $DPLogs
+        }
     }
+    catch {}
+}
+
+# --- Clean up legacy flag files ---
+$legacyFlags = @(
+    "EnableLogMachine.done", "ClientShortcuts.done", "ServerShortcuts2.done",
+    "MPLogshortcuts.done", "ServerShortcuts3.done", "IISShortcuts.done",
+    "IISShortcuts2.done", "WSUSShortcuts2.done", "WSUSShortcuts.done", "DPLogshortcuts.done"
+)
+foreach ($flag in $legacyFlags) {
+    $fp = Join-Path $env:USERPROFILE $flag
+    if (Test-Path $fp) { Remove-Item $fp -Force }
 }
 
 
