@@ -76,9 +76,29 @@
             MaximumSize = $PageFileSize
         }
         
-        WriteStatus WaitDomain {
+        WriteStatus DisableWU {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status    = "Waiting for domain to be ready (Trying to ping the DC)"
+            Status    = "Disabling Windows Update"
+        }
+
+        # Disable Windows Update before domain join reboot so WU doesn't fire on restart
+        Script DisableWindowsUpdate {
+            DependsOn  = "[WriteStatus]DisableWU"
+            GetScript  = { @{ Result = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue).NoAutoUpdate } }
+            TestScript = {
+                $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue
+                return ($val -and $val.NoAutoUpdate -eq 1)
+            }
+            SetScript  = {
+                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
+                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        WriteStatus WaitDomain {
+            DependsOn = "[Script]DisableWindowsUpdate"
+            Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
         }
 
         WaitForDomainReady WaitForDomain {
@@ -141,6 +161,11 @@
                     return ($vol -and $vol.KeyProtector.Count -gt 0)
                 }
                 SetScript  = {
+                    # Initialize TPM ownership (required on Hyper-V virtual TPMs before use)
+                    $tpm = Get-Tpm -ErrorAction SilentlyContinue
+                    if ($tpm -and -not $tpm.TpmReady) {
+                        Initialize-Tpm -AllowClear -ErrorAction Stop
+                    }
                     $result = manage-bde -protectors -add C: -TPM 2>&1
                     if ($LASTEXITCODE -ne 0) { throw "Failed to add TPM protector: $result" }
                 }
