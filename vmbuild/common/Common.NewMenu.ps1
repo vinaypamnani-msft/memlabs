@@ -631,7 +631,9 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Usable rows (leave room for prompt)
+    # Reserve extra rows so post-menu content (blank line, PgDn indicator, prompt)
+    # never writes past the last viewport row and triggers a scroll.
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 4)
     $CurrentPosition = $Host.UI.RawUI.CursorPosition
     # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
     # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
@@ -750,12 +752,19 @@ function Show-Menu {
         if ($RoomLeft -lt ($menuItems.Count - $roomsaved)) {
             $Maxshrink = $true
         }
+        $PgUpAvailable = ($operation -eq "PGDN")
         $CurrentPosition = Get-CursorPosition
-        $MenuStart = $CurrentPosition.Y        
+        $MenuStart = $CurrentPosition.Y
+        $passedDisplayedItems = $false
         foreach ($menuItem in $menuItems) {
             if ($operation -eq "PGDN") {
                 if ($menuItem.Displayed) {
                     $menuItem.Displayed = $false
+                    $passedDisplayedItems = $true
+                    continue
+                }
+                if (-not $passedDisplayedItems) {
+                    # Items before current page (hidden by a previous PgDn) - skip
                     continue
                 }
                 if (-not $menuItem.Displayed -and $menuitem.Selectable) {
@@ -865,12 +874,17 @@ function Show-Menu {
         if (-not $Maxshrink) {
             Write-Host ""
         }
-        if ($Operation -eq "PGDNDone") {
+        if ($PgUpAvailable -and $Operation -eq "PGDNNeeded") {
+            $Operation = ""
+            Write-Host2
+            Write-Host2 "Press [PgUp/PgDn] to see more" -ForegroundColor Yellow
+        }
+        elseif ($Operation -eq "PGDNDone") {
             $Operation = ""
             Write-Host2
             Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
         }
-        if ($Operation -eq "PGDNNeeded") {
+        elseif ($Operation -eq "PGDNNeeded") {
             $Operation = ""
             Write-Host2
             Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
