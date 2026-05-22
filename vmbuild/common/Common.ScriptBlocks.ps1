@@ -241,7 +241,7 @@ $global:VM_Create = {
         $dynamicMinRam = 0
 
         if (-not $CreateVM) {
-            # Check if memory matches
+            # Check if memory amount or processor count changed; skip dynamic memory toggle for existing VMs
             $restart = $false
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if memory has changed."
             $vm = Get-VM2 -name $currentItem.VmName
@@ -249,38 +249,15 @@ $global:VM_Create = {
             $memory = ($currentItem.Memory / 1)            
             $currentMemory = $vm.MemoryStartup
 
-            $dynamicRamEnabledRequested = $false
-            $dynamicRamEnabledCurrent = $vm.DynamicMemoryEnabled
-            $dynamicRamInBytes = 0
-            $dynamicRamCurrent = 0
-
-
-            if ($memory -ne $currentMemory -or $dynamicRamEnabledCurrent -ne $dynamicRamEnabledRequested -or $dynamicRamInBytes -ne $dynamicRamCurrent) {
+            if ($memory -ne $currentMemory) {
                
                 if ($vm.State -eq "Running") {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping VM."
                     stop-vm2 -name $vm.VmName
                     $restart = $true
                 }
 
-                if ($dynamicRamEnabledRequested) {
-           
-                    $priority = 25
-                    $buffer = 10
-                    if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
-                        $priority = 50
-                        $buffer = 20
-                    }
-                    if ($dynamicRamInBytes -gt 40MB) {
-                        Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
-                        $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
-                    }
-                    else {
-                        Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
-                    }
-                }
-                else {
-                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
-                }                
+                $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
             }
 
             $currentprocs = $vm.ProcessorCount
