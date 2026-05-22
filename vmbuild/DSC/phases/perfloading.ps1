@@ -597,6 +597,126 @@ else {
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
     }
 
+    # Define helper functions for SUP sync (used later)
+    function Check-SyncSucceeded {
+        param (
+            [string]$SiteCode
+        )
+ 
+        $syncFinished = $syncTimeout = $syncFailed = $false
+        $i = 0
+ 
+        do {                    
+            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+
+            if (-not $($syncState.WSUSServerName)) {
+                Write-DscStatus "$Tag SUM Sync: WSUS server not detected yet, waiting 60s..."
+                Start-Sleep -Seconds 60
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                 if (-not $($syncState.WSUSServerName)) {
+                    Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
+                    $syncFailed = $true
+                    return $false
+                 }                 
+            }
+
+            if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
+                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                Sync-CMSoftwareUpdate
+                Start-Sleep -Seconds 60
+            } 
+            else {
+                $syncStateString = "Unknown"
+                switch ($($syncState.LastSyncState)) {
+                    "6700" { $syncStateString = "WSUS Sync Manager Error" }
+                    "6701" { $syncStateString = "WSUS Synchronization Started" }
+                    "6702" { $syncStateString = "WSUS Synchronization Done" }
+                    "6703" { $syncStateString = "WSUS Synchronization Failed" }
+                    "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
+                    "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
+                    "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
+                    "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
+                    "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
+                    "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
+                    "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
+                }
+                Write-DscStatus "$Tag SUM Sync: State $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)] (check $i of 60)"
+ 
+                if ($syncState.LastSyncState -eq 6702) {
+                    Write-DscStatus "$Tag SUM Sync finished successfully."
+                    return $true
+                }
+ 
+                if (-not $syncFinished) {
+                    $i++
+                    Start-Sleep -Seconds 30
+                }
+ 
+                if ($i -gt 60) {
+                    $syncTimeout = $true
+                    Write-DscStatus "$Tag SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
+                    return $false
+                }
+            }
+        }  until ($syncFinished -or $syncTimeout -or $syncFailed)
+ 
+        return $false
+    }
+
+    function Invoke-FullSync {
+        $syncFolder = "$CMInstallDir\inboxes\wsyncmgr.box"
+        $syncFile = Join-Path $syncFolder "full.syn"
+        if (Test-Path $syncFolder) {
+            try {
+                New-Item -Path $syncFile -ItemType File -Force | Out-Null
+                Write-DscStatus "$Tag Triggered full WSUS sync (dropped full.syn)"
+            }
+            catch {
+                Write-DscStatus "$Tag Error creating 'full.syn': $_"
+            }
+        }
+    }
+
+    # Kick off WSUS sync early so it runs in background while we create collections
+    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
+    $syncNeeded = $false
+
+    if ($deployConfig.cmOptions.OfflineSUP) {
+        $Sups = $false
+        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"
+    }
+
+    if ($Sups) {
+        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
+        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
+
+        # Rename products to match SUP naming convention
+        $products = $products -replace "^Server 2016$", "Windows Server 2016"
+        $products = $products -replace "^Server 2019$", "Windows Server 2019"
+        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
+        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
+        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
+        $products = $products -replace "^Windows 11.*$", "Windows 11"
+        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
+        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
+        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
+        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
+        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
+        $products += "Microsoft Defender for Endpoint"
+        $products = @($products | ForEach-Object { "$_" })
+
+        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
+
+        if ($missingproducts) {
+            $syncNeeded = $true
+            Write-DscStatus "$Tag SUP products missing - triggering WSUS sync now (will finish later while we create collections)"
+            Invoke-FullSync
+        }
+        else {
+            Write-DscStatus "$Tag SUP products and classifications are already enabled."
+        }
+    }
+
     # Define additional device collection information
     $Collections += @(
         @{
@@ -1010,207 +1130,65 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
     
-    $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
-
-    if ($deployConfig.cmOptions.OfflineSUP) {
-        $Sups = $false
-        Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"        
-    }
-
+    # Now wait for WSUS sync that was triggered earlier (ran during collection creation)
     if (-not $Sups) {
         Write-DscStatus "$Tag No SUP installed for this site, skipping the SUP product check and sync"
     }
 
-    if ($Sups) {
+    if ($Sups -and $syncNeeded) {
+        Write-DscStatus "$Tag Waiting for WSUS sync to complete (was triggered before collection creation)..."
+        $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
 
-        # Get the Software Update Point Component
-        $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-    
-        # Get unique operating systems
-        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
+        if ($syncSuccess) {
 
-        Write-DscStatus "$Tag the OS for this SCCM site are $products"
-    
-        # Rename products based on conditions
-        $products = $products -replace "^Server 2016$", "Windows Server 2016"
-        $products = $products -replace "^Server 2019$", "Windows Server 2019"
-        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
-        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
-        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
-        $products = $products -replace "^Windows 11.*$", "Windows 11"
-        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
-        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
-        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
-        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
-    
-        # Add additional products for defender and Office 365
-        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
-        $products += "Microsoft Defender for Endpoint"
-    
-        # Add double quotes around each product name as few products have commas in their name
-        $products = @($products | ForEach-Object { "$_" })
+            Write-DscStatus "$Tag Found missing $products, enabling them now"
+            $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+            $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
 
-        Write-DscStatus "$Tag modified OS names to match with SUP naming convention are $products"
-    
-        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
+            # Get the language setting
+            $lang = $deployConfig.vmOptions.locale
 
-        Write-DscStatus "$Tag Are there any products not checked on SUP product? $missingproducts - if yes, please continue"
-        function Check-SyncSucceeded {
-            param (
-                [string]$SiteCode
-            )
-     
-            $syncFinished = $syncTimeout = $syncFailed = $false
-            $i = 0
-     
-            do {                    
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-    
-                if (-not $($syncState.WSUSServerName)) {
-                    start-sleep -Seconds 120
-                    $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-                     if (-not $($syncState.WSUSServerName)) {
-                        Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
-                        $syncFailed = $true
-                        return $false
-                     }                 
-                }
-
-                if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                    Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
-                    Sync-CMSoftwareUpdate
-                    Start-Sleep -Seconds 120
-                } 
-                else {
-                    $syncStateString = "Unknown"
-                    switch ($($syncState.LastSyncState)) {
-                        "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                        "6701" { $syncStateString = "WSUS Synchronization Started" }
-                        "6702" { $syncStateString = "WSUS Synchronization Done" }
-                        "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                        "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                        "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                        "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                        "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                        "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                        "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                        "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                    }
-                    Write-DscStatus "SUM Sync: Current State: $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)]"
-     
-                    if ($syncState.LastSyncState -eq 6702) {
-                        Write-DscStatus "SUM Sync finished successfully."
-                        return $true
-                    }
-     
-                    if (-not $syncFinished) {
-                        $i++
-                        Start-Sleep -Seconds 60
-                    }
-     
-                    if ($i -gt 60) {
-                        $syncTimeout = $true
-                        Write-DscStatus "SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                        return $false
-                    }
-                }
-            }  until ($syncFinished -or $syncTimeout -or $syncFailed)
-     
-            return $false
-        }
-
-        function Invoke-finalfullsync {
-            $folderPath = "$CMInstallDir\inboxes\wsyncmgr.box"
-            $filePath = Join-Path $folderPath "full.syn"
-            Write-DscStatus "$Tag check if $folderPath exists and drop a full.syn file to initialize a full synchronization"
-    
-            # Ensure the folder exists; create it if it doesn't
-            if (Test-Path $folderPath) {
-           
-                try {
-                    # Create the "full.syn" file (overwrites if it exists)
-                    New-Item -Path $filePath -ItemType File -Force | Out-Null
-                    Write-DscStatus "$Tag File 'full.syn' created successfully at $folderPath"
-                }
-                catch {
-                    Write-DscStatus "$Tag Error creating 'full.syn': $_"
-                }
+            # Define language mappings
+            switch ($lang) {
+                "en-us" { $addLang = "English" }
+                "ja-jp" { $addLang = "Japanese" }
+                "es-es" { $addLang = "Spanish" }
+                "de-de" { $addLang = "German" }
+                "fr-fr" { $addLang = "French" }
+                default { $addLang = "English" }
             }
 
-        }
+            Write-DscStatus "$Tag the locale language is $addLang"
 
-    
-        # Check if product classifications are already enabled for Critical updates or definition updates
-        if (!$missingproducts) {
-            Write-DscStatus "$Tag SUP products and classifications are already enabled. Skipping the update."
+            $parameters = @{
+                InputObject                   = $supComp
+                SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
+                AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+                Schedule                      = $schedule
+                EnableSyncFailureAlert        = $true
+                ImmediatelyExpireSupersedence = $false
+                AddLanguageUpdateFile         = $addLang
+                AddLanguageSummaryDetails     = $addLang
+                EnableCallWsusCleanupWizard   = $true
+                WaitMonth                     = 3
+                EnableThirdPartyUpdates       = $true
+                EnableManualCertManagement    = $false
+                AddProduct                    = $products
+            }
+
+            Set-CMSoftwareUpdatePointComponent @parameters
+
+            #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
+            Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+            Write-DscStatus "$Tag Products enabled. Triggering final sync..."
+            Invoke-FullSync
         }
         else {
-            Write-DscStatus "$Tag trying second time to see if 429 product classifications are enabled or not"
-            Invoke-finalfullsync
-            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
-
-            if ($syncSuccess) {
-
-                Write-DscStatus "$Tag Found missing $products, enabling them now"
-                $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-                $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
-    
-                # Get the language setting
-                $lang = $deployConfig.vmOptions.locale
-    
-                # Define language mappings
-                switch ($lang) {
-                    "en-us" { $addLang = "English" }
-                    "ja-jp" { $addLang = "Japanese" }
-                    "es-es" { $addLang = "Spanish" }
-                    "de-de" { $addLang = "German" }
-                    "fr-fr" { $addLang = "French" }
-                    default { $addLang = "English" }  # Fallback for unsupported languages is English and will add more languages as per adhoc request here
-                }
-    
-                # Output the result
-                Write-DscStatus "$Tag the locale language is $addLang"
-    
-                $parameters = @{
-                    InputObject                   = $supComp
-                    #DefaultWsusServer            = 'sup.contoso.com'
-                    SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-                    #ReportingEvent               = 'CreateAllWsusReportingEvents'
-                    #RemoveUpdateClassification   = "Update Rollups"
-                    AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-                    Schedule                      = $schedule
-                    EnableSyncFailureAlert        = $true
-                    ImmediatelyExpireSupersedence = $false
-                    AddLanguageUpdateFile         = $addLang
-                    AddLanguageSummaryDetails     = $addLang
-                    #RemoveLanguageUpdateFile     = $removeLang
-                    #RemoveLanguageSummaryDetails = $removeLang
-                    EnableCallWsusCleanupWizard   = $true
-                    WaitMonth                     = 3
-                    EnableThirdPartyUpdates       = $true
-                    EnableManualCertManagement    = $false
-                    AddProduct                    = $products
-                }
-    
-                Set-CMSoftwareUpdatePointComponent @parameters
-    
-    
-                #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-                Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-                Write-DscStatus "$Tag $productclassifications before enabling"
-                $productclassifications1 = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-                Write-DscStatus "$Tag $productclassifications1 after enabling"
-                Write-DscStatus "$Tag !!Final !! sync after enabling products and classifications" 
-                Invoke-finalfullsync
-
-            }
-            else {
-
-                Write-DscStatus "$Tag we were not able to sync the products and classifications so ADRs will not be created"
-                Invoke-finalfullsync
-            }
+            Write-DscStatus "$Tag Sync failed - ADRs will not be created"
+            Invoke-FullSync
         }
-       
+    }
+    if ($Sups) {
         # Define the collection where the updates will be deployed
         $TargetCollection = Get-CMDeviceCollection -Name "All systems"
     
@@ -1354,7 +1332,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 Write-DscStatus "$Tag An error occurred while creating the ADR for O365 Updates"
             }
             ##this sync will take a long time as it will almost pull 3k-5k updates down so don't wait for the process to finish
-            Invoke-finalfullsync
+            Invoke-FullSync
         }
 
     }
