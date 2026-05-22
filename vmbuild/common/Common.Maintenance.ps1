@@ -1347,7 +1347,11 @@ function Get-VMFixes {
 
         $regPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
 
-        $instances = (Get-ItemProperty -Path $regPath).PSObject.Properties |
+        if (-not (Test-Path $regPath)) {
+            return $true
+        }
+
+        $instances = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).PSObject.Properties |
         Where-Object {
             $_.MemberType -eq "NoteProperty" -and
             $_.Name -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider"
