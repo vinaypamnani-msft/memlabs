@@ -571,7 +571,7 @@ else {
             Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
 
             # Deploy the configuration baseline to a collection
-
+            Write-DscStatus "$Tag Deploying baseline $baselinename to All Systems..."
             New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
             Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
 
