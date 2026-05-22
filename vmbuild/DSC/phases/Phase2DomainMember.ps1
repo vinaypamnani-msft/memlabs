@@ -161,10 +161,12 @@
                     return ($vol -and $vol.KeyProtector.Count -gt 0)
                 }
                 SetScript  = {
-                    # Initialize TPM ownership (required on Hyper-V virtual TPMs before use)
-                    $tpm = Get-Tpm -ErrorAction SilentlyContinue
-                    if ($tpm -and -not $tpm.TpmReady) {
-                        Initialize-Tpm -AllowClear -ErrorAction Stop
+                    # Provision TPM ownership (Hyper-V virtual TPMs are not auto-provisioned)
+                    $initResult = Initialize-Tpm -ErrorAction SilentlyContinue
+                    if ($initResult -and $initResult.RestartRequired) {
+                        # TPM provisioning needs a reboot before the TPM can be used
+                        $global:DSCMachineStatus = 1
+                        return
                     }
                     $result = manage-bde -protectors -add C: -TPM 2>&1
                     if ($LASTEXITCODE -ne 0) { throw "Failed to add TPM protector: $result" }
