@@ -3224,6 +3224,12 @@ class ModuleAdd {
             }
         }
 
+        # Ensure PSGallery is trusted and PowerShellGet is current in this session.
+        # Without this, the first Install-Module call for the target module fails
+        # because the session still has stale provider state from bootstrapping.
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
+
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
         if ($null -eq $module) {
