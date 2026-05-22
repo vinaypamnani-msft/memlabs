@@ -1211,6 +1211,7 @@ Critical=Yes
                         -KeyLength 2048 `
                         -HashAlgorithmName SHA256 `
                         -OutputCertRequestFile $reqFile `
+                        -WarningAction SilentlyContinue `
                         -Force | Out-Null
                 }
                 catch {
