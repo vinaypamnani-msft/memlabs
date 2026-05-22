@@ -45,16 +45,214 @@ function Write-Status {
     Add-Content -Path $logFile -Value $line -Force -ErrorAction SilentlyContinue
 }
 
-# --- LogMachine file associations ---
+# --- LogMachine file associations (Windows 10/11 UserChoice hash method) ---
 $prg = "C:\tools\LogMachine\LogMachine.exe"
 if (-not (Test-Path $prg)) {
     Write-Status "FAIL: LogMachine.exe not found at '$prg'. Cannot register file associations."
 }
 else {
-    # 1) System-level: assoc/ftype (legacy fallback)
+    # --- Helper functions for computing UserChoice hash (from PS-SFTA / MIT license) ---
+    function Get-ShiftRight {
+        param ([long]$iValue, [int]$iCount)
+        if ($iValue -band 0x80000000) { ($iValue -shr $iCount) -bxor 0xFFFF0000 }
+        else { $iValue -shr $iCount }
+    }
+
+    function Get-Long {
+        param ([byte[]]$Bytes, [int]$Index = 0)
+        [BitConverter]::ToInt32($Bytes, $Index)
+    }
+
+    function Convert-Int32 {
+        param ([long]$Value)
+        [BitConverter]::ToInt32([BitConverter]::GetBytes($Value), 0)
+    }
+
+    function Get-Hash {
+        param ([string]$BaseInfo)
+        [byte[]]$bytesBaseInfo = [System.Text.Encoding]::Unicode.GetBytes($BaseInfo)
+        $bytesBaseInfo += 0x00, 0x00
+        $MD5 = New-Object -TypeName System.Security.Cryptography.MD5CryptoServiceProvider
+        [byte[]]$bytesMD5 = $MD5.ComputeHash($bytesBaseInfo)
+        $lengthBase = ($BaseInfo.Length * 2) + 2
+        $length = (($lengthBase -band 4) -le 1) + (Get-ShiftRight $lengthBase 2) - 1
+        $base64Hash = ""
+        if ($length -gt 1) {
+            $map = @{PDATA = 0; CACHE = 0; COUNTER = 0; INDEX = 0; MD51 = 0; MD52 = 0; OUTHASH1 = 0; OUTHASH2 = 0;
+                R0 = 0; R1 = @(0, 0); R2 = @(0, 0); R3 = 0; R4 = @(0, 0); R5 = @(0, 0); R6 = @(0, 0); R7 = @(0, 0)}
+            $map.CACHE = 0; $map.OUTHASH1 = 0; $map.PDATA = 0
+            $map.MD51 = (((Get-Long $bytesMD5) -bor 1) + 0x69FB0000L)
+            $map.MD52 = ((Get-Long $bytesMD5 4) -bor 1) + 0x13DB0000L
+            $map.INDEX = Get-ShiftRight ($length - 2) 1
+            $map.COUNTER = $map.INDEX + 1
+            while ($map.COUNTER) {
+                $map.R0 = Convert-Int32 ((Get-Long $bytesBaseInfo $map.PDATA) + [long]$map.OUTHASH1)
+                $map.R1[0] = Convert-Int32 (Get-Long $bytesBaseInfo ($map.PDATA + 4))
+                $map.PDATA = $map.PDATA + 8
+                $map.R2[0] = Convert-Int32 (($map.R0 * ([long]$map.MD51)) - (0x10FA9605L * ((Get-ShiftRight $map.R0 16))))
+                $map.R2[1] = Convert-Int32 ((0x79F8A395L * ([long]$map.R2[0])) + (0x689B6B9FL * (Get-ShiftRight $map.R2[0] 16)))
+                $map.R3 = Convert-Int32 ((0xEA970001L * $map.R2[1]) - (0x3C101569L * (Get-ShiftRight $map.R2[1] 16)))
+                $map.R4[0] = Convert-Int32 ($map.R3 + $map.R1[0])
+                $map.R5[0] = Convert-Int32 ($map.CACHE + $map.R3)
+                $map.R6[0] = Convert-Int32 (($map.R4[0] * [long]$map.MD52) - (0x3CE8EC25L * (Get-ShiftRight $map.R4[0] 16)))
+                $map.R6[1] = Convert-Int32 ((0x59C3AF2DL * $map.R6[0]) - (0x2232E0F1L * (Get-ShiftRight $map.R6[0] 16)))
+                $map.OUTHASH1 = Convert-Int32 ((0x1EC90001L * $map.R6[1]) + (0x35BD1EC9L * (Get-ShiftRight $map.R6[1] 16)))
+                $map.OUTHASH2 = Convert-Int32 ([long]$map.R5[0] + [long]$map.OUTHASH1)
+                $map.CACHE = ([long]$map.OUTHASH2)
+                $map.COUNTER = $map.COUNTER - 1
+            }
+            [byte[]]$outHash = @(0x00) * 16
+            [BitConverter]::GetBytes($map.OUTHASH1).CopyTo($outHash, 0)
+            [BitConverter]::GetBytes($map.OUTHASH2).CopyTo($outHash, 4)
+
+            $map = @{PDATA = 0; CACHE = 0; COUNTER = 0; INDEX = 0; MD51 = 0; MD52 = 0; OUTHASH1 = 0; OUTHASH2 = 0;
+                R0 = 0; R1 = @(0, 0); R2 = @(0, 0); R3 = 0; R4 = @(0, 0); R5 = @(0, 0); R6 = @(0, 0); R7 = @(0, 0)}
+            $map.CACHE = 0; $map.OUTHASH1 = 0; $map.PDATA = 0
+            $map.MD51 = ((Get-Long $bytesMD5) -bor 1)
+            $map.MD52 = ((Get-Long $bytesMD5 4) -bor 1)
+            $map.INDEX = Get-ShiftRight ($length - 2) 1
+            $map.COUNTER = $map.INDEX + 1
+            while ($map.COUNTER) {
+                $map.R0 = Convert-Int32 ((Get-Long $bytesBaseInfo $map.PDATA) + ([long]$map.OUTHASH1))
+                $map.PDATA = $map.PDATA + 8
+                $map.R1[0] = Convert-Int32 ($map.R0 * [long]$map.MD51)
+                $map.R1[1] = Convert-Int32 ((0xB1110000L * $map.R1[0]) - (0x30674EEFL * (Get-ShiftRight $map.R1[0] 16)))
+                $map.R2[0] = Convert-Int32 ((0x5B9F0000L * $map.R1[1]) - (0x78F7A461L * (Get-ShiftRight $map.R1[1] 16)))
+                $map.R2[1] = Convert-Int32 ((0x12CEB96DL * (Get-ShiftRight $map.R2[0] 16)) - (0x46930000L * $map.R2[0]))
+                $map.R3 = Convert-Int32 ((0x1D830000L * $map.R2[1]) + (0x257E1D83L * (Get-ShiftRight $map.R2[1] 16)))
+                $map.R4[0] = Convert-Int32 ([long]$map.MD52 * ([long]$map.R3 + (Get-Long $bytesBaseInfo ($map.PDATA - 4))))
+                $map.R4[1] = Convert-Int32 ((0x16F50000L * $map.R4[0]) - (0x5D8BE90BL * (Get-ShiftRight $map.R4[0] 16)))
+                $map.R5[0] = Convert-Int32 ((0x96FF0000L * $map.R4[1]) - (0x2C7C6901L * (Get-ShiftRight $map.R4[1] 16)))
+                $map.R5[1] = Convert-Int32 ((0x2B890000L * $map.R5[0]) + (0x7C932B89L * (Get-ShiftRight $map.R5[0] 16)))
+                $map.OUTHASH1 = Convert-Int32 ((0x9F690000L * $map.R5[1]) - (0x405B6097L * (Get-ShiftRight ($map.R5[1]) 16)))
+                $map.OUTHASH2 = Convert-Int32 ([long]$map.OUTHASH1 + $map.CACHE + $map.R3)
+                $map.CACHE = ([long]$map.OUTHASH2)
+                $map.COUNTER = $map.COUNTER - 1
+            }
+            [BitConverter]::GetBytes($map.OUTHASH1).CopyTo($outHash, 8)
+            [BitConverter]::GetBytes($map.OUTHASH2).CopyTo($outHash, 12)
+
+            [byte[]]$outHashBase = @(0x00) * 8
+            $hashValue1 = ((Get-Long $outHash 8) -bxor (Get-Long $outHash))
+            $hashValue2 = ((Get-Long $outHash 12) -bxor (Get-Long $outHash 4))
+            [BitConverter]::GetBytes($hashValue1).CopyTo($outHashBase, 0)
+            [BitConverter]::GetBytes($hashValue2).CopyTo($outHashBase, 4)
+            $base64Hash = [Convert]::ToBase64String($outHashBase)
+        }
+        Write-Output $base64Hash
+    }
+
+    function Get-UserExperience {
+        $userExperienceSearch = "User Choice set via Windows User Experience"
+        $shell32Path = [Environment]::GetFolderPath([Environment+SpecialFolder]::SystemX86) + "\Shell32.dll"
+        try {
+            $fileStream = [System.IO.File]::Open($shell32Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $binaryReader = New-Object System.IO.BinaryReader($fileStream)
+            [byte[]]$bytesData = $binaryReader.ReadBytes(5mb)
+            $fileStream.Close()
+            $dataString = [Text.Encoding]::Unicode.GetString($bytesData)
+            $position1 = $dataString.IndexOf($userExperienceSearch)
+            $position2 = $dataString.IndexOf("}", $position1)
+            $dataString.Substring($position1, $position2 - $position1 + 1)
+        }
+        catch {
+            "User Choice set via Windows User Experience {D18B6DD5-6124-4341-9318-804003BAFA0B}"
+        }
+    }
+
+    function Get-HexDateTime {
+        $now = [DateTime]::Now
+        $dateTime = [DateTime]::New($now.Year, $now.Month, $now.Day, $now.Hour, $now.Minute, 0)
+        $fileTime = $dateTime.ToFileTime()
+        $hi = ($fileTime -shr 32)
+        $low = ($fileTime -band 0xFFFFFFFFL)
+        ($hi.ToString("X8") + $low.ToString("X8")).ToLower()
+    }
+
+    function Set-FileTypeAssociation {
+        param ([string]$Extension, [string]$ProgId)
+
+        # Get user SID (domain-aware)
+        $userSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User).Value.ToLower()
+        $userExperience = Get-UserExperience
+        $userDateTime = Get-HexDateTime
+
+        $baseInfo = "$Extension$userSid$ProgId$userDateTime$userExperience".ToLower()
+        $progHash = Get-Hash $baseInfo
+
+        if (-not $progHash) {
+            Write-Status "FAIL: Could not compute hash for $Extension"
+            return $false
+        }
+
+        # Write ApplicationAssociationToasts to prevent "new app" notification
+        $toastKey = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ApplicationAssociationToasts"
+        if (-not (Test-Path $toastKey)) { New-Item -Path $toastKey -Force | Out-Null }
+        Set-ItemProperty -Path $toastKey -Name "${ProgId}_$Extension" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+
+        # Delete existing UserChoice key using P/Invoke (ACL-protected)
+        $deleteCode = @'
+using System;
+using System.Runtime.InteropServices;
+namespace RegHelper {
+    public class Utils {
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int RegOpenKeyEx(UIntPtr hKey, string subKey, int ulOptions, int samDesired, out UIntPtr hkResult);
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern uint RegDeleteKey(UIntPtr hKey, string subKey);
+        public static void DeleteKey(string key) {
+            UIntPtr hKey = UIntPtr.Zero;
+            RegOpenKeyEx((UIntPtr)0x80000001u, key, 0, 0x20019, out hKey);
+            RegDeleteKey((UIntPtr)0x80000001u, key);
+        }
+    }
+}
+'@
+        try { Add-Type -TypeDefinition $deleteCode -ErrorAction SilentlyContinue } catch {}
+
+        $ucKeyPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$Extension\UserChoice"
+        try { [RegHelper.Utils]::DeleteKey($ucKeyPath) } catch {}
+
+        # Write new UserChoice with ProgId and computed Hash
+        $fullKeyPath = "HKEY_CURRENT_USER\$ucKeyPath"
+        try {
+            [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "Hash", $progHash)
+            [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "ProgId", $ProgId)
+        }
+        catch {
+            Write-Status "FAIL: Could not write UserChoice for $Extension`: $_"
+            return $false
+        }
+
+        # Verify
+        $verify = (Get-ItemProperty "HKCU:\$ucKeyPath" -ErrorAction SilentlyContinue).ProgId
+        if ($verify -eq $ProgId) { return $true }
+        else { return $false }
+    }
+
+    # --- End helper functions ---
+
+    # 1) Register ProgId in HKLM Classes (system-level, makes LogMachine visible to shell)
+    $progIdPath = "HKLM:\SOFTWARE\Classes\LogMachine.LOG"
+    if (-not (Test-Path "$progIdPath\shell\open\command")) {
+        New-Item -Path "$progIdPath\shell\open\command" -Force | Out-Null
+    }
+    Set-ItemProperty -Path $progIdPath -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "$progIdPath\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
+    if (-not (Test-Path "$progIdPath\DefaultIcon")) { New-Item -Path "$progIdPath\DefaultIcon" -Force | Out-Null }
+    Set-ItemProperty -Path "$progIdPath\DefaultIcon" -Name "(Default)" -Value "`"$prg`",0" -ErrorAction SilentlyContinue
+
+    # Also register in HKCU Classes and OpenWithProgids for discoverability
+    $hkcuProgId = "HKCU:\SOFTWARE\Classes\LogMachine.LOG"
+    if (-not (Test-Path "$hkcuProgId\shell\open\command")) {
+        New-Item -Path "$hkcuProgId\shell\open\command" -Force | Out-Null
+    }
+    Set-ItemProperty -Path $hkcuProgId -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "$hkcuProgId\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
+
+    # 2) System-level assoc/ftype (legacy fallback)
     $currentAssoc = & cmd /c "assoc .log" 2>$null
     if ($currentAssoc -notlike "*LogMachine*") {
-        Write-Status "Registering LogMachine file associations (assoc/ftype)..."
         Add-Permissions -folderPath "C:\Windows\System32\Configuration"
         Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
         & cmd /c "ftype LogMachine.LOG=`"$prg`" %1" 2>&1 | Out-Null
@@ -63,96 +261,45 @@ else {
         & cmd /c "assoc .errlog=LogMachine.LOG" 2>&1 | Out-Null
     }
 
-    # 2) Register ProgId properly in registry (enables Windows app picker to find it)
-    $progIdPath = "HKLM:\SOFTWARE\Classes\LogMachine.LOG"
-    if (-not (Test-Path "$progIdPath\shell\open\command")) {
-        New-Item -Path "$progIdPath\shell\open\command" -Force | Out-Null
-    }
-    Set-ItemProperty -Path $progIdPath -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "$progIdPath\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
-    # Set icon
-    if (-not (Test-Path "$progIdPath\DefaultIcon")) {
-        New-Item -Path "$progIdPath\DefaultIcon" -Force | Out-Null
-    }
-    Set-ItemProperty -Path "$progIdPath\DefaultIcon" -Name "(Default)" -Value "`"$prg`",0" -ErrorAction SilentlyContinue
-
-    # 3) Per-user: remove any existing UserChoice so Windows uses system default
-    #    UserChoice keys are ACL-protected; take ownership first
+    # 3) Set per-user default via UserChoice with computed hash
     $extensions = @('.log', '.lo_', '.errlog')
+    $allOk = $true
     foreach ($ext in $extensions) {
-        $ucPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice"
-        if (Test-Path $ucPath) {
-            try {
-                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
-                    "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice",
-                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-                    [System.Security.AccessControl.RegistryRights]::TakeOwnership)
-                if ($key) {
-                    $acl = $key.GetAccessControl()
-                    $acl.SetOwner([System.Security.Principal.NTAccount]$env:USERNAME)
-                    $key.SetAccessControl($acl)
-                    $key.Close()
-
-                    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
-                        "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice",
-                        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
-                        [System.Security.AccessControl.RegistryRights]::ChangePermissions)
-                    $acl = $key.GetAccessControl()
-                    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
-                        $env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-                    $acl.SetAccessRule($rule)
-                    $key.SetAccessControl($acl)
-                    $key.Close()
-
-                    # Now delete it
-                    [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree(
-                        "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice", $false)
-                    Write-Status "Removed UserChoice for $ext"
-                }
-            }
-            catch {
-                Write-Status "Could not remove UserChoice for $ext`: $_"
-            }
-        }
-
-        # Set OpenWithProgids to only LogMachine.LOG
+        # Add to OpenWithProgids
         $owPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\OpenWithProgids"
         if (-not (Test-Path $owPath)) { New-Item -Path $owPath -Force | Out-Null }
-        # Remove any existing values (e.g. txtfile, Notepad)
-        $existing = Get-Item -Path $owPath -ErrorAction SilentlyContinue
-        if ($existing) {
-            foreach ($val in $existing.GetValueNames()) {
-                if ($val -and $val -ne "LogMachine.LOG") {
-                    Remove-ItemProperty -Path $owPath -Name $val -ErrorAction SilentlyContinue
-                }
-            }
-        }
         New-ItemProperty -Path $owPath -Name "LogMachine.LOG" -PropertyType None -ErrorAction SilentlyContinue | Out-Null
+
+        # Check if already set correctly
+        $ucPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice"
+        $currentProgId = (Get-ItemProperty $ucPath -ErrorAction SilentlyContinue).ProgId
+        if ($currentProgId -eq "LogMachine.LOG") {
+            Write-Status "OK: $ext already set to LogMachine.LOG"
+            continue
+        }
+
+        # Set the association with proper hash
+        $result = Set-FileTypeAssociation -Extension $ext -ProgId "LogMachine.LOG"
+        if ($result) {
+            Write-Status "OK: Set $ext -> LogMachine.LOG (UserChoice with hash)"
+        }
+        else {
+            Write-Status "FAIL: Could not set UserChoice for $ext"
+            $allOk = $false
+        }
     }
 
-    # 4) GPO: Set default associations XML (applies to new user profiles on this machine)
-    $xmlPath = "C:\tools\LogMachine\DefaultAssociations.xml"
-    $xmlContent = @"
-<?xml version="1.0" encoding="UTF-8"?>
-<DefaultAssociations>
-  <Association Identifier=".log" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
-  <Association Identifier=".lo_" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
-  <Association Identifier=".errlog" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
-</DefaultAssociations>
-"@
-    $xmlContent | Out-File -FilePath $xmlPath -Encoding UTF8 -Force -ErrorAction SilentlyContinue
-    $gpoPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-    if (-not (Test-Path $gpoPath)) { New-Item -Path $gpoPath -Force | Out-Null }
-    Set-ItemProperty -Path $gpoPath -Name "DefaultAssociationsConfiguration" -Value $xmlPath -Type String -ErrorAction SilentlyContinue
+    # 4) Notify shell of changes
+    $notifyCode = @'
+[System.Runtime.InteropServices.DllImport("Shell32.dll")]
+private static extern int SHChangeNotify(int eventId, int flags, IntPtr item1, IntPtr item2);
+public static void Refresh() { SHChangeNotify(0x8000000, 0, IntPtr.Zero, IntPtr.Zero); }
+'@
+    try { Add-Type -MemberDefinition $notifyCode -Namespace SHChange -Name Notify -ErrorAction SilentlyContinue } catch {}
+    try { [SHChange.Notify]::Refresh() } catch {}
 
-    # Verify
-    $verifyAssoc = & cmd /c "assoc .log" 2>$null
-    $verifyFtype = & cmd /c "ftype LogMachine.LOG" 2>$null
-    if ($verifyAssoc -like "*LogMachine*" -and $verifyFtype -like "*LogMachine.exe*") {
-        Write-Status "OK: LogMachine registered. assoc=$verifyAssoc ftype=$verifyFtype (UserChoice cleared, GPO set)"
-    }
-    else {
-        Write-Status "FAIL: Verification failed. assoc='$verifyAssoc' ftype='$verifyFtype'"
+    if ($allOk) {
+        Write-Status "OK: LogMachine set as default handler for .log, .lo_, .errlog"
     }
 }
 
