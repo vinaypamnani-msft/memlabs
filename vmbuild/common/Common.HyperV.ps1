@@ -867,3 +867,64 @@ function Checkpoint-VM2 {
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
+
+function Restore-DynamicMemory {
+    <#
+    .SYNOPSIS
+        Restores dynamic memory settings on all VMs after deployment completes.
+    .DESCRIPTION
+        During deployment, VMs run with static memory (min=max) for performance.
+        This function re-enables dynamic memory using the configured dynamicMinRam
+        values from the deploy config.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $domain = $DeployConfig.vmOptions.domainName
+    Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
+
+    $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
+        $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1))
+    })
+
+    if ($vmsToRestore.Count -eq 0) {
+        Write-Log "[Phase 11] No VMs have dynamic memory configured; skipping restore" -LogOnly
+        return
+    }
+
+    Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
+
+    foreach ($vmConfig in $vmsToRestore) {
+        $vmName = $vmConfig.vmName
+        try {
+            $vm = Get-VM2 -Name $vmName -ErrorAction SilentlyContinue
+            if (-not $vm) {
+                Write-Log "[Phase 11]   $vmName`: VM not found, skipping" -Warning
+                continue
+            }
+
+            $minBytes = ($vmConfig.dynamicMinRam / 1)
+            $maxBytes = ($vmConfig.memory / 1)
+
+            $priority = 25
+            $buffer = 10
+            $role = $vmConfig.role
+            if ($vmConfig.SqlVersion -and $role -eq "DomainMember") { $role = "SqlServer" }
+            if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
+                $priority = 50
+                $buffer = 20
+            }
+
+            Write-Log "[Phase 11]   $vmName`: Setting dynamic memory $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" -LogOnly
+            $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+        }
+        catch {
+            Write-Log "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" -Warning
+        }
+    }
+
+    Write-Log "[Phase 11] Dynamic memory restore complete" -Success
+}

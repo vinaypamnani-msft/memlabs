@@ -930,6 +930,14 @@ finally {
         }
         Write-Host
     }
+    # Restore dynamic memory settings (were pinned to max during deploy for performance).
+    # Runs unconditionally: even if a phase failed or was skipped.
+    if ($deployConfig -and $currentPhase -ge 1) {
+        try { Restore-DynamicMemory -DeployConfig $deployConfig } catch {
+            Write-Log "Restore-DynamicMemory failed: $_" -Warning
+        }
+    }
+
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {

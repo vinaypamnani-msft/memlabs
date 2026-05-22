@@ -225,6 +225,11 @@ $global:VM_Create = {
             $dynamicMinRam = $currentItem.dynamicMinRam
         }
 
+        # During deployment, disable dynamic memory so all VMs get full static RAM for performance.
+        # Dynamic memory will be restored after Phase 11 completes.
+        $dynamicMinRamDeferred = $dynamicMinRam
+        $dynamicMinRam = 0
+
         if (-not $CreateVM) {
             # Check if memory matches
             $restart = $false
@@ -234,16 +239,10 @@ $global:VM_Create = {
             $memory = ($currentItem.Memory / 1)            
             $currentMemory = $vm.MemoryStartup
 
-            $dynamicRamEnabledRequested = ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1)))
+            $dynamicRamEnabledRequested = $false
             $dynamicRamEnabledCurrent = $vm.DynamicMemoryEnabled
-            if ($dynamicRamEnabledRequested) {
-                $dynamicRamInBytes = ($dynamicMinRam / 1)
-                $dynamicRamCurrent = $vm.MemoryMinimum
-            }
-            else {
-                $dynamicRamInBytes = 0
-                $dynamicRamCurrent = 0
-            }
+            $dynamicRamInBytes = 0
+            $dynamicRamCurrent = 0
 
 
             if ($memory -ne $currentMemory -or $dynamicRamEnabledCurrent -ne $dynamicRamEnabledRequested -or $dynamicRamInBytes -ne $dynamicRamCurrent) {
