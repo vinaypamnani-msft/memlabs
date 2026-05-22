@@ -35,18 +35,44 @@ function New-Shortcut {
 }
 
 $script:shortcutsCreated = $false
+$logFile = "$env:systemdrive\staging\Enable-LogMachine.log"
+
+function Write-Status {
+    param([string]$Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "[$ts] $Message"
+    Write-Host $line
+    Add-Content -Path $logFile -Value $line -Force -ErrorAction SilentlyContinue
+}
 
 # --- LogMachine file associations ---
 $prg = "C:\tools\LogMachine\LogMachine.exe"
-if (Test-Path $prg) {
+if (-not (Test-Path $prg)) {
+    Write-Status "FAIL: LogMachine.exe not found at '$prg'. Cannot register file associations."
+}
+else {
     $currentAssoc = & cmd /c "assoc .log" 2>$null
-    if ($currentAssoc -notlike "*LogMachine*") {
+    if ($currentAssoc -like "*LogMachine*") {
+        Write-Status "OK: LogMachine already registered (.log -> $currentAssoc)"
+    }
+    else {
+        Write-Status "Registering LogMachine file associations..."
         Add-Permissions -folderPath "C:\Windows\System32\Configuration"
         Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
-        & cmd /c "ftype LogMachine.LOG=`"$prg`" %1"
-        & cmd /c "assoc .log=LogMachine.LOG"
-        & cmd /c "assoc .lo_=LogMachine.LOG"
-        & cmd /c "assoc .errlog=LogMachine.LOG"
+        & cmd /c "ftype LogMachine.LOG=`"$prg`" %1" 2>&1 | Out-Null
+        & cmd /c "assoc .log=LogMachine.LOG" 2>&1 | Out-Null
+        & cmd /c "assoc .lo_=LogMachine.LOG" 2>&1 | Out-Null
+        & cmd /c "assoc .errlog=LogMachine.LOG" 2>&1 | Out-Null
+
+        # Verify registration succeeded
+        $verifyAssoc = & cmd /c "assoc .log" 2>$null
+        $verifyFtype = & cmd /c "ftype LogMachine.LOG" 2>$null
+        if ($verifyAssoc -like "*LogMachine*" -and $verifyFtype -like "*LogMachine.exe*") {
+            Write-Status "OK: LogMachine registered successfully. assoc=$verifyAssoc ftype=$verifyFtype"
+        }
+        else {
+            Write-Status "FAIL: Registration commands ran but verification failed. assoc='$verifyAssoc' ftype='$verifyFtype'"
+        }
     }
 }
 
@@ -82,19 +108,19 @@ $desktopPath = [Environment]::GetFolderPath("CommonDesktop")
 if ($ControlPanel) {
     New-Shortcut -LinkPath "$desktopPath\SCCM Control Panel Applet.lnk" `
         -TargetPath "C:\Windows\System32\control.exe" `
-        -Arguments "smscfgrc" -IconLocation $ControlPanel
+        -Arguments "smscfgrc" -IconLocation $ControlPanel | Out-Null
 }
 
 if ($ClientlogsPath -and (Test-Path $ClientlogsPath)) {
     Add-Permissions -folderPath $ClientlogsPath
-    New-Shortcut -LinkPath "$desktopPath\Client Logs.lnk" -TargetPath $ClientlogsPath
+    New-Shortcut -LinkPath "$desktopPath\Client Logs.lnk" -TargetPath $ClientlogsPath | Out-Null
 }
 
 # --- ConfigMgr Logs shortcut (server or MP/WSUS role) ---
 if (-not (Test-Path "$desktopPath\ConfigMgr Logs.lnk")) {
     if ($CMlogs -and (Test-Path $CMlogs)) {
         Add-Permissions -folderPath $CMlogs
-        New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $CMlogs
+        New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $CMlogs | Out-Null
     }
     else {
         # Try MP or WSUS tracing path
@@ -111,7 +137,7 @@ if (-not (Test-Path "$desktopPath\ConfigMgr Logs.lnk")) {
         }
         if ($MPLogs -and (Test-Path $MPLogs)) {
             Add-Permissions -folderPath $MPLogs
-            New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $MPLogs
+            New-Shortcut -LinkPath "$desktopPath\ConfigMgr Logs.lnk" -TargetPath $MPLogs | Out-Null
         }
     }
 }
@@ -119,13 +145,13 @@ if (-not (Test-Path "$desktopPath\ConfigMgr Logs.lnk")) {
 # --- ConfigMgr Console + PowerShell shortcuts ---
 if ($CMexe -and (Test-Path $CMexe)) {
     New-Shortcut -LinkPath "$desktopPath\ConfigMgr Console.lnk" `
-        -TargetPath $CMexe -Arguments "sms:debugview"
+        -TargetPath $CMexe -Arguments "sms:debugview" | Out-Null
 
     $psLink = "$desktopPath\ConfigMgr Powershell.lnk"
     if (-not (Test-Path $psLink)) {
         New-Shortcut -LinkPath $psLink `
             -TargetPath "powershell" `
-            -Arguments "-NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1"
+            -Arguments "-NoExit -ExecutionPolicy Bypass C:\staging\DSC\Phases\Start-CMPS.ps1" | Out-Null
         if (Test-Path $psLink) {
             # Set RunAsAdmin flag in .lnk header
             $bytes = [System.IO.File]::ReadAllBytes($psLink)
@@ -139,24 +165,24 @@ if ($CMexe -and (Test-Path $CMexe)) {
 $IISLogs = "C:\inetpub\logs"
 if (Test-Path $IISLogs) {
     Add-Permissions -folderPath $IISLogs
-    New-Shortcut -LinkPath "$desktopPath\IIS Logs.lnk" -TargetPath $IISLogs
+    New-Shortcut -LinkPath "$desktopPath\IIS Logs.lnk" -TargetPath $IISLogs | Out-Null
 }
 
 $inetMgr = "$env:windir\system32\inetsrv\InetMgr.exe"
 if (Test-Path $inetMgr) {
-    New-Shortcut -LinkPath "$desktopPath\IIS InetMgr.lnk" -TargetPath $inetMgr
+    New-Shortcut -LinkPath "$desktopPath\IIS InetMgr.lnk" -TargetPath $inetMgr | Out-Null
 }
 
 # --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
 if (Test-Path $wsus) {
-    New-Shortcut -LinkPath "$desktopPath\WSUS Console.lnk" -TargetPath $wsus
+    New-Shortcut -LinkPath "$desktopPath\WSUS Console.lnk" -TargetPath $wsus | Out-Null
 }
 
 $WSUSLogs = "C:\Program Files\Update Services\LogFiles"
 if (Test-Path $WSUSLogs) {
     Add-Permissions -folderPath $WSUSLogs
-    New-Shortcut -LinkPath "$desktopPath\WSUS Logs.lnk" -TargetPath $WSUSLogs
+    New-Shortcut -LinkPath "$desktopPath\WSUS Logs.lnk" -TargetPath $WSUSLogs | Out-Null
 }
 
 # --- DP Logs shortcut ---
@@ -166,7 +192,7 @@ if (-not (Test-Path "$desktopPath\DP Logs.lnk")) {
         $DPLogs = Join-Path (Split-Path (Split-Path $val -Parent) -Parent) 'logs'
         if (Test-Path $DPLogs) {
             Add-Permissions -folderPath $DPLogs
-            New-Shortcut -LinkPath "$desktopPath\DP Logs.lnk" -TargetPath $DPLogs
+            New-Shortcut -LinkPath "$desktopPath\DP Logs.lnk" -TargetPath $DPLogs | Out-Null
         }
     }
     catch {}

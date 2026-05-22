@@ -402,7 +402,8 @@ function Start-VMFixesBatched {
 
     # Copy all InjectFiles upfront in one session
     $allInjectFiles = $applicableFixes | Where-Object { $_.InjectFiles } | ForEach-Object { $_.InjectFiles } | Select-Object -Unique
-    if ($allInjectFiles) {
+    $allInjectTools = $applicableFixes | Where-Object { $_.InjectTools } | ForEach-Object { $_.InjectTools } | Select-Object -Unique
+    if ($allInjectFiles -or $allInjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain
             foreach ($file in $allInjectFiles) {
@@ -411,9 +412,17 @@ function Start-VMFixesBatched {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..."
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
+            foreach ($toolFolder in $allInjectTools) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+                if (Test-Path $sourcePath) {
+                    $targetPathInVM = "C:\tools\$toolFolder"
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
+                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                }
+            }
         }
         catch {
-            Write-Log "$VMName`: Failed to copy InjectFiles for batched maintenance." -Warning
+            Write-Log "$VMName`: Failed to copy InjectFiles/InjectTools for batched maintenance." -Warning
             return $return
         }
     }
@@ -640,7 +649,7 @@ function Start-VMFix {
 
     start-sleep -Milliseconds 200
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
-    if ($vmFix.InjectFiles) {
+    if ($vmFix.InjectFiles -or $vmFix.InjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
             foreach ($file in $vmFix.InjectFiles) {
@@ -648,6 +657,14 @@ function Start-VMFix {
                 $targetPathInVM = "C:\staging\$file"
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
+            }
+            foreach ($toolFolder in $vmFix.InjectTools) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+                if (Test-Path $sourcePath) {
+                    $targetPathInVM = "C:\tools\$toolFolder"
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
+                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                }
             }
         }
         catch {
@@ -1249,7 +1266,7 @@ function Get-VMFixes {
     }
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix-EnableLogMachine"
-        FixVersion        = "250206"
+        FixVersion        = "250522"
         AppliesToNew      = $true 
         AppliesToExisting = $true
         AppliesToRoles    = @()
@@ -1258,6 +1275,7 @@ function Get-VMFixes {
         ScriptBlock       = $Fix_EnableLogMachine
         RunAsAccount      = $vmNote.adminName
         InjectFiles       = @("Enable-LogMachine.ps1") # must exist in filesToInject\staging dir
+        InjectTools       = @("LogMachine")            # ensures C:\tools\LogMachine exists on the VM
     }
 
     #endregion
