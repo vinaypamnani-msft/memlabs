@@ -608,7 +608,13 @@ function Add-NewVMForRole {
     if ($null -eq $ConfigToModify.VirtualMachines) {
         $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
     }
-    
+
+    # Add BitLocker property if BLM is enabled and VM has TPM + client OS
+    if ($virtualMachine.tpmEnabled -and $ConfigToModify.cmOptions -and $ConfigToModify.cmOptions.EnableBLM) {
+        $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+    }
+
     if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value "1GB" -force
     }
