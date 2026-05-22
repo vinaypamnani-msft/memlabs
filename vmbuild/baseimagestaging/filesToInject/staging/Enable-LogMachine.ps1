@@ -51,28 +51,108 @@ if (-not (Test-Path $prg)) {
     Write-Status "FAIL: LogMachine.exe not found at '$prg'. Cannot register file associations."
 }
 else {
+    # 1) System-level: assoc/ftype (legacy fallback)
     $currentAssoc = & cmd /c "assoc .log" 2>$null
-    if ($currentAssoc -like "*LogMachine*") {
-        Write-Status "OK: LogMachine already registered (.log -> $currentAssoc)"
-    }
-    else {
-        Write-Status "Registering LogMachine file associations..."
+    if ($currentAssoc -notlike "*LogMachine*") {
+        Write-Status "Registering LogMachine file associations (assoc/ftype)..."
         Add-Permissions -folderPath "C:\Windows\System32\Configuration"
         Add-Permissions -folderPath "C:\Windows\System32\Configuration\ConfigurationStatus"
         & cmd /c "ftype LogMachine.LOG=`"$prg`" %1" 2>&1 | Out-Null
         & cmd /c "assoc .log=LogMachine.LOG" 2>&1 | Out-Null
         & cmd /c "assoc .lo_=LogMachine.LOG" 2>&1 | Out-Null
         & cmd /c "assoc .errlog=LogMachine.LOG" 2>&1 | Out-Null
+    }
 
-        # Verify registration succeeded
-        $verifyAssoc = & cmd /c "assoc .log" 2>$null
-        $verifyFtype = & cmd /c "ftype LogMachine.LOG" 2>$null
-        if ($verifyAssoc -like "*LogMachine*" -and $verifyFtype -like "*LogMachine.exe*") {
-            Write-Status "OK: LogMachine registered successfully. assoc=$verifyAssoc ftype=$verifyFtype"
+    # 2) Register ProgId properly in registry (enables Windows app picker to find it)
+    $progIdPath = "HKLM:\SOFTWARE\Classes\LogMachine.LOG"
+    if (-not (Test-Path "$progIdPath\shell\open\command")) {
+        New-Item -Path "$progIdPath\shell\open\command" -Force | Out-Null
+    }
+    Set-ItemProperty -Path $progIdPath -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "$progIdPath\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
+    # Set icon
+    if (-not (Test-Path "$progIdPath\DefaultIcon")) {
+        New-Item -Path "$progIdPath\DefaultIcon" -Force | Out-Null
+    }
+    Set-ItemProperty -Path "$progIdPath\DefaultIcon" -Name "(Default)" -Value "`"$prg`",0" -ErrorAction SilentlyContinue
+
+    # 3) Per-user: remove any existing UserChoice so Windows uses system default
+    #    UserChoice keys are ACL-protected; take ownership first
+    $extensions = @('.log', '.lo_', '.errlog')
+    foreach ($ext in $extensions) {
+        $ucPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice"
+        if (Test-Path $ucPath) {
+            try {
+                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                    "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice",
+                    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                    [System.Security.AccessControl.RegistryRights]::TakeOwnership)
+                if ($key) {
+                    $acl = $key.GetAccessControl()
+                    $acl.SetOwner([System.Security.Principal.NTAccount]$env:USERNAME)
+                    $key.SetAccessControl($acl)
+                    $key.Close()
+
+                    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+                        "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice",
+                        [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+                        [System.Security.AccessControl.RegistryRights]::ChangePermissions)
+                    $acl = $key.GetAccessControl()
+                    $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+                        $env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+                    $acl.SetAccessRule($rule)
+                    $key.SetAccessControl($acl)
+                    $key.Close()
+
+                    # Now delete it
+                    [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree(
+                        "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\UserChoice", $false)
+                    Write-Status "Removed UserChoice for $ext"
+                }
+            }
+            catch {
+                Write-Status "Could not remove UserChoice for $ext`: $_"
+            }
         }
-        else {
-            Write-Status "FAIL: Registration commands ran but verification failed. assoc='$verifyAssoc' ftype='$verifyFtype'"
+
+        # Set OpenWithProgids to only LogMachine.LOG
+        $owPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext\OpenWithProgids"
+        if (-not (Test-Path $owPath)) { New-Item -Path $owPath -Force | Out-Null }
+        # Remove any existing values (e.g. txtfile, Notepad)
+        $existing = Get-Item -Path $owPath -ErrorAction SilentlyContinue
+        if ($existing) {
+            foreach ($val in $existing.GetValueNames()) {
+                if ($val -and $val -ne "LogMachine.LOG") {
+                    Remove-ItemProperty -Path $owPath -Name $val -ErrorAction SilentlyContinue
+                }
+            }
         }
+        New-ItemProperty -Path $owPath -Name "LogMachine.LOG" -PropertyType None -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    # 4) GPO: Set default associations XML (applies to new user profiles on this machine)
+    $xmlPath = "C:\tools\LogMachine\DefaultAssociations.xml"
+    $xmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<DefaultAssociations>
+  <Association Identifier=".log" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
+  <Association Identifier=".lo_" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
+  <Association Identifier=".errlog" ProgId="LogMachine.LOG" ApplicationName="LogMachine" />
+</DefaultAssociations>
+"@
+    $xmlContent | Out-File -FilePath $xmlPath -Encoding UTF8 -Force -ErrorAction SilentlyContinue
+    $gpoPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+    if (-not (Test-Path $gpoPath)) { New-Item -Path $gpoPath -Force | Out-Null }
+    Set-ItemProperty -Path $gpoPath -Name "DefaultAssociationsConfiguration" -Value $xmlPath -Type String -ErrorAction SilentlyContinue
+
+    # Verify
+    $verifyAssoc = & cmd /c "assoc .log" 2>$null
+    $verifyFtype = & cmd /c "ftype LogMachine.LOG" 2>$null
+    if ($verifyAssoc -like "*LogMachine*" -and $verifyFtype -like "*LogMachine.exe*") {
+        Write-Status "OK: LogMachine registered. assoc=$verifyAssoc ftype=$verifyFtype (UserChoice cleared, GPO set)"
+    }
+    else {
+        Write-Status "FAIL: Verification failed. assoc='$verifyAssoc' ftype='$verifyFtype'"
     }
 }
 
