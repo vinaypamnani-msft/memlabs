@@ -79,10 +79,22 @@ if (-not (Test-Path $CertPath)) {
         $issuingCACert = Get-Item Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Select-Object -First 1
         if ($issuingCACert) {
             $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-            [void]$chain.Build($issuingCACert)
-            $rootCert = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
-            $rootCert | Export-Certificate -FilePath $CertPath -Force
-            Write-DscStatus "Exported root CA '$($rootCert.Subject)' to $CertPath (two-tier PKI)"
+            # We only need the chain structure (to find the root cert), not revocation
+            # validation. CRL is published to http://pki.<domain>/crl/ but the HTTP
+            # fetch can time out under heavy Phase 8 load. NoCheck avoids the dependency.
+            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            $built = $chain.Build($issuingCACert)
+            if ($built -and $chain.ChainElements.Count -gt 1) {
+                $rootCert = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+                $rootCert | Export-Certificate -FilePath $CertPath -Force
+                Write-DscStatus "Exported root CA '$($rootCert.Subject)' to $CertPath (two-tier PKI)"
+            }
+            else {
+                # Fallback: export the issuing CA cert directly (same as single-tier behavior).
+                Write-DscStatus "Chain build incomplete (built=$built, elements=$($chain.ChainElements.Count)). Exporting issuing CA cert as fallback."
+                $issuingCACert | Export-Certificate -FilePath $CertPath -Force
+                Write-DscStatus "Exported issuing CA '$($issuingCACert.Subject)' to $CertPath"
+            }
         }
         else {
             Write-DscStatus "WARNING: Could not find issuing CA cert matching '$CAName' in Intermediate store"

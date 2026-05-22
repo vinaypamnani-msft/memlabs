@@ -68,7 +68,7 @@ Write-DscStatus "Client push candidates are '$ClientNames'"
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
 
-# Quick check: if all boundary groups, boundaries, and discovery are already configured, skip
+# Quick check: if all boundary groups, boundaries, membership, and discovery are already configured, skip
 $allBGsExist = $true
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     if (-not (Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue)) {
@@ -78,7 +78,14 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 }
 if ($allBGsExist) {
     foreach ($bg in $bgs) {
-        if (-not (Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue)) {
+        $boundary = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+        if (-not $boundary) {
+            $allBGsExist = $false
+            break
+        }
+        # Verify boundary is actually in its group
+        $memberOf = Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue
+        if (-not ($memberOf | Where-Object { $_.DisplayName -eq $bg.Subnet })) {
             $allBGsExist = $false
             break
         }
