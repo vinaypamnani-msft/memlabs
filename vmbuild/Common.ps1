@@ -3077,6 +3077,8 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false)]
         [switch]$Quiet,
         [Parameter(Mandatory = $false)]
+        [switch]$SkipDiskTest,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -3265,10 +3267,7 @@ function Wait-ForVm {
 
     if ($PathToVerify) {
 
-        if (-not $global:DSC_Copied) {
-            $global:DSC_Copied = @()
-        }
-        if (-not ($VmName -in $global:DSC_Copied)) {
+        if (-not $SkipDiskTest.IsPresent) {
             #If we already copied a DSC at least once, Disks are valid. Run if this is the first time.
             Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
             if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
