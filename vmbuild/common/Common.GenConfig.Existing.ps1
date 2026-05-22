@@ -892,6 +892,13 @@ function New-UserConfig {
     $domainDefaults = $DC.domainDefaults
     $existingPkiOptions = $DC.pkiOptions
 
+    # Import cmOptions from existing top-level site server (CAS or standalone Primary)
+    $allDomainVMs = Get-List -Type VM -DomainName $Domain
+    $topLevelSite = $allDomainVMs | Where-Object {
+        $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+    } | Select-Object -First 1
+    $existingCmOptions = $topLevelSite.cmOptions
+
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
     }
@@ -928,6 +935,11 @@ function New-UserConfig {
         $configGenerated | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $domainDefaults -force
     }
 
+    # Import cmOptions from existing site server so new VMs inherit EnableBLM, UsePKI, etc.
+    if ($existingCmOptions) {
+        $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $existingCmOptions -force
+    }
+
     # Import PKI settings from existing DC so new VMs inherit CA configuration
     if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) {
         $configGenerated.pkiOptions = $existingPkiOptions
@@ -935,7 +947,6 @@ function New-UserConfig {
     else {
         # Fallback for labs deployed before pkiOptions was stored on DC note:
         # Derive from per-VM InstallCA property (same logic as Common.Config.ps1 migration)
-        $allDomainVMs = Get-List -Type VM -DomainName $Domain
         $caVM = $allDomainVMs | Where-Object { $_.InstallCA -eq $true } | Select-Object -First 1
         if ($caVM) {
             $configGenerated.pkiOptions.EnablePKI = $true
