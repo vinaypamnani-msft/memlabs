@@ -787,7 +787,9 @@ try {
                 }
                 if ($i -eq 2) {
                     # PKI: orchestrate CA installation post-Phase2 (single-tier or two-tier).
-                    $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA }).Count -gt 0
+                    # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
+                    # InstallCA, PKI is already deployed and should not be re-orchestrated.
+                    $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
                     if ($hasPKI) {
                         $pkiSuccess = Install-PKI -DeployConfig $deployConfig
                         if (-not $pkiSuccess) {
