@@ -199,9 +199,7 @@
                 TestScript = {
                     $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
                     if (-not $vol) { return $false }
-                    # If volume is not fully decrypted, auto-encryption was triggered and must be cleaned up
-                    if ($vol.VolumeStatus -ne "FullyDecrypted") { return $false }
-                    # Ensure a TPM protector specifically exists (not just any protector from auto-encryption)
+                    # If a TPM protector exists, we're done (encryption may be in progress or complete)
                     $tpmProtector = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "Tpm" }
                     return ($null -ne $tpmProtector)
                 }
@@ -234,8 +232,13 @@
                         $global:DSCMachineStatus = 1
                         return
                     }
-                    $result = manage-bde -protectors -add C: -TPM 2>&1
-                    if ($LASTEXITCODE -ne 0) { throw "Failed to add TPM protector: $result" }
+
+                    # Start encryption with TPM protector. Using Enable-BitLocker rather than
+                    # just adding the protector because MBAM's enforcement engine requires an
+                    # interactive user session (0x800703f0) to start encryption on its own.
+                    # -SkipHardwareTest avoids a reboot before encryption begins.
+                    # BLM will later add a NumericalPassword protector and escrow it.
+                    Enable-BitLocker -MountPoint "C:" -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop
                 }
             }
 

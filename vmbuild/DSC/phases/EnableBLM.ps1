@@ -210,8 +210,8 @@ END
     $blmPolicies += New-CMUseOsEnforcePolicy -PolicyState Enabled -GracePeriodDays 0
     $blmPolicies += New-CMBMSFDVEncryptionPolicy -PolicyState Enabled -AutoUnlock Require
     $blmPolicies += New-CMUseFddEnforcePolicy -PolicyState Enabled -GracePeriodDays 0
-    $blmPolicies += New-CMBMSClientConfigureCheckIntervalPolicy -PolicyState Enabled -ClientWakeupFrequencyMinutes 90 -KeyRecoveryOption PasswordAndPackage
-    Write-DscStatus "$Tag Built $($blmPolicies.Count) policy objects (XtsAes256, TpmOnly, OsEnforce0d, FdvAutoUnlock, FddEnforce0d, ClientCheck90m)"
+    $blmPolicies += New-CMBMSClientConfigureCheckIntervalPolicy -PolicyState Enabled -ClientWakeupFrequencyMinutes 5 -KeyRecoveryOption PasswordAndPackage
+    Write-DscStatus "$Tag Built $($blmPolicies.Count) policy objects (XtsAes256, TpmOnly, OsEnforce0d, FdvAutoUnlock, FddEnforce0d, ClientCheck5m)"
 
     # Create BitLocker management policy (skip if already exists)
     $blmPolicyName = "MEMLABS-BitLocker Policy"
