@@ -235,10 +235,13 @@ $global:VM_Create = {
             $dynamicMinRam = $currentItem.dynamicMinRam
         }
 
-        # During deployment, disable dynamic memory so all VMs get full static RAM for performance.
-        # Dynamic memory will be restored after Phase 11 completes.
-        $dynamicMinRamDeferred = $dynamicMinRam
-        $dynamicMinRam = 0
+        # During deployment, pin VMs near max RAM by setting dynamic min to 99% of max.
+        # This keeps dynamic memory enabled (so Restore-DynamicMemory can adjust without stopping VMs)
+        # but prevents balloon-down during heavy parallel workloads.
+        if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($currentItem.memory / 1))) {
+            $dynamicMinRamDeferred = $dynamicMinRam
+            $dynamicMinRam = [string]([long][math]::Floor(($currentItem.memory / 1) * 0.99))
+        }
 
         if (-not $CreateVM) {
             # Check if memory amount or processor count changed; skip dynamic memory toggle for existing VMs
@@ -257,7 +260,11 @@ $global:VM_Create = {
                     $restart = $true
                 }
 
-                $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                # Keep dynamic memory enabled with min pinned at 99% so Restore-DynamicMemory
+                # can lower it later on a running VM (switching static->dynamic requires a stop).
+                $pinnedMin = [long][math]::Floor($memory * 0.99)
+                if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
+                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
             }
 
             $currentprocs = $vm.ProcessorCount

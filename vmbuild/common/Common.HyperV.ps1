@@ -876,9 +876,9 @@ function Restore-DynamicMemory {
     .SYNOPSIS
         Restores dynamic memory settings on all VMs after deployment completes.
     .DESCRIPTION
-        During deployment, VMs run with static memory (min=max) for performance.
-        This function re-enables dynamic memory using the configured dynamicMinRam
-        values from the deploy config.
+        During deployment, VMs run with dynamic memory but min pinned at 99% of max.
+        This function lowers the min back to the configured dynamicMinRam value.
+        Since dynamic memory is already enabled, this works on running VMs.
     #>
     [CmdletBinding()]
     param(
@@ -921,8 +921,24 @@ function Restore-DynamicMemory {
                 $buffer = 20
             }
 
-            Write-Log "[Phase 11]   $vmName`: Setting dynamic memory $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" -LogOnly
-            $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+            if ($vm.DynamicMemoryEnabled) {
+                # Normal path: dynamic memory already on, just lower the min (works while running)
+                Write-Log "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" -LogOnly
+                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+            }
+            else {
+                # Legacy/broken state: VM has static memory, must stop to switch to dynamic
+                $wasRunning = $vm.State -eq 'Running'
+                if ($wasRunning) {
+                    Write-Log "[Phase 11]   $vmName`: Stopping VM (static memory, must stop to enable dynamic)" -Warning
+                    $vm | Stop-VM -Force -ErrorAction Stop
+                }
+                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+                if ($wasRunning) {
+                    $vm | Start-VM -ErrorAction Stop
+                    Write-Log "[Phase 11]   $vmName`: Restarted with dynamic memory" -LogOnly
+                }
+            }
         }
         catch {
             Write-Log "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" -Warning
