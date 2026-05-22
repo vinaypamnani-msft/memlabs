@@ -244,7 +244,7 @@ function Start-PhaseJobs {
     $global:vm_remove_list = @()
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
-    $existingVMs = Get-List -Type VM -SmartUpdate
+    $existingVMs = Get-List -Type VM
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
