@@ -59,6 +59,10 @@ else {
 # Add direct membership rules for BitLocker VMs
 if ($blmCollection) {
     Write-DscStatus "$Tag Found $($blmVMs.Count) VM(s) with BitLocker=true in deployConfig"
+
+    # Collect VMs not yet in ConfigMgr for retry after AD discovery
+    $missingDevices = @()
+
     foreach ($blmVM in $blmVMs) {
         $vmResourceName = $blmVM.vmName
         $cmDevice = Get-CMDevice -Name $vmResourceName -ErrorAction SilentlyContinue
@@ -73,7 +77,54 @@ if ($blmCollection) {
             }
         }
         else {
-            Write-DscStatus "$Tag Device '$vmResourceName' not found in ConfigMgr, skipping direct membership"
+            $missingDevices += $blmVM
+        }
+    }
+
+    # If any BLM VMs are not yet discovered, trigger AD System Discovery and retry
+    if ($missingDevices.Count -gt 0) {
+        Write-DscStatus "$Tag $($missingDevices.Count) device(s) not yet in ConfigMgr. Triggering AD System Discovery..."
+        try {
+            $adDiscovery = Get-CimInstance -Namespace "root\SMS\site_$SiteCode" -ClassName SMS_SCI_Component -Filter "ComponentName='SMS_AD_SYSTEM_DISCOVERY_AGENT'" -ErrorAction Stop
+            if ($adDiscovery) {
+                Invoke-CimMethod -InputObject $adDiscovery -MethodName "RequestRefresh" -ErrorAction SilentlyContinue | Out-Null
+                Write-DscStatus "$Tag AD System Discovery refresh requested"
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to trigger AD Discovery: $($_.Exception.Message)"
+        }
+
+        # Wait for discovery to process DDRs (retry up to 5 minutes)
+        $maxRetries = 10
+        $retryDelay = 30
+        for ($retry = 1; $retry -le $maxRetries -and $missingDevices.Count -gt 0; $retry++) {
+            Write-DscStatus "$Tag Waiting ${retryDelay}s for discovery (attempt $retry/$maxRetries, $($missingDevices.Count) device(s) remaining)..."
+            Start-Sleep -Seconds $retryDelay
+            $stillMissing = @()
+            foreach ($blmVM in $missingDevices) {
+                $vmResourceName = $blmVM.vmName
+                $cmDevice = Get-CMDevice -Name $vmResourceName -ErrorAction SilentlyContinue
+                if ($cmDevice) {
+                    $existingRule = Get-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID -ErrorAction SilentlyContinue
+                    if (-not $existingRule) {
+                        Add-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID
+                        Write-DscStatus "$Tag Added $vmResourceName (ResourceID: $($cmDevice.ResourceID)) to $blmCollectionName (discovered on retry $retry)"
+                    }
+                    else {
+                        Write-DscStatus "$Tag $vmResourceName already a direct member of $blmCollectionName"
+                    }
+                }
+                else {
+                    $stillMissing += $blmVM
+                }
+            }
+            $missingDevices = $stillMissing
+        }
+
+        if ($missingDevices.Count -gt 0) {
+            $names = ($missingDevices | ForEach-Object { $_.vmName }) -join ', '
+            Write-DscStatus "$Tag WARNING: $($missingDevices.Count) device(s) still not discovered after retries: $names. They will be added to BLM collection once discovered by the site."
         }
     }
 }

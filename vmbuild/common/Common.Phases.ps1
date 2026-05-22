@@ -1138,6 +1138,27 @@ function Get-Phase8ConfigurationData {
         $cd.AllNodes += $all
 
     }
+
+    # Even when cmOptions.Install is false (existing CM), include the hidden Primary
+    # if there are new VMs with BitLocker=true that need BLM collection membership,
+    # or new VMs that need client push. This allows ScriptWorkFlow re-run on the Primary
+    # to handle EnableBLM and PushClients for newly added VMs.
+    if ($NumberOfNodesAdded -eq 0) {
+        $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+        $newPushVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not $_.hidden -and -not $_.SqlVersion })
+        if ($newBLMVMs.Count -gt 0 -or ($deployConfig.cmOptions.pushClientToDomainMembers -and $newPushVMs.Count -gt 0)) {
+            $hiddenPrimary = $deployConfig.virtualMachines | Where-Object {
+                $_.role -eq "Primary" -and $_.hidden -and
+                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+            } | Select-Object -First 1
+            if ($hiddenPrimary) {
+                $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
+                $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
+                $NumberOfNodesAdded = 1
+            }
+        }
+    }
+
     if ($NumberOfNodesAdded -eq 0) {
         return
     }

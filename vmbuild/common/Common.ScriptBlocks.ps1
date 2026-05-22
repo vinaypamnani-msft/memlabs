@@ -266,6 +266,27 @@ $global:VM_Create = {
                 if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
                 $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
             }
+            elseif ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0) {
+                # Memory amount unchanged but VM may need dynamic memory pinned at 99% during deploy.
+                # If already dynamic, raise min to 99% while running. If static, must stop.
+                $pinnedMin = [long][math]::Floor($memory * 0.99)
+                if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
+                if ($vm.DynamicMemoryEnabled) {
+                    if ($vm.MemoryMinimum -ne $pinnedMin) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
+                        $vm | Set-VMMemory -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction SilentlyContinue
+                    }
+                }
+                else {
+                    # Static memory from a pre-fix deploy; switch to dynamic (requires stop)
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Switching from static to dynamic memory (99% pin)"
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
+                }
+            }
 
             $currentprocs = $vm.ProcessorCount
             $requestedprocs = $currentItem.VirtualProcs

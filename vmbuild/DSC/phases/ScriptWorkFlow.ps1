@@ -398,13 +398,6 @@ else {
     . $ScriptFile $ConfigFilePath $LogPath $firstRun
 }
 
-if ($CurrentRole -eq "Primary") {
-    Write-DscStatus "Running EnableBLM.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
-}
-
 if ($TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
@@ -432,6 +425,14 @@ if ($ThisVM.role -ne "CAS") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
     Write-DscStatus "Complete!"
+}
+
+# Run EnableBLM AFTER PushClients so newly pushed clients are discoverable
+if ($CurrentRole -eq "Primary") {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
 }
 
 
