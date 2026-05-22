@@ -16,15 +16,25 @@ $global:Phase10Job = {
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
-        if ($NewVMS) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
-        }
-     
         # Get variables from parent scope
         $currentItem = $using:currentItem
         $Phase = $using:Phase
         if (-not $Phase) {
             $Phase = "Maintenance"
+        }
+
+        # Set domain-specific log path (same pattern as Phase11Job)
+        try { Flush-LogBuffer -All } catch { }
+        $domainNameForLogging = if ($using:deployConfigCopy) { ($using:deployConfigCopy).vmOptions.domainName } else { $currentItem.domain }
+        if (-not $domainNameForLogging) {
+            try { $domainNameForLogging = (Get-VMNote -VMName $currentItem.vmName).domain } catch { }
+        }
+        if ($domainNameForLogging) {
+            $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        }
+
+        if ($NewVMS) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
         }
         if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success

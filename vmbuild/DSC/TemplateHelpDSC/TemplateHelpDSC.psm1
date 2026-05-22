@@ -3834,6 +3834,20 @@ class RebootNow {
             return $false
         }
 
+        # Even if marker file exists, force reboot if there's a pending computer rename
+        # (handles retry scenarios where prior run was interrupted after rename but before reboot completed)
+        try {
+            $activeName = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -ErrorAction Stop).ComputerName
+            $pendingName = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -ErrorAction Stop).ComputerName
+            if ($activeName -ne $pendingName) {
+                Write-Verbose "Pending computer rename detected ($activeName -> $pendingName). Forcing reboot."
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "Could not check pending rename: $_"
+        }
+
         return $true
     }
 

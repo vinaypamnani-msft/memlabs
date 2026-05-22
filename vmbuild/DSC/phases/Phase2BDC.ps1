@@ -18,6 +18,7 @@
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
     $DomainName = $deployConfig.parameters.domainName
+    $DomainAdminName = $deployConfig.vmOptions.adminName
 
     # This VM
     $ThisMachineName = $deployConfig.parameters.ThisMachineName

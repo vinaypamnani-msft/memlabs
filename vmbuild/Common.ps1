@@ -3650,6 +3650,14 @@ function Get-VmSession {
                         $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
                         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
+                    # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
+                    if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+                        $username4 = "$VmDomainName\Administrator"
+                        $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
+                        $cacheKey = $VmName + "-$VmDomainName-Administrator"
+                        Write-Log "$VmName`: Falling back to $username4." -Verbose
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                    }
                     if (-not $ps) {
                         if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
                             Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
