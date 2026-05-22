@@ -240,7 +240,8 @@ $global:VM_Create = {
         # but prevents balloon-down during heavy parallel workloads.
         if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($currentItem.memory / 1))) {
             $dynamicMinRamDeferred = $dynamicMinRam
-            $dynamicMinRam = [string]([long][math]::Floor(($currentItem.memory / 1) * 0.99))
+            $raw99 = [long][math]::Floor(($currentItem.memory / 1) * 0.99)
+            $dynamicMinRam = [string]($raw99 - ($raw99 % 2MB))
         }
 
         if (-not $CreateVM) {
@@ -263,6 +264,7 @@ $global:VM_Create = {
                 # Keep dynamic memory enabled with min pinned at 99% so Restore-DynamicMemory
                 # can lower it later on a running VM (switching static->dynamic requires a stop).
                 $pinnedMin = [long][math]::Floor($memory * 0.99)
+                $pinnedMin = $pinnedMin - ($pinnedMin % 2MB)
                 if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
                 $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
             }
@@ -270,6 +272,7 @@ $global:VM_Create = {
                 # Memory amount unchanged but VM may need dynamic memory pinned at 99% during deploy.
                 # If already dynamic, raise min to 99% while running. If static, must stop.
                 $pinnedMin = [long][math]::Floor($memory * 0.99)
+                $pinnedMin = $pinnedMin - ($pinnedMin % 2MB)
                 if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
                 if ($vm.DynamicMemoryEnabled) {
                     if ($vm.MemoryMinimum -ne $pinnedMin) {
