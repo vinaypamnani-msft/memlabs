@@ -767,7 +767,7 @@ function New-RDCManFileFromHyperV {
             }
             Start-Sleep 1
             $existing.save($rdcmanfile) | Out-Null
-            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -ForegroundColor ForestGreen
+            Write-GreenCheck "Updated $rdcmanfile. Restarting RDCMan if it was running" -ForegroundColor ForestGreen
 
         }
         catch {
