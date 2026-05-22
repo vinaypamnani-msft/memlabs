@@ -128,9 +128,29 @@ if ($blmCollection) {
         }
     }
 
-    # Force collection membership evaluation so members appear immediately
+    # Force collection membership evaluation and verify members appear
+    $expectedCount = ($blmVMs.Count - $missingDevices.Count)
     Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
-    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName"
+    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName (expecting $expectedCount members)"
+
+    # Wait for evaluation to complete - members must be visible for deployment to work
+    $evalRetries = 12
+    $evalDelay = 10
+    for ($i = 1; $i -le $evalRetries; $i++) {
+        Start-Sleep -Seconds $evalDelay
+        $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue)
+        if ($members.Count -ge $expectedCount) {
+            Write-DscStatus "$Tag Collection evaluation complete: $($members.Count) member(s) visible"
+            break
+        }
+        if ($i -lt $evalRetries) {
+            Write-DscStatus "$Tag Waiting for collection evaluation ($i/$evalRetries): $($members.Count)/$expectedCount members visible..."
+            Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Collection shows $($members.Count)/$expectedCount members after $($evalRetries * $evalDelay)s. Deployment may be delayed."
+        }
+    }
 }
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
