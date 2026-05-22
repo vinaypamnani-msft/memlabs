@@ -631,10 +631,14 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Get the height of the console window, subtract 1 since its 0 based
-    $CurrentPosition = Get-CursorPosition
-    $MenuStart = $CurrentPosition.Y
-    $RoomLeft = ([int]$WindowSizeY - [int]$MenuStart)
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 2) # Usable rows (leave room for prompt)
+    $CurrentPosition = $Host.UI.RawUI.CursorPosition
+    # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
+    # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
+    # the top of the visible viewport. The difference is the cursor's visual row.
+    $viewportTop = $Host.UI.RawUI.WindowPosition.Y
+    $relativeY = $CurrentPosition.Y - $viewportTop
+    $RoomLeft = ([int]$WindowSizeY - [int]$relativeY)
     return $RoomLeft
 }
 
@@ -706,7 +710,6 @@ function Show-Menu {
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $RoomLeft = Get-RoomLeftFromCurrentPosition
-        $RoomLeft -= $ErrorCount
         if ($NoClear -and $RoomLeft -lt $TotalLineCount) {
             $NoClear = $false
         }
@@ -1135,7 +1138,7 @@ function Start-Navigation {
             write-log -Verbose "Found Selectable Item $menuItem" 
         }
 
-        if ($menuItem.Selected -and $menuItem.Displayed) {
+        if ($menuItem.Selected -and $menuItem.Displayed -and $menuItem.Selectable) {
             $foundSelected = $true
             $selectedIndex = $i
         }
@@ -1439,7 +1442,10 @@ function Start-Navigation {
                 $Global:MenuHistory[$menuName] = @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
             }
             else {
-                $Global:MenuHistory[$menuName] = $MenuItems[$selectedIndex].ItemName                
+                # Only save to MenuHistory if selectedIndex points to a selectable item
+                if ($selectedIndex -ge 0 -and $selectedIndex -lt $menuItems.Count -and $menuItems[$selectedIndex].Selectable) {
+                    $Global:MenuHistory[$menuName] = $MenuItems[$selectedIndex].ItemName
+                }
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait

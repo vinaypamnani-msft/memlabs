@@ -153,8 +153,19 @@
                 Status    = "Adding TPM protector for BitLocker"
             }
 
+            # Prevent Windows 11 24H2 automatic device encryption on first login.
+            # We want ConfigMgr BLM to manage encryption, not the OS auto-trigger.
+            Registry PreventDeviceEncryption {
+                DependsOn = "[WriteStatus]SeedTPM"
+                Ensure    = "Present"
+                Key       = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
+                ValueName = "PreventDeviceEncryption"
+                ValueType = "Dword"
+                ValueData = "1"
+            }
+
             Script SeedTPMProtector {
-                DependsOn  = "[WriteStatus]SeedTPM"
+                DependsOn  = "[Registry]PreventDeviceEncryption"
                 GetScript  = { @{ Result = (Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue).KeyProtector.Count } }
                 TestScript = {
                     $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue

@@ -7,7 +7,24 @@ Function Get-LabVMs {
     )
 
     $vms = Get-List -Type VM -domain $DomainName
+
+    # Reserve lines for menu options below the VM panel so key items (Modify,
+    # Start, Stop) are visible on the first page without pressing PgDn.
+    $menuReservedLines = 15
+    $maxRows = $host.UI.RawUI.WindowSize.Height - $menuReservedLines
+    if ($maxRows -lt 5) { $maxRows = 5 }
+
+    $truncated = $false
+    $displayVms = $vms
+    if ($vms -and $vms.Count -gt $maxRows) {
+        $displayVms = $vms | Select-Object -First $maxRows
+        $truncated = $true
+    }
+
     if ($LineCount) {
+        if ($truncated) {
+            return $maxRows + 3  # header + rows + truncation message
+        }
         return $vms.count + 2
     }
 
@@ -25,7 +42,7 @@ Function Get-LabVMs {
         # Calculate max width for each column (across ALL VMs for consistency)
         $columnWidths = foreach ($i in 0..($headers.Length - 1)) {
             $headerLength = $headers[$i].Length
-            $maxDataLength = ($vms | ForEach-Object { 
+            $maxDataLength = ($displayVms | ForEach-Object { 
                     $value = $_.($properties[$i])
                     if ($i -in 6, 7) { "$value GB" } else { "$value" } 
                 } | Measure-Object -Property Length -Maximum).Maximum
@@ -41,7 +58,7 @@ Function Get-LabVMs {
         if ($totalwidth -ge $maxWidth) {
             $columnWidths = foreach ($i in 0..($headers.Length - 1)) {
                 $headerLength = $headers[$i].Length
-                $maxDataLength = ($vms | ForEach-Object { 
+                $maxDataLength = ($displayVms | ForEach-Object { 
                         $value = $_.($properties[$i])
                         if ($i -in 6, 7) { "$value GB" } else { "$value" } 
                     } | Measure-Object -Property Length -Maximum).Maximum
@@ -58,7 +75,7 @@ Function Get-LabVMs {
         if ($totalwidth -ge $maxWidth) {
             $columnWidths = foreach ($i in 0..($headers.Length - 2)) {
                 $headerLength = $headers[$i].Length
-                $maxDataLength = ($vms | ForEach-Object { 
+                $maxDataLength = ($displayVms | ForEach-Object { 
                         $value = $_.($properties[$i])
                         if ($i -in 6, 7) { "$value GB" } else { "$value" } 
                     } | Measure-Object -Property Length -Maximum).Maximum
@@ -72,7 +89,7 @@ Function Get-LabVMs {
             }
         }
         # Group VMs by Domain
-        $groups = $vms | Sort-Object -Property Domain, VmName | Group-Object -Property Domain
+        $groups = $displayVms | Sort-Object -Property Domain, VmName | Group-Object -Property Domain
 
         $first = $true
         # Display tables per domain
@@ -149,6 +166,10 @@ Function Get-LabVMs {
             }
 
            
+        }
+        if ($truncated) {
+            $hidden = $vms.Count - $maxRows
+            Write-Host2 "   ... and $hidden more VM(s) not shown (use 'V' from main menu to see all)" -ForegroundColor DarkGray
         }
     }
     else {
