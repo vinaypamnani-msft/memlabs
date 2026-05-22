@@ -452,7 +452,9 @@ function Start-VMFixesBatched {
                 $sb = [scriptblock]::Create($def.Script)
                 try {
                     if ($def.Args) {
-                        $r = & $sb @($def.Args)
+                        # Use splatting to unpack array as individual positional arguments
+                        $fixArgs = @($def.Args)
+                        $r = & $sb @fixArgs
                     }
                     else {
                         $r = & $sb
