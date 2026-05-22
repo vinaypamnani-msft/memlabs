@@ -1186,23 +1186,27 @@ function Get-VMFixes {
                          (Test-Path "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe")
         if (-not $ssmsInstalled) { return $true }
 
+        # Run the script immediately (Phase 10 runs as admin, so %APPDATA% is correct)
+        if (Test-Path $filePath) {
+            try {
+                & $filePath
+            }
+            catch {
+                Write-Host "Configure-SSMS.ps1 threw an error: $_"
+            }
+        }
+
+        # Register logon task so future logons pick up newly added SQL servers
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if ($task) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
         }
 
-        # Action
         $taskCommand = "cmd"
         $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
         $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-
-        # Trigger
         $trigger = New-ScheduledTaskTrigger -AtLogOn
-
-        # Principal
         $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
-
-        # Task
         $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Configure SSMS Registered Servers"
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null

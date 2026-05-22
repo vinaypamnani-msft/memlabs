@@ -199,6 +199,20 @@ if ($ssmsVersions | Where-Object { $_.Major -eq 20 }) {
                         }
                         Write-Log "Existing MRU servers: $($existingServers -join ', ')"
 
+                        # Ensure TrustServerCertificate is set on ALL entries (existing + new)
+                        foreach ($sci in $serversNode.SelectNodes("Element/Item/ServerConnectionItem")) {
+                            $trustEl = $sci.SelectSingleNode("TrustServerCertificate")
+                            if (-not $trustEl) {
+                                $trustEl = $settingsXml.CreateElement("TrustServerCertificate")
+                                $trustEl.InnerText = "true"
+                                $sci.AppendChild($trustEl) | Out-Null
+                            }
+                            elseif ($trustEl.InnerText -ne "true") {
+                                $trustEl.InnerText = "true"
+                            }
+                        }
+                        Write-Log "Set TrustServerCertificate=true on all existing MRU entries"
+
                         $added = 0
                         foreach ($entry in $sqlServers.GetEnumerator() | Sort-Object Name) {
                             if ($entry.Key -notin $existingServers) {
@@ -219,6 +233,10 @@ if ($ssmsVersions | Where-Object { $_.Major -eq 20 }) {
                                 $authMethodEl = $settingsXml.CreateElement("AuthenticationMethod")
                                 $authMethodEl.InnerText = "0"
                                 $sciEl.AppendChild($authMethodEl) | Out-Null
+
+                                $trustEl = $settingsXml.CreateElement("TrustServerCertificate")
+                                $trustEl.InnerText = "true"
+                                $sciEl.AppendChild($trustEl) | Out-Null
 
                                 $connsEl = $settingsXml.CreateElement("Connections")
                                 $sciEl.AppendChild($connsEl) | Out-Null
