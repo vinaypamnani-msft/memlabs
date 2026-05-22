@@ -182,6 +182,15 @@ function Start-VMMaintenance {
         return $false
     }
 
+    # Offline Root CAs are intentionally powered off; skip if not running
+    if ($vmNoteObject.role -eq "StandaloneRootCA") {
+        $vmState = (Get-VM2 -Name $VMName -ErrorAction SilentlyContinue).State
+        if ($vmState -ne "Running") {
+            Write-Log "$VMName`: StandaloneRootCA is offline (expected). Skipping maintenance." -Success
+            return $true
+        }
+    }
+
     $global:MaintenanceActivity = $VMName
     $latestFixVersion = $Common.LatestHotfixVersion
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
