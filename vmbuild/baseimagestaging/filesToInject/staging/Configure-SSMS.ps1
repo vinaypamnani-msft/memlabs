@@ -11,6 +11,7 @@ $logFile = Join-Path $logDir "Configure-SSMS.log"
 function Write-Log {
     param([string]$Message)
     $entry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $Message"
+    Write-Host $entry
     Add-Content -Path $logFile -Value $entry -ErrorAction SilentlyContinue
 }
 
