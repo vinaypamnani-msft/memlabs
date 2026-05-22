@@ -1097,7 +1097,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     
             Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            
+            # Force collection membership evaluation so members appear immediately
+            Invoke-CMCollectionUpdate -CollectionId $NewCollection.CollectionID
 
             Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
 

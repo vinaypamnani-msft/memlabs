@@ -127,6 +127,10 @@ if ($blmCollection) {
             Write-DscStatus "$Tag WARNING: $($missingDevices.Count) device(s) still not discovered after retries: $names. They will be added to BLM collection once discovered by the site."
         }
     }
+
+    # Force collection membership evaluation so members appear immediately
+    Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
+    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName"
 }
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
@@ -214,8 +218,13 @@ END
             Where-Object { $_.CollectionId -eq $blmCollection.CollectionID }
         if (-not $existingDeployment) {
             Write-DscStatus "$Tag No existing deployment found, deploying policy to '$blmCollectionName' (ID: $($blmCollection.CollectionID))..."
-            New-CMSettingDeployment -CMSetting $blmPolicy -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Deployed BitLocker policy to $blmCollectionName"
+            try {
+                New-CMSettingDeployment -CMSetting $blmPolicy -CollectionId $blmCollection.CollectionID -ErrorAction Stop
+                Write-DscStatus "$Tag Deployed BitLocker policy to $blmCollectionName"
+            }
+            catch {
+                Write-DscStatus "$Tag ERROR: New-CMSettingDeployment failed: $($_.Exception.Message)"
+            }
         }
         else {
             Write-DscStatus "$Tag BitLocker policy already deployed to $blmCollectionName (DeploymentID: $($existingDeployment.CI_ID))"
