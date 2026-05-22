@@ -651,6 +651,16 @@ function Add-ExistingVMsToDeployConfig {
     # Add DCs from other domains, if needed
     $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
 
+    # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM)
+    $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+    if ($newBLMVMs.Count -gt 0) {
+        $existingPrimary = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary"
+        if ($existingPrimary) {
+            $primaryName = if ($existingPrimary -is [array]) { $existingPrimary[0] } else { $existingPrimary }
+            Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+        }
+    }
+
     if ($dc) {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
             $OtherDC = get-list -Type vm -DomainName $dc.ForestTrust | Where-Object { $_.Role -eq "DC" }
