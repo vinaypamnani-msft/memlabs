@@ -153,6 +153,12 @@ if ($CurrentRole -ne "CAS") {
     Write-DscStatus "[ClientPush] Skipping client push account configuration because current site is CAS."
 }
 
+# When PKI/HTTPS is enabled, ccmsetup must be told to use the PKI cert to reach the HTTPS-only MP
+if ($usePKI -and $CurrentRole -ne "CAS") {
+    Write-DscStatus "[ClientPush] PKI is enabled. Setting /UsePKICert installation property for client push."
+    Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Out-File $global:StatusLog -Append
+}
+
 Write-DscStatus "Client push candidates are '$ClientNames'"
 
 # Push Clients
