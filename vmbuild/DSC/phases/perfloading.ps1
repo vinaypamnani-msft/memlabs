@@ -184,7 +184,7 @@ else {
     # Fetch the instance of the class
     $instance = Get-CimInstance -ClassName $className -Namespace $namespace -Filter "SiteCode like '$SiteCode'"
 
-    if ($instance -ne $null) {
+    if ($null -ne $instance) {
         Write-DscStatus "$Tag Instance found: modifying existing instance."
 
         # Get the Props array

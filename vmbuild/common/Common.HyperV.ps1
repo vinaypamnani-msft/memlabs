@@ -411,7 +411,8 @@ function Test-VmResponsive {
         }
         
         # Test RDP port with hard timeout + retry (Test-NetConnection can hang indefinitely)
-        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs 3000 -Retries 3 -RetryDelayMs 1000)) {
+        $tcpTimeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000 / 3)
+        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
             Write-Log "VM $VmName RDP port test failed after retries" -Warning
             return $false
         }
@@ -431,49 +432,51 @@ function Restart-UnresponsiveVm {
         [int]$WaitTimeSeconds = 60
     )
     
-    Write-Log "Attempting to restart unresponsive VM: $VmName" -Warning
-    
-    try {
-        # Try graceful shutdown first
-        Write-Log "Attempting graceful shutdown of $VmName..."
-        Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        Start-Sleep -Seconds 10
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        Write-Log "Attempting to restart unresponsive VM: $VmName (attempt $attempt of $MaxRetries)" -Warning
         
-        # Force stop if still running
-        $vm = Get-VM2 -Name $VmName
-        if ($vm.State -ne 'Off') {
-            Write-Log "Forcing stop of $VmName..."
-            Stop-VM2 -Name $VmName -Force -TurnOff
-            Start-Sleep -Seconds 5
-        }
-        
-        # Start the VM
-        Write-Log "Starting $VmName..."
-        Start-VM2 -Name $VmName
-        
-        # Wait for VM to boot and become responsive
-        Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
-        $startTime = Get-Date
-        $isResponsive = $false
-        
-        while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+        try {
+            # Try graceful shutdown first
+            Write-Log "Attempting graceful shutdown of $VmName..."
+            Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             Start-Sleep -Seconds 10
             
-            if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
-                $isResponsive = $true
-                Write-Log "$VmName is now responsive"
-                break
+            # Force stop if still running
+            $vm = Get-VM2 -Name $VmName
+            if ($vm.State -ne 'Off') {
+                Write-Log "Forcing stop of $VmName..."
+                Stop-VM2 -Name $VmName -Force -TurnOff
+                Start-Sleep -Seconds 5
             }
             
-            Write-Log "Still waiting for $VmName to respond..."
+            # Start the VM
+            Write-Log "Starting $VmName..."
+            Start-VM2 -Name $VmName
+            
+            # Wait for VM to boot and become responsive
+            Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
+            $startTime = Get-Date
+            
+            while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+                Start-Sleep -Seconds 10
+                
+                if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
+                    Write-Log "$VmName is now responsive"
+                    return $true
+                }
+                
+                Write-Log "Still waiting for $VmName to respond..."
+            }
+            
+            Write-Log "VM $VmName did not become responsive within $WaitTimeSeconds seconds" -Warning
         }
-        
-        return $isResponsive
+        catch {
+            Write-Log "Error restarting VM ${VmName}: $_" -Error
+        }
     }
-    catch {
-        Write-Log "Error restarting VM ${VmName}: $_" -Error
-        return $false
-    }
+    
+    Write-Log "VM $VmName failed to become responsive after $MaxRetries attempts" -Error
+    return $false
 }
 
 function Stop-VM2 {

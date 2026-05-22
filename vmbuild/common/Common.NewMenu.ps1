@@ -1189,7 +1189,7 @@ function Start-Navigation {
                 }
             }
             if ($MoreItems) {
-                if ($key.VirtualKeyCode = 34) {
+                if ($key.VirtualKeyCode -eq 34) {
                     $return = [PSCustomObject]@{
                         Action      = "PGDN"
                         CurrentMenu = $MenuItems
