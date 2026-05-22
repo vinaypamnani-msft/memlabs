@@ -767,8 +767,6 @@ function New-RDCManFileFromHyperV {
             }
             Start-Sleep 1
             $existing.save($rdcmanfile) | Out-Null
-            Write-GreenCheck "Updated $rdcmanfile. Restarting RDCMan if it was running" -ForegroundColor ForestGreen
-
         }
         catch {
             Write-RedX "Could not update $rdcmanfile. $_"
@@ -788,7 +786,7 @@ function New-RDCManFileFromHyperV {
 "@ -Name "FgWindow" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
         $previousFgWindow = $getFgW::GetForegroundWindow()
 
-        Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $rdcProc = Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
         $i = 0
         while ($i -lt 3) {
             Set-RdcManMin
@@ -801,6 +799,16 @@ function New-RDCManFileFromHyperV {
         if ($previousFgWindow -ne [IntPtr]::Zero) {
             $getFgW::SetForegroundWindow($previousFgWindow) | Out-Null
         }
+
+        if ($rdcProc) {
+            Write-GreenCheck "Updated $rdcmanfile. Restarted RDCMan (PID $($rdcProc.Id))" -ForegroundColor ForestGreen
+        }
+        else {
+            Write-GreenCheck "Updated $rdcmanfile. RDCMan was stopped but failed to restart" -ForegroundColor ForestGreen
+        }
+    }
+    else {
+        Write-GreenCheck "Updated $rdcmanfile. RDCMan was not running" -ForegroundColor ForestGreen
     }
 }
 
