@@ -284,18 +284,33 @@ function Start-VMFixes {
 
     $copyResults = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
-    $fixesAppliedCount = 0
-    $fixesApplicableCount = 0
-    foreach ($vmFix in $VMFixes | Sort-Object FixVersion ) {
-        if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
-        $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
-        $toStop += $status.VMsToStop
-        $success = $status.Success
-        if ($status.Applied) { $fixesAppliedCount++ }
-        if (-not $success) {
-            $resetVersion = [int]($vmFix.FixVersion) - 1
-            Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
-            break
+    # Determine if we can use the batched fast-path (no fixes have DependentVMs)
+    $sortedFixes = $VMFixes | Sort-Object FixVersion
+    $hasDependentVMs = $sortedFixes | Where-Object { $_.DependentVMs -and $_.DependentVMs.Count -gt 0 -and $_.AppliesToThisVM }
+
+    if (-not $hasDependentVMs) {
+        # Fast path: batch all fixes into a single remote call per session type
+        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -ApplyNewOnly:$ApplyNewOnly
+        $success = $batchResult.Success
+        $toStop = $batchResult.VMsToStop
+        $fixesAppliedCount = $batchResult.AppliedCount
+        $fixesApplicableCount = $batchResult.ApplicableCount
+    }
+    else {
+        # Slow path: sequential per-fix execution (needed when fixes have dependent VMs)
+        $fixesAppliedCount = 0
+        $fixesApplicableCount = 0
+        foreach ($vmFix in $sortedFixes) {
+            if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
+            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
+            $toStop += $status.VMsToStop
+            $success = $status.Success
+            if ($status.Applied) { $fixesAppliedCount++ }
+            if (-not $success) {
+                $resetVersion = [int]($vmFix.FixVersion) - 1
+                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+                break
+            }
         }
     }
 
@@ -321,6 +336,209 @@ function Start-VMFixes {
     }
 
     return $success
+}
+
+function Start-VMFixesBatched {
+    <#
+    .SYNOPSIS
+        Executes all applicable maintenance fixes in a single remote call per session type.
+        Eliminates per-fix Invoke-VmCommand round-trip overhead (~2-4s each).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $VMName,
+        [Parameter(Mandatory = $true)]
+        [string] $VMDomain,
+        [Parameter(Mandatory = $true)]
+        [object[]] $VMFixes,
+        [Parameter(Mandatory = $false)]
+        [switch] $ApplyNewOnly
+    )
+
+    $return = [PSCustomObject]@{
+        Success         = $false
+        AppliedCount    = 0
+        ApplicableCount = 0
+        VMsToStop       = @()
+    }
+
+    $vmNote = Get-VMNote -VMName $VMName
+
+    # Stamp non-applicable fixes immediately (host-side, no remote call needed)
+    $applicableFixes = @()
+    foreach ($vmFix in $VMFixes) {
+        if ($vmNote.memLabsVersion -ge $vmFix.FixVersion -and -not $ApplyNewOnly.IsPresent) {
+            # Already applied
+            continue
+        }
+        if (-not $vmFix.AppliesToThisVM) {
+            Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion
+            continue
+        }
+        $return.ApplicableCount++
+        $applicableFixes += $vmFix
+    }
+
+    if ($applicableFixes.Count -eq 0) {
+        $return.Success = $true
+        return $return
+    }
+
+    # Start the VM
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance."
+    $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $VMDomain -WaitForConnect -Quiet
+    if ($status.StartedVM) { $return.VMsToStop += $VMName }
+    if ($status.StartFailed) { return $return }
+
+    # Copy all InjectFiles upfront in one session
+    $allInjectFiles = $applicableFixes | Where-Object { $_.InjectFiles } | ForEach-Object { $_.InjectFiles } | Select-Object -Unique
+    if ($allInjectFiles) {
+        try {
+            $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain
+            foreach ($file in $allInjectFiles) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                $targetPathInVM = "C:\staging\$file"
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..."
+                Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Log "$VMName`: Failed to copy InjectFiles for batched maintenance." -Warning
+            return $return
+        }
+    }
+
+    # Group fixes by RunAsAccount (null/default vs specific account)
+    $groups = @{}
+    foreach ($fix in $applicableFixes) {
+        $key = if ($fix.RunAsAccount) { $fix.RunAsAccount } else { "__default__" }
+        if (-not $groups.ContainsKey($key)) { $groups[$key] = @() }
+        $groups[$key] += $fix
+    }
+
+    # Build and execute a batched scriptblock for each session group
+    # Process groups in version order of their first fix
+    $sortedKeys = $groups.Keys | Sort-Object { ($groups[$_] | Select-Object -First 1).FixVersion }
+
+    foreach ($key in $sortedKeys) {
+        $groupFixes = $groups[$key]
+
+        # Build fix definitions array for transport into the VM
+        $fixDefs = @()
+        foreach ($fix in $groupFixes) {
+            $def = @{
+                Name   = $fix.FixName
+                Script = $fix.ScriptBlock.ToString()
+            }
+            if ($fix.ArgumentList) {
+                $def.Args = $fix.ArgumentList
+            }
+            $fixDefs += $def
+        }
+
+        $fixDefsJson = $fixDefs | ConvertTo-Json -Depth 4 -Compress
+        if ($fixDefs.Count -eq 1) {
+            # ConvertTo-Json doesn't wrap single items in array
+            $fixDefsJson = "[$fixDefsJson]"
+        }
+
+        # The batch runner: executes all fixes sequentially inside the VM, fail-fast
+        $batchRunner = {
+            param($json)
+            $fixDefs = $json | ConvertFrom-Json
+            $results = @()
+            foreach ($def in $fixDefs) {
+                $sb = [scriptblock]::Create($def.Script)
+                try {
+                    if ($def.Args) {
+                        $r = & $sb @($def.Args)
+                    }
+                    else {
+                        $r = & $sb
+                    }
+                    $results += [pscustomobject]@{ Name = $def.Name; Success = [bool]$r }
+                }
+                catch {
+                    $results += [pscustomobject]@{ Name = $def.Name; Success = $false }
+                }
+                if (-not $results[-1].Success) { break }
+            }
+            return ($results | ConvertTo-Json -Compress)
+        }
+
+        # Get session for this group
+        $sessionArgs = @{ VmName = $VMName; VmDomainName = $VMDomain; ShowVMSessionError = $true }
+        if ($key -ne "__default__") {
+            $sessionArgs.VmDomainAccount = $key
+        }
+        $ps = Get-VmSession @sessionArgs
+        if (-not $ps) {
+            # Fallback: try default session
+            $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain -ShowVMSessionError
+        }
+        if (-not $ps) {
+            Write-Log "$VMName`: Failed to get session for batched fixes (account: $key)." -Warning
+            return $return
+        }
+
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..."
+
+        try {
+            $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
+        }
+        catch {
+            Write-Log "$VMName`: Batched fix execution failed with exception: $_" -Warning
+            return $return
+        }
+
+        if ($batchErr.Count -ne 0) {
+            Write-Log "$VMName`: Batched fix execution had errors: $($batchErr[0].ToString().Trim())" -Warning
+        }
+
+        # Parse results
+        if (-not $rawOutput) {
+            Write-Log "$VMName`: Batched fix returned no output." -Warning
+            return $return
+        }
+
+        try {
+            $results = $rawOutput | ConvertFrom-Json
+            # Ensure it's an array
+            if ($results -isnot [array]) { $results = @($results) }
+        }
+        catch {
+            Write-Log "$VMName`: Failed to parse batched fix results: $_" -Warning
+            return $return
+        }
+
+        foreach ($r in $results) {
+            $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name }
+            if ($r.Success) {
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$($r.Name)' ($($matchingFix.FixVersion)) applied."
+                Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion
+                $return.AppliedCount++
+            }
+            else {
+                Write-Log "$VMName`: Fix '$($r.Name)' ($($matchingFix.FixVersion)) failed in batch." -Warning
+                $resetVersion = [int]($matchingFix.FixVersion) - 1
+                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+                return $return
+            }
+        }
+
+        # If fewer results than fixes in group, the batch broke early (shouldn't happen if fail-fast returned)
+        if ($results.Count -lt $groupFixes.Count) {
+            $failedFix = $groupFixes[$results.Count]
+            Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
+            $resetVersion = [int]($failedFix.FixVersion) - 1
+            Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
+            return $return
+        }
+    }
+
+    $return.Success = $true
+    return $return
 }
 
 function Start-VMFix {
