@@ -890,6 +890,7 @@ function New-UserConfig {
     $adminUser = $DC.adminName
 
     $domainDefaults = $DC.domainDefaults
+    $existingPkiOptions = $DC.pkiOptions
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -926,6 +927,30 @@ function New-UserConfig {
     if ($domainDefaults) {
         $configGenerated | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $domainDefaults -force
     }
+
+    # Import PKI settings from existing DC so new VMs inherit CA configuration
+    if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) {
+        $configGenerated.pkiOptions = $existingPkiOptions
+    }
+    else {
+        # Fallback for labs deployed before pkiOptions was stored on DC note:
+        # Derive from per-VM InstallCA property (same logic as Common.Config.ps1 migration)
+        $allDomainVMs = Get-List -Type VM -DomainName $Domain
+        $caVM = $allDomainVMs | Where-Object { $_.InstallCA -eq $true } | Select-Object -First 1
+        if ($caVM) {
+            $configGenerated.pkiOptions.EnablePKI = $true
+            $configGenerated.pkiOptions.IssuingCAVM = $caVM.vmName
+        }
+        # Detect offline root from UseOfflineRoot property OR existence of StandaloneRootCA VM
+        $offlineRoot = $allDomainVMs | Where-Object { $_.role -eq "StandaloneRootCA" } | Select-Object -First 1
+        if ($offlineRoot -or ($caVM -and $caVM.UseOfflineRoot)) {
+            $configGenerated.pkiOptions.UseOfflineRoot = $true
+            if ($offlineRoot) {
+                $configGenerated.pkiOptions.OfflineRootCAVM = $offlineRoot.vmName
+            }
+        }
+    }
+
     return $configGenerated
 }
 function Get-ExistingConfig {

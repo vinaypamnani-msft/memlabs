@@ -840,6 +840,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         "network",
         "prefix",
         "domaindefaults"
+        "pkiOptions",
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",

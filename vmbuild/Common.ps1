@@ -2223,6 +2223,12 @@ function New-VmNote {
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force
         }
 
+        # Store pkiOptions on the DC so new deployments to this domain can detect PKI state
+        if ($null -ne $DeployConfig.pkiOptions -and $ThisVm.role -eq "DC") {
+            Write-Log "Writing out pkiOptions on DC (EnablePKI: $($DeployConfig.pkiOptions.EnablePKI))"
+            $vmNote | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value $($DeployConfig.pkiOptions) -Force
+        }
+
         # Store cmOptions on the top-level site server (CAS or standalone Primary) so new
         # deployments to this domain can detect features like EnableBLM from the VM note.
         if ($null -ne $DeployConfig.cmOptions -and $ThisVm.role -in @('CAS', 'Primary') -and -not $ThisVm.parentSiteCode) {
