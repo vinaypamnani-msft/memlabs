@@ -27,8 +27,14 @@ function New-Shortcut {
     if ($Arguments) { $shortcut.Arguments = $Arguments }
     if ($IconLocation) { $shortcut.IconLocation = $IconLocation }
     $shortcut.Save()
-    return (Test-Path $LinkPath)
+    if (Test-Path $LinkPath) {
+        $script:shortcutsCreated = $true
+        return $true
+    }
+    return $false
 }
+
+$script:shortcutsCreated = $false
 
 # --- LogMachine file associations ---
 $prg = "C:\tools\LogMachine\LogMachine.exe"
@@ -175,6 +181,31 @@ $legacyFlags = @(
 foreach ($flag in $legacyFlags) {
     $fp = Join-Path $env:USERPROFILE $flag
     if (Test-Path $fp) { Remove-Item $fp -Force }
+}
+
+# --- Refresh desktop icon layout if any shortcuts were created ---
+if ($script:shortcutsCreated) {
+    # Notify Explorer so it auto-arranges new icons into the grid
+    Add-Type -TypeDefinition @"
+        using System;
+        using System.Runtime.InteropServices;
+        public class DesktopRefresh {
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+            [DllImport("user32.dll", SetLastError = true)]
+            public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+            [DllImport("user32.dll")]
+            public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+        }
+"@ -ErrorAction SilentlyContinue
+    try {
+        $progman = [DesktopRefresh]::FindWindow("Progman", "Program Manager")
+        if ($progman -ne [IntPtr]::Zero) {
+            # WM_COMMAND with sort-by-name (0x7041)
+            [DesktopRefresh]::SendMessage($progman, 0x111, [IntPtr]0x7041, [IntPtr]::Zero) | Out-Null
+        }
+    }
+    catch {}
 }
 
 
