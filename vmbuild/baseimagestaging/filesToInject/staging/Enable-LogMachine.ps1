@@ -278,6 +278,57 @@ if (-not (Test-Path "$desktopPath\DP Logs.lnk")) {
     catch {}
 }
 
+# --- DSC Logs shortcut ---
+$dscLogs = "$env:windir\System32\Configuration\ConfigurationStatus"
+if (Test-Path $dscLogs) {
+    Add-Permissions -folderPath $dscLogs
+    New-Shortcut -LinkPath "$desktopPath\DSC Logs.lnk" -TargetPath $dscLogs | Out-Null
+}
+
+# --- SSMS shortcut ---
+$ssmsExe = $null
+foreach ($ver in @('21', '20', '19', '18')) {
+    $candidate = "C:\Program Files (x86)\Microsoft SQL Server Management Studio $ver\Common7\IDE\ssms.exe"
+    if (Test-Path $candidate) { $ssmsExe = $candidate; break }
+}
+if ($ssmsExe) {
+    New-Shortcut -LinkPath "$desktopPath\SQL Server Management Studio.lnk" -TargetPath $ssmsExe | Out-Null
+}
+
+# --- SQL Server Logs shortcut ---
+if (-not (Test-Path "$desktopPath\SQL Logs.lnk")) {
+    $sqlLogPath = $null
+    # Find the default instance log directory from registry
+    $sqlInstances = @(
+        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer\Parameters',
+        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL15.MSSQLSERVER\MSSQLServer\Parameters',
+        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL14.MSSQLSERVER\MSSQLServer\Parameters',
+        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL13.MSSQLSERVER\MSSQLServer\Parameters'
+    )
+    foreach ($regPath in $sqlInstances) {
+        if (Test-Path $regPath) {
+            try {
+                # SQLArg1 is -e<errorlog path>
+                $arg1 = (Get-ItemProperty -Path $regPath -Name 'SQLArg1' -ErrorAction Stop).SQLArg1
+                if ($arg1 -match '^-e(.+)$') {
+                    $sqlLogPath = Split-Path $Matches[1] -Parent
+                    break
+                }
+            }
+            catch {}
+        }
+    }
+    # Fallback: search filesystem
+    if (-not $sqlLogPath) {
+        $sqlLogPath = Get-ChildItem "C:\Program Files\Microsoft SQL Server\MSSQL*\MSSQL\Log" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if ($sqlLogPath -and (Test-Path $sqlLogPath)) {
+        Add-Permissions -folderPath $sqlLogPath
+        New-Shortcut -LinkPath "$desktopPath\SQL Logs.lnk" -TargetPath $sqlLogPath | Out-Null
+    }
+}
+
 # --- Clean up legacy flag files ---
 $legacyFlags = @(
     "EnableLogMachine.done", "ClientShortcuts.done", "ServerShortcuts2.done",
@@ -291,7 +342,18 @@ foreach ($flag in $legacyFlags) {
 
 # --- Refresh desktop icon layout if any shortcuts were created ---
 if ($script:shortcutsCreated) {
-    # Notify Explorer so it auto-arranges new icons into the grid
+    # Enable auto-arrange via registry so future icons also align left
+    $bagsPath = "HKCU:\SOFTWARE\Microsoft\Windows\Shell\Bags\1\Desktop"
+    if (Test-Path $bagsPath) {
+        $fflags = Get-ItemProperty -Path $bagsPath -Name "FFlags" -ErrorAction SilentlyContinue
+        if ($fflags) {
+            # Set auto-arrange (bit 0) and snap-to-grid (bit 2)
+            $newFlags = $fflags.FFlags -bor 0x5
+            Set-ItemProperty -Path $bagsPath -Name "FFlags" -Value $newFlags -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Send LVM_ARRANGE to the desktop ListView to immediately align icons left
     Add-Type -TypeDefinition @"
         using System;
         using System.Runtime.InteropServices;
@@ -299,16 +361,38 @@ if ($script:shortcutsCreated) {
             [DllImport("user32.dll", SetLastError = true)]
             public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
             [DllImport("user32.dll", SetLastError = true)]
-            public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+            public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string lpszClass, string lpszWindow);
             [DllImport("user32.dll")]
             public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
         }
 "@ -ErrorAction SilentlyContinue
     try {
+        $defView = [IntPtr]::Zero
+        # Desktop ListView is under Progman > SHELLDLL_DefView > SysListView32
         $progman = [DesktopRefresh]::FindWindow("Progman", "Program Manager")
         if ($progman -ne [IntPtr]::Zero) {
-            # WM_COMMAND with sort-by-name (0x7041)
-            [DesktopRefresh]::SendMessage($progman, 0x111, [IntPtr]0x7041, [IntPtr]::Zero) | Out-Null
+            $defView = [DesktopRefresh]::FindWindowEx($progman, [IntPtr]::Zero, "SHELLDLL_DefView", $null)
+        }
+        # Fallback: on some configurations it's under a WorkerW window
+        if ($defView -eq [IntPtr]::Zero) {
+            $workerW = [IntPtr]::Zero
+            do {
+                $workerW = [DesktopRefresh]::FindWindowEx([IntPtr]::Zero, $workerW, "WorkerW", $null)
+                if ($workerW -ne [IntPtr]::Zero) {
+                    $dv = [DesktopRefresh]::FindWindowEx($workerW, [IntPtr]::Zero, "SHELLDLL_DefView", $null)
+                    if ($dv -ne [IntPtr]::Zero) {
+                        $defView = $dv
+                        break
+                    }
+                }
+            } while ($workerW -ne [IntPtr]::Zero)
+        }
+        if ($defView -ne [IntPtr]::Zero) {
+            $listView = [DesktopRefresh]::FindWindowEx($defView, [IntPtr]::Zero, "SysListView32", $null)
+            if ($listView -ne [IntPtr]::Zero) {
+                # LVM_ARRANGE (0x1016) with LVA_ALIGNLEFT (1)
+                [DesktopRefresh]::SendMessage($listView, 0x1016, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+            }
         }
     }
     catch {}
