@@ -1276,46 +1276,23 @@ function Get-KeyStroke {
     if (-not $WatchSize) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
-    $diagPath = Join-Path $PSScriptRoot '..\logs\ResizeDiag.log'
-    $iter = 0
-    $lastLogged = "$($WatchSize.Width)x$($WatchSize.Height)"
-    Add-Content -Path $diagPath -Value ("[{0}] ENTER watch={1} HostWin={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $lastLogged, $Host.UI.RawUI.WindowSize.Width, $Host.UI.RawUI.WindowSize.Height) -ErrorAction SilentlyContinue
     while ($true) {
-        $iter++
         try {
             # Use [System.Console]::KeyAvailable (not $Host.UI.RawUI.KeyAvailable):
             # after mstsc minimize/restore, the PS host's KeyAvailable property
             # becomes blocking until input arrives, which freezes the resize
             # poll loop entirely. The .NET API is guaranteed non-blocking.
             $ka = [System.Console]::KeyAvailable
-        } catch {
-            Add-Content -Path $diagPath -Value ("[{0}] KA-THROW iter={1} ex={2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $_.Exception.Message) -ErrorAction SilentlyContinue
+        }
+        catch {
             Start-Sleep -Milliseconds 75
             continue
         }
         if ($ka) {
-            $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-            Add-Content -Path $diagPath -Value ("[{0}] KEY iter={1} vkc={2} ch={3} ctrl={4} state={5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $k.VirtualKeyCode, [int]$k.Character, $k.ControlKeyState, ($k | Out-String).Trim()) -ErrorAction SilentlyContinue
-            return $k
+            return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
-        try {
-            $live = Get-LiveWindowSize
-            $hostWin = $Host.UI.RawUI.WindowSize
-        } catch {
-            Add-Content -Path $diagPath -Value ("[{0}] SIZE-THROW iter={1} ex={2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $_.Exception.Message) -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 75
-            continue
-        }
-        $liveStr = if ($live) { "$($live.Width)x$($live.Height)" } else { "NULL" }
-        $hostStr = "$($hostWin.Width)x$($hostWin.Height)"
-        $curStr = "$($liveStr)/Host=$hostStr"
-        # Heartbeat every ~1.1s (15 iters * 75ms) so we can tell if the poll is alive
-        if ($curStr -ne $lastLogged -or ($iter % 15 -eq 0)) {
-            Add-Content -Path $diagPath -Value ("[{0}] iter={1} ka=False live={2} host={3} watch={4}x{5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $liveStr, $hostStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
-            $lastLogged = $curStr
-        }
+        $live = Get-LiveWindowSize
         if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
-            Add-Content -Path $diagPath -Value ("[{0}] RESIZE-EXIT live={1} watch={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $liveStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
             return $null
         }
         Start-Sleep -Milliseconds 75
