@@ -101,6 +101,7 @@ function Get-GenericHelp {
         "pullDPSourceDP" { "Sets the source Distribution point for this PullDP" }
         "InstallPatchMyPC" { "Installs the PatchMyPC service on this VM. Must be installed on the Top-Level SUP" }
         "PatchMyPCFileServer" { "Sets the FileServer that PatchMyPC will use to store its updates" }
+        "cmOptions" { "ConfigMgr options for this top-level site server (version, license, install, push, PKI, SCP, BLM). Press Enter to edit." }
 
         default { "Help Missing for $text" }
     }
