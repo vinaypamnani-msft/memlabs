@@ -386,7 +386,9 @@ if ($CurrentRole -eq "CAS") {
 }
 
 
-if (-not $deployConfig.cmOptions.UsePKI) {
+# Per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+if (-not $cmo.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"

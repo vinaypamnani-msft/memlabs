@@ -172,7 +172,7 @@ CurrentBranch=1
     $cmini = $cmini.Replace('%InstallDir%', $SMSInstallDir)
     $productID = "EVAL"
     if ($CM -ne "CMTP") {
-        if (-not $($deployConfig.cmOptions.EVALVersion)) {
+        if (-not $($cmo.EVALVersion)) {
             if ($($deployConfig.parameters.ProductID)) {
                 $productID = $($deployConfig.parameters.ProductID)
             }

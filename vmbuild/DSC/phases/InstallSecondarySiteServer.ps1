@@ -21,7 +21,9 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisMachineFQDN = $ThisMachineName + "." + $DomainFullName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Resolve per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }

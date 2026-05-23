@@ -83,7 +83,9 @@ configuration Phase3
             $AddIISCert = $false
         }
 
-        if (-not $deployConfig.cmOptions.UsePKI) {
+        # Per-VM cmOptions (multi-hierarchy safe).
+        $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        if (-not $cmo.UsePKI) {
             $AddIISCert = $false
         }
 
@@ -179,7 +181,7 @@ configuration Phase3
             #Find the toplevel site server that is newly being deployed
             if (-not $ThisVM.thisParams.ParentSiteServer -and -not $ThisVM.hidden -and $ThisVM.Role -in ("CAS", "Primary")) {
 
-                $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+                $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
                 $CMDownloadStatus = "Downloading Configuration Manager current branch (required baseline version)"
                 if ($CM -eq "CMTP") {
                     $CMDownloadStatus = "Downloading Configuration Manager technical preview"

@@ -23,8 +23,13 @@ else {
     # Read config json
     $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
+    # Resolve per-VM cmOptions: this runs on a specific top-level site server,
+    # so prefer its stamped block over the global mirror (multi-hierarchy safe).
+    $ThisMachineName = $deployConfig.parameters.ThisMachineName
+    $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+    $cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
 
-    if ($deployConfig.cmOptions.PrePopulateObjects -ne $true) {
+    if ($cmo.PrePopulateObjects -ne $true) {
         return
     }
 
@@ -34,8 +39,7 @@ else {
     # Get required values from config
     $DomainFullName = $deployConfig.parameters.domainName
     $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
-    $ThisMachineName = $deployConfig.parameters.ThisMachineName
-    $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
+    # $ThisMachineName / $ThisVM / $cmo already resolved above (before PrePopulateObjects gate).
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
@@ -681,7 +685,7 @@ else {
     $Sups = $deployConfig.VirtualMachines | Where-Object { $_.InstallSup -and $_.SiteCode -eq $siteCode }
     $syncNeeded = $false
 
-    if ($deployConfig.cmOptions.OfflineSUP) {
+    if ($cmo.OfflineSUP) {
         $Sups = $false
         Write-DscStatus "$Tag Offline SUP requested, skipping the SUP product check"
     }

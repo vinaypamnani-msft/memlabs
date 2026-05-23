@@ -21,7 +21,9 @@ $Externaldomainsitecode = $DC.externalDomainJoinSiteCode
 
 $cm_svc = "$DomainFullName\cm_svc"
 
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Resolve per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }

@@ -25,9 +25,21 @@
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
 
+    # OR-across-top-levels: DC-level PKI templates publish if ANY hierarchy in
+    # this domain wants PKI. Over-provisioning is harmless; under-provisioning
+    # breaks the hierarchy that needed it. Falls back to global mirror when no
+    # per-VM blocks are stamped yet (mid-migration shape).
     $usePKI = $false
-    if ($deployConfig.cmOptions -and $deployConfig.cmOptions.UsePKI) {
-        $usePKI = $deployConfig.cmOptions.UsePKI
+    $dcDomain = if ($ThisVM.Domain) { $ThisVM.Domain } else { $deployConfig.parameters.domainName }
+    $domainTopCmOptions = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and
+            (-not $_.Domain -or $_.Domain -eq $dcDomain) -and $_.cmOptions
+        }).cmOptions
+    if (-not $domainTopCmOptions -and $deployConfig.cmOptions) {
+        $domainTopCmOptions = @($deployConfig.cmOptions)
+    }
+    foreach ($_cmo in $domainTopCmOptions) {
+        if ($_cmo.UsePKI) { $usePKI = $true }
     }
 
     $RealDC = $deployConfig.virtualMachines | Where-Object { $_.role -in ("DC") }

@@ -22,19 +22,26 @@
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
 
+    # DC-level provisioning (PKI cert templates, CM content pre-pop, BLM cert
+    # templates) is shared across every hierarchy in this domain. Use OR-across-
+    # top-levels: if ANY top-level site server (CAS or standalone Primary) has
+    # the flag set, the DC publishes it. Over-provisioning is harmless; under-
+    # provisioning breaks the hierarchy that needed it. Falls back to the
+    # rehydrated global block when no per-VM cmOptions are present yet (mid-
+    # migration shape) or when no site servers are in this deploy.
     $usePKI = $false
     $prePopulate = $false
     $enableBLM = $false
-    if ($deployConfig.cmOptions) {
-        if ($deployConfig.cmOptions.UsePKI) {
-            $usePKI = $deployConfig.cmOptions.UsePKI
-        }
-        if ($deployConfig.cmOptions.PrePopulateObjects) {
-            $prePopulate = $deployConfig.cmOptions.PrePopulateObjects
-        }
-        if ($deployConfig.cmOptions.EnableBLM) {
-            $enableBLM = $deployConfig.cmOptions.EnableBLM
-        }
+    $topLevelCmOptions = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
+        }).cmOptions
+    if (-not $topLevelCmOptions -and $deployConfig.cmOptions) {
+        $topLevelCmOptions = @($deployConfig.cmOptions)
+    }
+    foreach ($cmo in $topLevelCmOptions) {
+        if ($cmo.UsePKI) { $usePKI = $true }
+        if ($cmo.PrePopulateObjects) { $prePopulate = $true }
+        if ($cmo.EnableBLM) { $enableBLM = $true }
     }
 
 
