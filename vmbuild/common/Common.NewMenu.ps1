@@ -1074,10 +1074,25 @@ function Set-PointerDisplayAsPerMenu {
     }
 }
 
-# Get the key stroke from the user
+# Get the key stroke from the user. If $WatchSize is supplied, polls every
+# ~100ms and returns $null if the window size changes before a key is pressed.
+# Otherwise blocks until a key is pressed (original behavior).
 function Get-KeyStroke {
-    $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") # Read the key stroke without echoing it to the console
-    return $key # Return the key stroke
+    param(
+        [System.Management.Automation.Host.Size]$WatchSize
+    )
+    if (-not $WatchSize) {
+        return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    while ($true) {
+        if ($Host.UI.RawUI.KeyAvailable) {
+            return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        if ($Host.UI.RawUI.WindowSize -ne $WatchSize) {
+            return $null
+        }
+        Start-Sleep -Milliseconds 75
+    }
 }
 
 # Set the cursor position to the top of the menu
@@ -1278,8 +1293,14 @@ function Start-Navigation {
         }
 
         #Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
-        
-        $key = Get-KeyStroke # Get the key stroke from the user
+
+        # Poll-mode keystroke wait: returns $null if window is resized while idle.
+        # Show-Menu's outer loop treats a null return as "redraw" because $return
+        # falsiness skips the action-dispatch branch and re-enters the render path.
+        $key = Get-KeyStroke -WatchSize $startSize
+        if ($null -eq $key) {
+            return
+        }
         write-log -Verbose -HostOnly "key: $key"
 
         $currentsize = $Host.UI.RawUI.WindowSize
