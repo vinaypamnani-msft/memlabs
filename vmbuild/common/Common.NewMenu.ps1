@@ -1038,12 +1038,6 @@ function Show-Menu {
         $pageStartIndex = $layout.StartIndex
         $pageEndIndex   = $layout.EndIndex
         $PgUpAvailable  = ($pageStartIndex -gt 0)
-        # TEMP DIAG: page-layout under-fill hunt
-        $cur = $Host.UI.RawUI.CursorPosition; $vp = $Host.UI.RawUI.WindowPosition; $wsz = $Host.UI.RawUI.WindowSize
-        Write-Log -LogOnly ("[PageDiag] Win={0}x{1} Vp.Y={2} Cur.Y={3} RelY={4} Room={5} Avail={6} Items={7} Start={8} End={9} PgDn={10} Total={11} Shrink(S={12}H={13}B={14}Hp={15})" -f `
-            $wsz.Width, $wsz.Height, $vp.Y, $cur.Y, ($cur.Y - $vp.Y), `
-            (Get-RoomLeftFromCurrentPosition), $availableRows, $menuItems.Count, $layout.StartIndex, $layout.EndIndex, $layout.PgDnNeeded, `
-            $TotalLineCount, $shrink.Summary, $shrink.Header, $shrink.Blank, $shrink.Help)
         if ($layout.PgDnNeeded) {
             $Operation = 'PGDNNEEDED'
         }
