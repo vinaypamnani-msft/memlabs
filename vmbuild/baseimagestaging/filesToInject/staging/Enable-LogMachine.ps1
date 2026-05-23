@@ -142,23 +142,10 @@ else {
         Write-Output $base64Hash
     }
 
-    function Get-UserExperience {
-        $userExperienceSearch = "User Choice set via Windows User Experience"
-        $shell32Path = [Environment]::GetFolderPath([Environment+SpecialFolder]::SystemX86) + "\Shell32.dll"
-        try {
-            $fileStream = [System.IO.File]::Open($shell32Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-            $binaryReader = New-Object System.IO.BinaryReader($fileStream)
-            [byte[]]$bytesData = $binaryReader.ReadBytes(5mb)
-            $fileStream.Close()
-            $dataString = [Text.Encoding]::Unicode.GetString($bytesData)
-            $position1 = $dataString.IndexOf($userExperienceSearch)
-            $position2 = $dataString.IndexOf("}", $position1)
-            $dataString.Substring($position1, $position2 - $position1 + 1)
-        }
-        catch {
-            "User Choice set via Windows User Experience {D18B6DD5-6124-4341-9318-804003BAFA0B}"
-        }
-    }
+    # The "User Experience" string is embedded in Shell32.dll. It has been
+    # identical across all Windows 10/11 builds (10240 through 26100+).
+    # Hardcoding avoids the fragile 5MB binary scan of Shell32.dll.
+    $script:UserExperience = "User Choice set via Windows User Experience {D18B6DD5-6124-4341-9318-804003BAFA0B}"
 
     function Get-HexDateTime {
         $now = [DateTime]::Now
@@ -170,14 +157,13 @@ else {
     }
 
     function Set-FileTypeAssociation {
-        param ([string]$Extension, [string]$ProgId)
+        param ([string]$Extension, [string]$ProgId, [int]$MaxRetries = 2)
 
         # Get user SID (domain-aware)
         $userSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User).Value.ToLower()
-        $userExperience = Get-UserExperience
         $userDateTime = Get-HexDateTime
 
-        $baseInfo = "$Extension$userSid$ProgId$userDateTime$userExperience".ToLower()
+        $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLower()
         $progHash = Get-Hash $baseInfo
 
         if (-not $progHash) {
@@ -214,41 +200,47 @@ namespace RegHelper {
         try { [RegHelper.Utils]::DeleteKey($ucKeyPath) } catch {}
 
         # Write new UserChoice with ProgId and computed Hash
+        # Retry loop: Explorer can race and reset UserChoice between delete and write
         $fullKeyPath = "HKEY_CURRENT_USER\$ucKeyPath"
-        try {
-            [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "Hash", $progHash)
-            [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "ProgId", $ProgId)
-        }
-        catch {
-            Write-Status "FAIL: Could not write UserChoice for $Extension`: $_"
-            return $false
-        }
+        for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+            if ($attempt -gt 1) {
+                # Re-delete and recompute hash (timestamp may have rolled over to next minute)
+                Start-Sleep -Milliseconds 200
+                try { [RegHelper.Utils]::DeleteKey($ucKeyPath) } catch {}
+                $userDateTime = Get-HexDateTime
+                $baseInfo = "$Extension$userSid$ProgId$userDateTime$script:UserExperience".ToLower()
+                $progHash = Get-Hash $baseInfo
+                if (-not $progHash) { return $false }
+            }
 
-        # Verify
-        $verify = (Get-ItemProperty "HKCU:\$ucKeyPath" -ErrorAction SilentlyContinue).ProgId
-        if ($verify -eq $ProgId) { return $true }
-        else { return $false }
+            try {
+                [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "Hash", $progHash)
+                [Microsoft.Win32.Registry]::SetValue($fullKeyPath, "ProgId", $ProgId)
+            }
+            catch {
+                Write-Status "FAIL: Could not write UserChoice for $Extension (attempt $attempt): $_"
+                continue
+            }
+
+            # Verify the write stuck
+            $verify = (Get-ItemProperty "HKCU:\$ucKeyPath" -ErrorAction SilentlyContinue).ProgId
+            if ($verify -eq $ProgId) { return $true }
+        }
+        return $false
     }
 
     # --- End helper functions ---
 
-    # 1) Register ProgId in HKLM Classes (system-level, makes LogMachine visible to shell)
-    $progIdPath = "HKLM:\SOFTWARE\Classes\LogMachine.LOG"
-    if (-not (Test-Path "$progIdPath\shell\open\command")) {
-        New-Item -Path "$progIdPath\shell\open\command" -Force | Out-Null
+    # 1) Register ProgId in HKLM + HKCU Classes (makes LogMachine visible to shell)
+    foreach ($root in @("HKLM:\SOFTWARE\Classes\LogMachine.LOG", "HKCU:\SOFTWARE\Classes\LogMachine.LOG")) {
+        if (-not (Test-Path "$root\shell\open\command")) {
+            New-Item -Path "$root\shell\open\command" -Force | Out-Null
+        }
+        Set-ItemProperty -Path $root -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path "$root\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
+        if (-not (Test-Path "$root\DefaultIcon")) { New-Item -Path "$root\DefaultIcon" -Force | Out-Null }
+        Set-ItemProperty -Path "$root\DefaultIcon" -Name "(Default)" -Value "`"$prg`",0" -ErrorAction SilentlyContinue
     }
-    Set-ItemProperty -Path $progIdPath -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "$progIdPath\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
-    if (-not (Test-Path "$progIdPath\DefaultIcon")) { New-Item -Path "$progIdPath\DefaultIcon" -Force | Out-Null }
-    Set-ItemProperty -Path "$progIdPath\DefaultIcon" -Name "(Default)" -Value "`"$prg`",0" -ErrorAction SilentlyContinue
-
-    # Also register in HKCU Classes and OpenWithProgids for discoverability
-    $hkcuProgId = "HKCU:\SOFTWARE\Classes\LogMachine.LOG"
-    if (-not (Test-Path "$hkcuProgId\shell\open\command")) {
-        New-Item -Path "$hkcuProgId\shell\open\command" -Force | Out-Null
-    }
-    Set-ItemProperty -Path $hkcuProgId -Name "(Default)" -Value "LogMachine Log Viewer" -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "$hkcuProgId\shell\open\command" -Name "(Default)" -Value "`"$prg`" `"%1`"" -ErrorAction SilentlyContinue
 
     # 2) System-level assoc/ftype (legacy fallback)
     $currentAssoc = & cmd /c "assoc .log" 2>$null
@@ -303,22 +295,16 @@ public static void Refresh() { SHChangeNotify(0x8000000, 0, IntPtr.Zero, IntPtr.
     }
 }
 
-# --- Gather paths ---
-$CMInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
-if ($CMInstallDir) {
-    $CMlogs = Join-Path $CMInstallDir "Logs"
-}
-
-$UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
+# --- Gather paths (single registry read for SMS\Setup) ---
+$smsSetup = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\SMS\Setup" -ErrorAction SilentlyContinue
+$CMInstallDir = $smsSetup | Select-Object -ExpandProperty "Installation Directory" -ErrorAction SilentlyContinue
+$UIInstallDir = $smsSetup | Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
 if (-not $UIInstallDir) {
     $UIInstallDir = Get-ItemProperty -Path "HKLM:\SOFTWARE\Wow6432Node\Microsoft\ConfigMgr10\Setup" -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty "UI Installation Directory" -ErrorAction SilentlyContinue
 }
-if ($UIInstallDir) {
-    $CMexe = Join-Path $UIInstallDir "bin\Microsoft.ConfigurationManagement.exe"
-}
+if ($CMInstallDir) { $CMlogs = Join-Path $CMInstallDir "Logs" }
+if ($UIInstallDir) { $CMexe = Join-Path $UIInstallDir "bin\Microsoft.ConfigurationManagement.exe" }
 
 $ControlPanel = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Control Panel\Cpls" -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty "SMSCFGRC" -ErrorAction SilentlyContinue
@@ -352,13 +338,10 @@ if (-not (Test-Path "$desktopPath\ConfigMgr Logs.lnk")) {
     else {
         # Try MP or WSUS tracing path
         $MPLogs = $null
-        try {
-            $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_MP_CONTROL_MANAGER' -Name 'TraceFileName' -ErrorAction Stop).TraceFileName)
-        }
-        catch {}
-        if (-not $MPLogs) {
+        foreach ($tracingKey in @('SMS_MP_CONTROL_MANAGER', 'SMS_WSUS_CONTROL_MANAGER')) {
             try {
-                $MPLogs = Split-Path ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Tracing\SMS_WSUS_CONTROL_MANAGER' -Name 'TraceFileName' -ErrorAction Stop).TraceFileName)
+                $MPLogs = Split-Path ((Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\SMS\Tracing\$tracingKey" -Name 'TraceFileName' -ErrorAction Stop).TraceFileName)
+                if ($MPLogs) { break }
             }
             catch {}
         }
@@ -432,38 +415,29 @@ if (Test-Path $dscLogs) {
     New-Shortcut -LinkPath "$desktopPath\DSC Logs.lnk" -TargetPath $dscLogs | Out-Null
 }
 
-# --- SSMS shortcut ---
-$ssmsExe = $null
-foreach ($ver in @('21', '20', '19', '18')) {
-    $candidate = "C:\Program Files (x86)\Microsoft SQL Server Management Studio $ver\Common7\IDE\ssms.exe"
-    if (Test-Path $candidate) { $ssmsExe = $candidate; break }
-}
+# --- SSMS shortcut (discover any installed version via glob) ---
+$ssmsExe = Get-ChildItem "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe" -ErrorAction SilentlyContinue |
+    Sort-Object { [int]($_.Directory.Parent.Parent.Name -replace '\D') } -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
 if ($ssmsExe) {
     New-Shortcut -LinkPath "$desktopPath\SQL Server Management Studio.lnk" -TargetPath $ssmsExe | Out-Null
 }
 
-# --- SQL Server Logs shortcut ---
+# --- SQL Server Logs shortcut (discover any installed instance via registry glob) ---
 if (-not (Test-Path "$desktopPath\SQL Logs.lnk")) {
     $sqlLogPath = $null
-    # Find the default instance log directory from registry
-    $sqlInstances = @(
-        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.MSSQLSERVER\MSSQLServer\Parameters',
-        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL15.MSSQLSERVER\MSSQLServer\Parameters',
-        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL14.MSSQLSERVER\MSSQLServer\Parameters',
-        'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL13.MSSQLSERVER\MSSQLServer\Parameters'
-    )
-    foreach ($regPath in $sqlInstances) {
-        if (Test-Path $regPath) {
-            try {
-                # SQLArg1 is -e<errorlog path>
-                $arg1 = (Get-ItemProperty -Path $regPath -Name 'SQLArg1' -ErrorAction Stop).SQLArg1
-                if ($arg1 -match '^-e(.+)$') {
-                    $sqlLogPath = Split-Path $Matches[1] -Parent
-                    break
-                }
+    # Find default-instance parameter keys dynamically (no hardcoded version numbers)
+    $sqlParamKeys = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL*\MSSQLServer\Parameters" -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($paramKey in $sqlParamKeys) {
+        try {
+            $arg1 = (Get-ItemProperty -Path $paramKey.PSPath -Name 'SQLArg1' -ErrorAction Stop).SQLArg1
+            if ($arg1 -match '^-e(.+)$') {
+                $sqlLogPath = Split-Path $Matches[1] -Parent
+                break
             }
-            catch {}
         }
+        catch {}
     }
     # Fallback: search filesystem
     if (-not $sqlLogPath) {

@@ -103,6 +103,7 @@ function Show-GenConfigErrorMessages {
     $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
     $count = ($Errors | Measure-Object).Count
     if ($LineCount) {
+        if ($count -eq 0) { return 0 }
         return $count + 4
     }
     if ($count -gt 0) {

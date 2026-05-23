@@ -204,6 +204,10 @@ function New-MenuItem {
                 #write-host "Running Function $function -LineCount" 
                 $linecount = Invoke-Expression -Command "$function -LineCount"                             
             }
+            elseif ($itemName -eq "*HELP") {
+                $function = $null
+                $linecount = 3  # Update-HelpText renders 3 lines (clear or bordered box)
+            }
             else {                    
                 $function = $null   
                 $linecount = 1             
@@ -735,6 +739,13 @@ function Show-Menu {
         if (-not $HelpFound -and $HelpNeeded) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
+        }
+
+        # Help area is now either rendered above (placeholder) or will render
+        # via the *HELP item (whose LineCount covers it). Remove the global +5
+        # that was added for the early NoClear/clear decisions.
+        if ($HelpNeeded) {
+            $TotalLineCount -= 5
         }
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
