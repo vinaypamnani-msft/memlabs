@@ -37,9 +37,9 @@ function Invoke-CMOptionsMenu {
         -Prompt "Select site server whose ConfigMgr Options to modify" `
         -OptionArray $options -Test:$false -split
     if (-not $choice -or $choice -eq "ESCAPE") { return }
-    $picked = $topLevels | Where-Object {
-        "$($_.vmName)  [$($_.role) $($_.siteCode)]" -eq $choice
-    } | Select-Object -First 1
+    # Get-Menu2 -split returns the first space-separated token of the chosen
+    # option (the vmName here), so match by vmName.
+    $picked = $topLevels | Where-Object { $_.vmName -eq $choice } | Select-Object -First 1
     if ($picked) { Invoke-CMOptionsMenuForVM -VM $picked }
 }
 
