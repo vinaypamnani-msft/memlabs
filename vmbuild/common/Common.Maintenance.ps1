@@ -22,8 +22,14 @@ function Start-Maintenance {
 
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
     $countWorked = $countFailed = $countSkipped = 0
-    # Filter in-progress
-    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object { $_.inProgress -ne $true -and -not ($_.Role -in @("OSDClient", "Linux", "AADClient")) }
+    # Filter in-progress. Also exclude offline StandaloneRootCA VMs - they are
+    # intentionally powered off after issuing sub-CA certs and should not be
+    # offered for maintenance or auto-started.
+    $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object {
+        $_.inProgress -ne $true -and
+        -not ($_.Role -in @("OSDClient", "Linux", "AADClient")) -and
+        -not ($_.Role -eq "StandaloneRootCA" -and $_.State -ne "Running")
+    }
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
         Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
