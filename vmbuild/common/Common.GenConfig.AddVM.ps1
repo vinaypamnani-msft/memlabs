@@ -638,27 +638,37 @@ function Add-NewVMForRole {
     $ConfigToModify.virtualMachines += $virtualMachine
 
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
-        # Post-migration shape: cmOptions live on the top-level site server VM
-        # (CAS, or standalone Primary). Attach a default block to the newly
-        # added VM only when it is itself the top-level and no other top-level
-        # already owns a cmOptions block. Child Primary under a CAS, SiteSystem,
-        # PassiveSite, and Secondary all inherit at deploy time via
-        # New-DeployConfig rehydration and never own their own block.
-        $existingTopLevel = Get-TopLevelSiteServer -Config $ConfigToModify
+        # Post-migration shape: cmOptions live on each top-level site server VM
+        # (CAS, or standalone Primary). Attach a block to the newly added VM
+        # only when it is itself a top-level (CAS or Primary with no
+        # parentSiteCode). When another top-level already exists in the
+        # config, clone its cmOptions so the new hierarchy starts with the
+        # same Version / PKI / BLM settings. Otherwise create defaults.
+        # Child Primary under a CAS, SiteSystem, PassiveSite, and Secondary
+        # all inherit at deploy time via New-DeployConfig rehydration.
         $isTopLevelAdd = ($role -in 'CAS', 'Primary') -and (-not $virtualMachine.parentSiteCode)
-        if ($isTopLevelAdd -and (-not $existingTopLevel.cmOptions)) {
-            $latestVersion = Get-CMLatestBaselineVersion
-            $newCmOptions = [PSCustomObject]@{
-                Version                   = $latestVersion
-                Install                   = $true
-                PushClientToDomainMembers = $true
-                PrePopulateObjects        = $true
-                EVALVersion               = $false
-                #InstallSCP                = $true
-                OfflineSCP                = $false
-                OfflineSUP                = $false
-                UsePKI                    = $false
-                EnableBLM                 = $false
+        if ($isTopLevelAdd -and -not $virtualMachine.cmOptions) {
+            $existingTopLevel = $ConfigToModify.virtualMachines | Where-Object {
+                $_.vmName -ne $virtualMachine.vmName -and
+                $_.role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
+            } | Select-Object -First 1
+            if ($existingTopLevel) {
+                $newCmOptions = $existingTopLevel.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            }
+            else {
+                $latestVersion = Get-CMLatestBaselineVersion
+                $newCmOptions = [PSCustomObject]@{
+                    Version                   = $latestVersion
+                    Install                   = $true
+                    PushClientToDomainMembers = $true
+                    PrePopulateObjects        = $true
+                    EVALVersion               = $false
+                    #InstallSCP                = $true
+                    OfflineSCP                = $false
+                    OfflineSUP                = $false
+                    UsePKI                    = $false
+                    EnableBLM                 = $false
+                }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
         }

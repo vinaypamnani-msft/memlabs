@@ -1551,7 +1551,11 @@ function Test-Configuration {
                 }
 
                 # CAS with Primary, without parentSiteCode
-                if ($containsCS) {
+                # Only validate when this Primary actually claims a parent;
+                # a Primary with no parentSiteCode is a standalone top-level
+                # hierarchy and is allowed to coexist with a CAS in the same
+                # config (each owns its own cmOptions block).
+                if ($containsCS -and $psParentSiteCode) {
                     if ($psParentSiteCode -notin $CSVMs.siteCode) {
                         $casSiteCodesList = ($CSVMs.siteCode -join ",")
                         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match any CAS Site Code [$casSiteCodesList]." -ReturnObject $return -Warning
