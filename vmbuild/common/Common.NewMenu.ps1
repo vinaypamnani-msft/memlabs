@@ -1285,28 +1285,39 @@ function Start-Navigation {
 
         if ($key.VirtualKeyCode -eq 34 -or $key.VirtualKeyCode -eq 33) {
             # PGDN = 34, PGUP = 33
-            $MoreItems = $false
-            foreach ($item in $menuItems) {
-                if ($item.Selectable -and -not $item.Displayed ) {
-                    $MoreItems = $true
-                    break
+            # Determine direction separately: items before the first Displayed
+            # selectable mean PgUp is valid; items after the last Displayed
+            # selectable mean PgDn is valid. Using a single "any non-displayed"
+            # check wraps around to page 1 from the last page.
+            $firstDisplayed = -1
+            $lastDisplayed = -1
+            for ($idx = 0; $idx -lt $menuItems.Count; $idx++) {
+                if ($menuItems[$idx].Selectable -and $menuItems[$idx].Displayed) {
+                    if ($firstDisplayed -eq -1) { $firstDisplayed = $idx }
+                    $lastDisplayed = $idx
                 }
             }
-            if ($MoreItems) {
-                if ($key.VirtualKeyCode -eq 34) {
-                    $return = [PSCustomObject]@{
-                        Action      = 'PGDN'
-                        CurrentMenu = $MenuItems
-                    }
-                    return $return
+            $hasMoreAfter  = $false
+            $hasMoreBefore = $false
+            for ($idx = $lastDisplayed + 1; $idx -lt $menuItems.Count; $idx++) {
+                if ($menuItems[$idx].Selectable) { $hasMoreAfter = $true; break }
+            }
+            for ($idx = 0; $idx -lt $firstDisplayed; $idx++) {
+                if ($menuItems[$idx].Selectable) { $hasMoreBefore = $true; break }
+            }
+            if ($key.VirtualKeyCode -eq 34 -and $hasMoreAfter) {
+                $return = [PSCustomObject]@{
+                    Action      = 'PGDN'
+                    CurrentMenu = $MenuItems
                 }
-                if ($key.VirtualKeyCode -eq 33) {
-                    $return = [PSCustomObject]@{
-                        Action      = 'PGUP'
-                        CurrentMenu = $MenuItems
-                    }
-                    return $return
+                return $return
+            }
+            if ($key.VirtualKeyCode -eq 33 -and $hasMoreBefore) {
+                $return = [PSCustomObject]@{
+                    Action      = 'PGUP'
+                    CurrentMenu = $MenuItems
                 }
+                return $return
             }
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
