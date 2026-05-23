@@ -267,7 +267,12 @@ function Select-PKIOptions {
                 }
             }
             { $_ -match '^C(\d+)$' } {
-                $idx = [int]$Matches[1] - 1
+                # Re-parse from $response instead of relying on $Matches, which
+                # other cmdlets in this scope can clobber between the switch
+                # condition and the body running.
+                $m = [regex]::Match($response, '^C(\d+)$')
+                if (-not $m.Success) { break }
+                $idx = [int]$m.Groups[1].Value - 1
                 $tls = @($Global:Config.virtualMachines | Where-Object {
                         ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
                     })
