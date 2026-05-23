@@ -178,7 +178,11 @@ function Test-DCFunctionality {
     Write-Log "[Phase $Phase] $VMName [$label]: Testing AD DS, DNS, and Netlogon services" -LogOnly
 
     $scriptBlock = {
+        # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList, so any bool we pass
+        # in arrives as the string 'True'/'False' (both truthy in `if`). Compare to
+        # the string 'True' explicitly to avoid the BDC branch firing on every DC.
         param($domainFqdn, $isBdcInner)
+        $isBdc = ($isBdcInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # Check critical services
@@ -246,7 +250,7 @@ function Test-DCFunctionality {
         # BDC-only: confirm we can replicate inbound from at least one partner
         # within the last hour. A stale/never-replicated BDC means later VMs
         # built against it will be missing accounts/GPOs.
-        if ($isBdcInner) {
+        if ($isBdc) {
             $results.Details.Add("CMD: Get-ADReplicationPartnerMetadata -Target `$env:COMPUTERNAME -Scope Server")
             try {
                 Import-Module ActiveDirectory -ErrorAction Stop
@@ -276,7 +280,7 @@ function Test-DCFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain, $IsBDC.IsPresent `
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent) `
         -DisplayName "Phase11-$label-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
@@ -2231,7 +2235,10 @@ function Test-CMSiteWideFunctionality {
     Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
 
     $scriptBlock = {
+        # NOTE: Invoke-VmCommand stringifies ArgumentList -- compare bool args
+        # to the string 'True' explicitly (any non-empty string is truthy).
         param($sc, $usePkiInner, $expectedApps)
+        $usePki = ($usePkiInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         $ns = "root\SMS\site_$sc"
@@ -2284,8 +2291,8 @@ function Test-CMSiteWideFunctionality {
             $siteObj = Get-WmiObject -Namespace $ns -Class SMS_Site -Filter "SiteCode='$sc'" -ErrorAction Stop | Select-Object -First 1
             if ($siteObj) {
                 $mode = $siteObj.Mode
-                $results.Details.Add("OK: SMS_Site.Mode = $mode (cmOptions.UsePKI=$usePkiInner)")
-                if ($usePkiInner -and $mode -ne 1) {
+                $results.Details.Add("OK: SMS_Site.Mode = $mode (cmOptions.UsePKI=$usePki)")
+                if ($usePki -and $mode -ne 1) {
                     $results.Details.Add("WARN: UsePKI=true but site Mode=$mode (expected 1 = HTTPS only)")
                 }
             }
@@ -2334,7 +2341,7 @@ function Test-CMSiteWideFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $usePKI, $expectedAppNames `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $expectedAppNames `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel "CMSite-$siteCode" -Result $result)
