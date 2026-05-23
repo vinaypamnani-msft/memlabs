@@ -21,7 +21,9 @@ function Select-Options {
         [bool] $ContinueMode = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
-        [string] $HelpFunction = $null
+        [string] $HelpFunction = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Hashtable mapping property name -> section header text. A non-selectable divider with the header is rendered immediately before that property.")]
+        [hashtable] $Sections = $null
     )
 
     $property = $null
@@ -115,6 +117,12 @@ function Select-Options {
             else {
                 $TextToDisplay = Get-AdditionalInformation -item $item -data $value
                 $color = Get-AdditionalInformationColor -item $item -data $value
+            }
+            # Section header: rendered as a non-selectable divider right before
+            # this property when caller passes -Sections @{ propName = "Header" }.
+            if ($Sections -and $Sections.ContainsKey($item)) {
+                $headerText = "   ─────────  $($Sections[$item])  ─────────"
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*S$i" -ItemText $headerText -selectable $false -selected $false -Color1 "SlateGray"
             }
             $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"

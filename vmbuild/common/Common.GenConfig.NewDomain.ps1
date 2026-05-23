@@ -595,7 +595,16 @@ function Select-NewDomainConfig {
 
     #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
     #$additionalOptions = [ordered]@{"*HF" = "Get-NewDomainConfigHelp"}
-    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp"
+
+    # Section headers rendered above the first property in each group.
+    # Order of properties is controlled by Get-SortedProperties; section
+    # headers attach to whichever property currently leads each group.
+    $sections = @{
+        'DeploymentType'        = 'Domain'
+        'CMVersion'             = 'ConfigMgr'
+        'PushCMClientToClients' = 'Client Push'
+    }
+    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp" -Sections $sections
 
     if ($result -eq "ESCAPE") {
         return $result

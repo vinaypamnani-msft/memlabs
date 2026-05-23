@@ -166,7 +166,6 @@ function Get-SortedProperties {
         'vmName'              = 'vmName'
         'DeploymentType'      = 'DeploymentType'
         'domainName'          = 'DomainName'
-        'CMVersion'           = 'CMVersion'
         'prefix'              = 'Prefix'
         'network'             = 'Network'
         'DefaultServerOS'     = 'DefaultServerOS'
@@ -174,7 +173,15 @@ function Get-SortedProperties {
         'DefaultSqlVersion'   = 'DefaultSqlVersion'
         'UseDynamicMemory'    = 'UseDynamicMemory'
         'IncludeClients'      = 'IncludeClients'
-        'IncludeSSMSOnNONSQL' = 'IncludeSSMSOnNONSQL'
+        # ConfigMgr group (positioned together so New Domain wizard can
+        # render a section header above CMVersion).
+        'CMVersion'              = 'CMVersion'
+        'IncludeSSMSOnNONSQL'    = 'IncludeSSMSOnNONSQL'
+        'EnableSUPOnSiteServers' = 'EnableSUPOnSiteServers'
+        # Client-push group (section header attaches to PushCMClientToClients).
+        'PushCMClientToClients'     = 'PushCMClientToClients'
+        'PushCMClientToServers'     = 'PushCMClientToServers'
+        'PushCMClientToSiteSystems' = 'PushCMClientToSiteSystems'
         'adminName'           = 'AdminName'
         'basePath'            = 'BasePath'
         'domainUser'          = 'DomainUser'
