@@ -1290,8 +1290,9 @@ function Get-KeyStroke {
             continue
         }
         if ($ka) {
-            Add-Content -Path $diagPath -Value ("[{0}] KEY iter={1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter) -ErrorAction SilentlyContinue
-            return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            Add-Content -Path $diagPath -Value ("[{0}] KEY iter={1} vkc={2} ch={3} ctrl={4} state={5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $k.VirtualKeyCode, [int]$k.Character, $k.ControlKeyState, ($k | Out-String).Trim()) -ErrorAction SilentlyContinue
+            return $k
         }
         try {
             $live = Get-LiveWindowSize
