@@ -742,6 +742,33 @@ function Resolve-ShrinkPlan {
     return $plan
 }
 
+# Render a centered "───  Heading Text  ───" break line for a *B-prefixed
+# header item. Extracted verbatim from Show-Menu's inline render so callers
+# can read declaratively. Same colors, widths, and rounding as before.
+function Write-MenuHeader {
+    param(
+        [Parameter(Mandatory)] $MenuItem,
+        [Parameter(Mandatory)][int]$LongestBreakLine
+    )
+    $StartDashColor    = 'SlateGray'
+    $EndDashColor      = 'SlateGray'
+    $indentSpaces      = 3
+    $SpacesAroundWords = 4
+
+    $NumOfDash = [math]::Round((($LongestBreakLine - $MenuItem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
+    $breakPrefix = '─' * $NumOfDash
+    if ([bool](($LongestBreakLine - $MenuItem.Text.Length) % 2)) {
+        $NumOfDash += 1
+    }
+    $breakPostfix = '─' * $NumOfDash
+    $WordSpace    = ' ' * $SpacesAroundWords
+
+    Write-Host2 $(' ' * $indentSpaces) -NoNewline
+    Write-Host2 -ForegroundColor $StartDashColor $($breakPrefix + $WordSpace) -NoNewline
+    Write-Host2 -ForeGroundColor $MenuItem.Color1 $MenuItem.Text -NoNewline
+    Write-Host2 -ForegroundColor $EndDashColor $($WordSpace + $breakPostfix)
+}
+
 # Read the array of menu items and the selected index and display the menu
 function Show-Menu {
     [CmdletBinding()]
@@ -885,13 +912,6 @@ function Show-Menu {
                     continue
                 }
 
-                $StartDashColor = "SlateGray"
-                $EndDashColor = "SlateGray"
-                $indentSpaces = 3
-                $center = $true
-                $SpacesAroundWords = 4
-                $StartDashes = 3
-
                 if ($menuItem.itemName -eq "*HELP") {
                     $HelpPosition = Get-CursorPosition
                     Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
@@ -899,27 +919,7 @@ function Show-Menu {
                 }
 
                 if ($menuItem.itemName.StartsWith("*B") -and -not [string]::IsNullOrWhiteSpace($menuitem.Text)) {
-                    if ($center) {
-
-                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
-                        $breakPrefix = "─" * $NumOfDash
-                        if ([bool](($LongestBreakLine - $menuitem.Text.Length) % 2)) {
-                            $NumOfDash += 1
-                        }
-                        $breakPostfix = "─" * $NumOfDash                        
-                    }
-                    else {
-                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) - $StartDashes))
-                        $breakPrefix = "─" * $StartDashes
-                        $breakPostfix = "─" * $NumOfDash 
-                    }
-                    $WordSpace = " " * $SpacesAroundWords
-                    
-                    Write-Host2 $(" " * $indentSpaces) -NoNewline
-                    Write-Host2 -ForegroundColor $StartDashColor $($breakPrefix + $WordSpace) -NoNewline
-                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text -NoNewline
-                    Write-Host2 -ForegroundColor $EndDashColor $($WordSpace + $breakPostfix)
-                    
+                    Write-MenuHeader -MenuItem $menuItem -LongestBreakLine $LongestBreakLine
                 }
                 else {
                     #Write-Host2 -ForegroundColor "MediumPurple" $menuItem.itemName -NoNewline
