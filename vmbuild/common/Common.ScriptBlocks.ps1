@@ -2042,6 +2042,29 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
         }
 
+        # =============================================================
+        # Stamp a per-deploy RunId on the VM and clear any stale
+        # completion marker. ScriptWorkflow.ps1 will echo this RunId
+        # into ScriptWorkflow.completed.runid once it finishes ALL of
+        # its post-install scripts (InstallProvider, PushClients,
+        # EnableBLM, etc.). The monitoring loop below treats matching
+        # RunIds as authoritative completion, eliminating the race
+        # where Complete! status is overwritten by later writes.
+        # =============================================================
+        $expectedRunId = [guid]::NewGuid().ToString()
+        $stampResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
+            param($runId)
+            $dir = 'C:\staging\DSC'
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            # Delete any stale completion marker from a prior deploy BEFORE writing expected -- guarantees no false positive
+            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.completed.runid') -Force -ErrorAction SilentlyContinue
+            Set-Content -Path (Join-Path $dir 'ScriptWorkflow.expected.runid') -Value $runId -Force -Encoding ASCII
+        } -ArgumentList $expectedRunId -DisplayName "DSC: Stamp Phase RunId"
+        if ($stampResult.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to stamp RunId (will rely on status-string fallback). $($stampResult.ScriptBlockOutput)" -Warning
+            $expectedRunId = $null
+        }
+
         ### ===========================
         ### Start Monitoring the jobs
         ### ===========================
@@ -2244,7 +2267,22 @@ $global:VM_Config = {
                 }
                 $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
                 $stopwatch2.Start()
-                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
+                # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
+                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
+                    $statusText = Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue
+                    $completedRunId = $null
+                    if (Test-Path C:\staging\DSC\ScriptWorkflow.completed.runid) {
+                        $completedRunId = (Get-Content C:\staging\DSC\ScriptWorkflow.completed.runid -ErrorAction SilentlyContinue | Select-Object -First 1)
+                    }
+                    # Emit status text first (preserves legacy string consumers) then runid as a side property
+                    [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId }
+                } -SuppressLog:$suppressNoisyLogging
+                # Unwrap to keep $status.ScriptBlockOutput a plain string for the existing code paths below
+                $completedRunIdSnapshot = $null
+                if ($status -and $status.ScriptBlockOutput -is [pscustomobject]) {
+                    $completedRunIdSnapshot = $status.ScriptBlockOutput.CompletedRunId
+                    $status.ScriptBlockOutput = $status.ScriptBlockOutput.StatusText
+                }
                 $stopwatch2.Stop()
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
@@ -2354,6 +2392,13 @@ $global:VM_Config = {
                     $complete = $status.ScriptBlockOutput -eq "Complete!"
                     if (-not $complete) {
                         $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
+                    }
+                    # Authoritative path: ScriptWorkflow.ps1 echoes our per-deploy RunId into
+                    # ScriptWorkflow.completed.runid only after ALL its post-install scripts
+                    # finish. Immune to status-string overwrites and stale state from prior deploys.
+                    if (-not $complete -and $expectedRunId -and $completedRunIdSnapshot -eq $expectedRunId) {
+                        $complete = $true
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Completion confirmed via RunId match ($expectedRunId)"
                     }
                     if (-not $complete) {
                         #$complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")

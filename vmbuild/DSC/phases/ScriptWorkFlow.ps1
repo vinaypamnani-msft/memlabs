@@ -10,6 +10,18 @@ param(
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
 
+# Read the per-deploy RunId stamped by the orchestrator (Common.ScriptBlocks.ps1)
+# right before it began monitoring this phase. We'll echo it back into
+# ScriptWorkflow.completed.runid at the very end so the orchestrator can
+# detect completion authoritatively (immune to status-string overwrites).
+$ExpectedRunIdFile  = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
+$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+$ScriptWorkflowRunId = $null
+if (Test-Path $ExpectedRunIdFile) {
+    $ScriptWorkflowRunId = (Get-Content $ExpectedRunIdFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
+}
+
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $deployconfig.Parameters.ThisMachineName }
@@ -213,6 +225,10 @@ if ($scenario -eq "MultiDomain") {
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     Write-DscStatus "Complete!"
+    # Stamp completion RunId for the orchestrator's race-proof completion check
+    if ($ScriptWorkflowRunId) {
+        try { Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII } catch {}
+    }
     return
 }
 
@@ -441,6 +457,20 @@ if ($CurrentRole -eq "Primary") {
     # exact match "Complete!" / "Setting up ConfigMgr. Status: Complete!" and
     # will otherwise hang on Phase 8 long after the work is done.
     Write-DscStatus "Complete!"
+}
+
+# Stamp the completion RunId as the very last action. The orchestrator's
+# monitoring loop treats a matching RunId as authoritative completion,
+# which is bulletproof against any later status writes from background
+# work or future phase additions.
+if ($ScriptWorkflowRunId) {
+    try {
+        Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII
+        Write-DscStatus "ScriptWorkflow.ps1 stamped completion RunId: $ScriptWorkflowRunId"
+    }
+    catch {
+        Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
+    }
 }
 
 
