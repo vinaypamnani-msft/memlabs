@@ -3138,80 +3138,118 @@ Function Show-Summary {
 
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
-        if ($containsPS -or $containsSecondary) {
-            $versionInfoPrinted = $false
-            $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
-            if ($deployConfig.cmOptions.OfflineSCP) {
-                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed"
-                    $versionInfoPrinted = $true
-                }
-            }
-           
-            if (-not $versionInfoPrinted) {
-                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
-                }
-                else {                    
-                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed"
-                }
+        # Enumerate every top-level site server (CAS or standalone Primary, i.e.
+        # any CAS/Primary without a parentSiteCode) and report its hierarchy
+        # using *that* server's own cmOptions block. Falls back to the deploy-
+        # level cmOptions for hierarchies whose top-level VM hasn't received a
+        # per-VM block yet (mid-migration shape).
+        $topLevels = @($fixedConfig | Where-Object {
+                ($_.Role -in 'CAS', 'Primary') -and -not $_.parentSiteCode
+            })
 
+        if (-not $topLevels) {
+            Write-RedX "ConfigMgr will not be installed (no top-level site server in config)"
+        }
+
+        foreach ($top in $topLevels) {
+            $cmo = if ($top.cmOptions) { $top.cmOptions } else { $deployConfig.cmOptions }
+            if (-not $cmo -or -not $cmo.install) {
+                Write-RedX "$($top.VMName) [$($top.SiteCode)]: ConfigMgr install disabled (cmOptions.install=false)"
+                continue
             }
-           
-            if ($deployConfig.cmOptions.PrePopulateObjects) {
-                Write-GreenCheck "ConfigMgr: Scripts/apps/task sequences/etc will be pre-populated"
+
+            $hierarchyLabel = if ($top.Role -eq 'CAS') { "CAS hierarchy" } else { "Standalone Primary" }
+            $baselineVersion = (Get-CMBaselineVersion -CMVersion $cmo.version).baselineVersion
+
+            # Version line per top-level site server.
+            if ($cmo.OfflineSCP -and $baselineVersion -ne $cmo.version) {
+                Write-RedX "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $($cmo.version) selected, but Offline SCP forces baseline $baselineVersion"
+            }
+            elseif ($baselineVersion -ne $cmo.version) {
+                Write-OrangePoint "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $baselineVersion will be installed and upgraded to $($cmo.version)"
             }
             else {
-                Write-OrangePoint "ConfigMgr: Scripts/apps/task sequences/etc will NOT be pre-populated"
+                Write-GreenCheck "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $($cmo.version) will be installed"
             }
 
-            $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-            if ($PS) {
-                foreach ($PSVM in $PS) {
-                    if ($PSVM.ParentSiteCode) {
-                        Write-GreenCheck "ConfigMgr Primary server $($PSVM.VMName) will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
-                    }
-                    else {
-                        Write-GreenCheck "Primary server $($PSVM.VMName) with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
-                    }
+            # Per-hierarchy CM options.
+            if ($cmo.PrePopulateObjects) {
+                Write-GreenCheck "  Scripts/apps/task sequences will be pre-populated"
+            }
+            else {
+                Write-OrangePoint "  Scripts/apps/task sequences will NOT be pre-populated"
+            }
+
+            if ($cmo.usePKI) {
+                Write-GreenCheck "  PKI: HTTPS enforced (MP/DP/SUP/RP)"
+            }
+            else {
+                Write-OrangePoint "  PKI: HTTP/EHTTP will be used for all communication"
+            }
+
+            if ($cmo.OfflineSCP) {
+                Write-OrangePoint "  SCP: Will be installed in OFFLINE mode"
+            }
+            if ($cmo.OfflineSUP) {
+                Write-OrangePoint "  SUP: Will be installed in OFFLINE mode for the top-level site"
+            }
+            if ($cmo.EnableBLM) {
+                Write-GreenCheck "  BitLocker Management enabled"
+            }
+
+            # Hierarchy children: child Primaries (CAS only), their Secondaries,
+            # Passive site servers, and per-Primary client push.
+            $childPrimaries = @()
+            if ($top.Role -eq 'CAS') {
+                $childPrimaries = @($fixedConfig | Where-Object {
+                        $_.Role -eq 'Primary' -and $_.parentSiteCode -eq $top.SiteCode
+                    })
+                foreach ($p in $childPrimaries) {
+                    Write-GreenCheck "  Primary $($p.VMName) [$($p.SiteCode)] joins this hierarchy ($($p.SiteCode) -> $($top.SiteCode))"
                 }
             }
 
-            $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
-            if ($SSVM) {
-                Write-GreenCheck -NoNewLine "Secondary Site(s) will be installed:"
-                foreach ($SS in $SSVM) {
-                    write-host -NoNewLine " $($SS.SiteCode) -> $($SS.ParentSiteCode)"
-                }
-                write-host
+            # Secondaries reporting to any Primary in this hierarchy.
+            $hierarchyPrimaryCodes = @()
+            if ($top.Role -eq 'Primary') { $hierarchyPrimaryCodes += $top.SiteCode }
+            $hierarchyPrimaryCodes += @($childPrimaries.SiteCode)
+            $secondaries = @($fixedConfig | Where-Object {
+                    $_.Role -eq 'Secondary' -and $_.parentSiteCode -in $hierarchyPrimaryCodes
+                })
+            foreach ($s in $secondaries) {
+                Write-GreenCheck "  Secondary $($s.VMName) [$($s.SiteCode)] -> $($s.parentSiteCode)"
             }
-            if ($containsPS) {
-                if ($containsPassive) {
-                    $PassiveVMs = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-                    foreach ($PassiveVM in $PassiveVMs) {
-                        Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode $($PassiveVM.VMName) will be installed for SiteCode $($PassiveVM.SiteCode -Join ',')"
-                    }
+
+            # Passive site servers for any Primary (or CAS) in this hierarchy.
+            $hierarchyAllCodes = @($top.SiteCode) + $hierarchyPrimaryCodes | Select-Object -Unique
+            $passives = @($fixedConfig | Where-Object {
+                    $_.Role -eq 'PassiveSite' -and ($_.SiteCode -in $hierarchyAllCodes)
+                })
+            if ($passives) {
+                foreach ($pv in $passives) {
+                    Write-GreenCheck "  (High Availability) Passive site server $($pv.VMName) for SiteCode $($pv.SiteCode -join ',')"
+                }
+            }
+            else {
+                Write-RedX "  (High Availability) No passive site server in this hierarchy"
+            }
+
+            # Client push from every Primary in this hierarchy.
+            $pushSources = @()
+            if ($top.Role -eq 'Primary') { $pushSources += $top }
+            $pushSources += $childPrimaries
+            foreach ($cp in $pushSources) {
+                if ($cp.thisParams -and $cp.thisParams.ClientPush) {
+                    Write-GreenCheck "  Client Push from $($cp.VMName): [$($cp.thisParams.ClientPush -join ',')]"
                 }
                 else {
-                    Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
+                    Write-OrangePoint "  Client Push from $($cp.VMName): no eligible clients (pushClient=false on all candidates, or none in network)"
                 }
             }
         }
-        else {
-            Write-RedX "ConfigMgr will not be installed"
-        }
 
-        if ($deployConfig.cmOptions.usePKI) {
-            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and Reporting Point role"
-        }
-        else {
-            Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
-        }
-        if ($deployConfig.cmOptions.OfflineSCP) {
-            Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
-        }
- 
-       
+        # Site-system roles (DP/MP/SUP/RP/SMSProv) -- listed globally; the role
+        # itself implies the owning hierarchy via the VM's parentSiteCode.
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role: $($testSystem.vmName -Join ",")"
@@ -3225,9 +3263,6 @@ Function Show-Summary {
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
             Write-GreenCheck "SUP role: $($testSystem.vmName -Join ",")"
-            if ($deployConfig.cmOptions.OfflineSUP) {
-                Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
-            }
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
@@ -3235,27 +3270,10 @@ Function Show-Summary {
             Write-GreenCheck "RP role: $($testSystem.vmName -Join ",")"
         }
 
-
-        if ($containsMember) {
-            if ($containsPS -and $deployConfig.cmOptions.install -eq $true) {
-                $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                foreach ($PSVM in $PSVMs) {
-                    if ($PSVM.thisParams.ClientPush) {
-                        Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
-                    }
-                    else {
-                        Write-OrangePoint "Client Push: $($PSVM.VMname) has no eligible clients (pushClient=false on all candidates, or none in network)"
-                    }
-                }
-            }
-            else {
-                Write-RedX "Client Push: No"
-            }
+        $testSystem = $fixedConfig | Where-Object { $_.installSMSProv }
+        if ($testSystem) {
+            Write-GreenCheck "SMS Provider role: $($testSystem.vmName -Join ",")"
         }
-        else {
-            #Write-Host " [Client Push: N/A]"
-        }
-
     }
     else {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
