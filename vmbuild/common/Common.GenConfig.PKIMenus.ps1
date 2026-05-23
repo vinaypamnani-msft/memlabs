@@ -137,6 +137,20 @@ function Select-PKIOptions {
     [CmdletBinding()]
     param()
 
+    # Local helper: when UsePKI is turned on (root or per-VM), make sure the
+    # underlying PKI infrastructure is enabled and an Issuing CA is selected.
+    function Enable-PKIInfrastructureForCM {
+        if (-not $pkiOptions.EnablePKI) {
+            $pkiOptions.EnablePKI = $true
+        }
+        if (-not $pkiOptions.IssuingCAVM) {
+            $firstDC = $Global:Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+            if ($firstDC) {
+                $pkiOptions.IssuingCAVM = $firstDC.vmName
+            }
+        }
+    }
+
     $pkiOptions = $Global:Config.pkiOptions
     if (-not $pkiOptions) { return }
 
@@ -174,14 +188,32 @@ function Select-PKIOptions {
         }
 
         # ── Section: ConfigMgr ──
-        if ($Global:Config.cmOptions) {
+        # Per-top-level toggles (cmOptions now lives on the top-level site server VM).
+        # Falls back to the legacy root-level $Global:Config.cmOptions when present
+        # (in-flight configs before Move-CmOptionsToTopLevelSiteServer migrates them).
+        $cmTopLevels = @($Global:Config.virtualMachines | Where-Object {
+                ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+            })
+        if ($cmTopLevels.Count -gt 0 -or $Global:Config.cmOptions) {
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -Color1 $Global:Common.Colors.GenConfigHeader
             $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "*B3" -ItemText "ConfigMgr" -selectable $false -Color1 $Global:Common.Colors.GenConfigHeader
 
-            # --- Item C: UsePKI for ConfigMgr ---
-            $usePKIText = if ($Global:Config.cmOptions.UsePKI) { "True" } else { "False" }
-            $usePKIColor = if ($Global:Config.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
-            $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C" -ItemText "$("UsePKI for ConfigMgr".PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
+            if ($cmTopLevels.Count -gt 0) {
+                $cmIdx = 0
+                foreach ($tl in $cmTopLevels) {
+                    $cmIdx++
+                    $usePKIText = if ($tl.cmOptions.UsePKI) { "True" } else { "False" }
+                    $usePKIColor = if ($tl.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
+                    $label = "UsePKI on $($tl.vmName)"
+                    $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C$cmIdx" -ItemText "$($label.PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
+                }
+            }
+            else {
+                # Legacy root cmOptions fallback
+                $usePKIText = if ($Global:Config.cmOptions.UsePKI) { "True" } else { "False" }
+                $usePKIColor = if ($Global:Config.cmOptions.UsePKI) { $Global:Common.Colors.GenConfigTrue } else { $Global:Common.Colors.GenConfigFalse }
+                $null = Add-MenuItem -MenuName "PKI Settings" -MenuItems ([ref]$MenuItems) -ItemName "C" -ItemText "$("UsePKI for ConfigMgr".PadRight($padding)) = $usePKIText" -selectable $true -Color1 $usePKIColor -HelpFunction "Get-PKIHelp"
+            }
         }
 
         # --- Done ---
@@ -213,27 +245,36 @@ function Select-PKIOptions {
                     $pkiOptions.IssuingCAVM = ""
                     $pkiOptions.UseOfflineRoot = $false
                     $pkiOptions.OfflineRootCAVM = ""
-                    # Can't use PKI for CM without CA infrastructure
+                    # Can't use PKI for CM without CA infrastructure — clear on every
+                    # top-level site server and legacy root.
                     if ($Global:Config.cmOptions -and $Global:Config.cmOptions.UsePKI) {
                         $Global:Config.cmOptions.UsePKI = $false
+                    }
+                    foreach ($tl in @($Global:Config.virtualMachines | Where-Object {
+                                ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+                            })) {
+                        if ($tl.cmOptions.UsePKI) { $tl.cmOptions.UsePKI = $false }
                     }
                 }
             }
             "C" {
+                # Legacy single root-level cmOptions toggle
                 if ($Global:Config.cmOptions) {
                     $Global:Config.cmOptions.UsePKI = -not $Global:Config.cmOptions.UsePKI
                     if ($Global:Config.cmOptions.UsePKI) {
-                        # Turning on UsePKI auto-enables PKI infrastructure
-                        if (-not $pkiOptions.EnablePKI) {
-                            $pkiOptions.EnablePKI = $true
-                        }
-                        # Auto-fill IssuingCAVM with first DC if empty
-                        if (-not $pkiOptions.IssuingCAVM) {
-                            $firstDC = $Global:Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
-                            if ($firstDC) {
-                                $pkiOptions.IssuingCAVM = $firstDC.vmName
-                            }
-                        }
+                        Enable-PKIInfrastructureForCM
+                    }
+                }
+            }
+            { $_ -match '^C(\d+)$' } {
+                $idx = [int]$Matches[1] - 1
+                $tls = @($Global:Config.virtualMachines | Where-Object {
+                        ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+                    })
+                if ($idx -ge 0 -and $idx -lt $tls.Count) {
+                    $tls[$idx].cmOptions.UsePKI = -not $tls[$idx].cmOptions.UsePKI
+                    if ($tls[$idx].cmOptions.UsePKI) {
+                        Enable-PKIInfrastructureForCM
                     }
                 }
             }
@@ -284,6 +325,7 @@ function Get-PKIHelp {
     switch (($text -split "=")[0].Trim()) {
         "EnablePKI" { "Deploy Certificate Authority infrastructure. Works with or without ConfigMgr. Installs an Enterprise CA on the selected VM." }
         "UsePKI for ConfigMgr" { "Use HTTPS for all ConfigMgr roles (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
+        { $_ -like 'UsePKI on *' } { "Use HTTPS for all ConfigMgr roles on this site server (DP/MP/SUP/RP). Automatically enables PKI infrastructure if not already enabled." }
         "IssuingCA" { "The VM that will host the Issuing (Enterprise) CA. Defaults to the domain controller." }
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA issues a certificate for an Enterprise Subordinate CA. The Root CA VM is powered off after setup." }
         "OfflineRootCA" { "The standalone workgroup VM that will host the Offline Root CA. Auto-created if not specified." }
