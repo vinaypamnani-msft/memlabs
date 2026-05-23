@@ -1157,8 +1157,9 @@ function Get-Phase8ConfigurationData {
     if ($NumberOfNodesAdded -eq 0) {
         $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
         # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
+        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
         $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
-                $_.role -eq "DomainMember" -and -not $_.hidden -and -not $_.SqlVersion -and ($_.pushClient -ne $false)
+                $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
             })
         if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
             $hiddenPrimary = $deployConfig.virtualMachines | Where-Object {

@@ -615,12 +615,20 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
     }
 
-    # Add pushClient property for DomainMember non-SQL VMs.
-    # Default from domainDefaults.PushCMClientToClients (client OS) or
-    # PushCMClientToServers (server OS). Each is independently togglable.
-    if ($role -eq 'DomainMember' -and -not $virtualMachine.sqlVersion) {
-        $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
-        $defaultKey = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+    # Add pushClient property for DomainMember and site system VMs.
+    # Default from domainDefaults:
+    #   client OS DomainMember        -> PushCMClientToClients
+    #   server OS DomainMember (+SQL) -> PushCMClientToServers
+    #   site system roles             -> PushCMClientToSiteSystems
+    $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    if ($role -eq 'DomainMember' -or $role -in $siteSystemRoles) {
+        if ($role -in $siteSystemRoles) {
+            $defaultKey = 'PushCMClientToSiteSystems'
+        }
+        else {
+            $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+            $defaultKey = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+        }
         $defaultVal = $true
         if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$defaultKey)) {
             $defaultVal = [bool]$ConfigToModify.domainDefaults.$defaultKey

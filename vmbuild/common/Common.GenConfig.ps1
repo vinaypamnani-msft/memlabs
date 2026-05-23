@@ -1020,10 +1020,12 @@ function ConvertTo-DeployConfigEx {
                 # --- ClientPush
                 $thisVMNetwork = $thisVMObject.Network
 
-                # Only push to DomainMember non-SQL VMs that have pushClient enabled (per-VM opt-in/out).
-                # Treat null/absent as $true for back-compat with configs that haven't been re-saved.
+                # Push to any DomainMember (incl. SQL) or site system VM that has pushClient enabled
+                # (per-VM opt-in/out). Treat null/absent as $true for back-compat with configs
+                # that haven't been re-saved.
+                $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
                 $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object {
-                    $_.role -eq "DomainMember" -and -not ($_.SqlVersion) -and ($_.pushClient -ne $false)
+                    $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
                 }
                 $clientPush = @()
                 $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork }).vmName

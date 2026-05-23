@@ -318,18 +318,24 @@ function Get-UserConfiguration {
                 }
             }
 
-            # pushClient property: auto-add for DomainMember non-SQL VMs.
+            # pushClient property: auto-add for DomainMember and site system VMs.
             # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
-            # > domainDefaults.PushCMClientToClients/PushCMClientToServers > $true.
-            if ($vm.role -eq 'DomainMember' -and -not $vm.sqlVersion -and ($null -eq $vm.pushClient)) {
-                $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+            # > domainDefaults.PushCMClientToClients/Servers/SiteSystems > $true.
+            $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+            if (($vm.role -eq 'DomainMember' -or $vm.role -in $siteSystemRoles) -and ($null -eq $vm.pushClient)) {
                 $pushDefault = $true
                 if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
-                    # Legacy single-value migration: apply to all non-SQL DomainMembers
+                    # Legacy single-value migration: apply to all eligible VMs
                     $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
                 }
                 elseif ($config.domainDefaults) {
-                    $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+                    if ($vm.role -in $siteSystemRoles) {
+                        $key = 'PushCMClientToSiteSystems'
+                    }
+                    else {
+                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                        $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+                    }
                     if ($null -ne $config.domainDefaults.$key) {
                         $pushDefault = [bool]$config.domainDefaults.$key
                     }

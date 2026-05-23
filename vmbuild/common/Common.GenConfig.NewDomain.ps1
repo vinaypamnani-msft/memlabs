@@ -536,6 +536,7 @@ function Get-NewDomainConfigHelp {
         "EnableSUPOnSiteServers" { "Enabling this will automatically install the SUP role on CAS/Primary site servers, sharing SQL with the site server" }
         "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
         "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
+        "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -567,6 +568,7 @@ function Select-NewDomainConfig {
         EnableSUPOnSiteServers      = $false
         PushCMClientToClients       = $true
         PushCMClientToServers       = $false
+        PushCMClientToSiteSystems   = $false
     }
 
     # Load saved defaults from previous run if available

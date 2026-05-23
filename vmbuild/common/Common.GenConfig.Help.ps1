@@ -28,6 +28,7 @@ function Get-GenericHelp {
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
         "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
         "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
+        "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
 
         # Global VM
@@ -60,7 +61,7 @@ function Get-GenericHelp {
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
         "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
-        "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients/PushCMClientToServers based on OS." }
+        "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients (client OS), PushCMClientToServers (server OS DomainMembers), or PushCMClientToSiteSystems (site system roles)." }
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
