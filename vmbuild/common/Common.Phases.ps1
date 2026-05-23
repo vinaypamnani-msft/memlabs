@@ -141,6 +141,11 @@ function Start-NormalJobs {
     if (-not $phase) {
         $phase = "NormalJob"
     }
+    # Define $deployConfigCopy in local scope so $using:deployConfigCopy in
+    # script blocks (e.g. Phase10Job) binds successfully even when this caller
+    # (e.g. Start-Maintenance) has no deployConfig. The script blocks guard
+    # against null before using it.
+    $deployConfigCopy = $null
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {
