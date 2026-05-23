@@ -635,9 +635,14 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    # Reserve extra rows so post-menu content (blank line, PgDn indicator, prompt)
-    # never writes past the last viewport row and triggers a scroll.
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 4)
+    # Reserve extra rows so post-menu content never writes past the last viewport
+    # row and triggers a scroll. The 4 rows cover:
+    #   1) blank line after the last menu item (Write-Host "" before indicator)
+    #   2) the PgUp/PgDn indicator line ("Press [PgDn] to see more...")
+    #   3) the prompt row ("Press Enter to select...")
+    #   4) one row of breathing room for the cursor / wrapped prompt
+    $BottomReserve = 4
+    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - $BottomReserve)
     $CurrentPosition = $Host.UI.RawUI.CursorPosition
     # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
     # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
