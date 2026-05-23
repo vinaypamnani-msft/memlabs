@@ -297,7 +297,9 @@ function Start-VMFixes {
         return $true
     }
 
-    $copyResults = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+    # Copy DSC content into the VM so fix bodies and helper scripts are available.
+    # Output is intentionally discarded; failures surface inside Copy-ItemSafe.
+    $null = Copy-ItemSafe -VmName $vmName -VMDomainName $vmDomain -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
 
     # Determine if we can use the batched fast-path (no fixes have DependentVMs)
     $sortedFixes = $VMFixes | Sort-Object FixVersion
@@ -1061,38 +1063,38 @@ function Get-VMFixes {
 
     #region Fix-Prereq
     $Fix_Prereq = {
-        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
         if (-not $SiteCode) {
-            Write-host "No sitecode in HKLM:\SOFTWARE\Microsoft\SMS\Identification"
-            return $true
+            return [pscustomobject]@{ Success = $true; Message = 'No SiteCode in HKLM:\...\SMS\Identification - skipping' }
         }
-        $version = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS' -Name 'Full Version'
+        $version = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS' -Name 'Full Version' -ErrorAction SilentlyContinue
         if (-not $version) {
-            Write-host "No Version found in HKLM:\SOFTWARE\Microsoft\SMS\Full Version"
-            return $false
+            return [pscustomobject]@{ Success = $false; Message = 'No Full Version found in HKLM:\...\SMS' }
+        }
+        if ([System.Version]$version -lt [System.Version]'5.0.9128') {
+            return [pscustomobject]@{ Success = $true; Message = "Version $version is 2309 or older - EHTTP not forced" }
         }
 
-        if ([System.Version]$version -lt [System.Version]"5.0.9128") {
-            Write-Host "2309 or older.. Should not force EHTTP"
-            return $true
-        }
-        
         $NameSpace = "ROOT\SMS\site_$SiteCode"
+        $component = Get-CimInstance -Namespace $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'" -ErrorAction SilentlyContinue
+        if (-not $component) {
+            return [pscustomobject]@{ Success = $false; Message = "Could not query SMS_SCI_Component in $NameSpace" }
+        }
+        # Get-CimInstance returns lazy props; use WMI for SMS_SCI_Component.Put() compatibility
         $component = gwmi -ns $NameSpace -Query "SELECT * FROM SMS_SCI_Component WHERE FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND ItemType='Component' AND SiteCode='$SiteCode'"
         $props = $component.Props
         $index = [Array]::IndexOf($props.PropertyName, 'IISSSLState')
-        $value = $props[$index].Value    
+        $value = $props[$index].Value
         $enabled = ($value -band 1024) -eq 1024 -or ($value -eq 63) -or ($value -eq 1472) -or ($value -eq 1504)
         if (-not $enabled) {
-            Write-Host  "IISSSLSTATE $value is not correct.. Updated for EHTTP"
+            Write-FixLog "IISSSLState $value is not correct - updating for EHTTP" -Level Warning
             $props[$index].Value = 1024
             $component.Props = $props
-            $component.Put()
-            return $true
+            $component.Put() | Out-Null
+            [pscustomobject]@{ Success = $true; Message = "IISSSLState updated from $value to 1024 (EHTTP forced)" }
         }
         else {
-            write-host "IISSSLSTATE of $value looks good.. You should not be failing at prereq check"
-            return $true
+            [pscustomobject]@{ Success = $true; Message = "IISSSLState $value is already correct" }
         }
     }
 
@@ -1111,8 +1113,17 @@ function Get-VMFixes {
 
     #region Fix-Upgrade-Console
     $Fix_UpgradeConsole = {
-        & C:\staging\DSC\phases\Upgrade-Console.ps1
-        return $true
+        $script = 'C:\staging\DSC\phases\Upgrade-Console.ps1'
+        if (-not (Test-Path $script)) {
+            return [pscustomobject]@{ Success = $false; Message = "Upgrade-Console.ps1 not found at $script" }
+        }
+        try {
+            & $script
+            [pscustomobject]@{ Success = $true; Message = 'Upgrade-Console.ps1 completed' }
+        }
+        catch {
+            [pscustomobject]@{ Success = $false; Message = 'Upgrade-Console.ps1 threw'; Errors = @("$($_.Exception.Message)") }
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
@@ -1130,12 +1141,16 @@ function Get-VMFixes {
 
     #region Fix-LocalAccount
     $Fix_LocalAccount = {
-        Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true -ErrorAction SilentlyContinue -ErrorVariable AccountError
+        Set-LocalUser -Name 'vmbuildadmin' -PasswordNeverExpires $true -ErrorAction SilentlyContinue -ErrorVariable AccountError
         if ($AccountError.Count -eq 0) {
-            return $true
+            [pscustomobject]@{ Success = $true; Message = "vmbuildadmin PasswordNeverExpires set" }
         }
         else {
-            return $false
+            [pscustomobject]@{
+                Success = $false
+                Message = 'Set-LocalUser failed for vmbuildadmin'
+                Errors  = @($AccountError | ForEach-Object { $_.ToString() })
+            }
         }
     }
 
@@ -1154,13 +1169,29 @@ function Get-VMFixes {
 
     #region Fix-DefaultUserProfile
     $Fix_DefaultProfile = {
-        $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
-        $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
-        $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
-        if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse -ProgressAction SilentlyContinue | Out-Null }
-        if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse -ProgressAction SilentlyContinue | Out-Null }
-        if (Test-Path $path3) { Remove-Item -Path $path3 -Force -ProgressAction SilentlyContinue | Out-Null }
-        return $true
+        $paths = @(
+            'C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache',
+            'C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache',
+            'C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat'
+        )
+        $removed = 0
+        $errs = @()
+        foreach ($p in $paths) {
+            if (Test-Path $p) {
+                try {
+                    Remove-Item -Path $p -Force -Recurse -ProgressAction SilentlyContinue -ErrorAction Stop | Out-Null
+                    $removed++
+                }
+                catch {
+                    $errs += "Failed to remove ${p}: $($_.Exception.Message)"
+                }
+            }
+        }
+        [pscustomobject]@{
+            Success = ($errs.Count -eq 0)
+            Message = "Removed $removed default-profile cache item(s)"
+            Errors  = $errs
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
@@ -1269,47 +1300,34 @@ function Get-VMFixes {
     #region Fix-DisableIEESC
     # Disable IE Enhanced Security for all users via Scheduled task
     $Fix_DisableIEESC = {
-
         $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-        if ($os) {
-            if ($os.Producttype -eq 1) {
-                return $true # workstation OS, fix not applicable
-            }
+        if (-not $os) {
+            return [pscustomobject]@{ Success = $false; Message = 'Could not query Win32_OperatingSystem' }
         }
-        else {
-            return $false # failed to determine OS type, fail
+        if ($os.ProductType -eq 1) {
+            return [pscustomobject]@{ Success = $true; Message = 'Workstation OS - fix not applicable' }
         }
 
-        $taskName = "Disable-IEESC"
+        $taskName = 'Disable-IEESC'
         $filePath = "$env:systemdrive\staging\Disable-IEESC.ps1"
 
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($task) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
         }
 
-        # Action
-        $taskCommand = "cmd"
+        $taskCommand = 'cmd'
         $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-
-        # Trigger
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-
-        # Principal
+        $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+        $trigger   = New-ScheduledTaskTrigger -AtLogOn
         $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
-
-        # Task
-        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Disable IE Enhanced Security"
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Disable IE Enhanced Security'
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-        if ($null -ne $task) {
-            return $true
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            [pscustomobject]@{ Success = $true; Message = "Scheduled task '$taskName' registered" }
         }
         else {
-            return $false
+            [pscustomobject]@{ Success = $false; Message = "Scheduled task '$taskName' not present after Register-ScheduledTask" }
         }
     }
 
@@ -1331,47 +1349,34 @@ function Get-VMFixes {
     #region Fix-CleanupSQL
 
     $Fix_CleanupSQL = {
-
         $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-        if ($os) {
-            if ($os.Producttype -eq 1) {
-                return $true # workstation OS, fix not applicable
-            }
+        if (-not $os) {
+            return [pscustomobject]@{ Success = $false; Message = 'Could not query Win32_OperatingSystem' }
         }
-        else {
-            return $false # failed to determine OS type, fail
+        if ($os.ProductType -eq 1) {
+            return [pscustomobject]@{ Success = $true; Message = 'Workstation OS - fix not applicable' }
         }
 
-        $taskName = "MemLabs Cleanup SQL"
+        $taskName = 'MemLabs Cleanup SQL'
         $filePath = "$env:systemdrive\staging\Cleanup-SQL.ps1"
 
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($task) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
         }
 
-        # Action
-        $taskCommand = "cmd"
+        $taskCommand = 'cmd'
         $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-
-        # Trigger
-        $trigger = New-ScheduledTaskTrigger -Daily -At 3am
-
-        # Principal
-        $principal = New-ScheduledTaskPrincipal -UserId "System"
-
-        # Task
-        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Cleanup SQL"
+        $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+        $trigger   = New-ScheduledTaskTrigger -Daily -At 3am
+        $principal = New-ScheduledTaskPrincipal -UserId 'System'
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Cleanup SQL'
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-        if ($null -ne $task) {
-            return $true
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            [pscustomobject]@{ Success = $true; Message = "Scheduled task '$taskName' registered" }
         }
         else {
-            return $false
+            [pscustomobject]@{ Success = $false; Message = "Scheduled task '$taskName' not present after Register-ScheduledTask" }
         }
     }
 
@@ -1393,37 +1398,26 @@ function Get-VMFixes {
     #region Fix-EnableLogMachine
 
     $Fix_EnableLogMachine = {
-
-        $taskName = "EnableLogMachine"
+        $taskName = 'EnableLogMachine'
         $filePath = "$env:systemdrive\staging\Enable-LogMachine.ps1"
 
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($task) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
         }
 
-        # Action
-        $taskCommand = "cmd"
+        $taskCommand = 'cmd'
         $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-
-        # Trigger
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-
-        # Principal
+        $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+        $trigger   = New-ScheduledTaskTrigger -AtLogOn
         $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
-
-        # Task
-        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Enable Log Machine"
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Enable Log Machine'
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-        if ($null -ne $task) {
-            return $true
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            [pscustomobject]@{ Success = $true; Message = "Scheduled task '$taskName' registered" }
         }
         else {
-            return $false
+            [pscustomobject]@{ Success = $false; Message = "Scheduled task '$taskName' not present after Register-ScheduledTask" }
         }
     }
     $fixesToPerform += [PSCustomObject]@{
@@ -1445,12 +1439,16 @@ function Get-VMFixes {
     #region Fix-AccountExpiry
 
     $Fix_AccountExpiry = {
-
-        $RegistryPath = 'HKLM:\\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
-        $Name = 'DisablePasswordChange'
-        $Value = '1'
-        New-ItemProperty -Path $RegistryPath -Name $Name -Value $Value -PropertyType DWORD -Force | Out-Null
-        return $true
+        $RegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+        $Name  = 'DisablePasswordChange'
+        $Value = 1
+        try {
+            New-ItemProperty -Path $RegistryPath -Name $Name -Value $Value -PropertyType DWORD -Force -ErrorAction Stop | Out-Null
+            [pscustomobject]@{ Success = $true; Message = "Set $Name=$Value at $RegistryPath" }
+        }
+        catch {
+            [pscustomobject]@{ Success = $false; Message = "Failed to write $Name"; Errors = @($_.Exception.Message) }
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
@@ -1468,11 +1466,15 @@ function Get-VMFixes {
 
     #region Fix_LocalAdminAccount
     $Fix_LocalAdminAccount = {
-        param ($password)
-        $p = ConvertTo-SecureString $password -AsPlainText -Force
-        Set-LocalUser -Password $p "Administrator"
-        Enable-LocalUser "Administrator"
-        return $true
+        param ([SecureString]$password)
+        try {
+            Set-LocalUser -Name 'Administrator' -Password $password -ErrorAction Stop
+            Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
+            [pscustomobject]@{ Success = $true; Message = 'Local Administrator password reset and account enabled' }
+        }
+        catch {
+            [pscustomobject]@{ Success = $false; Message = 'Failed to reset local Administrator'; Errors = @($_.Exception.Message) }
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
@@ -1484,33 +1486,41 @@ function Get-VMFixes {
         NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
         DependentVMs      = @()
         ScriptBlock       = $Fix_LocalAdminAccount
-        ArgumentList      = @($Common.LocalAdmin.GetNetworkCredential().Password)
+        ArgumentList      = @($Common.LocalAdmin.Password)
     }
     #endregion
 
     #region Fix_ActivateWindows
     $Fix_ActivateWindows = {
+        $atkms = 'azkms.core.windows.net:1688'
+        $winp  = 'W269N-WFGWX-YVC9B-4J6C9-T83GX'
+        $wine  = 'NPPR9-FWDCX-D2C8J-H872K-2YT43'
+        $cosname = (Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue).Name
+        if (-not $cosname) {
+            return [pscustomobject]@{ Success = $false; Message = 'Could not query Win32_OperatingSystem.Name' }
+        }
 
-        $atkms = "azkms.core.windows.net:1688"
-        $winp = "W269N-WFGWX-YVC9B-4J6C9-T83GX"
-        $wine = "NPPR9-FWDCX-D2C8J-H872K-2YT43"
-        $cosname = (Get-CimInstance -Class Win32_OperatingSystem).Name
-        
-        if ($cosname -like "*Pro*") {
-            $key = $winp
+        $key = $null
+        if ($cosname -like '*Pro*')        { $key = $winp }
+        elseif ($cosname -like '*Enterprise*') { $key = $wine }
+
+        if (-not $key) {
+            return [pscustomobject]@{ Success = $true; Message = "OS '$cosname' is not Pro/Enterprise - activation skipped" }
         }
-        if ($cosname -like "*Enterprise*") {
-            $key = $wine
+
+        Write-FixLog "Setting KMS host and installing product key"
+        cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms > $null
+        Start-Sleep -Seconds 2
+        cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key > $null
+        Start-Sleep -Seconds 2
+        cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato > $null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            [pscustomobject]@{ Success = $true; Message = "Activation submitted against $atkms" }
         }
-        
-        if ($key) {
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms > $null    
-            Start-Sleep -Seconds 5        
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key > $null
-            Start-Sleep -Seconds 5
-            cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato > $null
+        else {
+            [pscustomobject]@{ Success = $false; Message = "slmgr /ato exited with $exitCode" }
         }
-        return $true
     }
         
     $fixesToPerform += [PSCustomObject]@{
@@ -1578,47 +1588,55 @@ function Get-VMFixes {
     #region Fix-ConfigureSSMS
 
     $Fix_ConfigureSSMS = {
-
-        $taskName = "ConfigureSSMS"
+        $taskName = 'ConfigureSSMS'
         $filePath = "$env:systemdrive\staging\Configure-SSMS.ps1"
 
-        # Only apply if SSMS is installed
-        $ssmsInstalled = (Test-Path "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe") -or
-                         (Test-Path "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe") -or
-                         (Test-Path "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe")
-        if (-not $ssmsInstalled) { return $true }
+        # Only apply if SSMS is installed (any 18..21 layout)
+        $ssmsRoots = 18..21 | ForEach-Object { "C:\Program Files (x86)\Microsoft SQL Server Management Studio $_\Common7\IDE\ssms.exe" }
+        $ssmsInstalled = $ssmsRoots | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $ssmsInstalled) {
+            return [pscustomobject]@{ Success = $true; Message = 'SSMS not installed - skipping' }
+        }
+
+        $errs = @()
 
         # Run the script immediately (Phase 10 runs as admin, so %APPDATA% is correct)
         if (Test-Path $filePath) {
             try {
                 & $filePath
+                Write-FixLog "Ran Configure-SSMS.ps1 against $ssmsInstalled"
             }
             catch {
-                Write-Host "Configure-SSMS.ps1 threw an error: $_"
+                $errs += "Configure-SSMS.ps1 threw: $($_.Exception.Message)"
+                Write-FixLog $errs[-1] -Level Failure
             }
+        }
+        else {
+            $errs += "Configure-SSMS.ps1 not found at $filePath"
         }
 
         # Register logon task so future logons pick up newly added SQL servers
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($task) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false | Out-Null
         }
 
-        $taskCommand = "cmd"
+        $taskCommand = 'cmd'
         $taskArgs = "/c start /min C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -WindowStyle Hidden -NonInteractive -Executionpolicy unrestricted -file $filePath"
-        $action = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $action    = New-ScheduledTaskAction -Execute $taskCommand -Argument $taskArgs
+        $trigger   = New-ScheduledTaskTrigger -AtLogOn
         $principal = New-ScheduledTaskPrincipal -GroupId Users -RunLevel Highest
-        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description "Configure SSMS Registered Servers"
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Trigger $trigger -Description 'Configure SSMS Registered Servers'
 
         Register-ScheduledTask -TaskName $taskName -InputObject $definition | Out-Null
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-        if ($null -ne $task) {
-            return $true
+        $taskOk = [bool](Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)
+        if (-not $taskOk) {
+            $errs += "Scheduled task '$taskName' not present after Register-ScheduledTask"
         }
-        else {
-            return $false
+
+        [pscustomobject]@{
+            Success = ($errs.Count -eq 0)
+            Message = if ($taskOk) { "Configure-SSMS scheduled task registered" } else { "Configure-SSMS task registration failed" }
+            Errors  = $errs
         }
     }
 
