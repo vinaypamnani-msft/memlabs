@@ -648,6 +648,100 @@ function Get-RoomLeftFromCurrentPosition {
     return $RoomLeft
 }
 
+# Layout constants used by Show-Menu's line-counting math. Centralized so the
+# same number isn't sprinkled across the file in a half-dozen places.
+$script:MenuLayout = @{
+    HelpBannerLines = 5    # Update-HelpText placeholder rendered above the menu
+    PromptLines     = 2    # Trailing blank + prompt row
+    TextWidthSlack  = 9    # Columns reserved for arrow/indent in wrap detection
+}
+
+# Classify a non-selectable menu item into a shrink tier so the same rule is
+# used by both the line-count scan and the render loop. Returns one of
+# 'Summary' | 'Header' | 'Blank' | 'Help', or $null when the item is selectable.
+function Get-MenuItemTier {
+    param([Parameter(Mandatory)] $MenuItem)
+    if ($MenuItem.Selectable) { return $null }
+    $name = [string]$MenuItem.itemName
+    if ($name -eq '*HELP')        { return 'Help' }
+    if ($name.StartsWith('*F'))   { return 'Summary' }
+    if ($name.StartsWith('*V'))   { return 'Blank' }   # decorative ruler
+    if ($name.StartsWith('*B') -and -not [string]::IsNullOrWhiteSpace($MenuItem.Text)) {
+        return 'Header'
+    }
+    return 'Blank'   # *B/*D spacer with empty text, or anything else non-selectable
+}
+
+# Walk the menu once and gather every number Show-Menu needs to lay it out:
+# total line cost, longest breakline width, whether help is present/needed,
+# and the per-tier line cost used by the progressive shrink decision.
+function Get-MenuMetrics {
+    param(
+        [Parameter(Mandatory)][System.Collections.IEnumerable]$MenuItems,
+        [Parameter(Mandatory)][int]$WindowWidth
+    )
+    $tiers = @{ Summary = 0; Header = 0; Blank = 0; Help = 0 }
+    $wrapAt = $WindowWidth - $script:MenuLayout.TextWidthSlack
+    $totalLineCount = 0
+    $longestBreak = 0
+    $helpFound = $false
+    $helpNeeded = $false
+
+    foreach ($mi in $MenuItems) {
+        $totalLineCount += $mi.LineCount
+        $len = $mi.Text.Length
+        if ($len -gt $wrapAt) { $totalLineCount += 1 }
+        $name = [string]$mi.itemName
+        if ($name.StartsWith('*B') -and $len -gt $longestBreak) {
+            $longestBreak = $len
+        }
+        if ($name -eq '*HELP') { $helpFound = $true }
+        if (-not [string]::IsNullOrWhiteSpace($mi.HelpText)) { $helpNeeded = $true }
+        $tier = Get-MenuItemTier -MenuItem $mi
+        if ($tier) { $tiers[$tier] += $mi.LineCount }
+    }
+    if ($helpNeeded) { $totalLineCount += $script:MenuLayout.HelpBannerLines }
+    $totalLineCount += $script:MenuLayout.PromptLines
+
+    return [pscustomobject]@{
+        TotalLineCount   = $totalLineCount
+        LongestBreakLine = $longestBreak
+        HelpFound        = $helpFound
+        HelpNeeded       = $helpNeeded
+        Tiers            = $tiers
+    }
+}
+
+# Decide which tiers of non-selectable content to drop so the menu fits the
+# viewport. Tiers are dropped in priority order (Summary -> Header -> Blank ->
+# Help) until the running deficit reaches zero. If all four tiers still aren't
+# enough, the Max flag triggers legacy "hide everything non-selectable" mode.
+# Returns a hashtable keyed by tier name + 'Max'.
+function Resolve-ShrinkPlan {
+    param(
+        [Parameter(Mandatory)][hashtable]$Tiers,
+        [Parameter(Mandatory)][int]$HelpBannerCost,
+        [Parameter(Mandatory)][int]$TotalLineCount,
+        [Parameter(Mandatory)][int]$RoomLeft
+    )
+    $plan = @{ Summary = $false; Header = $false; Blank = $false; Help = $false; Max = $false }
+    $deficit = $TotalLineCount - $RoomLeft
+    $tierOrder = @(
+        @{ Name = 'Summary'; Cost = $Tiers.Summary }
+        @{ Name = 'Header';  Cost = $Tiers.Header }
+        @{ Name = 'Blank';   Cost = $Tiers.Blank }
+        @{ Name = 'Help';    Cost = $Tiers.Help + $HelpBannerCost }
+    )
+    foreach ($t in $tierOrder) {
+        if ($deficit -le 0) { break }
+        if ($t.Cost -le 0)  { continue }
+        $plan[$t.Name] = $true
+        $deficit -= $t.Cost
+    }
+    $plan.Max = $plan.Summary -and $plan.Header -and $plan.Blank -and $plan.Help -and ($deficit -gt 0)
+    return $plan
+}
+
 # Read the array of menu items and the selected index and display the menu
 function Show-Menu {
     [CmdletBinding()]
@@ -666,52 +760,30 @@ function Show-Menu {
     $Operation = ""
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
     While ($true) {
-        $found = $false
-        $HelpFound = $false
-        $HelpNeeded = $false
-        $TotalLineCount = 0
-        foreach ($menuitem in $menuItems) {
-            $TotalLineCount += $menuitem.LineCount
-            #Write-Host "Adding LineCount for $($menuitem.itemName) $($menuitem.Text) $($menuitem.LineCount)"
-            if ($operation -eq "PGUP") {
-                $menuitem.Displayed = $false
+        # PGUP/PGDN bookkeeping: reset Displayed flags so the upcoming render
+        # walk knows where the new page starts. Done before measurement because
+        # nothing about line counts depends on these flags.
+        if ($operation -eq "PGUP") {
+            foreach ($mi in $menuItems) { $mi.Displayed = $false }
+        }
+        elseif ($operation -eq "PGDN") {
+            $pgDnHasMore = $false
+            foreach ($mi in $menuItems) {
+                if (-not $mi.Displayed -and $mi.Selectable) { $pgDnHasMore = $true; break }
             }
-
-            if ($operation -eq "PGDN") {
-                if ($menuitem.Displayed -eq $false -and $menuitem.Selectable) {
-                    $found = $true
-                }
-            }
-            $len = $menuitem.Text.Length
-            if ($len -gt $host.UI.RawUI.WindowSize.Width - 9) {
-                #$menuitem.Text = $menuitem.Text.SubString(0, $host.UI.RawUI.WindowSize.Width - 9)
-                $TotalLineCount += 1
-            }
-            if ($menuitem.itemName.StartsWith("*B")) {                
-                if ($len -gt $LongestBreakLine) {
-                    $LongestBreakLine = $len
-                }
-            }
-            if ($menuitem.itemname -eq "*HELP") {
-                $HelpFound = $true
-            }
-            if (-not [string]::IsNullOrWhiteSpace($menuitem.HelpText)) {
-                $HelpNeeded = $true
+            if (-not $pgDnHasMore) {
+                foreach ($mi in $menuItems) { $mi.Displayed = $false }
+                $operation = ""
             }
         }
-        if ($operation -eq "PGDN" -and -not $found) {
-            foreach ($menuitem in $menuItems) {
-                $menuitem.Displayed = $false
-            }
-            $operation = ""
-        }
 
-        if ($HelpNeeded) {
-            $TotalLineCount += 5
-        }
+        # Single pass over the menu collects every layout number we need.
+        $metrics          = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $host.UI.RawUI.WindowSize.Width
+        $TotalLineCount   = $metrics.TotalLineCount
+        $LongestBreakLine = $metrics.LongestBreakLine
+        $HelpFound        = $metrics.HelpFound
+        $HelpNeeded       = $metrics.HelpNeeded
 
-        $TotalLineCount += 2 #For Prompt
-       
         #$WindowSizeY = $host.UI.RawUI.WindowSize.Height - 1 # Get the height of the console window, subtract 1 since its 0 based
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
@@ -729,39 +801,20 @@ function Show-Menu {
         Write-Host
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
-        if ($HelpNeeded) {
-            $RoomLeft = $RoomLeft - 5
-        }
-
         if ($RoomLeft -lt $TotalLineCount) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
+            $RoomLeft = Get-RoomLeftFromCurrentPosition
         }
-        if (-not $HelpFound -and $HelpNeeded) {
+
+        # Decide which tiers of non-selectable content to drop so the menu fits.
+        # Tiers (dropped first to last): Summary -> Header -> Blank -> Help.
+        $helpBannerCost = if ($HelpNeeded) { $script:MenuLayout.HelpBannerLines } else { 0 }
+        $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
+        $Maxshrink = $shrink.Max
+
+        if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
-        }
-
-        # Help area is now either rendered above (placeholder) or will render
-        # via the *HELP item (whose LineCount covers it). Remove the global +5
-        # that was added for the early NoClear/clear decisions.
-        if ($HelpNeeded) {
-            $TotalLineCount -= 5
-        }
-
-        $RoomLeft = Get-RoomLeftFromCurrentPosition
-        if ($RoomLeft -lt $TotalLineCount) {        
-            $shrink = $true    
-            $roomsaved = 0
-            foreach ($menuItem in $menuItems) {
-                if (-not $menuItem.Selectable) {
-                    if (-not [string]::IsNullOrWhiteSpace($menuItem.Text)) {
-                        $roomsaved = $roomsaved + 1
-                    }                
-                }
-            }
-        }
-        if ($RoomLeft -lt ($menuItems.Count - $roomsaved)) {
-            $Maxshrink = $true
         }
         $PgUpAvailable = ($operation -eq "PGDN")
         $CurrentPosition = Get-CursorPosition
@@ -792,6 +845,9 @@ function Show-Menu {
             Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
             if ($menuItem.Function) {
+                if ($shrink.Summary -and (Get-MenuItemTier -MenuItem $menuItem) -eq 'Summary') {
+                    continue
+                }
                 $menuItem.Displayed = $true
                 Invoke-Expression -Command $menuItem.Function
                 
@@ -824,7 +880,8 @@ function Show-Menu {
                 if ($Maxshrink) {
                     continue
                 }
-                if ($shrink -and [string]::IsNullOrWhiteSpace($menuItem.Text)) {
+                $tier = Get-MenuItemTier -MenuItem $menuItem
+                if ($tier -and $shrink[$tier]) {
                     continue
                 }
 
