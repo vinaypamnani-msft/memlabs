@@ -1017,10 +1017,15 @@ function Get-VMFixes {
                 $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
 
                 if (-not $exists) {
+                    Write-Host "[Fix-CMFullAdmin] Attempt $i`: Adding $domainUserName as Full Administrator"
                     New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                        -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+                        -SecurityScopeName "All", "All Systems", "All Users and User Groups" `
+                        -ErrorAction Continue -ErrorVariable NewErr 2>&1 | Out-String | Write-Host
+                    if ($NewErr) { Write-Host "[Fix-CMFullAdmin] New-CMAdministrativeUser errors: $($NewErr -join '; ')" }
                     Start-Sleep -Seconds 15
-                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
+                    # Use -like (same as initial check) so casing/domain-form differences
+                    # in LogonName don't cause a spurious failure when the user was created.
+                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
                 }
             }
             until ($exists -or $i -gt 5)
@@ -1031,71 +1036,9 @@ function Get-VMFixes {
             else { return $false }
         }
         catch {
-            Stop-Transcript | out-null
+            try { Stop-Transcript | out-null } catch {}
             return $false
         }
-
-        if ([string]::IsNullOrWhiteSpace($SiteCode)) {
-            # Deployment was done with cmOptions.Install=False, or site was uninstalled
-            return $true
-        }
-
-        $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-        # Get CM module path
-        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-        if (-not $subKey) {
-            return $true
-        }
-        $uiInstallPath = $subKey.GetValue("UI Installation Directory")
-        $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-        $initParams = @{}
-
-        $userName = "vmbuildadmin"
-        $userDomain = $env:USERDOMAIN
-        $domainUserName = "$userDomain\$userName"
-
-        $i = 0
-        do {
-            $i++
-
-            # Import the ConfigurationManager.psd1 module
-            if ($null -eq (Get-Module ConfigurationManager)) {
-                Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
-            }
-
-            # Connect to the site's drive if it is not already present
-            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-
-            $c = 0
-            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                $c++
-                if ($c -gt 5) {
-                    return $false
-                }
-                Start-Sleep -Seconds 10
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-            }
-
-            # Set the current location to be the site code.
-            Set-Location "$($SiteCode):\" @initParams | out-null
-
-            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
-
-            if (-not $exists) {
-                New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                    -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
-                Start-Sleep -Seconds 15
-                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName } -ErrorAction SilentlyContinue
-            }
-        }
-        until ($exists -or $i -gt 5)
-
-        #Stop-Transcript | out-null
-
-        if ($exists) { return $true }
-        else { return $false }
     }
 
     $fixesToPerform += [PSCustomObject]@{
