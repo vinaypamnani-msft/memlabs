@@ -871,6 +871,8 @@ function Show-Menu {
         $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
 
+        Write-Log -LogOnly "MenuDiag[$menuName]: Total=$TotalLineCount RoomLeft=$RoomLeft WinH=$($host.UI.RawUI.WindowSize.Height) Shrink S=$($shrink.Summary) H=$($shrink.Header) B=$($shrink.Blank) Hp=$($shrink.Help) Max=$Maxshrink Items=$($menuItems.Count) Op=$operation"
+
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
@@ -898,6 +900,7 @@ function Show-Menu {
             if ($RoomLeft -le 2) {
                 $menuItem.Displayed = $false                
                 $Operation = $script:MenuOp.PgDnNeeded
+                Write-Log -LogOnly "MenuDiag[$menuName]: PgDnNeeded fired at item '$($menuItem.itemName)' RoomLeft=$RoomLeft"
                 continue
             }
             $CurrentPosition = Get-CursorPosition
@@ -974,6 +977,7 @@ function Show-Menu {
         if (-not $Maxshrink) {
             Write-Host ""
         }
+        Write-Log -LogOnly "MenuDiag[$menuName]: pre-indicator Op=$Operation PgUpAvail=$PgUpAvailable RoomLeftNow=$(Get-RoomLeftFromCurrentPosition)"
         if ($PgUpAvailable -and $Operation -eq $script:MenuOp.PgDnNeeded) {
             $Operation = ""
             Write-MenuPgIndicator -Operation $script:MenuOp.PgDnNeeded -PgUpAvailable $true
