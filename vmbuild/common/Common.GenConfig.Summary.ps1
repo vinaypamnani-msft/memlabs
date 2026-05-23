@@ -372,6 +372,7 @@ function Get-SortedProperties {
         "OfflineSCP" {}
         "OfflineSUP" {}
         "pushClientToDomainMembers" {}
+        "pushClient" {}
         "PrePopulateObjects" {}
         "EnableBLM" {}
         "cmOptions" {}
