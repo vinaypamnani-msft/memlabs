@@ -634,6 +634,24 @@ function Get-Menu2 {
 }
 
 
+# Read the current console window size directly from kernel32 via
+# [System.Console]::Window{Width,Height}. PowerShell's $Host.UI.RawUI.WindowSize
+# can return a stale cached value across RDP minimize/restore cycles, which
+# breaks the resize-watcher polling in Get-KeyStroke. Returning $null when the
+# window is minimized (either dim 0) signals callers to leave the captured
+# baseline untouched so we don't latch onto a 0x0 ghost size.
+function Get-LiveWindowSize {
+    try {
+        $w = [System.Console]::WindowWidth
+        $h = [System.Console]::WindowHeight
+    }
+    catch {
+        return $null
+    }
+    if ($w -le 0 -or $h -le 0) { return $null }
+    return [pscustomobject]@{ Width = $w; Height = $h }
+}
+
 function Get-RoomLeftFromCurrentPosition {
     # Reserve extra rows so post-menu content never writes past the last viewport
     # row and triggers a scroll. The 4 rows cover:
@@ -1189,7 +1207,9 @@ function Set-PointerDisplayAsPerMenu {
 # Otherwise blocks until a key is pressed (original behavior).
 function Get-KeyStroke {
     param(
-        [System.Management.Automation.Host.Size]$WatchSize
+        # Accepts the {Width;Height} pscustomobject returned by Get-LiveWindowSize.
+        # Untyped so a $null baseline (captured while window was minimized) is OK.
+        $WatchSize
     )
     if (-not $WatchSize) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
@@ -1198,7 +1218,10 @@ function Get-KeyStroke {
         if ($Host.UI.RawUI.KeyAvailable) {
             return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
-        if ($Host.UI.RawUI.WindowSize -ne $WatchSize) {
+        $live = Get-LiveWindowSize
+        # $null means the window is currently minimized; ignore it so we don't
+        # bounce out on a 0x0 transition. Only treat real dim changes as resizes.
+        if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
             return $null
         }
         Start-Sleep -Milliseconds 75
@@ -1393,13 +1416,20 @@ function Start-Navigation {
     # before drawing, so we do NOT default it to $CPosition here -- that would
     # paint the help box on top of menu content.
     [System.Console]::CursorVisible = $false # Hide the cursor
-    $startSize = $Host.UI.RawUI.WindowSize
+    # Capture the live (kernel32-backed) size, retrying briefly if the window is
+    # currently minimized so we don't latch a $null baseline that disables resize
+    # detection for the rest of this Start-Navigation call.
+    $startSize = Get-LiveWindowSize
+    for ($i = 0; $i -lt 10 -and -not $startSize; $i++) {
+        Start-Sleep -Milliseconds 50
+        $startSize = Get-LiveWindowSize
+    }
     # Loop until the user presses the Escape key
     Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
     #Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $menuItems[$selectedIndex].HelpText -Color $menuItems[$selectedIndex].Color1 -wait:$false
     while ($true) {
-        $currentsize = $Host.UI.RawUI.WindowSize
-        if ($currentsize -ne $startSize) {
+        $currentsize = Get-LiveWindowSize
+        if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
             return
         }
 
@@ -1414,8 +1444,8 @@ function Start-Navigation {
         }
         write-log -Verbose -HostOnly "key: $key"
 
-        $currentsize = $Host.UI.RawUI.WindowSize
-        if ($currentsize -ne $startSize) {
+        $currentsize = Get-LiveWindowSize
+        if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
             return
         }
         # Handle the key stroke
