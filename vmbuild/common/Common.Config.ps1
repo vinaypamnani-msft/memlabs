@@ -2888,11 +2888,13 @@ Function Write-OrangePoint {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("WARNING: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Orange "!" -NoNewline
@@ -3172,29 +3174,31 @@ Function Show-Summary {
                 Write-GreenCheck "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $($cmo.version) will be installed"
             }
 
-            # Per-hierarchy CM options.
+            # Per-hierarchy CM options. Sub-items are indented (bracket and text)
+            # so they read as children of the top-level site-server line above.
+            $subIndent = 6
             if ($cmo.PrePopulateObjects) {
-                Write-GreenCheck "  Scripts/apps/task sequences will be pre-populated"
+                Write-GreenCheck -indent $subIndent "Scripts/apps/task sequences will be pre-populated"
             }
             else {
-                Write-OrangePoint "  Scripts/apps/task sequences will NOT be pre-populated"
+                Write-OrangePoint -indent $subIndent "Scripts/apps/task sequences will NOT be pre-populated"
             }
 
             if ($cmo.usePKI) {
-                Write-GreenCheck "  PKI: HTTPS enforced (MP/DP/SUP/RP)"
+                Write-GreenCheck -indent $subIndent "PKI: HTTPS enforced (MP/DP/SUP/RP)"
             }
             else {
-                Write-OrangePoint "  PKI: HTTP/EHTTP will be used for all communication"
+                Write-OrangePoint -indent $subIndent "PKI: HTTP/EHTTP will be used for all communication"
             }
 
             if ($cmo.OfflineSCP) {
-                Write-OrangePoint "  SCP: Will be installed in OFFLINE mode"
+                Write-OrangePoint -indent $subIndent "SCP: Will be installed in OFFLINE mode"
             }
             if ($cmo.OfflineSUP) {
-                Write-OrangePoint "  SUP: Will be installed in OFFLINE mode for the top-level site"
+                Write-OrangePoint -indent $subIndent "SUP: Will be installed in OFFLINE mode for the top-level site"
             }
             if ($cmo.EnableBLM) {
-                Write-GreenCheck "  BitLocker Management enabled"
+                Write-GreenCheck -indent $subIndent "BitLocker Management enabled"
             }
 
             # Hierarchy children: child Primaries (CAS only), their Secondaries,
@@ -3205,7 +3209,7 @@ Function Show-Summary {
                         $_.Role -eq 'Primary' -and $_.parentSiteCode -eq $top.SiteCode
                     })
                 foreach ($p in $childPrimaries) {
-                    Write-GreenCheck "  Primary $($p.VMName) [$($p.SiteCode)] joins this hierarchy ($($p.SiteCode) -> $($top.SiteCode))"
+                    Write-GreenCheck -indent $subIndent "Primary $($p.VMName) [$($p.SiteCode)] joins this hierarchy ($($p.SiteCode) -> $($top.SiteCode))"
                 }
             }
 
@@ -3217,7 +3221,7 @@ Function Show-Summary {
                     $_.Role -eq 'Secondary' -and $_.parentSiteCode -in $hierarchyPrimaryCodes
                 })
             foreach ($s in $secondaries) {
-                Write-GreenCheck "  Secondary $($s.VMName) [$($s.SiteCode)] -> $($s.parentSiteCode)"
+                Write-GreenCheck -indent $subIndent "Secondary $($s.VMName) [$($s.SiteCode)] -> $($s.parentSiteCode)"
             }
 
             # Passive site servers for any Primary (or CAS) in this hierarchy.
@@ -3227,11 +3231,11 @@ Function Show-Summary {
                 })
             if ($passives) {
                 foreach ($pv in $passives) {
-                    Write-GreenCheck "  (High Availability) Passive site server $($pv.VMName) for SiteCode $($pv.SiteCode -join ',')"
+                    Write-GreenCheck -indent $subIndent "(High Availability) Passive site server $($pv.VMName) for SiteCode $($pv.SiteCode -join ',')"
                 }
             }
             else {
-                Write-RedX "  (High Availability) No passive site server in this hierarchy"
+                Write-RedX -indent $subIndent "(High Availability) No passive site server in this hierarchy"
             }
 
             # Client push from every Primary in this hierarchy.
@@ -3240,10 +3244,10 @@ Function Show-Summary {
             $pushSources += $childPrimaries
             foreach ($cp in $pushSources) {
                 if ($cp.thisParams -and $cp.thisParams.ClientPush) {
-                    Write-GreenCheck "  Client Push from $($cp.VMName): [$($cp.thisParams.ClientPush -join ',')]"
+                    Write-GreenCheck -indent $subIndent "Client Push from $($cp.VMName): [$($cp.thisParams.ClientPush -join ',')]"
                 }
                 else {
-                    Write-OrangePoint "  Client Push from $($cp.VMName): no eligible clients (pushClient=false on all candidates, or none in network)"
+                    Write-OrangePoint -indent $subIndent "Client Push from $($cp.VMName): no eligible clients (pushClient=false on all candidates, or none in network)"
                 }
             }
         }
