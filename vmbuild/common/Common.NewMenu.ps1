@@ -927,6 +927,16 @@ function Show-Menu {
         $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
 
+        # TEMP DIAGNOSTIC: print layout state at top of menu so we can see what
+        # the render loop is about to decide. Remove once blank-menu bug fixed.
+        $diagY = (Get-CursorPosition).Y
+        Set-CursorPosition -X 60 -Y 0
+        Write-Host ("DBG: Cnt={0} Tot={1} Room={2} W={3} H={4} Shrink={5}/{6}/{7}/{8}/Max={9} Op='{10}'" -f `
+            $menuItems.Count, $TotalLineCount, $RoomLeft, `
+            $host.UI.RawUI.WindowSize.Width, $host.UI.RawUI.WindowSize.Height, `
+            $shrink.Function, $shrink.Header, $shrink.Blank, $shrink.Help, $Maxshrink, $Operation) -ForegroundColor Magenta
+        Set-CursorPosition -X 0 -Y $diagY
+
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
@@ -937,6 +947,13 @@ function Show-Menu {
         $passedDisplayedItems = $false
         for ($idx = 0; $idx -lt $menuItems.Count; $idx++) {
             $menuItem = $menuItems[$idx]
+
+            # TEMP DIAGNOSTIC per-item
+            $_dbgY = (Get-CursorPosition).Y
+            $_dbgKind = Get-MenuItemKind -MenuItem $menuItem
+            Set-CursorPosition -X 60 -Y ($idx + 1)
+            Write-Host ("DBG[{0,2}] kind={1,-10} sel={2,-5} name='{3}' Disp={4}" -f $idx, $_dbgKind, [bool]$menuItem.Selectable, $menuItem.itemName, [bool]$menuItem.Displayed) -ForegroundColor DarkGray
+            Set-CursorPosition -X 0 -Y $_dbgY
 
             # ---- PgDn page-state: skip items already shown on the previous page,
             # then mark this page "Done" once we hit the first new selectable item.
