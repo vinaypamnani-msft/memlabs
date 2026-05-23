@@ -11,12 +11,21 @@
 $Fix_LocalAdminAccount = {
     param ([string]$password)
     try {
+        $existing = Get-LocalUser -Name 'Administrator' -ErrorAction Stop
+        Write-FixLog "Found local Administrator (SID=$($existing.SID), Enabled=$($existing.Enabled))"
+
         $secure = ConvertTo-SecureString -String $password -AsPlainText -Force
         Set-LocalUser -Name 'Administrator' -Password $secure -ErrorAction Stop
+        Write-FixLog "Password reset via Set-LocalUser" -Level Success
+
         Enable-LocalUser -Name 'Administrator' -ErrorAction Stop
+        $after = Get-LocalUser -Name 'Administrator'
+        Write-FixLog "Account enabled (Enabled=$($after.Enabled), PasswordLastSet=$($after.PasswordLastSet))" -Level Success
+
         [pscustomobject]@{ Success = $true; Message = 'Local Administrator password reset and account enabled' }
     }
     catch {
+        Write-FixLog "Exception: $($_.Exception.Message)" -Level Failure
         [pscustomobject]@{ Success = $false; Message = 'Failed to reset local Administrator'; Errors = @($_.Exception.Message) }
     }
 }
