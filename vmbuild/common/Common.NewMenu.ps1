@@ -947,10 +947,6 @@ function Show-Menu {
         $helpBannerCost = if ($HelpNeeded) { $script:MenuLayout.HelpBannerLines } else { 0 }
         $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
-        # TEMP DIAG: shrink-regression hunt (Step 5)
-        Write-Log -Verbose ("[ShrinkDiag] Total={0} Room={1} Banner={2} Tiers(S={3} H={4} B={5} Hp={6}) Plan(S={7} H={8} B={9} Hp={10} Max={11}) shrinkType={12}" -f `
-            $TotalLineCount, $RoomLeft, $helpBannerCost, $metrics.Tiers.Summary, $metrics.Tiers.Header, $metrics.Tiers.Blank, $metrics.Tiers.Help, `
-            $shrink.Summary, $shrink.Header, $shrink.Blank, $shrink.Help, $shrink.Max, ($shrink.GetType().Name))
 
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
