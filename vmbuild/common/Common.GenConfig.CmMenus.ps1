@@ -31,7 +31,9 @@ function Invoke-CMOptionsMenu {
         return
     }
     $options = $topLevels | ForEach-Object {
-        "$($_.vmName)  [$($_.role) $($_.siteCode)]"
+        $label = "$($_.vmName)  [$($_.role) $($_.siteCode)]"
+        $summary = get-CMOptionsSummary -CmOptions $_.cmOptions
+        if ($summary) { "$label  $summary" } else { $label }
     }
     $choice = Get-Menu2 -MenuName "Pick Top-Level Site Server" `
         -Prompt "Select site server whose ConfigMgr Options to modify" `
