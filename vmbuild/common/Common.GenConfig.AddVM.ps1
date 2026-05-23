@@ -615,6 +615,19 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
     }
 
+    # Add pushClient property for DomainMember non-SQL VMs.
+    # Default from domainDefaults.PushCMClientToClients (client OS) or
+    # PushCMClientToServers (server OS). Each is independently togglable.
+    if ($role -eq 'DomainMember' -and -not $virtualMachine.sqlVersion) {
+        $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+        $defaultKey = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+        $defaultVal = $true
+        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$defaultKey)) {
+            $defaultVal = [bool]$ConfigToModify.domainDefaults.$defaultKey
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $defaultVal -Force
+    }
+
     if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
         # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
         $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
@@ -660,7 +673,6 @@ function Add-NewVMForRole {
                 $newCmOptions = [PSCustomObject]@{
                     Version                   = $latestVersion
                     Install                   = $true
-                    PushClientToDomainMembers = $true
                     PrePopulateObjects        = $true
                     EVALVersion               = $false
                     #InstallSCP                = $true

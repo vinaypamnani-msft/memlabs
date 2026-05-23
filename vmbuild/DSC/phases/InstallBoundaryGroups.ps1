@@ -19,7 +19,9 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$NetbiosDomainName\cm_svc"
-$pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
+# Push is now per-VM (pushClient property). thisParams.ClientPush only contains
+# VMs that have opted in, so an empty list means nothing to push.
+$pushClients = [bool]$ClientNames
 $usePKI = $deployConfig.cmOptions.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
@@ -227,7 +229,7 @@ if ($ThisVm.thisParams.PassiveNode) {
 # Push Clients
 #==============
 if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
+    Write-DscStatus "Skipping Client Push. No VMs have pushClient=true in this deployment."
     $Configuration.InstallClient.Status = 'NotRequested'
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return

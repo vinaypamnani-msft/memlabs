@@ -317,6 +317,25 @@ function Get-UserConfiguration {
                     $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
                 }
             }
+
+            # pushClient property: auto-add for DomainMember non-SQL VMs.
+            # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
+            # > domainDefaults.PushCMClientToClients/PushCMClientToServers > $true.
+            if ($vm.role -eq 'DomainMember' -and -not $vm.sqlVersion -and ($null -eq $vm.pushClient)) {
+                $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                $pushDefault = $true
+                if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
+                    # Legacy single-value migration: apply to all non-SQL DomainMembers
+                    $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
+                }
+                elseif ($config.domainDefaults) {
+                    $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+                    if ($null -ne $config.domainDefaults.$key) {
+                        $pushDefault = [bool]$config.domainDefaults.$key
+                    }
+                }
+                $vm | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushDefault -Force
+            }
         }
 
         if ($null -ne $config.cmOptions.Version) {
@@ -3212,14 +3231,14 @@ Function Show-Summary {
 
 
         if ($containsMember) {
-            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
+            if ($containsPS -and $deployConfig.cmOptions.install -eq $true) {
                 $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
                 foreach ($PSVM in $PSVMs) {
                     if ($PSVM.thisParams.ClientPush) {
                         Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
                     }
                     else {
-                        Write-OrangePoint "Client Push is enabled for $($PSVM.VMname) , but no eligible clients found"
+                        Write-OrangePoint "Client Push: $($PSVM.VMname) has no eligible clients (pushClient=false on all candidates, or none in network)"
                     }
                 }
             }

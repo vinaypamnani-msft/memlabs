@@ -62,7 +62,6 @@ function Invoke-CMOptionsMenuForVM {
         $defaults = [PSCustomObject]@{
             Version                   = $latestVersion
             Install                   = $true
-            PushClientToDomainMembers = $true
             PrePopulateObjects        = $true
             EVALVersion               = $false
             OfflineSCP                = $false

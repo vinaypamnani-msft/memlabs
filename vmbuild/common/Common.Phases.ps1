@@ -1156,8 +1156,11 @@ function Get-Phase8ConfigurationData {
     # to handle EnableBLM and PushClients for newly added VMs.
     if ($NumberOfNodesAdded -eq 0) {
         $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
-        $newPushVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not $_.hidden -and -not $_.SqlVersion })
-        if ($newBLMVMs.Count -gt 0 -or ($deployConfig.cmOptions.pushClientToDomainMembers -and $newPushVMs.Count -gt 0)) {
+        # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
+        $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -eq "DomainMember" -and -not $_.hidden -and -not $_.SqlVersion -and ($_.pushClient -ne $false)
+            })
+        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
             $hiddenPrimary = $deployConfig.virtualMachines | Where-Object {
                 $_.role -eq "Primary" -and $_.hidden -and
                 (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)

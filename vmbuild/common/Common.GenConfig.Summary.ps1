@@ -70,10 +70,6 @@ function get-CMOptionsSummary {
     $installColor = if ($options.install) { "ForestGreen" } else { "Tomato" }
     $installMark = if ($options.install) { "✓" } else { "✗" }
 
-    # Push Clients — green ✓ when on, tan ✗ when off (intentional, not error)
-    $pushColor = if ($options.pushClientToDomainMembers) { "ForestGreen" } else { "Tan" }
-    $pushMark = if ($options.pushClientToDomainMembers) { "✓" } else { "✗" }
-
     # Auth — PKI is the more secure choice (green); EHTTP is the default (khaki/yellow)
     $authText = if ($options.UsePKI) { "PKI" } else { "EHTTP" }
     $authColor = if ($options.UsePKI) { "ForestGreen" } else { "Khaki" }
@@ -88,7 +84,6 @@ function get-CMOptionsSummary {
         (Format-OptionToken -Color "DimGray" -Text "CM ") + (Format-OptionToken -Color $verColor -Text $verText)
         Format-OptionToken -Color $licenseColor -Text $licenseText
         (Format-OptionToken -Color "DimGray" -Text "Install ") + (Format-OptionToken -Color $installColor -Text $installMark)
-        (Format-OptionToken -Color "DimGray" -Text "Push ") + (Format-OptionToken -Color $pushColor -Text $pushMark)
         (Format-OptionToken -Color "DimGray" -Text "Auth ") + (Format-OptionToken -Color $authColor -Text $authText)
         (Format-OptionToken -Color "DimGray" -Text "SCP ") + (Format-OptionToken -Color $scpColor -Text $scpText)
     )
@@ -312,9 +307,6 @@ function Get-SortedProperties {
     }
     if ($members.Name -contains "OfflineSUP") {
         $sorted += "OfflineSUP"
-    }
-    if ($members.Name -contains "PushClientToDomainMembers") {
-        $sorted += "PushClientToDomainMembers"
     }
     if ($members.Name -contains "PrePopulateObjects") {
         $sorted += "PrePopulateObjects"

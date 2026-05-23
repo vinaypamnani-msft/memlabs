@@ -199,12 +199,7 @@ function Test-ValidCmOptions {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    # pushClientToDomainMembers
-    if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
-    }
-
-    # pushClientToDomainMembers
+    # usePKI
     if ($ConfigObject.cmOptions.usePKI -isnot [bool]) {
         Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }

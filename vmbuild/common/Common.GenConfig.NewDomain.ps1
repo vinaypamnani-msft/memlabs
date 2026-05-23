@@ -534,6 +534,8 @@ function Get-NewDomainConfigHelp {
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
         "EnableSUPOnSiteServers" { "Enabling this will automatically install the SUP role on CAS/Primary site servers, sharing SQL with the site server" }
+        "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
+        "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -560,9 +562,11 @@ function Select-NewDomainConfig {
         DefaultServerOS     = "Server 2022"
         DefaultSqlVersion   = "Sql Server 2022"
         UseDynamicMemory    = $true
-        IncludeClients          = $true
-        IncludeSSMSOnNONSQL     = $true
-        EnableSUPOnSiteServers  = $false
+        IncludeClients              = $true
+        IncludeSSMSOnNONSQL         = $true
+        EnableSUPOnSiteServers      = $false
+        PushCMClientToClients       = $true
+        PushCMClientToServers       = $true
     }
 
     # Load saved defaults from previous run if available

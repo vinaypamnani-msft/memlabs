@@ -26,6 +26,8 @@ function Get-GenericHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM. Can be overridden per VM via the dynamicMinRam setting" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
+        "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
 
         # Global VM
@@ -46,7 +48,6 @@ function Get-GenericHelp {
         "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA. Configured via PKI Settings menu." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
-        "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
         "EnableBLM" { "Enable BitLocker Management. Configures GPO, enables the BLM site feature, and deploys a BitLocker policy to encrypt client OS drives via the MP recovery service." }
         "PrePopulateObjects" { "This setting will pre-populate a number of objects in the CM database, such as packages, scripts, OSD Task Sequences, Baselines, etc." }
 
@@ -59,6 +60,7 @@ function Get-GenericHelp {
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
         "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
+        "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients/PushCMClientToServers based on OS." }
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
