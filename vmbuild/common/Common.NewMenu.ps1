@@ -748,6 +748,78 @@ function Resolve-ShrinkPlan {
     return $plan
 }
 
+# Classify a menu item into a render "kind". Distinct from Get-MenuItemTier
+# (which drives shrink decisions) -- a kind determines which rendering branch
+# the row takes. Selectable rows always render the same way; non-selectable
+# rows depend on prefix (*F / *HELP / *B-with-text / decorative fallback).
+function Get-MenuItemKind {
+    param([Parameter(Mandatory)] $MenuItem)
+    if ($MenuItem.Function)   { return 'Summary' }   # *F items run a scriptblock
+    if ($MenuItem.Selectable) { return 'Selectable' }
+    $name = [string]$MenuItem.itemName
+    if ($name -eq '*HELP')    { return 'Help' }
+    if ($name.StartsWith('*B') -and -not [string]::IsNullOrWhiteSpace($MenuItem.Text)) {
+        return 'Header'
+    }
+    return 'Decorative'   # *V rulers, *C borders, *B spacers, plain text
+}
+
+# Render a single menu row. Switch-dispatches on item kind. Returns a hashtable
+# with side-effect outputs the foreach loop needs:
+#   Drawn        - whether $menuItem.Displayed should be set $true
+#   HelpPosition - non-null only when this row was the *HELP placeholder
+# All shrink/Max checks live here so the caller's loop body is just the
+# per-item bookkeeping (PGDN paging, RoomLeft guard, Displayed flag).
+function Write-MenuItem {
+    param(
+        [Parameter(Mandatory)] $MenuItem,
+        [Parameter(Mandatory)][hashtable]$Shrink,
+        [Parameter(Mandatory)][bool]$MaxShrink,
+        [Parameter(Mandatory)][int]$LongestBreakLine,
+        [switch]$MultiSelect
+    )
+    $result = @{ Drawn = $false; HelpPosition = $null }
+    $kind = Get-MenuItemKind -MenuItem $MenuItem
+
+    switch ($kind) {
+        'Summary' {
+            if ($Shrink.Summary) { return $result }
+            Invoke-Expression -Command $MenuItem.Function
+            $result.Drawn = $true
+        }
+        'Selectable' {
+            if ($MenuItem.Selected) {
+                Write-Host '━➤ ' -ForegroundColor Yellow -NoNewline
+            } else {
+                Write-Host '   ' -ForegroundColor Cyan -NoNewline
+            }
+            $CurrentPosition = Get-CursorPosition
+            $MenuItem | Add-Member -MemberType NoteProperty -Name 'CurrentPosition' -Value $CurrentPosition.Y -Force
+            Set-CursorPosition -x 3 -y $CurrentPosition.Y
+            Write-Option $MenuItem.itemName $MenuItem.Text -color $MenuItem.Color1 -Color2 $MenuItem.Color1 -MultiSelect:$MultiSelect -MultiSelected:$MenuItem.MultiSelected
+            $result.Drawn = $true
+        }
+        'Help' {
+            if ($MaxShrink -or $Shrink.Help) { return $result }
+            $result.HelpPosition = Get-CursorPosition
+            Update-HelpText -HelpPosition $result.HelpPosition -CurrentHelpText '' -Color None -wait:$false
+        }
+        'Header' {
+            if ($MaxShrink -or $Shrink.Header) { return $result }
+            Write-MenuHeader -MenuItem $MenuItem -LongestBreakLine $LongestBreakLine
+            $result.Drawn = $true
+        }
+        'Decorative' {
+            if ($MaxShrink) { return $result }
+            $tier = Get-MenuItemTier -MenuItem $MenuItem
+            if ($tier -and $Shrink[$tier]) { return $result }
+            write-host2 -ForeGroundColor $MenuItem.Color1 $MenuItem.Text
+            $result.Drawn = $true
+        }
+    }
+    return $result
+}
+
 # Render the bottom-of-menu pagination hint ("Press [PgUp/PgDn] to see more"
 # etc). Caller passes Operation and whether PgUp is available; the helper
 # writes the hint to the console. Returns nothing.
@@ -908,63 +980,12 @@ function Show-Menu {
             $CurrentPosition = Get-CursorPosition
             Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
 
-            if ($menuItem.Function) {
-                if ($shrink.Summary -and (Get-MenuItemTier -MenuItem $menuItem) -eq 'Summary') {
-                    continue
-                }
-                $menuItem.Displayed = $true
-                Invoke-Expression -Command $menuItem.Function
-                
-                continue
-            }
-            if ($menuitem.Selectable) {
-                if ($menuItem.Selected) {
-                    #$arrow = "-> " 
-                    #$arrow = "⟶ "
-                    #$arrow = "➤ "
-                    $arrow = "━➤ "
-                    Write-Host $arrow -ForegroundColor Yellow -NoNewline
-                }
-                else {
-                    Write-Host "   " -ForegroundColor Cyan -NoNewline
-                }
-            }
-
-        
-
-            
-            $CurrentPosition = Get-CursorPosition
-            $menuItem | Add-Member -MemberType NoteProperty -Name "CurrentPosition" -Value $CurrentPosition.Y -force
-            if ($menuItem.Selectable) {    
-                Set-CursorPosition -x 3 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line       
-                Write-Option $menuItem.itemName $menuItem.Text -color $menuItem.Color1 -Color2 $menuItem.Color1 -MultiSelect:$MultiSelect -MultiSelected:$menuItem.MultiSelected
-                $menuItem.Displayed = $true
-            }
-            else {
-                if ($Maxshrink) {
-                    continue
-                }
-                $tier = Get-MenuItemTier -MenuItem $menuItem
-                if ($tier -and $shrink[$tier]) {
-                    continue
-                }
-
-                if ($menuItem.itemName -eq "*HELP") {
-                    $HelpPosition = Get-CursorPosition
-                    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
-                    continue
-                }
-
-                if ($menuItem.itemName.StartsWith("*B") -and -not [string]::IsNullOrWhiteSpace($menuitem.Text)) {
-                    Write-MenuHeader -MenuItem $menuItem -LongestBreakLine $LongestBreakLine
-                }
-                else {
-                    #Write-Host2 -ForegroundColor "MediumPurple" $menuItem.itemName -NoNewline
-                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
-                }
-                $menuItem.Displayed = $true
-            }                        
-            
+            # Per-item render is dispatched in Write-MenuItem (kind-based switch).
+            # Loop body only handles PGDN bookkeeping above, then applies the
+            # Drawn / HelpPosition outputs returned here.
+            $itemResult = Write-MenuItem -MenuItem $menuItem -Shrink $shrink -MaxShrink $Maxshrink -LongestBreakLine $LongestBreakLine -MultiSelect:$MultiSelect
+            if ($itemResult.Drawn)        { $menuItem.Displayed = $true }
+            if ($itemResult.HelpPosition) { $HelpPosition = $itemResult.HelpPosition }
         }   
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
