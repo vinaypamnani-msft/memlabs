@@ -670,6 +670,7 @@ function Get-MenuItemTier {
     $name = [string]$MenuItem.itemName
     if ($name -eq '*HELP')        { return 'Help' }
     if ($name.StartsWith('*F'))   { return 'Summary' }
+    if ($name.StartsWith('*C'))   { return 'Summary' }   # decorative box border around *F summary content; shrink together
     if ($name.StartsWith('*V'))   { return 'Blank' }   # decorative ruler
     if ($name.StartsWith('*B') -and -not [string]::IsNullOrWhiteSpace($MenuItem.Text)) {
         return 'Header'
@@ -1179,7 +1180,7 @@ function Update-Prompt {
     param (
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [object]$PromptPosition, # The cursor position
-        [Parameter(Mandatory = $true)] # Mandatory parameter
+        [Parameter(Mandatory = $false)] # Optional: $null when shrink plan dropped help banner
         [object]$HelpPosition, # The cursor position
         [Parameter(Mandatory = $false)] # Mandatory parameter
         [string]$buffer, # The buffer to display
