@@ -1166,6 +1166,14 @@ function Remove-VMFromConfig {
 
         foreach ($child in $children ) {
             $child.parentSiteCode = $null
+            # Newly-standalone Primary: inherit the deleted CAS's cmOptions so each
+            # orphaned hierarchy keeps its existing CM settings (Version, PKI, BLM,
+            # etc.). Skip if the child already has its own block. Deep-clone via
+            # JSON round-trip so siblings don't share a mutable reference.
+            if ($child.Role -eq "Primary" -and $DeletedVM.cmOptions -and -not $child.cmOptions) {
+                $clone = $DeletedVM.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+                $child | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+            }
         }
     }
 }
