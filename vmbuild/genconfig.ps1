@@ -866,7 +866,19 @@ function Build-MainMenuOptions {
             $cmSummary = get-CMOptionsSummary -CmOptions $rootCmOptions
         }
         else {
-            $cmSummary = "<Multiple Options>"
+            # Multi-top-level: build a compact per-server summary so the row
+            # tells the user which site servers and CM versions are configured
+            # before they drill into the picker.
+            $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
+            $parts = foreach ($tl in $topLevelSiteServers) {
+                $opts = $tl.cmOptions
+                $verText = if ($opts) { $opts.version } else { "?" }
+                $verColor = if ($opts -and $opts.version -eq "tech-preview") { "Tomato" } else { "ForestGreen" }
+                (Format-OptionToken -Color "LightSteelBlue" -Text $tl.vmName) +
+                (Format-OptionToken -Color "DimGray" -Text " [$($tl.role) $($tl.siteCode)] CM ") +
+                (Format-OptionToken -Color $verColor -Text $verText)
+            }
+            $cmSummary = $parts -join $sep
         }
         $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         $preOptions += [ordered]@{ "HC" = "Change Configuration Manager Options on the top-level site server (Version, licensing, PKI, BitLocker, etc.)" }
