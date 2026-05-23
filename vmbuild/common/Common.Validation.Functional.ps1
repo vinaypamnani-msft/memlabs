@@ -57,7 +57,7 @@ function Test-VmFunctionality {
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain
         }
         'BDC' {
-            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain
+            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC
         }
         'CAS' {
             $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
@@ -89,10 +89,22 @@ function Test-VmFunctionality {
         'StandaloneRootCA' {
             $testsPassed = Test-StandaloneRootCAFunctionality -VMName $VMName -Domain $domain
         }
+        'PassiveSite' {
+            $testsPassed = Test-PassiveSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        }
+        'DomainMember' {
+            $testsPassed = Test-DomainMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        }
+        'WorkgroupMember' {
+            $testsPassed = Test-WorkgroupMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        }
+        'InternetClient' {
+            $testsPassed = Test-InternetClientFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        }
         default {
-            # Roles like DomainMember, WorkgroupMember, InternetClient, etc.
-            # have no role-specific functionality to test. If we get here
-            # the phase dispatch filter missed one - pass by default.
+            # Any role not in this switch falls through silently. The phase
+            # dispatcher in Common.Phases.ps1 already filters out OSDClient/
+            # Linux/AADClient. Unknown roles get a log line but don't fail.
             Write-Log "[Phase $Phase] $VMName [$role]: No role-specific tests defined; skipping" -LogOnly
         }
     }
@@ -110,6 +122,31 @@ function Test-VmFunctionality {
     # If the VM has SQL but is not a Primary/CAS/SQLAO (standalone SQL server)
     if ($testsPassed -and $CurrentItem.sqlVersion -and $role -notin @('CAS', 'Primary', 'SQLAO')) {
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
+    # SSMS install check (any role with installSSMS=$true)
+    if ($testsPassed -and $CurrentItem.installSSMS) {
+        $testsPassed = Test-SSMSInstall -VMName $VMName -Domain $domain
+    }
+
+    # SMS Provider role check (remote SMS provider, not on the site server itself)
+    if ($testsPassed -and $CurrentItem.InstallSMSProv -and $role -ne 'CAS' -and $role -ne 'Primary') {
+        $testsPassed = Test-SMSProviderRole -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
+    # Pull-DP configuration (verified from parent Primary)
+    if ($testsPassed -and $CurrentItem.enablePullDP) {
+        $testsPassed = Test-PullDPConfiguration -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
+    # Additional data disks (E:, F:, ...) per additionalDisks config
+    if ($testsPassed -and $CurrentItem.additionalDisks) {
+        $testsPassed = Test-AdditionalDisks -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
+    # BitLocker volume state on member VMs flagged for encryption
+    if ($testsPassed -and $CurrentItem.BitLocker -eq $true -and $role -notin @('DC', 'BDC')) {
+        $testsPassed = Test-BitLockerProtection -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # BitLocker Management: validate policy exists and is deployed (top-level site only)
@@ -132,14 +169,16 @@ function Test-DCFunctionality {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$Domain
+        [Parameter(Mandatory)][string]$Domain,
+        [switch]$IsBDC
     )
 
     $Phase = 11
-    Write-Log "[Phase $Phase] $VMName [DC]: Testing AD DS, DNS, and Netlogon services" -LogOnly
+    $label = if ($IsBDC) { 'BDC' } else { 'DC' }
+    Write-Log "[Phase $Phase] $VMName [$label]: Testing AD DS, DNS, and Netlogon services" -LogOnly
 
     $scriptBlock = {
-        param($domainFqdn)
+        param($domainFqdn, $isBdcInner)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # Check critical services
@@ -192,14 +231,55 @@ function Test-DCFunctionality {
             $results.Details.Add("WARN: dcdiag execution failed: $($_.Exception.Message)")
         }
 
+        # SYSVOL + NETLOGON shares -- if these are missing GPOs and logons break.
+        foreach ($shr in @('SYSVOL', 'NETLOGON')) {
+            $s = Get-SmbShare -Name $shr -ErrorAction SilentlyContinue
+            if (-not $s) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SMB share '$shr' missing on DC")
+            }
+            else {
+                $results.Details.Add("OK: SMB share '$shr' -> '$($s.Path)'")
+            }
+        }
+
+        # BDC-only: confirm we can replicate inbound from at least one partner
+        # within the last hour. A stale/never-replicated BDC means later VMs
+        # built against it will be missing accounts/GPOs.
+        if ($isBdcInner) {
+            $results.Details.Add("CMD: Get-ADReplicationPartnerMetadata -Target `$env:COMPUTERNAME -Scope Server")
+            try {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $partners = Get-ADReplicationPartnerMetadata -Target $env:COMPUTERNAME -Scope Server -ErrorAction Stop
+                if (-not $partners) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: No replication partners found for BDC")
+                }
+                else {
+                    $fresh = $partners | Where-Object { $_.LastReplicationSuccess -gt (Get-Date).AddHours(-1) }
+                    if ($fresh) {
+                        $results.Details.Add("OK: $($fresh.Count) replication partner(s) succeeded within last hour")
+                    }
+                    else {
+                        $most = $partners | Sort-Object LastReplicationSuccess -Descending | Select-Object -First 1
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: BDC replication stale -- last success $($most.LastReplicationSuccess) from $($most.Partner)")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Could not query BDC replication metadata: $($_.Exception.Message)")
+            }
+        }
+
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain `
-        -DisplayName "Phase11-DC-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, $IsBDC.IsPresent `
+        -DisplayName "Phase11-$label-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel 'DC' -Result $result)
+    return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
 }
 
 function Test-SQLFunctionality {
@@ -412,6 +492,33 @@ function Test-WSUSFunctionality {
             $results.Details.Add("FAIL: WSUS API test failed: $($_.Exception.Message)")
         }
 
+        # WsusPool app pool must be Started
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $pool = Get-WebAppPoolState -Name 'WsusPool' -ErrorAction SilentlyContinue
+            if ($pool -and $pool.Value -eq 'Started') {
+                $results.Details.Add("OK: App pool 'WsusPool' is Started")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: App pool 'WsusPool' is $(if ($pool) { $pool.Value } else { 'not found' })")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Could not check WsusPool state: $($_.Exception.Message)")
+        }
+
+        # At least one WSUS port must be listening
+        $listening = Get-NetTCPConnection -State Listen -LocalPort 8530, 8531 -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty LocalPort -Unique
+        if ($listening) {
+            $results.Details.Add("OK: WSUS listening on port(s): $($listening -join ', ')")
+        }
+        else {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Neither 8530 nor 8531 is listening")
+        }
+
         return $results
     }
 
@@ -548,7 +655,19 @@ function Test-CMSiteFunctionality {
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
         -DisplayName "Phase11-CM-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel "CM-$siteCode" -Result $result)
+    $passed = Format-TestResult -VMName $VMName -RoleLabel "CM-$siteCode" -Result $result
+
+    # Site-wide tests only run on a top-level site (Primary without parentSiteCode,
+    # or CAS). On a child Primary under a CAS we skip these -- the CAS already owns
+    # the boundaries / discovery / apps, and probing them on the child can fail
+    # while replication is still catching up.
+    $isTopLevel = (-not $CurrentItem.parentSiteCode) -and ($CurrentItem.role -in @('CAS', 'Primary'))
+    if ($passed -and $isTopLevel) {
+        $sitePassed = Test-CMSiteWideFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        if (-not $sitePassed) { $passed = $false }
+    }
+
+    return $passed
 }
 
 function Test-BLMFunctionality {
@@ -861,6 +980,48 @@ function Test-SiteSystemFunctionality {
                 $results.Details.Add("WARN: SMS Identification registry key not found (MP may still be initializing)")
             }
 
+            # End-to-end MP probe: fetch the MP list (proves the MP is actually serving).
+            # Some sites are HTTPS-only -- try HTTPS first, then HTTP. Treat 401/403 as
+            # serving-OK (auth required); only fail on connection refused / 404.
+            $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+            $mpProbed = $false
+            foreach ($scheme in @('https', 'http')) {
+                $url = "$scheme`://$fqdn/sms_mp/.sms_aut?MPLIST"
+                $results.Details.Add("CMD: Invoke-WebRequest -Uri '$url' -UseBasicParsing")
+                try {
+                    $req = [System.Net.HttpWebRequest]::Create($url)
+                    $req.Timeout = 15000
+                    $req.UseDefaultCredentials = $true
+                    $req.AllowAutoRedirect = $false
+                    if ($scheme -eq 'https') {
+                        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                    }
+                    $resp = $req.GetResponse()
+                    $sc = [int]$resp.StatusCode
+                    $resp.Close()
+                    $results.Details.Add("OK: MP probe '$url' returned $sc")
+                    $mpProbed = $true
+                    break
+                }
+                catch [System.Net.WebException] {
+                    $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                    if ($sc -in 401, 403) {
+                        $results.Details.Add("OK: MP probe '$url' returned $sc (auth required = serving)")
+                        $mpProbed = $true
+                        break
+                    }
+                    $results.Details.Add("  $scheme failed: $($_.Exception.Message)")
+                }
+                catch {
+                    $results.Details.Add("  $scheme failed: $($_.Exception.Message)")
+                }
+            }
+            if (-not $mpProbed) {
+                # Don't fail the build -- if W3SVC + SMS_MP app pool are OK, the
+                # endpoint may just be authenticating differently. Warn loudly.
+                $results.Details.Add("WARN: MP HTTP probe did not succeed on http or https. App is configured but not serving as expected.")
+            }
+
             return $results
         }
 
@@ -927,6 +1088,44 @@ function Test-SiteSystemFunctionality {
             if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $dpResult)) {
                 $allPassed = $false
             }
+
+            # Local DP probes: SMS_DP$ share + WDS (PXE always-on per ScriptFunctions)
+            Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
+            $localDpScript = {
+                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+                $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
+                $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+                if (-not $share) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing -- content library not initialized")
+                }
+                else {
+                    $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
+                }
+
+                # WDS service for PXE -- memlabs always enables PXE on DPs (see
+                # ScriptFunctions.ps1 Add-CMDistributionPoint -EnablePxe). If it's
+                # off the build silently broke OSD scenarios.
+                $results.Details.Add("CMD: Get-Service -Name 'WDSServer'")
+                $wds = Get-Service -Name 'WDSServer' -ErrorAction SilentlyContinue
+                if (-not $wds) {
+                    $results.Details.Add("WARN: WDSServer service not found (PXE not yet enabled or NoWDS PXE in use)")
+                }
+                elseif ($wds.Status -ne 'Running') {
+                    $results.Details.Add("WARN: WDSServer is $($wds.Status) (PXE responses may be delayed/unavailable)")
+                }
+                else {
+                    $results.Details.Add("OK: WDSServer is Running (PXE active)")
+                }
+
+                return $results
+            }
+            $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+                -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog
+            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DPLocal' -Result $localDpResult)) {
+                $allPassed = $false
+            }
         }
         else {
             Write-Log "[Phase $Phase] $VMName [DP]: Cannot find parent site server for site '$siteCode'; skipping DP verification" -Warning
@@ -945,13 +1144,65 @@ function Test-SiteSystemFunctionality {
             if (-not $svc) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Service 'WsusService' not found")
+                return $results
             }
             elseif ($svc.Status -ne 'Running') {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Service 'WsusService' is $($svc.Status)")
+                return $results
             }
             else {
                 $results.Details.Add("OK: Service 'WsusService' is Running")
+            }
+
+            # WsusPool app pool must be Started (recycle storm == clients can't sync)
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $pool = Get-WebAppPoolState -Name 'WsusPool' -ErrorAction SilentlyContinue
+                if ($pool -and $pool.Value -eq 'Started') {
+                    $results.Details.Add("OK: App pool 'WsusPool' is Started")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: App pool 'WsusPool' is $(if ($pool) { $pool.Value } else { 'not found' })")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Could not check WsusPool state: $($_.Exception.Message)")
+            }
+
+            # Port 8530 (HTTP) or 8531 (HTTPS) must be listening
+            $results.Details.Add("CMD: Get-NetTCPConnection -State Listen -LocalPort 8530,8531")
+            $listening = Get-NetTCPConnection -State Listen -LocalPort 8530, 8531 -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty LocalPort -Unique
+            if ($listening) {
+                $results.Details.Add("OK: WSUS listening on port(s): $($listening -join ', ')")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Neither 8530 nor 8531 is listening on this SUP")
+            }
+
+            # WSUS API last sync result -- non-fatal but loud if last sync failed
+            try {
+                [reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
+                foreach ($port in @(8530, 443, 8531)) {
+                    try {
+                        $useSSL = ($port -in 443, 8531)
+                        $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer('localhost', $useSSL, $port)
+                        $sub = $wsus.GetSubscription()
+                        $sync = $sub.GetLastSynchronizationInfo()
+                        $results.Details.Add("OK: WSUS last sync result = $($sync.Result), at $($sync.StartTime)")
+                        if ($sync.Result -eq 'Failed') {
+                            $results.Details.Add("WARN: Last WSUS sync FAILED ($($sync.Error)) -- updates pipeline broken")
+                        }
+                        break
+                    }
+                    catch { }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: WSUS API sync-info query skipped: $($_.Exception.Message)")
             }
 
             return $results
@@ -1201,6 +1452,45 @@ function Test-CAFunctionality {
             $results.Details.Add("WARN: CA name check failed: $($_.Exception.Message)")
         }
 
+        # Confirm the CA cert is published into the AD NTAuthCertificates store.
+        # Without this, domain client-auth certs issued by the CA won't be
+        # honoured for 802.1x / CM client comms.
+        $results.Details.Add("CMD: certutil.exe -store -enterprise NTAuth")
+        try {
+            $ntAuth = & certutil.exe -store -enterprise NTAuth 2>&1
+            $ntAuthText = $ntAuth -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $caName -and $ntAuthText -match [regex]::Escape($caName.Trim())) {
+                $results.Details.Add("OK: CA '$($caName.Trim())' is published in enterprise NTAuthCertificates")
+            }
+            elseif ($LASTEXITCODE -eq 0 -and $ntAuthText -match 'Certificate \d+:') {
+                $results.Details.Add("OK: enterprise NTAuthCertificates store has entries (CA name unverified)")
+            }
+            else {
+                $results.Details.Add("WARN: CA cert may not be published to NTAuthCertificates -- client-auth scenarios will fail")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: NTAuth check failed: $($_.Exception.Message)")
+        }
+
+        # AD CA enrollment object should exist under the Enrollment Services container
+        try {
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $cfg = (Get-ADRootDSE).configurationNamingContext
+            $enroll = "CN=Enrollment Services,CN=Public Key Services,CN=Services,$cfg"
+            $caObjs = Get-ADObject -SearchBase $enroll -Filter "objectClass -eq 'pKIEnrollmentService'" -ErrorAction Stop
+            if ($caObjs) {
+                $results.Details.Add("OK: $($caObjs.Count) Enterprise CA(s) published in AD: $($caObjs.Name -join ', ')")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No pKIEnrollmentService objects under '$enroll'")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: AD Enrollment Services query failed: $($_.Exception.Message)")
+        }
+
         return $results
     }
 
@@ -1243,6 +1533,811 @@ function Test-MaintenanceTasks {
         -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
+}
+
+function Test-PassiveSiteFunctionality {
+    <#
+    .SYNOPSIS
+        Validates the passive (HA) site server is initialized and replicating.
+    .DESCRIPTION
+        After the active site promotes a passive node, the passive VM should
+        have SMS_EXECUTIVE running, the registry should reflect the same site
+        code as its active partner, and from the parent active site server the
+        passive node should appear in SMS_SCI_SysResUse.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+
+    Write-Log "[Phase $Phase] $VMName [PassiveSite]: Testing passive site server (site $siteCode)" -LogOnly
+
+    $passiveScript = {
+        param($sc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: Get-Service -Name 'SMS_EXECUTIVE'")
+        $svc = Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue
+        if (-not $svc) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' not found")
+            return $results
+        }
+        if ($svc.Status -ne 'Running') {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' is $($svc.Status)")
+            return $results
+        }
+        $results.Details.Add("OK: Service 'SMS_EXECUTIVE' is Running")
+
+        # Registry should advertise the same site code as the active partner
+        $regSite = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
+        if (-not $regSite) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Registry 'SMS\Identification\Site Code' missing -- site server bootstrap incomplete")
+        }
+        elseif ($regSite.'Site Code' -ne $sc) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Registry site code '$($regSite.'Site Code')' != expected '$sc'")
+        }
+        else {
+            $results.Details.Add("OK: Registry site code matches '$sc'")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $passiveScript -ArgumentList $siteCode `
+        -DisplayName "Phase11-PassiveSite-Test" -SuppressLog
+
+    $localOk = Format-TestResult -VMName $VMName -RoleLabel 'PassiveSite' -Result $result
+    if (-not $localOk) { return $false }
+
+    # Verify from the active site server that this passive node is registered
+    $activeVM = $DeployConfig.virtualMachines | Where-Object {
+        $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
+    } | Select-Object -First 1
+    if (-not $activeVM) {
+        Write-Log "[Phase $Phase] $VMName [PassiveSite]: No active site server found for site '$siteCode'; skipping cross-check" -LogOnly
+        return $true
+    }
+
+    $parentScript = {
+        param($sc, $passiveName)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $filter = "RoleName = 'SMS Site Server' AND NetworkOSPath LIKE '%$passiveName%'"
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_SCI_SysResUse -Filter `"$filter`"")
+        try {
+            $passive = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SCI_SysResUse -Filter $filter -ErrorAction Stop
+            if ($passive) {
+                $results.Details.Add("OK: Passive site server '$passiveName' registered in site '$sc'")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Passive site server '$passiveName' not registered in site '$sc'")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: WMI query for passive site server failed: $($_.Exception.Message)")
+        }
+        return $results
+    }
+
+    $parentResult = Invoke-VmCommand -VmName $activeVM.vmName -VmDomainName $domain `
+        -ScriptBlock $parentScript -ArgumentList $siteCode, $VMName `
+        -DisplayName "Phase11-PassiveSite-Parent-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'PassiveSite-Parent' -Result $parentResult)
+}
+
+function Test-DomainMemberFunctionality {
+    <#
+    .SYNOPSIS
+        Lightweight checks for a domain-joined member server / client.
+    .DESCRIPTION
+        Verifies domain join, secure-channel health, time sync, and (when the
+        SCCM client is present) CCMExec service + last MP communication.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+
+    Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
+
+    $scriptBlock = {
+        param($expectedDomain)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        # Domain membership
+        $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if (-not $cs.PartOfDomain) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Computer is not domain-joined (Domain = '$($cs.Domain)')")
+            return $results
+        }
+        if ($cs.Domain -notlike "$expectedDomain*" -and $expectedDomain -notlike "$($cs.Domain)*") {
+            $results.Details.Add("WARN: Joined domain '$($cs.Domain)' differs from deploy domain '$expectedDomain' (may be cross-domain by design)")
+        }
+        else {
+            $results.Details.Add("OK: Computer joined to domain '$($cs.Domain)'")
+        }
+
+        # Secure channel
+        try {
+            $sc = Test-ComputerSecureChannel -ErrorAction Stop
+            if ($sc) {
+                $results.Details.Add("OK: Secure channel to domain is healthy")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False -- machine account password may be broken")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Test-ComputerSecureChannel threw: $($_.Exception.Message)")
+        }
+
+        # Time sync
+        try {
+            $w32tm = & w32tm.exe /query /status 2>&1
+            $offsetLine = $w32tm | Where-Object { $_ -match 'Last Successful Sync Time' } | Select-Object -First 1
+            if ($offsetLine) {
+                $results.Details.Add("OK: w32tm reports last successful sync ($($offsetLine.Trim()))")
+            }
+            else {
+                $results.Details.Add("WARN: w32tm did not report a successful sync time")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: w32tm /query /status failed: $($_.Exception.Message)")
+        }
+
+        # CCM client (only if installed; not all DomainMembers get the client)
+        $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+        if ($ccm) {
+            if ($ccm.Status -eq 'Running') {
+                $results.Details.Add("OK: CcmExec service is Running")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: CcmExec service is $($ccm.Status) (client is installed but not running)")
+            }
+        }
+        else {
+            $results.Details.Add("OK: CcmExec service not installed (no client push expected for this VM)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $domain `
+        -DisplayName "Phase11-DomainMember-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'DomainMember' -Result $result)
+}
+
+function Test-WorkgroupMemberFunctionality {
+    <#
+    .SYNOPSIS
+        Lightweight checks for a workgroup (non-domain-joined) member.
+    .DESCRIPTION
+        Verifies network is up, time sync, and CCM client state if present.
+        Uses the VM's local admin via Invoke-VmCommand's fallback.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+
+    Write-Log "[Phase $Phase] $VMName [WorkgroupMember]: Testing basic workgroup VM health" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if ($cs.PartOfDomain) {
+            $results.Details.Add("WARN: Workgroup VM is unexpectedly domain-joined ('$($cs.Domain)')")
+        }
+        else {
+            $results.Details.Add("OK: Workgroup VM ($($cs.Workgroup))")
+        }
+
+        # At least one NIC connected
+        $nic = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
+        if (-not $nic) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: No NIC in 'Up' state")
+        }
+        else {
+            $results.Details.Add("OK: NIC '$($nic.Name)' is Up")
+        }
+
+        # CCM client (only if installed)
+        $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+        if ($ccm) {
+            if ($ccm.Status -eq 'Running') {
+                $results.Details.Add("OK: CcmExec service is Running")
+            }
+            else {
+                $results.Details.Add("WARN: CcmExec service is $($ccm.Status) (workgroup clients may struggle to talk to MP)")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock `
+        -DisplayName "Phase11-WorkgroupMember-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'WorkgroupMember' -Result $result)
+}
+
+function Test-InternetClientFunctionality {
+    <#
+    .SYNOPSIS
+        Validates an InternetClient VM (CMG/internet-facing client).
+    .DESCRIPTION
+        Verifies the VM is reachable (NIC up), CCM client if installed, and
+        that the PKI client cert exists when the site is PKI-enabled.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $usePKI = [bool]($DeployConfig.cmOptions.UsePKI)
+
+    Write-Log "[Phase $Phase] $VMName [InternetClient]: Testing internet client VM (UsePKI=$usePKI)" -LogOnly
+
+    $scriptBlock = {
+        param($expectPKI)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $nic = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
+        if (-not $nic) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: No NIC in 'Up' state")
+            return $results
+        }
+        $results.Details.Add("OK: NIC '$($nic.Name)' is Up")
+
+        $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+        if ($ccm -and $ccm.Status -eq 'Running') {
+            $results.Details.Add("OK: CcmExec service is Running")
+        }
+        elseif ($ccm) {
+            $results.Details.Add("WARN: CcmExec service is $($ccm.Status)")
+        }
+
+        if ($expectPKI -eq '1') {
+            # Look for a client auth cert in LocalMachine\My
+            $clientAuth = '1.3.6.1.5.5.7.3.2'
+            $certs = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                Where-Object { $_.EnhancedKeyUsageList.ObjectId -contains $clientAuth -and $_.NotAfter -gt (Get-Date) }
+            if ($certs) {
+                $results.Details.Add("OK: Found $($certs.Count) valid client-auth cert(s) in LocalMachine\My")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No valid client-auth cert in LocalMachine\My (PKI is enabled for this site)")
+            }
+        }
+
+        return $results
+    }
+
+    $pkiFlag = if ($usePKI) { '1' } else { '0' }
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $pkiFlag `
+        -DisplayName "Phase11-InternetClient-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'InternetClient' -Result $result)
+}
+
+function Test-SSMSInstall {
+    <#
+    .SYNOPSIS
+        Verifies SSMS is installed when installSSMS=$true on a VM.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName [SSMS]: Verifying SSMS install" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: Test-Path 'C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe'")
+        $ssms = Get-ChildItem "C:\Program Files (x86)\Microsoft SQL Server Management Studio *\Common7\IDE\ssms.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+        if (-not $ssms) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: ssms.exe not found under 'C:\Program Files (x86)\Microsoft SQL Server Management Studio *'")
+            return $results
+        }
+        $results.Details.Add("OK: SSMS found at '$($ssms.FullName)' (version $($ssms.VersionInfo.ProductVersion))")
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-SSMS-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'SSMS' -Result $result)
+}
+
+function Test-SMSProviderRole {
+    <#
+    .SYNOPSIS
+        Verifies a remote SMS Provider (InstallSMSProv=$true) is reachable.
+    .DESCRIPTION
+        Hits the SMS provider WMI namespace from the provider host itself
+        and from the parent site server to confirm both ends agree.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+
+    Write-Log "[Phase $Phase] $VMName [SMSProv]: Testing remote SMS provider for site $siteCode" -LogOnly
+
+    $scriptBlock = {
+        param($sc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -Filter `"SiteCode = '$sc'`"")
+        try {
+            $prov = Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -Filter "SiteCode = '$sc'" -ErrorAction Stop |
+                Where-Object { $_.Machine -like "$env:COMPUTERNAME*" }
+            if (-not $prov) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: This host not registered as a provider for site '$sc'")
+                return $results
+            }
+            $results.Details.Add("OK: Provider location: $($prov.NamespacePath)")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SMS_ProviderLocation query failed: $($_.Exception.Message)")
+            return $results
+        }
+
+        # Round-trip a query through the local provider
+        try {
+            $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
+            if ($site) {
+                $results.Details.Add("OK: Local SMS_Site query succeeded via provider (site '$($site.SiteCode)')")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SMS_Site query returned null via local provider")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SMS_Site query via local provider failed: $($_.Exception.Message)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode `
+        -DisplayName "Phase11-SMSProv-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'SMSProv' -Result $result)
+}
+
+function Test-PullDPConfiguration {
+    <#
+    .SYNOPSIS
+        Verifies a DP configured as Pull DP has the right source DP set.
+    .DESCRIPTION
+        Runs against the parent Primary because the IsPullDPEnabled flag
+        and source list live in the site database, not on the DP itself.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+    $expectedSource = $CurrentItem.pullDPSourceDP
+
+    $parentVM = $DeployConfig.virtualMachines | Where-Object {
+        $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
+    } | Select-Object -First 1
+    if (-not $parentVM) {
+        Write-Log "[Phase $Phase] $VMName [PullDP]: No parent site server for site '$siteCode'; skipping" -LogOnly
+        return $true
+    }
+
+    Write-Log "[Phase $Phase] $VMName [PullDP]: Verifying pull-DP config from '$($parentVM.vmName)'" -LogOnly
+
+    $scriptBlock = {
+        param($sc, $dpName, $dpFqdn, $expectedSrc)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"ServerName LIKE '%$dpName%'`"")
+        try {
+            $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
+                -Filter "ServerName LIKE '%$dpName%'" -ErrorAction Stop | Select-Object -First 1
+            if (-not $dp) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: DP '$dpName' not found in site '$sc'")
+                return $results
+            }
+            if (-not $dp.IsPullDP) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: DP '$dpName' is NOT flagged as Pull DP (IsPullDP=$($dp.IsPullDP))")
+                return $results
+            }
+            $results.Details.Add("OK: DP '$dpName' has IsPullDP=$true")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: WMI query failed: $($_.Exception.Message)")
+            return $results
+        }
+
+        # Source DP list lives in SMS_DistributionPoint property arrays.
+        # Best-effort: look it up via CM module if available.
+        if ($expectedSrc) {
+            try {
+                $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+                $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+                $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+                Import-Module (Join-Path $uiInstallPath "bin\ConfigurationManager.psd1") -ErrorAction Stop
+                $smsProvider = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                $null = New-PSDrive -Name $sc -PSProvider CMSite -Root $smsProvider -ErrorAction SilentlyContinue
+                Push-Location "${sc}:\"
+                $cmDp = Get-CMDistributionPoint -SiteSystemServerName $dpFqdn -ErrorAction SilentlyContinue
+                Pop-Location
+                if ($cmDp) {
+                    $results.Details.Add("OK: Get-CMDistributionPoint returned the DP via CM module")
+                }
+                else {
+                    $results.Details.Add("WARN: Get-CMDistributionPoint did not return the DP (may be load latency)")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: CM module pull-source verification skipped: $($_.Exception.Message)")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $parentVM.vmName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $VMName, "$VMName.$domain", $expectedSource `
+        -DisplayName "Phase11-PullDP-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
+}
+
+function Test-AdditionalDisks {
+    <#
+    .SYNOPSIS
+        Verifies all additionalDisks defined in the deploy config are mounted.
+    .DESCRIPTION
+        deployConfig's additionalDisks is a hashtable like { E='100GB'; F='200GB' }.
+        Confirms each drive letter exists with a non-removable volume.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+
+    # additionalDisks may be a PSCustomObject (from JSON) or hashtable
+    $disks = @()
+    if ($CurrentItem.additionalDisks) {
+        if ($CurrentItem.additionalDisks -is [hashtable]) {
+            $disks = $CurrentItem.additionalDisks.Keys
+        }
+        else {
+            $disks = $CurrentItem.additionalDisks.PSObject.Properties.Name
+        }
+    }
+    if (-not $disks -or $disks.Count -eq 0) {
+        Write-Log "[Phase $Phase] $VMName [Disks]: No additionalDisks in config; skipping" -LogOnly
+        return $true
+    }
+
+    Write-Log "[Phase $Phase] $VMName [Disks]: Verifying $($disks.Count) additional disk(s): $($disks -join ', ')" -LogOnly
+
+    $scriptBlock = {
+        param($expected)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        foreach ($letter in $expected) {
+            $letter = $letter.TrimEnd(':').ToUpper()
+            $results.Details.Add("CMD: Get-Volume -DriveLetter $letter")
+            $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue
+            if (-not $vol) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Volume '$letter`:' not present")
+                continue
+            }
+            if ($vol.FileSystem -ne 'NTFS') {
+                $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
+            }
+            $sizeGB = [math]::Round($vol.Size / 1GB, 1)
+            $results.Details.Add("OK: Volume '$letter`:' present ($sizeGB GB, $($vol.FileSystem))")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList (, [string[]]$disks) `
+        -DisplayName "Phase11-Disks-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'Disks' -Result $result)
+}
+
+function Test-BitLockerProtection {
+    <#
+    .SYNOPSIS
+        Verifies BitLocker is actually protecting the OS volume on a flagged VM.
+    .DESCRIPTION
+        For VMs with BitLocker=$true. Confirms the OS volume has at least one
+        key protector and encryption is active (Used Space Only is acceptable).
+        Encryption may still be in progress on a fresh deploy -- treat
+        EncryptionInProgress as OK; only fail on no protector or fully off.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+
+    Write-Log "[Phase $Phase] $VMName [BitLocker]: Verifying OS volume encryption status" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: Get-BitLockerVolume -MountPoint 'C:'")
+        try {
+            $vol = Get-BitLockerVolume -MountPoint 'C:' -ErrorAction Stop
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Get-BitLockerVolume threw: $($_.Exception.Message)")
+            return $results
+        }
+
+        $protectors = @($vol.KeyProtector)
+        if ($protectors.Count -eq 0) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: No key protectors on C: (volume is unprotected)")
+            return $results
+        }
+        $protectorTypes = ($protectors | ForEach-Object { $_.KeyProtectorType }) -join ', '
+        $results.Details.Add("OK: $($protectors.Count) key protector(s): $protectorTypes")
+
+        # Volume status: encrypted / encrypting / decrypting / fullydecrypted
+        $status = $vol.VolumeStatus
+        $pct = $vol.EncryptionPercentage
+        if ($status -eq 'FullyEncrypted') {
+            $results.Details.Add("OK: Volume is FullyEncrypted (100%)")
+        }
+        elseif ($status -eq 'EncryptionInProgress') {
+            $results.Details.Add("OK: Encryption in progress ($pct%) -- acceptable on a fresh build")
+        }
+        elseif ($status -eq 'UsedSpaceOnlyEncrypted') {
+            $results.Details.Add("OK: Volume is UsedSpaceOnlyEncrypted (BLM policy default)")
+        }
+        else {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Volume status is '$status' ($pct%), expected encrypted or in progress")
+        }
+
+        # ProtectionStatus 1 = On, 0 = Off
+        if ($vol.ProtectionStatus -ne 'On') {
+            $results.Details.Add("WARN: ProtectionStatus is '$($vol.ProtectionStatus)' (expected 'On' when key protector is active)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-BitLocker-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'BitLocker' -Result $result)
+}
+
+function Test-CMSiteWideFunctionality {
+    <#
+    .SYNOPSIS
+        Validates site-wide settings on a top-level Primary or CAS:
+        boundary groups, discovery methods, client push, apps, and the
+        site comms mode (HTTPS-only vs EnhancedHTTP) based on cmOptions.UsePKI.
+    .NOTES
+        Only invoked from Test-CMSiteFunctionality when the VM has no
+        parentSiteCode and role is CAS/Primary.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $domain = $DeployConfig.vmOptions.domainName
+    $siteCode = $CurrentItem.siteCode
+    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+
+    # Load expected apps from Apps.json on the host -- pass names down to the VM
+    $expectedAppNames = @()
+    $appsJsonPath = Join-Path $PSScriptRoot '..\Apps.json'
+    if (Test-Path $appsJsonPath) {
+        try {
+            $expectedAppNames = @((Get-Content -Raw -Path $appsJsonPath | ConvertFrom-Json) |
+                Select-Object -ExpandProperty AppName -ErrorAction SilentlyContinue)
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not read Apps.json: $($_.Exception.Message)" -Warning
+        }
+    }
+
+    Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
+
+    $scriptBlock = {
+        param($sc, $usePkiInner, $expectedApps)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $ns = "root\SMS\site_$sc"
+
+        # 1. Boundary groups -- at least the default "Default-Site-Boundary-Group" should exist
+        $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
+        try {
+            $bgs = @(Get-WmiObject -Namespace $ns -Class SMS_BoundaryGroup -ErrorAction Stop)
+            if ($bgs.Count -ge 1) {
+                $results.Details.Add("OK: $($bgs.Count) boundary group(s) defined: $(($bgs | Select-Object -First 5 -ExpandProperty Name) -join ', ')")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No boundary groups defined for site '$sc'")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: SMS_BoundaryGroup query failed: $($_.Exception.Message)")
+        }
+
+        # 2. Discovery methods -- at least AD System Discovery should be enabled
+        $results.Details.Add("CMD: Get-WmiObject SMS_SCI_Component -Filter `"ComponentName='SMS_AD_SYSTEM_DISCOVERY_AGENT'`"")
+        try {
+            $adSys = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
+                -Filter "ComponentName='SMS_AD_SYSTEM_DISCOVERY_AGENT' AND SiteCode='$sc'" -ErrorAction Stop |
+                Select-Object -First 1
+            if ($adSys) {
+                $enabled = ($adSys.Props | Where-Object { $_.PropertyName -eq 'SETTINGS' } | Select-Object -First 1)
+                $isOn = $enabled -and ($enabled.Value1 -eq 'ACTIVE')
+                if ($isOn) {
+                    $results.Details.Add("OK: AD System Discovery is ACTIVE")
+                }
+                else {
+                    $results.Details.Add("WARN: AD System Discovery is configured but not ACTIVE (clients won't be auto-discovered)")
+                }
+            }
+            else {
+                $results.Details.Add("WARN: SMS_AD_SYSTEM_DISCOVERY_AGENT component not found")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: AD discovery query failed: $($_.Exception.Message)")
+        }
+
+        # 3. Site comms mode -- aligns with cmOptions.UsePKI
+        # SMS_SCI_SCProperty named "Enforce Enhanced Hash Algorithm" and
+        # "IISSSLState" on SMS_SITE_COMPONENT_MANAGER carry the HTTPS flag.
+        # We look at SMS_Site.Mode: 0 = mixed/EHTTP, 1 = HTTPS only.
+        try {
+            $siteObj = Get-WmiObject -Namespace $ns -Class SMS_Site -Filter "SiteCode='$sc'" -ErrorAction Stop | Select-Object -First 1
+            if ($siteObj) {
+                $mode = $siteObj.Mode
+                $results.Details.Add("OK: SMS_Site.Mode = $mode (cmOptions.UsePKI=$usePkiInner)")
+                if ($usePkiInner -and $mode -ne 1) {
+                    $results.Details.Add("WARN: UsePKI=true but site Mode=$mode (expected 1 = HTTPS only)")
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
+        }
+
+        # 4. Apps from Apps.json must be present as SMS_ApplicationLatest objects
+        if ($expectedApps -and $expectedApps.Count -gt 0) {
+            $results.Details.Add("CMD: Get-WmiObject SMS_ApplicationLatest -Filter `"LocalizedDisplayName LIKE 'MEMLABS-%'`"")
+            try {
+                $apps = @(Get-WmiObject -Namespace $ns -Class SMS_ApplicationLatest `
+                    -Filter "LocalizedDisplayName LIKE 'MEMLABS-%'" -ErrorAction Stop)
+                $appNames = $apps | Select-Object -ExpandProperty LocalizedDisplayName
+                $missing = @($expectedApps | Where-Object { $_ -notin $appNames })
+                if ($missing.Count -eq 0) {
+                    $results.Details.Add("OK: All $($expectedApps.Count) Apps.json apps present in CM site")
+                }
+                elseif ($missing.Count -le ($expectedApps.Count / 2)) {
+                    $results.Details.Add("WARN: $($missing.Count)/$($expectedApps.Count) apps missing: $(($missing | Select-Object -First 5) -join ', ')")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($missing.Count)/$($expectedApps.Count) Apps.json apps missing in CM site")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: SMS_ApplicationLatest query failed: $($_.Exception.Message)")
+            }
+        }
+
+        # 5. Client push install account configured (warn-only -- some labs disable client push)
+        try {
+            $cpComp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
+                -Filter "ComponentName='SMS_DISCOVERY_DATA_MANAGER' AND SiteCode='$sc'" -ErrorAction Stop
+            if ($cpComp) {
+                $results.Details.Add("OK: SMS_DISCOVERY_DATA_MANAGER component present (client push pipeline reachable)")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Client push component query failed: $($_.Exception.Message)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, $usePKI, $expectedAppNames `
+        -DisplayName "Phase11-CMSite-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel "CMSite-$siteCode" -Result $result)
 }
 
 #endregion

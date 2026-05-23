@@ -323,7 +323,13 @@ function Start-PhaseJobs {
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {
 
             if ($Phase -eq 11) {
-                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient", "DomainMember", "WorkgroupMember", "InternetClient")) {
+                # Phase 11 = functional validation. Skip only roles that have no
+                # PSDirect-reachable validation surface (OSDClient is the boot
+                # task-sequence image, Linux/AADClient aren't in the domain so
+                # Invoke-VmCommand's domain-cred path can't reach them reliably).
+                # Client roles (DomainMember/WorkgroupMember/InternetClient) DO
+                # run -- see Test-DomainMemberFunctionality et al.
+                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
                     continue
                 }
                 $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
