@@ -2,6 +2,67 @@
 ### Config Functions ###
 ########################
 
+# Returns the top-level site server VM from a config (CAS preferred, else standalone
+# Primary, i.e. a Primary with no parentSiteCode). Returns $null when no top-level
+# site server is present. Used by genconfig, summary, deploy rehydration, and
+# validation to locate the canonical owner of the cmOptions block.
+function Get-TopLevelSiteServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return $null }
+    $cas = $Config.virtualMachines | Where-Object {
+        $_.role -eq 'CAS' -and -not $_.parentSiteCode
+    } | Select-Object -First 1
+    if ($cas) { return $cas }
+    return $Config.virtualMachines | Where-Object {
+        $_.role -eq 'Primary' -and -not $_.parentSiteCode
+    } | Select-Object -First 1
+}
+
+# Returns the cmOptions block for a config, whether it lives at the root
+# (legacy/in-flight) or on the top-level site server VM (post-migration shape).
+# Returns $null if neither location has it. Read-only convenience for genconfig
+# and other load-time consumers; deploy-time consumers should keep reading
+# $deployConfig.cmOptions which New-DeployConfig rehydrates.
+function Get-ConfigCmOptions {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if ($null -ne $Config.cmOptions) { return $Config.cmOptions }
+    $topLevel = Get-TopLevelSiteServer -Config $Config
+    if ($topLevel -and $topLevel.cmOptions) { return $topLevel.cmOptions }
+    return $null
+}
+
+# Migrates a config's root-level cmOptions onto the top-level site server VM.
+# Idempotent: a no-op when root cmOptions is already absent. Called from
+# Get-UserConfiguration after all existing root-level reads have completed.
+# When no top-level site server exists, the orphan root block is dropped
+# (no consumer can use it).
+function Move-CmOptionsToTopLevelSiteServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if ($null -eq $Config.cmOptions) { return }
+    $topLevel = Get-TopLevelSiteServer -Config $Config
+    if ($topLevel) {
+        # Deep-clone via JSON round-trip so subsequent mutations of either copy
+        # don't bleed across.
+        if ($null -eq $topLevel.cmOptions) {
+            $clone = $Config.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+            $topLevel | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+        }
+    }
+    $Config.PSObject.Properties.Remove('cmOptions')
+}
+
 function Get-UserConfiguration {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
@@ -286,8 +347,9 @@ function Get-UserConfiguration {
             }
         }
 
-
-
+        # Migrate root-level cmOptions onto the top-level site server VM.
+        # Runs last so the legacy-shape reads above still see $config.cmOptions.
+        Move-CmOptionsToTopLevelSiteServer -Config $config
 
         $return.Loaded = $true
         $return.Config = $config
@@ -298,7 +360,6 @@ function Get-UserConfiguration {
         Write-Log "Get-UserConfiguration Trace: $($_.ScriptStackTrace)" -LogOnly
         return $return
     }
-
 }
 
 function Get-FilesForConfiguration {
@@ -335,10 +396,11 @@ function Get-FilesForConfiguration {
 
     # Get unique items from config
     if ($config) {
+        $cfgCmOptions = Get-ConfigCmOptions -Config $config
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
-        $cmVersionsToGet = $config.cmOptions.version | Select-Object -Unique
-        if ($config.cmOptions.PrePopulateObjects) {
+        $cmVersionsToGet = $cfgCmOptions.version | Select-Object -Unique
+        if ($cfgCmOptions.PrePopulateObjects) {
             $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
         }
     }
@@ -394,7 +456,7 @@ function Get-FilesForConfiguration {
     $siteServers = $null
     $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
 
-    if ($DownloadAll -or ($config.cmOptions.PrePopulateObjects -and $siteServers) ) {
+    if ($DownloadAll -or ($cfgCmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
         $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
@@ -460,6 +522,16 @@ function New-DeployConfig {
     )
     try {
 
+        # Rehydrate root-level cmOptions from the top-level site server VM if needed,
+        # so downstream deploy/DSC/validation/phases consumers can keep reading
+        # $deployConfig.cmOptions without change. Per-VM is the canonical storage;
+        # root is a derived read-only mirror within this DeployConfig snapshot.
+        if ($null -eq $configObject.cmOptions) {
+            $rootCmOptions = Get-ConfigCmOptions -Config $configObject
+            if ($rootCmOptions) {
+                $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootCmOptions -Force
+            }
+        }
 
         if ($null -ne ($configObject.vmOptions.domainName)) { 
             if (($configObject.vmOptions.domainName) -eq "AUTO") {

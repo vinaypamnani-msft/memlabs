@@ -762,7 +762,7 @@ function Select-MainMenu {
                 Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" -HelpFunction "Get-GenericHelp"
             }
             "c" { 
-                Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" -HelpFunction "Get-GenericHelp"
+                Invoke-CMOptionsMenu
             }
             "p" {
                 Select-PKIOptions
@@ -846,9 +846,30 @@ function Build-MainMenuOptions {
     $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
     $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
-    if ($Global:Config.cmOptions) {
-        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
-        $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
+    # Top-level site servers (CAS, or standalone Primary) own cmOptions per-VM.
+    # Display rules:
+    #   1 top-level -> summary inline (uses that VM's cmOptions block).
+    #   2+         -> literal "<Multiple Options>" (use the C picker to drill in).
+    #   0 + root cmOptions present -> legacy "expand existing domain" path, root
+    #                                  block stays editable until a top-level VM
+    #                                  is added to the config.
+    #   0 + no root -> hide the row.
+    $topLevelSiteServers = @($Global:Config.virtualMachines | Where-Object {
+        $_.role -in 'CAS', 'Primary' -and -not $_.parentSiteCode
+    })
+    $rootCmOptions = $Global:Config.cmOptions
+    if ($topLevelSiteServers.Count -ge 1 -or $rootCmOptions) {
+        if ($topLevelSiteServers.Count -eq 1) {
+            $cmSummary = get-CMOptionsSummary -CmOptions $topLevelSiteServers[0].cmOptions
+        }
+        elseif ($topLevelSiteServers.Count -eq 0) {
+            $cmSummary = get-CMOptionsSummary -CmOptions $rootCmOptions
+        }
+        else {
+            $cmSummary = "<Multiple Options>"
+        }
+        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "HC" = "Change Configuration Manager Options on the top-level site server (Version, licensing, PKI, BitLocker, etc.)" }
     }
     $preOptions += [ordered]@{ "P" = "PKI Settings      `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
@@ -924,17 +945,18 @@ function Save-Config {
 
 
     $file = "$($config.vmOptions.domainName)"
+    $cfgCmOptions = Get-ConfigCmOptions -Config $config
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD-"
     }
-    elseif (-not $config.cmOptions) {
+    elseif (-not $cfgCmOptions) {
         $file += "-NOSCCM-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }) {
-        $file += "-CAS-$($config.cmOptions.version)-"
+        $file += "-CAS-$($cfgCmOptions.version)-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }) {
-        $file += "-PRI-$($config.cmOptions.version)-"
+        $file += "-PRI-$($cfgCmOptions.version)-"
     }
 
     $file += "$($config.virtualMachines.Count)VMs"

@@ -105,8 +105,17 @@ function Select-Options {
             $deletable = $false            
             #$padding = 27 - ($i.ToString().Length)
             $color = $null
-            $TextToDisplay = Get-AdditionalInformation -item $item -data $value
-            $color = Get-AdditionalInformationColor -item $item -data $value
+            if ($item -eq "cmOptions") {
+                # cmOptions on a top-level site server VM: render as the same
+                # colored summary the main menu shows, and route the handler
+                # into the dedicated sub-menu (see switch below).
+                $TextToDisplay = get-CMOptionsSummary -CmOptions $value
+                $color = $Global:Common.Colors.GenConfigNonDefault
+            }
+            else {
+                $TextToDisplay = Get-AdditionalInformation -item $item -data $value
+                $color = Get-AdditionalInformationColor -item $item -data $value
+            }
             $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
             $itemMap[$i] = $item
@@ -177,6 +186,12 @@ function Select-Options {
 
 
         switch ($name) {
+            "cmOptions" {
+                # Dive into this VM's cmOptions sub-object via the dedicated helper
+                # (lazy-creates defaults if missing; exposes Version/Install/etc).
+                Invoke-CMOptionsMenuForVM -VM $property
+                continue MainLoop
+            }
             "operatingSystem" {
                 Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                 if ($property.role -eq "DomainMember") {

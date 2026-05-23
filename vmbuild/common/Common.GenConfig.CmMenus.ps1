@@ -2,6 +2,80 @@
 # Picker / menu helpers for ConfigMgr role, site code, SQL, OS, WSUS,
 # forest trust, and CM version selection used throughout genconfig.ps1.
 
+# Main-menu "C" entry point: routes the user into a per-VM cmOptions sub-menu.
+# Behavior:
+#   0 top-level site servers  -> no-op (handler shouldn't have been shown).
+#   1 top-level site server   -> dive straight into that VM's cmOptions sub-menu.
+#   2+ top-level site servers -> show a picker, then dive in.
+# Also reachable from a top-level site server VM's properties menu via the
+# "cmOptions" row (see Select-Options in Common.GenConfig.VMList.ps1).
+function Invoke-CMOptionsMenu {
+    [CmdletBinding()]
+    param ()
+    $topLevels = @($Global:Config.virtualMachines | Where-Object {
+        $_.role -in 'CAS', 'Primary' -and -not $_.parentSiteCode
+    })
+    if ($topLevels.Count -eq 0) {
+        # Legacy "expand existing domain" fallback: cmOptions still at root
+        # because the deployed top-level site server isn't in this config.
+        if ($Global:Config.cmOptions) {
+            Select-Options -MenuName "Global Configuration Manager Menu" `
+                -Rootproperty $Global:Config -PropertyName cmOptions `
+                -prompt "Select ConfigMgr Property to modify" `
+                -HelpFunction "Get-GenericHelp"
+        }
+        return
+    }
+    if ($topLevels.Count -eq 1) {
+        Invoke-CMOptionsMenuForVM -VM $topLevels[0]
+        return
+    }
+    $options = $topLevels | ForEach-Object {
+        "$($_.vmName)  [$($_.role) $($_.siteCode)]"
+    }
+    $choice = Get-Menu2 -MenuName "Pick Top-Level Site Server" `
+        -Prompt "Select site server whose ConfigMgr Options to modify" `
+        -OptionArray $options -Test:$false -split
+    if (-not $choice -or $choice -eq "ESCAPE") { return }
+    $picked = $topLevels | Where-Object {
+        "$($_.vmName)  [$($_.role) $($_.siteCode)]" -eq $choice
+    } | Select-Object -First 1
+    if ($picked) { Invoke-CMOptionsMenuForVM -VM $picked }
+}
+
+# Drills into the cmOptions sub-object of a specific (top-level) site server VM.
+# Also exposes the VM-local siteCode and cmInstallDir as additional menu items
+# so they can be edited from the same screen (each re-enters Select-Options on
+# the VM root for that single property, preserving existing validation).
+# Lazy-creates a default cmOptions block on the VM if one is missing (e.g. an
+# old config that lost its root cmOptions migration).
+function Invoke-CMOptionsMenuForVM {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VM
+    )
+    if ($null -eq $VM.cmOptions) {
+        $latestVersion = Get-CMLatestBaselineVersion
+        $defaults = [PSCustomObject]@{
+            Version                   = $latestVersion
+            Install                   = $true
+            PushClientToDomainMembers = $true
+            PrePopulateObjects        = $true
+            EVALVersion               = $false
+            OfflineSCP                = $false
+            OfflineSUP                = $false
+            UsePKI                    = $false
+            EnableBLM                 = $false
+        }
+        $VM | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $defaults -Force
+    }
+    Select-Options -MenuName "ConfigMgr Options for $($VM.vmName)" `
+        -Rootproperty $VM -PropertyName cmOptions `
+        -prompt "Select ConfigMgr Property to modify" `
+        -HelpFunction "Get-GenericHelp"
+}
+
 Function Get-SupportedOperatingSystemsForRole {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "role")]
@@ -1042,8 +1116,9 @@ Function Get-CMVersionMenu {
 
     $valid = $false
     $noteColor = $Global:Common.Colors.GenConfigTip
+    $effectiveCmOptions = Get-ConfigCmOptions -Config $Global:Config
 
-    if ($Global:Config.cmOptions.OfflineSCP) {   
+    if ($effectiveCmOptions.OfflineSCP) {   
         write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
         write-host2 "SCP is in OFFLINE mode. Only baseline versions will be shown"
     }
@@ -1064,7 +1139,7 @@ Function Get-CMVersionMenu {
 
             default {
                 $baselineVersion = (Get-CMBaselineVersion -CMVersion $cmVersion).baselineVersion
-                if ($Global:Config.cmOptions.OfflineSCP) {                    
+                if ($effectiveCmOptions.OfflineSCP) {                    
                     if ($baselineVersion -eq $cmVersion) {
                         $cmVersions += "$cmVersion (baseline)"
                     }

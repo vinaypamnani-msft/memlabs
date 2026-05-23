@@ -36,8 +36,22 @@
 }
 
 function get-CMOptionsSummary {
+    [CmdletBinding()]
+    param (
+        # Optional: render summary for an arbitrary cmOptions block (e.g. the one
+        # attached to a specific site server VM). When omitted, falls back to
+        # $Global:Config.cmOptions for legacy callers.
+        [Parameter(Mandatory = $false)]
+        [object] $CmOptions
+    )
     $fixedConfig = $Global:Config.virtualMachines | Where-Object { -not $_.hidden }
-    $options = $Global:Config.cmOptions
+    if ($null -eq $CmOptions) {
+        $options = $Global:Config.cmOptions
+    }
+    else {
+        $options = $CmOptions
+    }
+    if ($null -eq $options) { return "" }
 
     # Version (red if tech-preview, otherwise green). Use baseline number when SCP is Offline.
     $verText = $options.version
@@ -241,6 +255,11 @@ function Get-SortedProperties {
     if ($members.Name -contains "siteName") {
         $sorted += "SiteName"
     }
+    if ($members.Name -contains "cmOptions") {
+        # Per-VM cmOptions on top-level site servers (post-migration shape).
+        # Rendered as a colored summary; selecting it dives into the sub-menu.
+        $sorted += "cmOptions"
+    }
     if ($members.Name -contains "remoteContentLibVM") {
         $sorted += "RemoteContentLibVM"
     }
@@ -359,6 +378,7 @@ function Get-SortedProperties {
         "pushClientToDomainMembers" {}
         "PrePopulateObjects" {}
         "EnableBLM" {}
+        "cmOptions" {}
 
 
         Default { $sorted += $_ }

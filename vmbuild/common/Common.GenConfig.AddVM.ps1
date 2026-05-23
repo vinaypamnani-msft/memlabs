@@ -638,7 +638,15 @@ function Add-NewVMForRole {
     $ConfigToModify.virtualMachines += $virtualMachine
 
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
-        if ($null -eq $ConfigToModify.cmOptions) {
+        # Post-migration shape: cmOptions live on the top-level site server VM
+        # (CAS, or standalone Primary). Attach a default block to the newly
+        # added VM only when it is itself the top-level and no other top-level
+        # already owns a cmOptions block. Child Primary under a CAS, SiteSystem,
+        # PassiveSite, and Secondary all inherit at deploy time via
+        # New-DeployConfig rehydration and never own their own block.
+        $existingTopLevel = Get-TopLevelSiteServer -Config $ConfigToModify
+        $isTopLevelAdd = ($role -in 'CAS', 'Primary') -and (-not $virtualMachine.parentSiteCode)
+        if ($isTopLevelAdd -and (-not $existingTopLevel.cmOptions)) {
             $latestVersion = Get-CMLatestBaselineVersion
             $newCmOptions = [PSCustomObject]@{
                 Version                   = $latestVersion
@@ -652,7 +660,7 @@ function Add-NewVMForRole {
                 UsePKI                    = $false
                 EnableBLM                 = $false
             }
-            $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
         }
     }
 
