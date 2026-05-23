@@ -156,230 +156,96 @@ function Get-SortedProperties {
         [object] $property
     )
 
-    $Sorted = @()
-    $members = $property | Get-Member -MemberType NoteProperty
-    if ($members.Name -contains "vmName") {
-        $sorted += "vmName"
-    }
-    if ($members.Name -contains "DeploymentType") {
-        $sorted += "DeploymentType"
-    }
-    if ($members.Name -contains "domainName") {
-        $sorted += "DomainName"
-    }
-    if ($members.Name -contains "CMVersion") {
-        $sorted += "CMVersion"
-    }
-    if ($members.Name -contains "prefix") {
-        $sorted += "Prefix"
-    }
-    if ($members.Name -contains "network") {
-        $sorted += "Network"
-    }
-    if ($members.Name -contains "DefaultServerOS") {
-        $sorted += "DefaultServerOS"
-    }
-    if ($members.Name -contains "DefaultClientOS") {
-        $sorted += "DefaultClientOS"
-    }
-    if ($members.Name -contains "DefaultSqlVersion") {
-        $sorted += "DefaultSqlVersion"
-    }
-    if ($members.Name -contains "UseDynamicMemory") {
-        $sorted += "UseDynamicMemory"
-    }
-    if ($members.Name -contains "IncludeClients") {
-        $sorted += "IncludeClients"
-    }
-    if ($members.Name -contains "IncludeSSMSOnNONSQL") {
-        $sorted += "IncludeSSMSOnNONSQL"
-    }
-    if ($members.Name -contains "adminName") {
-        $sorted += "AdminName"
-    }
-    if ($members.Name -contains "basePath") {
-        $sorted += "BasePath"
-    }
-    if ($members.Name -contains "domainUser") {
-        $sorted += "DomainUser"
-    }
-    if ($members.Name -contains "role") {
-        $sorted += "Role"
-    }
-    if ($members.Name -contains "memory") {
-        $sorted += "Memory"
-    }
-    if ($members.Name -contains "dynamicMinRam") {
-        $sorted += "DynamicMinRam"
-    }
-    if ($members.Name -contains "virtualProcs") {
-        $sorted += "VirtualProcs"
-    }
-    if ($members.Name -contains "operatingSystem") {
-        $sorted += "OperatingSystem"
-    }
-    if ($members.Name -contains "sqlVersion") {
-        $sorted += "sqlVersion"
-    }
-    if ($members.Name -contains "sqlInstanceName") {
-        $sorted += "sqlInstanceName"
-    }
-    if ($members.Name -contains "sqlInstanceDir") {
-        $sorted += "sqlInstanceDir"
-    }
-    if ($members.Name -contains "sqlPort") {
-        $sorted += "sqlPort"
-    }
-    if ($members.Name -contains "SqlAgentAccount") {
-        $sorted += "SqlAgentAccount"
-    }
-    if ($members.Name -contains "SqlServiceAccount") {
-        $sorted += "SqlServiceAccount"
-    }    
-    if ($members.Name -contains "remoteSQLVM") {
-        $sorted += "RemoteSQLVM"
-    }
-    if ($members.Name -contains "cmInstallDir") {
-        $sorted += "cmInstallDir"
-    }
-    if ($members.Name -contains "parentSiteCode") {
-        $sorted += "ParentSiteCode"
-    }
-    if ($members.Name -contains "siteCode") {
-        $sorted += "SiteCode"
-    }
-    if ($members.Name -contains "siteName") {
-        $sorted += "SiteName"
-    }
-    if ($members.Name -contains "cmOptions") {
+    # Single source of truth for the menu render order.
+    #   Key   = NoteProperty name as it appears on the object.
+    #   Value = label emitted to the caller (some are case-adjusted for display).
+    # Properties not present on the object are silently skipped. Properties
+    # present but not in this list fall through to the catch-all at the end
+    # (unless they're in $hidden).
+    $order = [ordered]@{
+        'vmName'              = 'vmName'
+        'DeploymentType'      = 'DeploymentType'
+        'domainName'          = 'DomainName'
+        'CMVersion'           = 'CMVersion'
+        'prefix'              = 'Prefix'
+        'network'             = 'Network'
+        'DefaultServerOS'     = 'DefaultServerOS'
+        'DefaultClientOS'     = 'DefaultClientOS'
+        'DefaultSqlVersion'   = 'DefaultSqlVersion'
+        'UseDynamicMemory'    = 'UseDynamicMemory'
+        'IncludeClients'      = 'IncludeClients'
+        'IncludeSSMSOnNONSQL' = 'IncludeSSMSOnNONSQL'
+        'adminName'           = 'AdminName'
+        'basePath'            = 'BasePath'
+        'domainUser'          = 'DomainUser'
+        'role'                = 'Role'
+        'memory'              = 'Memory'
+        'dynamicMinRam'       = 'DynamicMinRam'
+        'virtualProcs'        = 'VirtualProcs'
+        'operatingSystem'     = 'OperatingSystem'
+        'sqlVersion'          = 'sqlVersion'
+        'sqlInstanceName'     = 'sqlInstanceName'
+        'sqlInstanceDir'      = 'sqlInstanceDir'
+        'sqlPort'             = 'sqlPort'
+        'SqlAgentAccount'     = 'SqlAgentAccount'
+        'SqlServiceAccount'   = 'SqlServiceAccount'
+        'remoteSQLVM'         = 'RemoteSQLVM'
+        'cmInstallDir'        = 'cmInstallDir'
+        'parentSiteCode'      = 'ParentSiteCode'
+        'siteCode'            = 'SiteCode'
+        'siteName'            = 'SiteName'
         # Per-VM cmOptions on top-level site servers (post-migration shape).
         # Rendered as a colored summary; selecting it dives into the sub-menu.
-        $sorted += "cmOptions"
-    }
-    if ($members.Name -contains "remoteContentLibVM") {
-        $sorted += "RemoteContentLibVM"
-    }
-    if ($members.Name -contains "tpmEnabled") {
-        $sorted += "tpmEnabled"
-    }
-    if ($members.Name -contains "BitLocker") {
-        $sorted += "BitLocker"
-    }
-    if ($members.Name -contains "InstallSSMS") {
-        $sorted += "InstallSSMS"
-    }
-    if ($members.Name -contains "pushClient") {
-        $sorted += "pushClient"
+        'cmOptions'           = 'cmOptions'
+        'remoteContentLibVM'  = 'RemoteContentLibVM'
+        'tpmEnabled'          = 'tpmEnabled'
+        'BitLocker'           = 'BitLocker'
+        'InstallSSMS'         = 'InstallSSMS'
+        'pushClient'          = 'pushClient'
+        'additionalDisks'     = 'AdditionalDisks'
+        'installDP'           = 'InstallDP'
+        'enablePullDP'        = 'EnablePullDP'
+        'installMP'           = 'InstallMP'
+        'installRP'           = 'InstallRP'
+        'installSUP'          = 'InstallSUP'
+        'installSMSProv'      = 'InstallSMSProv'
+        'Version'             = 'Version'
+        'Install'             = 'Install'
+        'EVALVersion'         = 'EVALVersion'
+        'UsePKI'              = 'UsePKI'
+        'OfflineSCP'          = 'OfflineSCP'
+        'OfflineSUP'          = 'OfflineSUP'
+        'PrePopulateObjects'  = 'PrePopulateObjects'
+        'EnableBLM'           = 'EnableBLM'
     }
 
-    if ($members.Name -contains "additionalDisks") {
-        $sorted += "AdditionalDisks"
-    }
-    if ($members.Name -contains "installDP") {
-        $sorted += "InstallDP"
-    }
-    if ($members.Name -contains "enablePullDP") {
-        $sorted += "EnablePullDP"
-    }
-    if ($members.Name -contains "installMP") {
-        $sorted += "InstallMP"
-    }
-    if ($members.Name -contains "installRP") {
-        $sorted += "InstallRP"
-    }
-    if ($members.Name -contains "installSUP") {
-        $sorted += "InstallSUP"
-    }
-    if ($members.Name -contains "installSMSProv") {
-        $sorted += "InstallSMSProv"
-    }
-    if ($members.Name -contains "Version") {
-        $sorted += "Version"
-    }
-    if ($members.Name -contains "Install") {
-        $sorted += "Install"
-    }
-    if ($members.Name -contains "EVALVersion") {
-        $sorted += "EVALVersion"
-    }
-    if ($members.Name -contains "UsePKI") {
-        $sorted += "UsePKI"
-    }
-    if ($members.Name -contains "OfflineSCP") {
-        $sorted += "OfflineSCP"
-    }
-    if ($members.Name -contains "OfflineSUP") {
-        $sorted += "OfflineSUP"
-    }
-    if ($members.Name -contains "PrePopulateObjects") {
-        $sorted += "PrePopulateObjects"
-    }
-    if ($members.Name -contains "EnableBLM") {
-        $sorted += "EnableBLM"
-    }
-  
-    switch ($members.Name) {
-        "vmName" {  }
-        "role" {  }
-        "memory" { }
-        "dynamicMinRam" { }
-        "domainUser" {}
-        "virtualProcs" { }
-        "operatingSystem" {  }
-        "siteCode" { }
-        "siteName" { }
-        "parentSiteCode" { }
-        "sqlVersion" { }
-        "sqlInstanceName" {  }
-        "sqlInstanceDir" { }
-        "sqlPort" { }
-        "SqlAgentAccount" { }
-        "SqlServiceAccount" { }
-        "additionalDisks" { }
-        "cmInstallDir" { }
-        "DeploymentType" { }
-        "domainName" { }
-        "prefix" { }
-        "CMVersion" { }
-        "network" { }
-        "DefaultServerOS" { }
-        "DefaultClientOS" { }
-        "DefaultSqlVersion" { }
-        "UseDynamicMemory" {}
-        "IncludeClients" { }
-        "IncludeSSMSOnNONSQL" { }  
-        "adminName" { }
-        "basePath" { }
-        "remoteSQLVM" {}
-        "remoteContentLibVM" {}
-        "tpmEnabled" {}
-        "BitLocker" {}
-        "installSSMS" {}
-        "installCA" {}
-        "UseOfflineRoot" {}
-        "SubordinateCA" {}
-        "_autoAddedByOfflineRootCA" {}
-        "enablePullDP" {}
-        "installSUP" {}
-        "installDP" {}
-        "installMP" {}
-        "installRP" {}
-        "installSMSProv" {}
-        "version" {}
-        "install" {}
-        "EVALVersion" {}
-        "UsePKI" {}
-        "OfflineSCP" {}
-        "OfflineSUP" {}
-        "pushClientToDomainMembers" {}
-        "pushClient" {}
-        "PrePopulateObjects" {}
-        "EnableBLM" {}
-        "cmOptions" {}
+    # Properties that may exist on the object but must never be surfaced in
+    # the menu (legacy, internal flags, or rendered elsewhere).
+    $hidden = @(
+        'installCA'
+        'UseOfflineRoot'
+        'SubordinateCA'
+        '_autoAddedByOfflineRootCA'
+        'pushClientToDomainMembers'
+    )
 
+    $memberNames = @($property | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+    $sorted = @()
 
-        Default { $sorted += $_ }
+    foreach ($key in $order.Keys) {
+        if ($memberNames -contains $key) {
+            $sorted += $order[$key]
+        }
     }
+
+    # Catch-all: anything present on the object but not in $order or $hidden
+    # gets appended at the end so new properties surface without code changes.
+    foreach ($name in $memberNames) {
+        if ($order.Contains($name)) { continue }
+        if ($hidden -contains $name) { continue }
+        $sorted += $name
+    }
+
     return $sorted
 }
 
