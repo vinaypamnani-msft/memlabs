@@ -448,12 +448,14 @@ function Start-VMFixesBatched {
     foreach ($key in $sortedKeys) {
         $groupFixes = $groups[$key]
 
-        # Build fix definitions array for transport into the VM
+        # Build fix definitions array for transport into the VM.
+        # We wrap each fix body in the standard transcript + structured-return wrapper.
         $fixDefs = @()
         foreach ($fix in $groupFixes) {
+            $wrapped = New-VMFixScriptBlock -FixName $fix.FixName -Body $fix.ScriptBlock
             $def = @{
                 Name   = $fix.FixName
-                Script = $fix.ScriptBlock.ToString()
+                Script = $wrapped.ToString()
             }
             if ($fix.ArgumentList) {
                 $def.Args = $fix.ArgumentList
@@ -467,30 +469,58 @@ function Start-VMFixesBatched {
             $fixDefsJson = "[$fixDefsJson]"
         }
 
-        # The batch runner: executes all fixes sequentially inside the VM, fail-fast
+        # The batch runner: executes all wrapped fixes sequentially inside the VM,
+        # collects their structured results, and returns them as JSON. Fail-fast on
+        # the first failure (subsequent fixes assume prior ones succeeded).
         $batchRunner = {
             param($json)
             $fixDefs = $json | ConvertFrom-Json
             $results = @()
             foreach ($def in $fixDefs) {
                 $sb = [scriptblock]::Create($def.Script)
+                $r = $null
                 try {
                     if ($def.Args) {
-                        # Use splatting to unpack array as individual positional arguments
                         $fixArgs = @($def.Args)
                         $r = & $sb @fixArgs
                     }
                     else {
                         $r = & $sb
                     }
-                    $results += [pscustomobject]@{ Name = $def.Name; Success = [bool]$r }
                 }
                 catch {
-                    $results += [pscustomobject]@{ Name = $def.Name; Success = $false }
+                    # The wrapper should normally catch its own exceptions; this
+                    # catches only catastrophic failures (e.g. wrapper compilation).
+                    $r = [pscustomobject]@{
+                        FixName       = $def.Name
+                        Success       = $false
+                        Message       = $null
+                        Errors        = @()
+                        ExceptionInfo = "$($_.Exception.Message)`n$($_.ScriptStackTrace)"
+                        ComputerName  = $env:COMPUTERNAME
+                        DurationSec   = 0
+                        IsStructured  = $true
+                    }
+                }
+                # Normalize whatever came back into a structured record
+                if ($r -is [pscustomobject] -and ($r.PSObject.Properties.Name -contains 'IsStructured')) {
+                    $results += $r
+                }
+                else {
+                    $results += [pscustomobject]@{
+                        FixName       = $def.Name
+                        Success       = [bool]$r
+                        Message       = $null
+                        Errors        = @()
+                        ExceptionInfo = $null
+                        ComputerName  = $env:COMPUTERNAME
+                        DurationSec   = 0
+                        IsStructured  = $true
+                    }
                 }
                 if (-not $results[-1].Success) { break }
             }
-            return ($results | ConvertTo-Json -Compress)
+            return ($results | ConvertTo-Json -Depth 4 -Compress)
         }
 
         # Get session for this group
@@ -538,15 +568,36 @@ function Start-VMFixesBatched {
             return $return
         }
 
+        $accountForTranscript = if ($key -eq "__default__") { $null } else { $key }
+
         foreach ($r in $results) {
-            $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name }
+            $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name -or $_.FixName -eq $r.FixName } | Select-Object -First 1
+            $fixDisplayName = if ($matchingFix) { $matchingFix.FixName } else { $r.FixName }
+
+            # Log structured fields
+            if ($r.PSObject.Properties.Name -contains 'Message' -and $r.Message) {
+                Write-Log "$VMName`: [$fixDisplayName] $($r.Message)"
+            }
+            if ($r.PSObject.Properties.Name -contains 'Errors' -and $r.Errors -and @($r.Errors).Count -gt 0) {
+                foreach ($e in @($r.Errors)) { Write-Log "$VMName`: [$fixDisplayName] ERROR: $e" -Warning }
+            }
+            if ($r.PSObject.Properties.Name -contains 'ExceptionInfo' -and $r.ExceptionInfo) {
+                Write-Log "$VMName`: [$fixDisplayName] EXCEPTION on VM: $($r.ExceptionInfo)" -Warning
+            }
+            if ($r.PSObject.Properties.Name -contains 'DurationSec') {
+                Write-Log -LogOnly "$VMName`: [$fixDisplayName] Success=$($r.Success) DurationSec=$($r.DurationSec)"
+            }
+
+            # Always pull transcript (LogOnly) so failures + slow fixes are diagnosable
+            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript
+
             if ($r.Success) {
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$($r.Name)' ($($matchingFix.FixVersion)) applied."
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
                 Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion
                 $return.AppliedCount++
             }
             else {
-                Write-Log "$VMName`: Fix '$($r.Name)' ($($matchingFix.FixVersion)) failed in batch." -Warning
+                Write-Log "$VMName`: Fix '$fixDisplayName' ($($matchingFix.FixVersion)) failed in batch." -Warning
                 $resetVersion = [int]($matchingFix.FixVersion) - 1
                 Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
                 return $return
@@ -557,6 +608,8 @@ function Start-VMFixesBatched {
         if ($results.Count -lt $groupFixes.Count) {
             $failedFix = $groupFixes[$results.Count]
             Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
+            # Pull transcript for the fix that we suspect crashed mid-execution
+            Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
             $resetVersion = [int]($failedFix.FixVersion) - 1
             Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
             return $return
@@ -682,28 +735,49 @@ function Start-VMFix {
 
     start-sleep -Milliseconds 200
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
-    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError -CommandReturnsBool
-    if ($result.ScriptBlockFailed -or $result.ScriptBlockOutput -eq $false) {
+
+    # Wrap the fix body so we get a structured return + transcript on the VM
+    $HashArguments.ScriptBlock = New-VMFixScriptBlock -FixName $fixName -Body $vmFix.ScriptBlock
+
+    # Drop -CommandReturnsBool: output is now a structured PSCustomObject.
+    $result = Invoke-VmCommand @HashArguments -ShowVMSessionError
+    $rawOut = $result.ScriptBlockOutput
+    $isStructured = ($null -ne $rawOut) -and ($rawOut -is [pscustomobject]) -and `
+                    ($rawOut.PSObject.Properties.Name -contains 'IsStructured')
+
+    $fixSucceeded = $false
+    if ($result.ScriptBlockFailed) {
+        # Transport/session failure - body never ran (or failed catastrophically).
+        $fixSucceeded = $false
+    }
+    elseif ($isStructured) {
+        $fixSucceeded = [bool]$rawOut.Success
+        if ($rawOut.Message) {
+            Write-Log "$VMName`: [$fixName] $($rawOut.Message)"
+        }
+        if ($rawOut.Errors -and $rawOut.Errors.Count -gt 0) {
+            foreach ($e in $rawOut.Errors) {
+                Write-Log "$VMName`: [$fixName] ERROR: $e" -Warning
+            }
+        }
+        if ($rawOut.ExceptionInfo) {
+            Write-Log "$VMName`: [$fixName] EXCEPTION on VM: $($rawOut.ExceptionInfo)" -Warning
+        }
+        Write-Log -LogOnly "$VMName`: [$fixName] Success=$($rawOut.Success) DurationSec=$($rawOut.DurationSec)"
+    }
+    else {
+        # Legacy bool return (back-compat)
+        $fixSucceeded = ($rawOut -eq $true)
+    }
+
+    # Always pull the on-VM transcript and dump it to the host log (LogOnly).
+    Get-VMFixTranscript -VMName $VMName -VMDomain $vmDomain -FixName $fixName -VMDomainAccount $vmFix.RunAsAccount
+
+    if (-not $fixSucceeded) {
         Write-Log "$VMName`: Fix '$fixName' ($fixVersion) failed to be applied." -Warning
-        Write-log "ScriptBlockFailed: $($result.ScriptBlockFailed) Output: $($result.ScriptBlockOutput)"
-        write-log -LogOnly "ScriptBlock: $($vmFix.ScriptBlock)"
+        Write-Log "ScriptBlockFailed: $($result.ScriptBlockFailed) Output: $(if ($isStructured) { 'Success=' + $rawOut.Success } else { $rawOut })"
+        Write-Log -LogOnly "ScriptBlock: $($vmFix.ScriptBlock)"
         $return.Success = $false
-        # if ($Common.VerboseEnabled) {
-        #     $pull_Transcript = {
-        #         $filePath = "C:\staging\Fix\$($using:fixName).txt"
-        #         if (Test-Path $filePath) {
-        #             Get-Content -Path $filePath -ErrorAction SilentlyContinue -Force
-        #         }
-        #     }
-        #     $HashArguments2 = @{
-        #         VmName       = $VMName
-        #         VMDomainName = $vmDomain
-        #         DisplayName  = "Pull-Fix-Transcript"
-        #         ScriptBlock  = $pull_Transcript
-        #     }
-        #     $result2 = Invoke-VmCommand @HashArguments2 -SuppressLog
-        #     if (-not $result2.ScriptBlockFailed) { $result2.ScriptBlockOutput | Out-Host }
-        # }
     }
     else {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
@@ -772,6 +846,150 @@ function Start-VMIfNotRunning {
     return $return
 }
 
+function New-VMFixScriptBlock {
+    <#
+    .SYNOPSIS
+        Wraps a fix body scriptblock with a standard transcript + structured-return
+        wrapper that runs on the VM.
+    .DESCRIPTION
+        The wrapper:
+          - Starts Start-Transcript to C:\staging\Fix\<FixName>.txt
+          - Exposes a Write-FixLog helper to the body (Info/Warning/Failure/Success)
+          - Runs the body in try/catch; captures exceptions
+          - Returns a PSCustomObject:
+              FixName, Success, Message, Errors[], ExceptionInfo, ComputerName,
+              StartedAt, DurationSec, IsStructured = $true
+        Body return value handling (back-compat):
+          - $null              -> Success = $true
+          - [bool]             -> Success = value
+          - PSCustomObject     -> If it has .Success, copy Success/Message/Errors
+          - other              -> Cast last item to bool
+        The body's own param(...) block is preserved; ArgumentList from
+        Invoke-VmCommand is forwarded into the body via $args.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$FixName,
+        [Parameter(Mandatory = $true)][scriptblock]$Body
+    )
+
+    $bodyText = $Body.ToString()
+    # Escape any backticks/$ in the FixName for safe embedding in a here-string.
+    $safeName = $FixName -replace "'", "''"
+
+    $wrapperText = @"
+# Auto-generated wrapper for fix '$safeName'
+`$__FixName = '$safeName'
+if (-not (Test-Path 'C:\staging\Fix')) {
+    New-Item -Path 'C:\staging\Fix' -ItemType Directory -Force | Out-Null
+}
+`$__transcriptPath = "C:\staging\Fix\`$__FixName.txt"
+`$__result = [pscustomobject]@{
+    FixName       = `$__FixName
+    Success       = `$false
+    Message       = `$null
+    Errors        = @()
+    ExceptionInfo = `$null
+    ComputerName  = `$env:COMPUTERNAME
+    StartedAt     = (Get-Date).ToString('o')
+    DurationSec   = 0
+    IsStructured  = `$true
+}
+`$__sw = [System.Diagnostics.Stopwatch]::StartNew()
+try { Start-Transcript -Path `$__transcriptPath -Force -ErrorAction Stop | Out-Null } catch { }
+try {
+    Write-Host "[`$__FixName] Starting on `$env:COMPUTERNAME at `$(Get-Date -Format 'u')"
+    function Write-FixLog {
+        [CmdletBinding()]
+        param(
+            [Parameter(ValueFromPipeline = `$true, Position = 0)][string]`$Message,
+            [ValidateSet('Info','Warning','Failure','Success')][string]`$Level = 'Info'
+        )
+        process {
+            `$ts = (Get-Date).ToString('HH:mm:ss.fff')
+            Write-Host "[`$ts][`$Level] `$Message"
+        }
+    }
+    # --- BEGIN FIX BODY ---
+    `$__bodyOut = & {
+$bodyText
+    } @args
+    # --- END FIX BODY ---
+    if (`$null -eq `$__bodyOut) {
+        `$__result.Success = `$true
+    }
+    elseif (`$__bodyOut -is [pscustomobject] -and (`$__bodyOut.PSObject.Properties.Name -contains 'Success')) {
+        `$__result.Success = [bool]`$__bodyOut.Success
+        if (`$__bodyOut.PSObject.Properties.Name -contains 'Message') { `$__result.Message = `$__bodyOut.Message }
+        if (`$__bodyOut.PSObject.Properties.Name -contains 'Errors')  { `$__result.Errors  = @(`$__bodyOut.Errors) }
+    }
+    else {
+        # Take last emitted value (back-compat with fixes that return `$true/`$false at the end)
+        `$__last = @(`$__bodyOut) | Select-Object -Last 1
+        `$__result.Success = [bool]`$__last
+    }
+}
+catch {
+    `$__result.Success = `$false
+    `$__result.ExceptionInfo = "`$(`$_.Exception.Message)``n`$(`$_.ScriptStackTrace)"
+    Write-Host "[`$__FixName] EXCEPTION: `$(`$_.Exception.Message)"
+    Write-Host "[`$__FixName] `$(`$_.ScriptStackTrace)"
+}
+finally {
+    `$__sw.Stop()
+    `$__result.DurationSec = [math]::Round(`$__sw.Elapsed.TotalSeconds, 2)
+    try { Stop-Transcript | Out-Null } catch { }
+}
+`$__result
+"@
+
+    return [scriptblock]::Create($wrapperText)
+}
+
+function Get-VMFixTranscript {
+    <#
+    .SYNOPSIS
+        Pulls the C:\staging\Fix\<FixName>.txt transcript from a VM and writes
+        each line to the host log with a TR/FixName prefix.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$VMDomain,
+        [Parameter(Mandatory = $true)][string]$FixName,
+        [string]$VMDomainAccount
+    )
+    $sb = {
+        param($name)
+        $p = "C:\staging\Fix\$name.txt"
+        if (Test-Path $p) { Get-Content -Path $p -ErrorAction SilentlyContinue }
+    }
+    $args = @{
+        VmName       = $VMName
+        VMDomainName = $VMDomain
+        ScriptBlock  = $sb
+        ArgumentList = @($FixName)
+        DisplayName  = "Pull transcript: $FixName"
+        SuppressLog  = $true
+    }
+    if ($VMDomainAccount) { $args.VmDomainAccount = $VMDomainAccount }
+    try {
+        $r = Invoke-VmCommand @args
+        if ($r -and $r.ScriptBlockOutput) {
+            Write-Log "$VMName`: ===== Transcript [$FixName] BEGIN =====" -LogOnly
+            foreach ($line in @($r.ScriptBlockOutput)) {
+                if ($null -ne $line -and "$line" -ne "") {
+                    Write-Log -LogOnly "$VMName`: [$FixName] $line"
+                }
+            }
+            Write-Log "$VMName`: ===== Transcript [$FixName] END =====" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $_" -LogOnly -Warning
+    }
+}
+
 function Get-VMFixes {
     [CmdletBinding()]
     param (
@@ -797,31 +1015,33 @@ function Get-VMFixes {
 
     $Fix_DomainAccount = {
         param ($accountName)
-        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        $transcriptPath = "C:\staging\Fix\Fix-DomainAccounts.txt"
-        Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-        $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName)
-        $accountsToUpdate = $accountsToUpdate | Select-Object -Unique
+        $accountsToUpdate = @("vmbuildadmin", "administrator", "cm_svc", $accountName) | Select-Object -Unique
         $accountsUpdated = 0
+        $errs = @()
         foreach ($account in $accountsToUpdate) {
             $i = 0
             do {
                 $i++
                 Set-ADUser -Identity $account -PasswordNeverExpires $true -CannotChangePassword $true -ErrorVariable AccountError -ErrorAction SilentlyContinue | out-null
-                if ($AccountError.Count -ne 0) { Start-Sleep -Seconds (5 * $i) }
+                if ($AccountError.Count -ne 0) {
+                    Write-FixLog "Set-ADUser '$account' attempt $i failed: $($AccountError[0])" -Level Warning
+                    Start-Sleep -Seconds (5 * $i)
+                }
             }
             until ($i -ge 5 -or $AccountError.Count -eq 0)
 
             if ($AccountError.Count -eq 0) {
                 $accountsUpdated++
+                Write-FixLog "Updated '$account'" -Level Success
+            }
+            else {
+                $errs += "Failed to update '$account' after $i attempts: $($AccountError[0])"
             }
         }
-        Stop-Transcript | out-null
-        if ($accountsUpdated -ne $accountsToUpdate.Count) {
-            return $false
-        }
-        else {
-            return $true
+        [pscustomobject]@{
+            Success = ($accountsUpdated -eq $accountsToUpdate.Count)
+            Message = "Updated $accountsUpdated of $($accountsToUpdate.Count) accounts"
+            Errors  = $errs
         }
     }
 
@@ -959,85 +1179,78 @@ function Get-VMFixes {
     # Full Admin in CM
 
     $Fix_CMFullAdmin = {
-        if (-not (Test-Path "C:\staging\Fix")) { New-Item -Path "C:\staging\Fix" -ItemType Directory -Force | Out-Null }
-        $transcriptPath = "C:\staging\Fix\Fix-CMFullAdmin.txt"
-        try {
-
-
-            Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | out-null
-            $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar
-
-            if ($ErrVar.Count -ne 0) {
-                return $true
-            }
-
-            if ([string]::IsNullOrWhiteSpace($SiteCode)) {
-                # Deployment was done with cmOptions.Install=False, or site was uninstalled
-                return $true
-            }
-
-            $ProviderMachineName = $env:COMPUTERNAME + "." + $DomainFullName # SMS Provider machine name
-
-            # Get CM module path
-            $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
-            try {
-                $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
-            }
-            catch {
-                return $true
-            }
-            $uiInstallPath = $subKey.GetValue("UI Installation Directory")
-            $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
-            $initParams = @{}
-
-            $userName = "vmbuildadmin"
-            $userDomain = $env:USERDOMAIN
-            $domainUserName = "$userDomain\$userName"
-
-            $i = 0
-            do {
-                $i++
-
-                # Import the ConfigurationManager.psd1 module
-                if ($null -eq (Get-Module ConfigurationManager)) {
-                    Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
-                }
-
-                # Connect to the site's drive if it is not already present
-                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-
-                while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-                    Start-Sleep -Seconds 10
-                    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
-                }
-
-                # Set the current location to be the site code.
-                Set-Location "$($SiteCode):\" @initParams | out-null
-
-                $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
-
-                if (-not $exists) {
-                    Write-Host "[Fix-CMFullAdmin] Attempt $i`: Adding $domainUserName as Full Administrator"
-                    New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-                        -SecurityScopeName "All", "All Systems", "All Users and User Groups" `
-                        -ErrorAction Continue -ErrorVariable NewErr 2>&1 | Out-String | Write-Host
-                    if ($NewErr) { Write-Host "[Fix-CMFullAdmin] New-CMAdministrativeUser errors: $($NewErr -join '; ')" }
-                    Start-Sleep -Seconds 15
-                    # Use -like (same as initial check) so casing/domain-form differences
-                    # in LogonName don't cause a spurious failure when the user was created.
-                    $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$userName*" } -ErrorAction SilentlyContinue
-                }
-            }
-            until ($exists -or $i -gt 5)
-
-            Stop-Transcript | out-null
-
-            if ($exists) { return $true }
-            else { return $false }
+        $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorVariable ErrVar -ErrorAction SilentlyContinue
+        if ($ErrVar.Count -ne 0 -or [string]::IsNullOrWhiteSpace($SiteCode)) {
+            return [pscustomobject]@{ Success = $true; Message = 'No site code; CM not installed or uninstalled - skipping' }
         }
-        catch {
-            try { Stop-Transcript | out-null } catch {}
-            return $false
+
+        # Use DNS domain (USERDNSDOMAIN) instead of bare USERDOMAIN; SMS Provider needs FQDN.
+        $dnsDomain = $env:USERDNSDOMAIN
+        if ([string]::IsNullOrWhiteSpace($dnsDomain)) {
+            return [pscustomobject]@{ Success = $false; Message = 'USERDNSDOMAIN is empty; cannot build SMS Provider FQDN' }
+        }
+        $ProviderMachineName = "$env:COMPUTERNAME.$dnsDomain"
+        Write-FixLog "SiteCode=$SiteCode Provider=$ProviderMachineName"
+
+        # Get CM module path
+        $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
+        $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\ConfigMgr10\Setup")
+        if (-not $subKey) {
+            return [pscustomobject]@{ Success = $true; Message = 'CM admin console not installed - skipping' }
+        }
+        $uiInstallPath = $subKey.GetValue("UI Installation Directory")
+        $modulePath = $uiInstallPath + "bin\ConfigurationManager.psd1"
+        $initParams = @{}
+
+        $userName = "vmbuildadmin"
+        $userDomain = $env:USERDOMAIN
+        $domainUserName = "$userDomain\$userName"
+        $errs = @()
+
+        $i = 0
+        do {
+            $i++
+            if ($null -eq (Get-Module ConfigurationManager)) {
+                Import-Module $modulePath -ErrorAction SilentlyContinue | out-null
+            }
+            New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+            $waits = 0
+            while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+                $waits++
+                if ($waits -gt 6) {
+                    $errs += "Could not create CMSite PSDrive '$SiteCode' against '$ProviderMachineName' after 60s"
+                    return [pscustomobject]@{ Success = $false; Message = 'CMSite PSDrive never came online'; Errors = $errs }
+                }
+                Start-Sleep -Seconds 10
+                New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams -ErrorAction SilentlyContinue | out-null
+            }
+            Set-Location "$($SiteCode):\" @initParams | out-null
+
+            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" -ErrorAction SilentlyContinue |
+                      Where-Object { $_.LogonName -like "*$userName*" }
+            if ($exists) { break }
+
+            Write-FixLog "Attempt $i`: Adding $domainUserName as Full Administrator"
+            $newOut = New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                -SecurityScopeName "All", "All Systems", "All Users and User Groups" `
+                -ErrorAction Continue -ErrorVariable NewErr 2>&1
+            if ($newOut) { Write-FixLog ($newOut | Out-String).Trim() }
+            if ($NewErr) {
+                $msg = "New-CMAdministrativeUser attempt $i errors: $($NewErr -join '; ')"
+                Write-FixLog $msg -Level Warning
+                $errs += $msg
+            }
+            Start-Sleep -Seconds 15
+            $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" -ErrorAction SilentlyContinue |
+                      Where-Object { $_.LogonName -like "*$userName*" }
+        }
+        until ($exists -or $i -gt 5)
+
+        if ($exists) {
+            [pscustomobject]@{ Success = $true; Message = "Full Administrator '$domainUserName' is present (verified after $i attempt(s))" }
+        }
+        else {
+            [pscustomobject]@{ Success = $false; Message = "Failed to verify '$domainUserName' as Full Administrator after $i attempts"; Errors = $errs }
         }
     }
 
@@ -1314,50 +1527,39 @@ function Get-VMFixes {
     #endregion
 
     $Fix_RunSQL = {
-
         $SqlFilePath = "$env:systemdrive\staging\SQLFix-Compat.sql"
-
         if (-not (Test-Path $SqlFilePath)) {
-            return $true
+            return [pscustomobject]@{ Success = $true; Message = 'No SQLFix-Compat.sql present - skipping' }
         }
-
         $regPath = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
-
         if (-not (Test-Path $regPath)) {
-            return $true
+            return [pscustomobject]@{ Success = $true; Message = 'No SQL instances installed - skipping' }
         }
-
         $instances = (Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue).PSObject.Properties |
-        Where-Object {
-            $_.MemberType -eq "NoteProperty" -and
-            $_.Name -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider"
-        } |
-        Select-Object -ExpandProperty Name
-
+            Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notin 'PSPath','PSParentPath','PSChildName','PSDrive','PSProvider' } |
+            Select-Object -ExpandProperty Name
         if (-not $instances) {
-            return $true
+            return [pscustomobject]@{ Success = $true; Message = 'No SQL instances found in registry - skipping' }
         }
 
+        $ran = 0; $errs = @()
         foreach ($instance in $instances) {
-
-            if ($instance -eq "MSSQLSERVER") {
-                $sqlInstanceName = "."
-            }
-            else {
-                $sqlInstanceName = ".\$instance"
-            }
-
+            $sqlInstanceName = if ($instance -eq 'MSSQLSERVER') { '.' } else { ".\$instance" }
+            Write-FixLog "Running SQLFix-Compat.sql against $sqlInstanceName"
             try {
                 sqlcmd -S $sqlInstanceName -i $SqlFilePath -C 1>$null 2>$null
+                $ran++
             }
             catch {
-                Write-Host "ERROR on ${sqlInstanceName}: $($_.Exception.Message)"
-                return $false
+                $errs += "sqlcmd failed on ${sqlInstanceName}: $($_.Exception.Message)"
+                Write-FixLog $errs[-1] -Level Failure
             }
-
         }
-
-        return $true
+        [pscustomobject]@{
+            Success = ($errs.Count -eq 0)
+            Message = "Ran against $ran of $($instances.Count) instance(s)"
+            Errors  = $errs
+        }
     }
 
     $fixesToPerform += [PSCustomObject]@{
