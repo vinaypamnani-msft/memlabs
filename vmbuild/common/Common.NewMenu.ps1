@@ -206,7 +206,7 @@ function New-MenuItem {
             }
             elseif ($itemName -eq "*HELP") {
                 $function = $null
-                $linecount = 3  # Update-HelpText renders 3 lines (clear or bordered box)
+                $linecount = $script:MenuLayout.HelpBannerLines  # see Update-HelpText: top border + text + bottom border
             }
             else {                    
                 $function = $null   
@@ -635,9 +635,13 @@ function Get-Menu2 {
 
 
 function Get-RoomLeftFromCurrentPosition {
-    # Reserve extra rows so post-menu content (blank line, PgDn indicator, prompt)
-    # never writes past the last viewport row and triggers a scroll.
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - 4)
+    # Reserve rows for the post-menu fixtures that Show-Menu always paints
+    # below the items: the PgDn indicator (blank + text) and the prompt
+    # (blank + prompt line). RoomLeft is therefore the budget for items +
+    # help banner only -- the fixtures are pre-subtracted here so the rest
+    # of the layout math doesn't have to think about them.
+    $reserved = $script:MenuLayout.PgIndicatorLines + $script:MenuLayout.PromptLines
+    $WindowSizeY = $host.UI.RawUI.WindowSize.Height - $reserved
     $CurrentPosition = $Host.UI.RawUI.CursorPosition
     # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
     # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
@@ -648,28 +652,132 @@ function Get-RoomLeftFromCurrentPosition {
     return $RoomLeft
 }
 
-# Layout constants used by Show-Menu's line-counting math. Centralized so the
-# same number isn't sprinkled across the file in a half-dozen places.
+# Layout constants used by Show-Menu's line-counting math. Single source of
+# truth -- consumers (Get-RoomLeftFromCurrentPosition, Get-MenuMetrics,
+# Update-HelpText, New-MenuItem, render-loop lookahead) all reference these
+# so layout dimensions can't drift apart.
 $script:MenuLayout = @{
-    HelpBannerLines = 5    # Update-HelpText placeholder rendered above the menu
-    PromptLines     = 2    # Trailing blank + prompt row
-    TextWidthSlack  = 9    # Columns reserved for arrow/indent in wrap detection
+    HelpBannerLines  = 3   # Update-HelpText paints: top border + text + bottom border.
+                           # Text is truncated to one visual row (see Update-HelpText),
+                           # so this is an enforced invariant, not an estimate.
+    PromptLines      = 2   # Update-Prompt: blank spacer + prompt line
+    PgIndicatorLines = 2   # Write-MenuPgIndicator: blank spacer + "Press [PgDn]" line
+    TextWidthSlack   = 9   # Reserved leading columns for indent + arrow + numeric prefix;
+                           # text is treated as wrapped when length > WindowWidth - this
 }
 
-# Classify a non-selectable menu item into a shrink tier so the same rule is
-# used by both the line-count scan and the render loop. Returns one of
-# 'Summary' | 'Header' | 'Blank' | 'Help', or $null when the item is selectable.
-function Get-MenuItemTier {
+# Page-state constants used by Show-Menu's PgUp/PgDn state machine. Centralized
+# so callers compare against a typo-safe symbol instead of bare string literals.
+# Start-Navigation produces 'PGUP'/'PGDN'; the render loop produces PgDnNeeded/
+# PgDnDone while walking items.
+$script:MenuOp = @{
+    None       = ''
+    PgUp       = 'PGUP'
+    PgDn       = 'PGDN'
+    PgDnNeeded = 'PgDnNeeded'
+    PgDnDone   = 'PgDnDone'
+}
+
+# Classify a menu item into one of five kinds. Single source of truth for both
+# the layout-shrink logic (which only cares about the 4 non-selectable kinds:
+# Function | Header | Blank | Help) and the render loop dispatch (which also
+# distinguishes Selectable). Replaces ad-hoc StartsWith/-eq checks scattered
+# through the render path.
+function Get-MenuItemKind {
     param([Parameter(Mandatory)] $MenuItem)
-    if ($MenuItem.Selectable) { return $null }
+    if ($MenuItem.Selectable) { return 'Selectable' }
+    if ($MenuItem.Function)   { return 'Function' }   # *F (function-rendered summary)
     $name = [string]$MenuItem.itemName
-    if ($name -eq '*HELP')        { return 'Help' }
-    if ($name.StartsWith('*F'))   { return 'Summary' }
-    if ($name.StartsWith('*V'))   { return 'Blank' }   # decorative ruler
+    if ($name -eq '*HELP') { return 'Help' }
     if ($name.StartsWith('*B') -and -not [string]::IsNullOrWhiteSpace($MenuItem.Text)) {
         return 'Header'
     }
-    return 'Blank'   # *B/*D spacer with empty text, or anything else non-selectable
+    return 'Blank'   # *V ruler, *B/*D spacer with empty text, anything else non-selectable
+}
+
+# Sum the rows that items at/after StartIndex would consume during the upcoming
+# render pass, respecting the current Shrink plan. Used by the pagination
+# lookahead to decide whether trailing items would fit inline (avoiding a
+# wasted PgDn page that only holds 1-2 items).
+function Get-RemainingMenuRows {
+    param(
+        [Parameter(Mandatory)][System.Collections.IList]$MenuItems,
+        [Parameter(Mandatory)][int]$StartIndex,
+        [Parameter(Mandatory)][hashtable]$Shrink
+    )
+    $wrapAt = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
+    $rows = 0
+    for ($i = $StartIndex; $i -lt $MenuItems.Count; $i++) {
+        $mi = $MenuItems[$i]
+        $kind = Get-MenuItemKind -MenuItem $mi
+        if ($kind -ne 'Selectable' -and $Shrink[$kind]) { continue }
+        $rows += Get-MenuItemRows -MenuItem $mi -WrapAt $wrapAt
+    }
+    return $rows
+}
+
+# Render the "Press [PgDn]/[PgUp]/[PgUp/PgDn] to see more" indicator and its
+# preceding spacer blank. Returns $true when an indicator was actually written.
+# Consolidates the three near-duplicate if/elseif branches.
+function Write-MenuPgIndicator {
+    param(
+        [Parameter(Mandatory)][string]$Operation,
+        [Parameter(Mandatory)][bool]$PgUpAvailable
+    )
+    $pgDnNeeded = ($Operation -eq $script:MenuOp.PgDnNeeded)
+    $pgDnDone   = ($Operation -eq $script:MenuOp.PgDnDone)
+    if (-not $pgDnNeeded -and -not $pgDnDone) { return $false }
+
+    Write-Host2
+    if ($pgDnDone) {
+        Write-Host2 'Press [PgUp] to see more' -ForegroundColor Yellow
+    }
+    elseif ($PgUpAvailable) {
+        Write-Host2 'Press [PgUp/PgDn] to see more' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host2 'Press [PgDn] to see more' -ForegroundColor Yellow
+    }
+    return $true
+}
+
+# Render a centered "───  Heading Text  ───" break line. Extracted from the
+# render loop so the per-kind switch stays declarative.
+function Write-MenuHeader {
+    param(
+        [Parameter(Mandatory)] $MenuItem,
+        [Parameter(Mandatory)][int]$LongestBreakLine
+    )
+    $indentSpaces      = 3
+    $spacesAroundWords = 4
+    $dashColor         = 'SlateGray'
+
+    $textLen   = $MenuItem.Text.Length
+    $padding   = ($LongestBreakLine - $textLen) + ($spacesAroundWords * 2) + 2
+    $numOfDash = [math]::Round($padding / 2)
+    $prefix    = '─' * $numOfDash
+    if ((($LongestBreakLine - $textLen) % 2) -ne 0) { $numOfDash += 1 }
+    $postfix   = '─' * $numOfDash
+    $wordSpace = ' ' * $spacesAroundWords
+
+    Write-Host2 (' ' * $indentSpaces) -NoNewline
+    Write-Host2 -ForegroundColor $dashColor ($prefix + $wordSpace) -NoNewline
+    Write-Host2 -ForegroundColor $MenuItem.Color1 $MenuItem.Text -NoNewline
+    Write-Host2 -ForegroundColor $dashColor ($wordSpace + $postfix)
+}
+
+# Single source of truth for "how many viewport rows does this item consume?".
+# Accounts for the +1 wrap row when the item's text exceeds the wrap width.
+# All line-counting paths (total, per-tier, and lookahead) call this so the
+# numbers can't drift apart.
+function Get-MenuItemRows {
+    param(
+        [Parameter(Mandatory)] $MenuItem,
+        [Parameter(Mandatory)][int]$WrapAt
+    )
+    $rows = [int]$MenuItem.LineCount
+    if ([int]$MenuItem.Text.Length -gt $WrapAt) { $rows += 1 }
+    return $rows
 }
 
 # Walk the menu once and gather every number Show-Menu needs to lay it out:
@@ -680,31 +788,41 @@ function Get-MenuMetrics {
         [Parameter(Mandatory)][System.Collections.IEnumerable]$MenuItems,
         [Parameter(Mandatory)][int]$WindowWidth
     )
-    $tiers = @{ Summary = 0; Header = 0; Blank = 0; Help = 0 }
     $wrapAt = $WindowWidth - $script:MenuLayout.TextWidthSlack
-    $totalLineCount = 0
+    $tiers = @{ Function = 0; Header = 0; Blank = 0; Help = 0 }
+    $totalRows = 0
     $longestBreak = 0
     $helpFound = $false
     $helpNeeded = $false
 
     foreach ($mi in $MenuItems) {
-        $totalLineCount += $mi.LineCount
-        $len = $mi.Text.Length
-        if ($len -gt $wrapAt) { $totalLineCount += 1 }
+        $rows = Get-MenuItemRows -MenuItem $mi -WrapAt $wrapAt
+        $totalRows += $rows
+
         $name = [string]$mi.itemName
-        if ($name.StartsWith('*B') -and $len -gt $longestBreak) {
-            $longestBreak = $len
+        if ($name.StartsWith('*B') -and $mi.Text.Length -gt $longestBreak) {
+            $longestBreak = $mi.Text.Length
         }
         if ($name -eq '*HELP') { $helpFound = $true }
         if (-not [string]::IsNullOrWhiteSpace($mi.HelpText)) { $helpNeeded = $true }
-        $tier = Get-MenuItemTier -MenuItem $mi
-        if ($tier) { $tiers[$tier] += $mi.LineCount }
+
+        $kind = Get-MenuItemKind -MenuItem $mi
+        if ($kind -ne 'Selectable') { $tiers[$kind] += $rows }
     }
-    if ($helpNeeded) { $totalLineCount += $script:MenuLayout.HelpBannerLines }
-    $totalLineCount += $script:MenuLayout.PromptLines
+
+    # When help text is requested but no explicit *HELP slot exists, Show-Menu
+    # paints an auto-banner above the menu. Fold its cost directly into the
+    # Help tier so Resolve-ShrinkPlan doesn't need a separate parameter for it.
+    if ($helpNeeded -and -not $helpFound) {
+        $tiers.Help += $script:MenuLayout.HelpBannerLines
+        $totalRows  += $script:MenuLayout.HelpBannerLines
+    }
+    # Note: PromptLines and PgIndicatorLines are NOT added here -- they're
+    # pre-reserved inside Get-RoomLeftFromCurrentPosition. RoomLeft is the
+    # budget for items + help banner only.
 
     return [pscustomobject]@{
-        TotalLineCount   = $totalLineCount
+        TotalLineCount   = $totalRows
         LongestBreakLine = $longestBreak
         HelpFound        = $helpFound
         HelpNeeded       = $helpNeeded
@@ -712,33 +830,27 @@ function Get-MenuMetrics {
     }
 }
 
-# Decide which tiers of non-selectable content to drop so the menu fits the
-# viewport. Tiers are dropped in priority order (Summary -> Header -> Blank ->
-# Help) until the running deficit reaches zero. If all four tiers still aren't
-# enough, the Max flag triggers legacy "hide everything non-selectable" mode.
-# Returns a hashtable keyed by tier name + 'Max'.
+# Decide which categories of non-selectable content to drop so the menu fits
+# the viewport. Categories are dropped in priority order
+# (Function -> Header -> Blank -> Help) until the running deficit reaches zero.
+# If all four still aren't enough, the Max flag triggers a legacy
+# "hide everything non-selectable" mode. Returned hashtable keys mirror the
+# Get-MenuItemKind output so callers can index it directly: $shrink[$kind].
 function Resolve-ShrinkPlan {
     param(
         [Parameter(Mandatory)][hashtable]$Tiers,
-        [Parameter(Mandatory)][int]$HelpBannerCost,
         [Parameter(Mandatory)][int]$TotalLineCount,
         [Parameter(Mandatory)][int]$RoomLeft
     )
-    $plan = @{ Summary = $false; Header = $false; Blank = $false; Help = $false; Max = $false }
+    $plan = @{ Function = $false; Header = $false; Blank = $false; Help = $false; Max = $false }
     $deficit = $TotalLineCount - $RoomLeft
-    $tierOrder = @(
-        @{ Name = 'Summary'; Cost = $Tiers.Summary }
-        @{ Name = 'Header';  Cost = $Tiers.Header }
-        @{ Name = 'Blank';   Cost = $Tiers.Blank }
-        @{ Name = 'Help';    Cost = $Tiers.Help + $HelpBannerCost }
-    )
-    foreach ($t in $tierOrder) {
+    foreach ($name in 'Function','Header','Blank','Help') {
         if ($deficit -le 0) { break }
-        if ($t.Cost -le 0)  { continue }
-        $plan[$t.Name] = $true
-        $deficit -= $t.Cost
+        if ($Tiers[$name] -le 0) { continue }
+        $plan[$name] = $true
+        $deficit -= $Tiers[$name]
     }
-    $plan.Max = $plan.Summary -and $plan.Header -and $plan.Blank -and $plan.Help -and ($deficit -gt 0)
+    $plan.Max = $plan.Function -and $plan.Header -and $plan.Blank -and $plan.Help -and ($deficit -gt 0)
     return $plan
 }
 
@@ -757,23 +869,23 @@ function Show-Menu {
 
     )
     $LongestBreakLine = 0
-    $Operation = ""
+    $Operation = $script:MenuOp.None
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
     While ($true) {
         # PGUP/PGDN bookkeeping: reset Displayed flags so the upcoming render
         # walk knows where the new page starts. Done before measurement because
         # nothing about line counts depends on these flags.
-        if ($operation -eq "PGUP") {
+        if ($Operation -eq $script:MenuOp.PgUp) {
             foreach ($mi in $menuItems) { $mi.Displayed = $false }
         }
-        elseif ($operation -eq "PGDN") {
+        elseif ($Operation -eq $script:MenuOp.PgDn) {
             $pgDnHasMore = $false
             foreach ($mi in $menuItems) {
                 if (-not $mi.Displayed -and $mi.Selectable) { $pgDnHasMore = $true; break }
             }
             if (-not $pgDnHasMore) {
                 foreach ($mi in $menuItems) { $mi.Displayed = $false }
-                $operation = ""
+                $Operation = $script:MenuOp.None
             }
         }
 
@@ -797,8 +909,11 @@ function Show-Menu {
             #$NoClear = $true
         }
         
+        # Write-Log -Activity with -NoNewLine already emits one newline (via
+        # Write-Host2) so the cursor lands on the row after the activity header.
+        # Don't add another bare Write-Host here -- that would burn a blank row
+        # at the top of every menu redraw.
         Write-Log -Activity $menuName -NoNewLine
-        Write-Host
 
         $RoomLeft = Get-RoomLeftFromCurrentPosition
         if ($RoomLeft -lt $TotalLineCount) {
@@ -808,127 +923,99 @@ function Show-Menu {
 
         # Decide which tiers of non-selectable content to drop so the menu fits.
         # Tiers (dropped first to last): Summary -> Header -> Blank -> Help.
-        $helpBannerCost = if ($HelpNeeded) { $script:MenuLayout.HelpBannerLines } else { 0 }
-        $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
+        # Help-banner cost is already folded into $metrics.Tiers.Help.
+        $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
 
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
-        $PgUpAvailable = ($operation -eq "PGDN")
+        $PgUpAvailable = ($Operation -eq $script:MenuOp.PgDn)
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $passedDisplayedItems = $false
-        foreach ($menuItem in $menuItems) {
-            if ($operation -eq "PGDN") {
+        for ($idx = 0; $idx -lt $menuItems.Count; $idx++) {
+            $menuItem = $menuItems[$idx]
+
+            # ---- PgDn page-state: skip items already shown on the previous page,
+            # then mark this page "Done" once we hit the first new selectable item.
+            if ($Operation -eq $script:MenuOp.PgDn) {
                 if ($menuItem.Displayed) {
                     $menuItem.Displayed = $false
                     $passedDisplayedItems = $true
                     continue
                 }
-                if (-not $passedDisplayedItems) {
-                    # Items before current page (hidden by a previous PgDn) - skip
-                    continue
-                }
-                if (-not $menuItem.Displayed -and $menuitem.Selectable) {
-                    $operation = "PGDNDone"
-                }
+                if (-not $passedDisplayedItems) { continue }
+                if ($menuItem.Selectable) { $Operation = $script:MenuOp.PgDnDone }
             }
+
+            $kind = Get-MenuItemKind -MenuItem $menuItem
+
+            # ---- Tier-based shrinking: drop whole categories of non-selectable
+            # content when the viewport is too small. Selectable items are never
+            # dropped here -- they spill to a PgDn page instead.
+            if ($kind -ne 'Selectable' -and ($Maxshrink -or $shrink[$kind])) {
+                continue
+            }
+
+            # ---- Pagination cutoff with lookahead: only paginate when the
+            # remaining items wouldn't fit even after reclaiming the rows
+            # that the "Press [PgDn]" indicator + spacer would consume
+            # (we don't paint the indicator when we're not paginating).
             $RoomLeft = Get-RoomLeftFromCurrentPosition
-            if ($RoomLeft -le 2) {
-                $menuItem.Displayed = $false                
-                $Operation = "PgDnNeeded"
-                continue
+            $reclaimable = $script:MenuLayout.PgIndicatorLines
+            if ($RoomLeft -le $reclaimable) {
+                $remainingRows = Get-RemainingMenuRows -MenuItems $menuItems -StartIndex $idx -Shrink $shrink
+                if ($remainingRows -gt ($RoomLeft + $reclaimable)) {
+                    $menuItem.Displayed = $false
+                    $Operation = $script:MenuOp.PgDnNeeded
+                    continue
+                }
+                # else: fall through and render the trailing items inline
             }
+
+            # ---- Per-kind rendering. Function items render via Invoke-Expression
+            # and don't get the CurrentPosition stamp (they manage their own
+            # cursor). All other kinds get a fresh row anchor stamped onto the
+            # item so Update-Prompt can repaint the arrow / checkbox in place.
             $CurrentPosition = Get-CursorPosition
-            Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
+            Set-CursorPosition -x 0 -y $CurrentPosition.Y
 
-            if ($menuItem.Function) {
-                if ($shrink.Summary -and (Get-MenuItemTier -MenuItem $menuItem) -eq 'Summary') {
-                    continue
+            switch ($kind) {
+                'Function' {
+                    $menuItem.Displayed = $true
+                    Invoke-Expression -Command $menuItem.Function
                 }
-                $menuItem.Displayed = $true
-                Invoke-Expression -Command $menuItem.Function
-                
-                continue
-            }
-            if ($menuitem.Selectable) {
-                if ($menuItem.Selected) {
-                    #$arrow = "-> " 
-                    #$arrow = "⟶ "
-                    #$arrow = "➤ "
-                    $arrow = "━➤ "
-                    Write-Host $arrow -ForegroundColor Yellow -NoNewline
-                }
-                else {
-                    Write-Host "   " -ForegroundColor Cyan -NoNewline
-                }
-            }
-
-        
-
-            
-            $CurrentPosition = Get-CursorPosition
-            $menuItem | Add-Member -MemberType NoteProperty -Name "CurrentPosition" -Value $CurrentPosition.Y -force
-            if ($menuItem.Selectable) {    
-                Set-CursorPosition -x 3 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line       
-                Write-Option $menuItem.itemName $menuItem.Text -color $menuItem.Color1 -Color2 $menuItem.Color1 -MultiSelect:$MultiSelect -MultiSelected:$menuItem.MultiSelected
-                $menuItem.Displayed = $true
-            }
-            else {
-                if ($Maxshrink) {
-                    continue
-                }
-                $tier = Get-MenuItemTier -MenuItem $menuItem
-                if ($tier -and $shrink[$tier]) {
-                    continue
-                }
-
-                $StartDashColor = "SlateGray"
-                $EndDashColor = "SlateGray"
-                $indentSpaces = 3
-                $center = $true
-                $SpacesAroundWords = 4
-                $StartDashes = 3
-
-                if ($menuItem.itemName -eq "*HELP") {
-                    $HelpPosition = Get-CursorPosition
-                    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
-                    continue
-                }
-
-                if ($menuItem.itemName.StartsWith("*B") -and -not [string]::IsNullOrWhiteSpace($menuitem.Text)) {
-                    if ($center) {
-
-                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) + 2 ) / 2)
-                        $breakPrefix = "─" * $NumOfDash
-                        if ([bool](($LongestBreakLine - $menuitem.Text.Length) % 2)) {
-                            $NumOfDash += 1
-                        }
-                        $breakPostfix = "─" * $NumOfDash                        
+                'Selectable' {
+                    $menuItem | Add-Member -MemberType NoteProperty -Name 'CurrentPosition' -Value $CurrentPosition.Y -Force
+                    if ($menuItem.Selected) {
+                        Write-Host '━➤ ' -ForegroundColor Yellow -NoNewline
                     }
                     else {
-                        $NumOfDash = [math]::Round((($LongestBreakLine - $menuitem.Text.Length) + ($SpacesAroundWords * 2) - $StartDashes))
-                        $breakPrefix = "─" * $StartDashes
-                        $breakPostfix = "─" * $NumOfDash 
+                        Write-Host '   ' -ForegroundColor Cyan -NoNewline
                     }
-                    $WordSpace = " " * $SpacesAroundWords
-                    
-                    Write-Host2 $(" " * $indentSpaces) -NoNewline
-                    Write-Host2 -ForegroundColor $StartDashColor $($breakPrefix + $WordSpace) -NoNewline
-                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text -NoNewline
-                    Write-Host2 -ForegroundColor $EndDashColor $($WordSpace + $breakPostfix)
-                    
+                    Set-CursorPosition -x 3 -y $CurrentPosition.Y
+                    Write-Option $menuItem.itemName $menuItem.Text -color $menuItem.Color1 -Color2 $menuItem.Color1 -MultiSelect:$MultiSelect -MultiSelected:$menuItem.MultiSelected
+                    $menuItem.Displayed = $true
                 }
-                else {
-                    #Write-Host2 -ForegroundColor "MediumPurple" $menuItem.itemName -NoNewline
-                    write-host2 -ForeGroundColor $menuItem.Color1 $menuItem.Text
+                'Help' {
+                    $menuItem | Add-Member -MemberType NoteProperty -Name 'CurrentPosition' -Value $CurrentPosition.Y -Force
+                    $HelpPosition = Get-CursorPosition
+                    Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText '' -Color None -wait:$false
                 }
-                $menuItem.Displayed = $true
-            }                        
-            
-        }   
+                'Header' {
+                    $menuItem | Add-Member -MemberType NoteProperty -Name 'CurrentPosition' -Value $CurrentPosition.Y -Force
+                    Write-MenuHeader -MenuItem $menuItem -LongestBreakLine $LongestBreakLine
+                    $menuItem.Displayed = $true
+                }
+                'Blank' {
+                    $menuItem | Add-Member -MemberType NoteProperty -Name 'CurrentPosition' -Value $CurrentPosition.Y -Force
+                    Write-Host2 -ForegroundColor $menuItem.Color1 $menuItem.Text
+                    $menuItem.Displayed = $true
+                }
+            }
+        }
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
         $AnySelections = $menuItems | Where-Object { $_.Selectable }
@@ -938,25 +1025,11 @@ function Show-Menu {
         else {
             $prompt = "No Selections. Press Left/Enter or Escape to exit"
         }
-        #$currentValue = "T"
-        if (-not $Maxshrink) {
-            Write-Host ""
-        }
-        if ($PgUpAvailable -and $Operation -eq "PGDNNeeded") {
-            $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgUp/PgDn] to see more" -ForegroundColor Yellow
-        }
-        elseif ($Operation -eq "PGDNDone") {
-            $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
-        }
-        elseif ($Operation -eq "PGDNNeeded") {
-            $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
-        }
+        # Indicator helper emits its own leading blank, so we don't need the
+        # legacy unconditional Write-Host "" here -- it would waste a row when
+        # no PgDn/PgUp is shown.
+        [void](Write-MenuPgIndicator -Operation $Operation -PgUpAvailable $PgUpAvailable)
+        $Operation = $script:MenuOp.None
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition               
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
@@ -965,8 +1038,8 @@ function Show-Menu {
         if ($return) {
             
             if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
-                $operation = $return.Action
-                write-log -verbose "OP: $operation"
+                $Operation = $return.Action
+                write-log -verbose "OP: $Operation"
                 #Start-Sleep -seconds 1
             }
             else {
@@ -1056,6 +1129,30 @@ function Get-KeyStroke {
     return $key # Return the key stroke
 }
 
+# Non-blocking wait for either a keypress or a console resize. Returns a
+# PSCustomObject with .Key (KeyInfo or $null) and .Resized (bool). Polls the
+# window dimensions every PollMs so an idle resize triggers a redraw instead
+# of being noticed only after the user presses a key.
+function Wait-KeyStrokeOrResize {
+    param(
+        [Parameter(Mandatory)] $StartSize,
+        [int]$PollMs = 75
+    )
+    while ($true) {
+        if ($Host.UI.RawUI.KeyAvailable) {
+            return [pscustomobject]@{
+                Key     = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                Resized = $false
+            }
+        }
+        $cur = $Host.UI.RawUI.WindowSize
+        if ($cur.Width -ne $StartSize.Width -or $cur.Height -ne $StartSize.Height) {
+            return [pscustomobject]@{ Key = $null; Resized = $true }
+        }
+        Start-Sleep -Milliseconds $PollMs
+    }
+}
+
 # Set the cursor position to the top of the menu
 function Set-CursorPositionToTopOfMenu {
     param (
@@ -1092,9 +1189,11 @@ Function Update-HelpText {
 
     # Use ANSI erase-line (ESC[2K) instead of writing Width-2 spaces per line.
     # This avoids pushing hundreds of characters through the console on each redraw.
-    Write-Host "`e[2K"
-    Write-Host "`e[2K"
-    Write-Host "`e[2K"  
+    # Row count matches $script:MenuLayout.HelpBannerLines so the metrics math
+    # and the actual paint can't disagree.
+    for ($i = 0; $i -lt $script:MenuLayout.HelpBannerLines; $i++) {
+        Write-Host "`e[2K"
+    }
     if (-not [string]::IsNullOrWhiteSpace($CurrentHelpText) -and -not $wait) {      
 
         # Truncate the help text so it fits on a single line. The box
@@ -1248,20 +1347,14 @@ function Start-Navigation {
     Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
     #Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $menuItems[$selectedIndex].HelpText -Color $menuItems[$selectedIndex].Color1 -wait:$false
     while ($true) {
-        $currentsize = $Host.UI.RawUI.WindowSize
-        if ($currentsize -ne $startSize) {
-            return
-        }
-
-        #Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
-        
-        $key = Get-KeyStroke # Get the key stroke from the user
+        # Block until either a key arrives or the console gets resized.
+        # On resize we return immediately; Show-Menu's outer loop re-runs
+        # Get-MenuMetrics + Resolve-ShrinkPlan and repaints for the new size.
+        $event = Wait-KeyStrokeOrResize -StartSize $startSize
+        if ($event.Resized) { return }
+        $key = $event.Key
         write-log -Verbose -HostOnly "key: $key"
 
-        $currentsize = $Host.UI.RawUI.WindowSize
-        if ($currentsize -ne $startSize) {
-            return
-        }
         # Handle the key stroke
 
         if ($key.VirtualKeyCode -eq 34 -or $key.VirtualKeyCode -eq 33) {
@@ -1276,14 +1369,14 @@ function Start-Navigation {
             if ($MoreItems) {
                 if ($key.VirtualKeyCode -eq 34) {
                     $return = [PSCustomObject]@{
-                        Action      = "PGDN"
+                        Action      = $script:MenuOp.PgDn
                         CurrentMenu = $MenuItems
                     }
                     return $return
                 }
                 if ($key.VirtualKeyCode -eq 33) {
                     $return = [PSCustomObject]@{
-                        Action      = "PGUP"
+                        Action      = $script:MenuOp.PgUp
                         CurrentMenu = $MenuItems
                     }
                     return $return
