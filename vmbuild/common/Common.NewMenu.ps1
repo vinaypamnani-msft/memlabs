@@ -814,6 +814,11 @@ function Show-Menu {
     $Operation = ""
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
     While ($true) {
+        # Reset per-iteration state. HelpPosition must be cleared each loop:
+        # the shrink plan may drop the help banner this iteration even though
+        # it was drawn previously, and a stale position would cause Update-Prompt
+        # to paint the help box over wherever that old coordinate points.
+        $HelpPosition = $null
         # PGUP/PGDN bookkeeping: reset Displayed flags so the upcoming render
         # walk knows where the new page starts. Done before measurement because
         # nothing about line counts depends on these flags.
@@ -1222,7 +1227,7 @@ function Update-Prompt {
     }
     $BlinkLocation = Get-CursorPosition
 
-    if ($AnyHelpText) {
+    if ($AnyHelpText -and $HelpPosition) {
         Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $CurrentHelpText -Color $CurrentColor -wait:$wait
     }
     #$roomleft = Get-RoomLeftFromCurrentPosition
@@ -1282,9 +1287,10 @@ function Start-Navigation {
     Write-log -Verbose "Start-Navigation NumSelectable: $NumSelectable $ValidChars"
 
     $CPosition = Get-CursorPosition # Get the current cursor position
-    if (-not $HelpPosition) {
-        $HelpPosition = $CPosition
-    }
+    # Note: $HelpPosition may legitimately be $null if Show-Menu's shrink plan
+    # dropped the help banner for this render pass. Update-Prompt null-checks
+    # before drawing, so we do NOT default it to $CPosition here -- that would
+    # paint the help box on top of menu content.
     [System.Console]::CursorVisible = $false # Hide the cursor
     $startSize = $Host.UI.RawUI.WindowSize
     # Loop until the user presses the Escape key
