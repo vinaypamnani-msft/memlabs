@@ -616,7 +616,9 @@ function Add-NewVMForRole {
     }
 
     if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value "1GB" -force
+        # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
+        $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $defaultMin -force
     }
     else {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force

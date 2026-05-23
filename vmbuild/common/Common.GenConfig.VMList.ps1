@@ -927,6 +927,10 @@ function Select-VirtualMachines {
                                         $virtualMachine.memory = "4GB"
                                     }
                                 }
+                                # Raise dynamicMinRam floor to 4GB for SQL workloads
+                                if ($virtualMachine.dynamicMinRam -and (($virtualMachine.dynamicMinRam / 1) -lt 4GB)) {
+                                    $virtualMachine.dynamicMinRam = "4GB"
+                                }
 
                                 $newName = Rename-VirtualMachine -vm $virtualMachine
 

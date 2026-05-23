@@ -253,7 +253,17 @@ function select-ChangeDynamicMemory {
             }
             $Memory = $vmNotes.Memory
             if ($enable) {
-                $dynamicMinRam = "1GB"
+                $role = $vm.role
+                if ($vm.sqlVersion) {
+                    $role = "SqlServer"
+                }
+                # SQL workloads default to a 4GB floor; everything else 1GB
+                if ($role -in ("SqlServer", "Primary", "SQLAO", "CAS")) {
+                    $dynamicMinRam = "4GB"
+                }
+                else {
+                    $dynamicMinRam = "1GB"
+                }
                 $dynamicRamInBytes = ($dynamicMinRam / 1)
                 $Memory = $vmNotes.Memory
                 if ($dynamicRamInBytes -gt ($Memory / 1)) {
@@ -262,10 +272,6 @@ function select-ChangeDynamicMemory {
                 }
                 $priority = 25
                 $buffer = 10
-                $role = $vm.role
-                if ($vm.sqlVersion) {
-                    $role = "SqlServer"
-                }
                 if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
                     $priority = 50
                     $buffer = 20
