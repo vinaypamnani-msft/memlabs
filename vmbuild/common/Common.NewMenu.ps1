@@ -1026,10 +1026,13 @@ function Show-Menu {
         # Lookahead: pre-compute which slice of $menuItems fits this page given
         # the active shrink plan. Replaces the legacy "render until RoomLeft -le 2"
         # reactive bailout with a deterministic up-front layout decision.
-        # Available rows reserves 2 lines for the trailing prompt / PgDn indicator
-        # (matches the prior "-le 2" threshold).
+        # AvailableRows uses Get-RoomLeftFromCurrentPosition directly: its
+        # BottomReserve=4 already covers the trailing blank, PgDn indicator,
+        # prompt, and a cursor breathing row. Using the same value Resolve-ShrinkPlan
+        # sees prevents the "shrink says fits / layout says paginate" mismatch
+        # that left a 2-row gap above the indicator.
         $wrapAt        = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
-        $availableRows = [Math]::Max(1, (Get-RoomLeftFromCurrentPosition) - 2)
+        $availableRows = [Math]::Max(1, (Get-RoomLeftFromCurrentPosition))
         $layout        = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
                             -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
         $pageStartIndex = $layout.StartIndex
