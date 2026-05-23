@@ -1214,14 +1214,29 @@ function Get-KeyStroke {
     if (-not $WatchSize) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+    $diagPath = Join-Path $PSScriptRoot '..\logs\ResizeDiag.log'
+    $iter = 0
+    $lastLogged = "$($WatchSize.Width)x$($WatchSize.Height)"
+    Add-Content -Path $diagPath -Value ("[{0}] ENTER watch={1} HostWin={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $lastLogged, $Host.UI.RawUI.WindowSize.Width, $Host.UI.RawUI.WindowSize.Height) -ErrorAction SilentlyContinue
     while ($true) {
+        $iter++
         if ($Host.UI.RawUI.KeyAvailable) {
+            Add-Content -Path $diagPath -Value ("[{0}] KEY iter={1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter) -ErrorAction SilentlyContinue
             return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
         $live = Get-LiveWindowSize
+        $hostWin = $Host.UI.RawUI.WindowSize
+        $liveStr = if ($live) { "$($live.Width)x$($live.Height)" } else { "NULL" }
+        $hostStr = "$($hostWin.Width)x$($hostWin.Height)"
+        $curStr = "$($liveStr)/Host=$hostStr"
+        if ($curStr -ne $lastLogged -or ($iter % 60 -eq 0)) {
+            Add-Content -Path $diagPath -Value ("[{0}] iter={1} live={2} host={3} watch={4}x{5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $liveStr, $hostStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
+            $lastLogged = $curStr
+        }
         # $null means the window is currently minimized; ignore it so we don't
         # bounce out on a 0x0 transition. Only treat real dim changes as resizes.
         if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
+            Add-Content -Path $diagPath -Value ("[{0}] RESIZE-EXIT live={1} watch={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $liveStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
             return $null
         }
         Start-Sleep -Milliseconds 75
