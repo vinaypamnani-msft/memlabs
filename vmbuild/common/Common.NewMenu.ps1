@@ -900,7 +900,7 @@ function Show-Menu {
             if ($RoomLeft -le 2) {
                 $menuItem.Displayed = $false                
                 $Operation = $script:MenuOp.PgDnNeeded
-                Write-Log -LogOnly "MenuDiag[$menuName]: PgDnNeeded fired at item '$($menuItem.itemName)' RoomLeft=$RoomLeft"
+                Write-Log -LogOnly "MenuDiag[$menuName]: PgDnNeeded fired at item '$($menuItem.itemName)' RoomLeft=$RoomLeft Op-now=$Operation"
                 continue
             }
             $CurrentPosition = Get-CursorPosition
@@ -964,6 +964,7 @@ function Show-Menu {
             }                        
             
         }   
+        Write-Log -LogOnly "MenuDiag[$menuName]: post-foreach Op=$Operation"
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
         $AnySelections = $menuItems | Where-Object { $_.Selectable }
