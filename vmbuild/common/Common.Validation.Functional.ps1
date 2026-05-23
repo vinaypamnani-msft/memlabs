@@ -623,6 +623,78 @@ function Test-BLMFunctionality {
         }
         $results.Details.Add("OK: BitLocker policy is deployed to '$collectionName'")
 
+        # Helpdesk Portal: IIS app + app pool + registry conn string must all be present.
+        # Without this, admins cannot look up recovery keys -- key escrow is useless.
+        $results.Details.Add("CMD: Get-WebApplication -Site 'Default Web Site' -Name 'HelpDesk'")
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $portalApp = Get-WebApplication -Site 'Default Web Site' -Name 'HelpDesk' -ErrorAction SilentlyContinue
+            if (-not $portalApp) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: BLM Helpdesk Portal IIS app '/HelpDesk' not found on $env:COMPUTERNAME")
+            }
+            else {
+                $results.Details.Add("OK: IIS app '/HelpDesk' -> $($portalApp.PhysicalPath)")
+                if ($portalApp.PhysicalPath -and -not (Test-Path $portalApp.PhysicalPath)) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Helpdesk Portal physical path missing on disk")
+                }
+                $poolName = $portalApp.applicationPool
+                if ($poolName) {
+                    $pool = Get-Item "IIS:\AppPools\$poolName" -ErrorAction SilentlyContinue
+                    if (-not $pool) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: App pool '$poolName' not found")
+                    }
+                    elseif ($pool.State -ne 'Started') {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: App pool '$poolName' state=$($pool.State), expected Started")
+                    }
+                    else {
+                        $results.Details.Add("OK: App pool '$poolName' is Started")
+                    }
+                }
+                # Registry conn string proves the installer's SQL bootstrap completed
+                $webKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\MBAM Server\Web' -ErrorAction SilentlyContinue
+                if (-not $webKey -or -not $webKey.RecoveryDBConnectionString) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Registry 'MBAM Server\Web\RecoveryDBConnectionString' missing (installer did not complete SQL setup)")
+                }
+                else {
+                    $results.Details.Add("OK: Registry connection string present")
+                }
+                # HTTPS smoke test -- treat 401/403/302 as 'serving OK' (portal requires auth)
+                try {
+                    $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                    $req = [System.Net.HttpWebRequest]::Create("https://$fqdn/HelpDesk/")
+                    $req.Timeout = 15000
+                    $req.AllowAutoRedirect = $false
+                    $req.UseDefaultCredentials = $true
+                    $resp = $req.GetResponse()
+                    $results.Details.Add("OK: HTTPS smoke test returned $([int]$resp.StatusCode) from https://$fqdn/HelpDesk/")
+                    $resp.Close()
+                }
+                catch [System.Net.WebException] {
+                    $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                    if ($code -in 401,403,302) {
+                        $results.Details.Add("OK: HTTPS smoke test returned $code (expected -- portal requires auth)")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: HTTPS smoke test failed: $($_.Exception.Message)")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: HTTPS smoke test exception: $($_.Exception.Message)")
+                }
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Helpdesk Portal probe error: $($_.Exception.Message)")
+        }
+
         Pop-Location
         return $results
     }

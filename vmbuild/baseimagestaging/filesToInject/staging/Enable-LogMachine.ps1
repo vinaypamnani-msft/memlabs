@@ -383,6 +383,30 @@ if (Test-Path $inetMgr) {
     New-Shortcut -LinkPath "$desktopPath\IIS InetMgr.lnk" -TargetPath $inetMgr | Out-Null
 }
 
+# --- BLM Helpdesk Portal shortcut (site server only -- registry key only exists
+#     after MBAMWebSiteInstaller has run, which EnableBLM phase does on the Primary) ---
+$blmPortalLink = "$desktopPath\BitLocker Helpdesk Portal.url"
+if (-not (Test-Path $blmPortalLink)) {
+    $hasPortal = $false
+    try {
+        $webKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\MBAM Server\Web' -ErrorAction SilentlyContinue
+        if ($webKey -and $webKey.RecoveryDBConnectionString) { $hasPortal = $true }
+    } catch {}
+    if ($hasPortal) {
+        try {
+            $fqdn = "$env:COMPUTERNAME.$((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).Domain)"
+            $portalUrl = "https://$fqdn/HelpDesk/"
+            # .url files are plain INI -- write directly (WScript.Shell.CreateShortcut is for .lnk only)
+            $iconDll = "$env:windir\System32\imageres.dll"
+            $urlBody = @("[InternetShortcut]", "URL=$portalUrl")
+            if (Test-Path $iconDll) { $urlBody += @("IconFile=$iconDll", "IconIndex=77") }
+            $urlBody | Out-File -FilePath $blmPortalLink -Encoding ASCII -Force
+            if (Test-Path $blmPortalLink) { $script:shortcutsCreated = $true }
+        }
+        catch {}
+    }
+}
+
 # --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
 if (Test-Path $wsus) {
