@@ -848,6 +848,10 @@ function Show-Menu {
 
         if (-not $NoClear) {
             Write-Host "`e[2J`e[H"
+            # Clearing the screen wipes the help-box pixels too; invalidate the
+            # cached help text so the next Update-HelpText actually redraws it
+            # instead of short-circuiting on a stale "text unchanged" match.
+            $script:_lastHelpText = $null
             #$NoClear = $true
         }
         
