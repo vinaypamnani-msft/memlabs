@@ -268,6 +268,9 @@ function Get-SortedProperties {
     if ($members.Name -contains "InstallSSMS") {
         $sorted += "InstallSSMS"
     }
+    if ($members.Name -contains "pushClient") {
+        $sorted += "pushClient"
+    }
 
     if ($members.Name -contains "additionalDisks") {
         $sorted += "AdditionalDisks"
