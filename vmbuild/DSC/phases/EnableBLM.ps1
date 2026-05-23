@@ -32,6 +32,57 @@ $DomainFullName = $deployConfig.parameters.domainName
 
 Write-DscStatus "$Tag Configuring BitLocker Management (Domain: $DomainFullName)"
 
+# Enable the BLM Recovery Service web app on all MPs in the site.
+# Mechanism (verified from cmmain source):
+#   1. Set SC_SiteDefinition_Property.EnableMBAMRecoveryService = 1 (via SMS_SCI_SiteDefinition WMI)
+#   2. Site Component Manager pushes HKLM:\SOFTWARE\Microsoft\SMS\MP\EnableMBAMRecoveryService=1 to each MP
+#   3. MP control runs bin\x64\MBAMRecoveryServiceInstaller.ps1 which creates IIS app 'SMS_MP_MBAM'
+#      under Default Web Site with app pool 'SMS MP MBAM Pool'.
+# Without this, the Console cannot query recovery keys (the web app is the read-back endpoint).
+# Idempotent: no-op if Value already == 1; SCM won't re-push to MPs unless the value changes.
+try {
+    $siteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction Stop
+    $wmiNs    = "root\sms\site_$siteCode"
+    $siteDefLazy = Get-WmiObject -Namespace $wmiNs -Class SMS_SCI_SiteDefinition -Filter "SiteCode='$siteCode'" -ErrorAction Stop
+    if ($siteDefLazy) {
+        $siteDef  = [wmi]"$($siteDefLazy.__PATH)"
+        $existing = $siteDef.Props | Where-Object PropertyName -eq 'EnableMBAMRecoveryService'
+        if ($existing -and $existing.Value -eq 1) {
+            Write-DscStatus "$Tag Recovery Service site property already enabled (no-op)."
+        }
+        else {
+            if ($existing) {
+                $existing.Value  = 1
+                $existing.Value1 = ''
+                $existing.Value2 = ''
+            }
+            else {
+                $cls = [wmiclass]"\\.\$($wmiNs):SMS_EmbeddedProperty"
+                $new = $cls.CreateInstance()
+                $new.PropertyName = 'EnableMBAMRecoveryService'
+                $new.Value  = 1
+                $new.Value1 = ''
+                $new.Value2 = ''
+                $siteDef.Props = @($siteDef.Props) + $new
+            }
+            $siteDef.Put() | Out-Null
+            Write-DscStatus "$Tag Set EnableMBAMRecoveryService=1 on site $siteCode. SCM will push to MPs (~1-5 min)."
+            try {
+                Restart-Service -Name SMS_SITE_COMPONENT_MANAGER -Force -ErrorAction Stop
+                Write-DscStatus "$Tag Restarted SMS_SITE_COMPONENT_MANAGER to accelerate MP push."
+            } catch {
+                Write-DscStatus "$Tag SCM restart failed (will pick up on next cycle): $($_.Exception.Message)"
+            }
+        }
+    }
+    else {
+        Write-DscStatus "$Tag WARNING: SMS_SCI_SiteDefinition not found for site $siteCode -- skipping recovery service enable."
+    }
+}
+catch {
+    Write-DscStatus "$Tag WARNING: Failed to enable BLM Recovery Service site property: $($_.Exception.Message)"
+}
+
 # Create collection for BitLocker clients (direct membership only, no OU query)
 $blmCollectionName = "MEMLABS-BitLocker Clients"
 Write-DscStatus "$Tag Checking if collection '$blmCollectionName' exists..."
@@ -206,6 +257,331 @@ END
 }
 else {
     Write-DscStatus "$Tag Skipping policy creation/deployment (cmOptions.EnableBLM not set; policy should already exist from original build)"
+}
+
+# Install the BLM Helpdesk Portal web app on this Primary site server.
+# The ConfigMgr Console has NO built-in recovery-key UI -- the Helpdesk Portal
+# (/HelpDesk on the site server) is Microsoft's only first-party tool for
+# looking up BitLocker recovery keys from the CM database.
+#
+# This block is built for a 4-hour deployment: every step is logged, every
+# external call is wrapped in try/catch, and it is FULLY idempotent. If a
+# prior install is already healthy we do nothing -- we never re-run the
+# MBAMWebSiteInstaller against a working install (it tears down and rebuilds
+# the SQL grants + IIS app on every run, which is risky).
+if ($blmEnabled) {
+
+    function Test-BlmPortalHealth {
+        # Returns hashtable: @{ Installed=$bool; AppOk=$bool; PoolOk=$bool; Reg=$bool; ConnStr=$str; Details=$str }
+        $result = @{ Installed=$false; AppOk=$false; PoolOk=$false; Reg=$false; ConnStr=$null; Details=@() }
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+        } catch {
+            $result.Details += "WebAdministration module load failed: $($_.Exception.Message)"
+            return $result
+        }
+        try {
+            $app = Get-WebApplication -Site 'Default Web Site' -Name 'HelpDesk' -ErrorAction SilentlyContinue
+            if ($app) {
+                $result.AppOk = $true
+                $result.Details += "IIS app /HelpDesk -> $($app.PhysicalPath)"
+                if ($app.PhysicalPath -and -not (Test-Path $app.PhysicalPath)) {
+                    $result.Details += "WARN: physical path missing on disk"
+                    $result.AppOk = $false
+                }
+                $poolName = $app.applicationPool
+                if ($poolName) {
+                    $pool = Get-Item "IIS:\AppPools\$poolName" -ErrorAction SilentlyContinue
+                    if ($pool) {
+                        $result.Details += "AppPool '$poolName' state=$($pool.State)"
+                        $result.PoolOk = $true
+                    } else {
+                        $result.Details += "WARN: AppPool '$poolName' not found"
+                    }
+                }
+            } else {
+                $result.Details += "IIS app /HelpDesk not present"
+            }
+        } catch {
+            $result.Details += "IIS probe failed: $($_.Exception.Message)"
+        }
+        try {
+            $webKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\MBAM Server\Web' -ErrorAction SilentlyContinue
+            if ($webKey -and $webKey.RecoveryDBConnectionString) {
+                $result.Reg = $true
+                $result.ConnStr = $webKey.RecoveryDBConnectionString
+                $result.Details += "Registry conn string present"
+            } else {
+                $result.Details += "Registry MBAM Server\Web missing or empty"
+            }
+        } catch {
+            $result.Details += "Registry probe failed: $($_.Exception.Message)"
+        }
+        $result.Installed = ($result.AppOk -and $result.Reg)
+        return $result
+    }
+
+    $blmGroup       = 'BLM Helpdesk Users'
+    $netbios        = ($DomainFullName -split '\.')[0]
+    $qualifiedGroup = "$netbios\$blmGroup"
+    $sqlServerFqdn  = "$env:COMPUTERNAME.$DomainFullName"
+    $cmDbName       = "CM_$SiteCode"
+
+    Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$sqlServerFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
+
+    # ---- Pre-flight: is it already installed and healthy? -----------------
+    try {
+        $health = Test-BlmPortalHealth
+        foreach ($d in $health.Details) { Write-DscStatus "$Tag   probe: $d" }
+
+        if ($health.Installed) {
+            # If conn string points somewhere unexpected, warn but DO NOT reinstall
+            # (someone may have intentionally pointed it at a different DB).
+            if ($health.ConnStr -and ($health.ConnStr -notlike "*$cmDbName*")) {
+                Write-DscStatus "$Tag WARNING: existing portal connection string does not reference '$cmDbName'. Leaving as-is to avoid clobbering customization. ConnStr=$($health.ConnStr)"
+            }
+            # Make sure the app pool is running (cheap, safe).
+            try {
+                $app = Get-WebApplication -Site 'Default Web Site' -Name 'HelpDesk' -ErrorAction Stop
+                $poolName = $app.applicationPool
+                $pool = Get-Item "IIS:\AppPools\$poolName" -ErrorAction Stop
+                if ($pool.State -ne 'Started') {
+                    Write-DscStatus "$Tag App pool '$poolName' is $($pool.State); starting..."
+                    Start-WebAppPool -Name $poolName -ErrorAction Stop
+                    Write-DscStatus "$Tag App pool '$poolName' started."
+                }
+            } catch {
+                Write-DscStatus "$Tag WARNING: could not verify/start app pool: $($_.Exception.Message)"
+            }
+            Write-DscStatus "$Tag Helpdesk Portal already installed and healthy. Skipping installer (idempotent no-op)."
+        }
+        else {
+            # ---- AD group via ADSI (no RSAT required) -------------------------
+            Write-DscStatus "$Tag Ensuring AD group '$blmGroup' exists (via ADSI)..."
+            $groupReady = $false
+            try {
+                $root = [ADSI]"LDAP://RootDSE"
+                $domainDn = $root.defaultNamingContext.ToString()
+                Write-DscStatus "$Tag   domainDn=$domainDn"
+
+                $finder = New-Object DirectoryServices.DirectorySearcher
+                $finder.Filter = "(&(objectClass=group)(sAMAccountName=$blmGroup))"
+                $found = $finder.FindOne()
+
+                if (-not $found) {
+                    Write-DscStatus "$Tag   group not found; creating in CN=Users,$domainDn"
+                    try {
+                        $usersOu = [ADSI]"LDAP://CN=Users,$domainDn"
+                        $newGrp  = $usersOu.Create('group', "CN=$blmGroup")
+                        $newGrp.Put('sAMAccountName', $blmGroup)
+                        $newGrp.Put('groupType', -2147483646)  # Global Security
+                        $newGrp.Put('description', 'BitLocker Management Helpdesk Users (recovery key lookup)')
+                        $newGrp.SetInfo()
+                        Write-DscStatus "$Tag   created '$blmGroup'; waiting for AD propagation..."
+                    } catch {
+                        Write-DscStatus "$Tag WARNING: New-ADGroup (ADSI) failed: $($_.Exception.Message)"
+                    }
+                    # Re-find with retry (DC replication / cache)
+                    for ($i = 1; $i -le 6; $i++) {
+                        Start-Sleep -Seconds 5
+                        $finder2 = New-Object DirectoryServices.DirectorySearcher
+                        $finder2.Filter = "(&(objectClass=group)(sAMAccountName=$blmGroup))"
+                        $found = $finder2.FindOne()
+                        if ($found) { Write-DscStatus "$Tag   group visible after $($i*5)s"; break }
+                        Write-DscStatus "$Tag   waiting for group to be visible ($i/6)..."
+                    }
+                } else {
+                    Write-DscStatus "$Tag   group already exists: $($found.Properties['distinguishedName'][0])"
+                }
+
+                if ($found) {
+                    $groupReady = $true
+                    # Add Domain Admins as a member if missing
+                    try {
+                        $daFinder = New-Object DirectoryServices.DirectorySearcher
+                        $daFinder.Filter = "(&(objectClass=group)(sAMAccountName=Domain Admins))"
+                        $daFound = $daFinder.FindOne()
+                        if ($daFound) {
+                            $grpObj = $found.GetDirectoryEntry()
+                            $daDn   = $daFound.Properties['distinguishedName'][0]
+                            $currentMembers = @($grpObj.member)
+                            if ($currentMembers -contains $daDn) {
+                                Write-DscStatus "$Tag   Domain Admins already a member."
+                            } else {
+                                $grpObj.Add("LDAP://$daDn")
+                                Write-DscStatus "$Tag   added Domain Admins -> '$blmGroup'."
+                            }
+                        } else {
+                            Write-DscStatus "$Tag WARNING: Domain Admins group not found via ADSI."
+                        }
+                    } catch {
+                        Write-DscStatus "$Tag WARNING: failed to add Domain Admins to '$blmGroup': $($_.Exception.Message)"
+                    }
+                } else {
+                    Write-DscStatus "$Tag WARNING: group '$blmGroup' still not visible after retries. Portal install will proceed; create group manually if portal sign-in fails."
+                }
+            } catch {
+                Write-DscStatus "$Tag WARNING: AD group setup failed: $($_.Exception.Message)"
+            }
+
+            # ---- IIS + ASP.NET 4.5 prereqs ------------------------------------
+            Write-DscStatus "$Tag Verifying IIS / ASP.NET 4.5 features..."
+            try {
+                $needed = @('Web-Server','Web-Asp-Net45','Web-Mgmt-Console')
+                $missing = @()
+                foreach ($f in $needed) {
+                    $feat = Get-WindowsFeature -Name $f -ErrorAction SilentlyContinue
+                    if (-not $feat) { Write-DscStatus "$Tag   feature '$f' not recognized on this OS" ; continue }
+                    if ($feat.Installed) {
+                        Write-DscStatus "$Tag   $f : installed"
+                    } else {
+                        Write-DscStatus "$Tag   $f : MISSING - will install"
+                        $missing += $f
+                    }
+                }
+                if ($missing.Count -gt 0) {
+                    $iisResult = Install-WindowsFeature -Name $missing -ErrorAction Stop
+                    Write-DscStatus "$Tag   Install-WindowsFeature: Success=$($iisResult.Success) RestartNeeded=$($iisResult.RestartNeeded)"
+                    if ($iisResult.RestartNeeded -eq 'Yes') {
+                        Write-DscStatus "$Tag WARNING: IIS install requested reboot; continuing anyway. May fail until reboot."
+                    }
+                }
+                $defaultSite = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+                if (-not $defaultSite) {
+                    throw "'Default Web Site' is missing in IIS after feature install."
+                }
+                Write-DscStatus "$Tag   'Default Web Site' state=$($defaultSite.State) bindings=$($defaultSite.bindings.Collection.bindingInformation -join ',')"
+            } catch {
+                Write-DscStatus "$Tag WARNING: IIS prereq step failed: $($_.Exception.Message)"
+            }
+
+            # ---- Locate and sanity-check the installer ------------------------
+            $cmInstallDir = $null
+            try {
+                $cmInstallDir = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SMS\Setup' -ErrorAction Stop).'Installation Directory'
+            } catch {
+                Write-DscStatus "$Tag ERROR: cannot read SMS Setup registry: $($_.Exception.Message)"
+            }
+            $installer = if ($cmInstallDir) { Join-Path $cmInstallDir 'bin\x64\MBAMWebSiteInstaller.ps1' } else { $null }
+            Write-DscStatus "$Tag CM install dir: $cmInstallDir"
+            Write-DscStatus "$Tag Installer path : $installer"
+
+            $installerOk = $false
+            if ($installer -and (Test-Path $installer)) {
+                try {
+                    $fi = Get-Item $installer -ErrorAction Stop
+                    Write-DscStatus "$Tag Installer size=$($fi.Length) lastWrite=$($fi.LastWriteTime)"
+                    if ($fi.Length -lt 1024) {
+                        Write-DscStatus "$Tag WARNING: installer file is suspiciously small ($($fi.Length) bytes)"
+                    }
+                    # Quick content sanity check (param name we depend on)
+                    $head = Get-Content $installer -TotalCount 200 -ErrorAction Stop
+                    if (($head -join "`n") -match 'HelpdeskUsersGroupName') {
+                        $installerOk = $true
+                    } else {
+                        Write-DscStatus "$Tag WARNING: installer does not appear to declare -HelpdeskUsersGroupName; aborting to avoid corruption."
+                    }
+                } catch {
+                    Write-DscStatus "$Tag WARNING: installer sanity check failed: $($_.Exception.Message)"
+                }
+            } else {
+                Write-DscStatus "$Tag WARNING: MBAMWebSiteInstaller.ps1 not found; skipping portal install."
+            }
+
+            # ---- Run the installer --------------------------------------------
+            if ($installerOk) {
+                $stamp     = Get-Date -Format yyyyMMdd_HHmmss
+                $logDir    = if (Test-Path 'C:\staging\DSC') { 'C:\staging\DSC' } else { $env:TEMP }
+                $logFile   = Join-Path $logDir "MBAMWebSiteInstaller_$stamp.log"
+                $errFile   = "$logFile.err"
+
+                $installerArgs = @(
+                    '-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned'
+                    '-File',"`"$installer`""
+                    '-SqlServerName',$sqlServerFqdn        # MUST be FQDN -- installer hardcodes
+                    '-SqlDatabaseName',$cmDbName            # Encrypt=True;TrustServerCertificate=False,
+                    '-SiteInstall','HelpDesk'               # so NetBIOS triggers SPN mismatch
+                    '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
+                    '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
+                    '-DomainName',$DomainFullName
+                )
+                Write-DscStatus "$Tag Launching installer; log=$logFile"
+                Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
+
+                $proc = $null
+                try {
+                    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $installerArgs `
+                        -NoNewWindow -Wait -PassThru `
+                        -RedirectStandardOutput $logFile -RedirectStandardError $errFile -ErrorAction Stop
+                } catch {
+                    Write-DscStatus "$Tag ERROR: failed to launch installer: $($_.Exception.Message)"
+                }
+
+                if ($proc) {
+                    Write-DscStatus "$Tag Installer exit code: $($proc.ExitCode)"
+                    if (Test-Path $logFile) {
+                        $stdoutTail = (Get-Content $logFile -Tail 20 -ErrorAction SilentlyContinue) -join ' | '
+                        Write-DscStatus "$Tag   stdout tail: $stdoutTail"
+                    }
+                    if ((Test-Path $errFile) -and ((Get-Item $errFile).Length -gt 0)) {
+                        $stderrTail = (Get-Content $errFile -Tail 10 -ErrorAction SilentlyContinue) -join ' | '
+                        Write-DscStatus "$Tag   stderr tail: $stderrTail"
+                    }
+
+                    # ---- Verification (regardless of exit code, check actual state) ----
+                    $post = Test-BlmPortalHealth
+                    foreach ($d in $post.Details) { Write-DscStatus "$Tag   verify: $d" }
+
+                    if ($post.Installed) {
+                        # Make sure the app pool is running
+                        try {
+                            $app = Get-WebApplication -Site 'Default Web Site' -Name 'HelpDesk' -ErrorAction Stop
+                            $poolName = $app.applicationPool
+                            $pool = Get-Item "IIS:\AppPools\$poolName" -ErrorAction Stop
+                            if ($pool.State -ne 'Started') {
+                                Write-DscStatus "$Tag Starting app pool '$poolName'..."
+                                Start-WebAppPool -Name $poolName -ErrorAction Stop
+                            }
+                        } catch {
+                            Write-DscStatus "$Tag WARNING: post-install pool check failed: $($_.Exception.Message)"
+                        }
+
+                        # Smoke-test the URL (401/403 are also fine -- means IIS is serving)
+                        try {
+                            $req = [System.Net.HttpWebRequest]::Create("https://$sqlServerFqdn/HelpDesk/")
+                            $req.Timeout = 15000
+                            $req.AllowAutoRedirect = $false
+                            $req.UseDefaultCredentials = $true
+                            $resp = $req.GetResponse()
+                            Write-DscStatus "$Tag Smoke test: HTTP $([int]$resp.StatusCode) from https://$sqlServerFqdn/HelpDesk/"
+                            $resp.Close()
+                        } catch [System.Net.WebException] {
+                            $code = $null
+                            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+                            if ($code -in 401,403,302) {
+                                Write-DscStatus "$Tag Smoke test: HTTP $code (expected -- portal requires auth). Portal is serving."
+                            } else {
+                                Write-DscStatus "$Tag WARNING: Smoke test failed: $($_.Exception.Message)"
+                            }
+                        } catch {
+                            Write-DscStatus "$Tag WARNING: Smoke test exception: $($_.Exception.Message)"
+                        }
+
+                        Write-DscStatus "$Tag SUCCESS: BLM Helpdesk Portal ready at https://$sqlServerFqdn/HelpDesk (sign in as member of $qualifiedGroup)"
+                    }
+                    else {
+                        Write-DscStatus "$Tag WARNING: Installer ran but post-install health check FAILED. See $logFile and $errFile for details."
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        # Belt-and-suspenders: never let this section fail the phase.
+        Write-DscStatus "$Tag WARNING: unhandled exception in Helpdesk Portal block: $($_.Exception.Message)"
+    }
+
+    Write-DscStatus "$Tag === Helpdesk Portal: done ==="
 }
 
 Write-DscStatus "$Tag BitLocker Management configuration complete"
