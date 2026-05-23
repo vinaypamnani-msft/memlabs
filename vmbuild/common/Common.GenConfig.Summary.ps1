@@ -821,6 +821,29 @@ function get-VMString {
                     }
                     catch {}
                 }
+                else {
+                    # Color clients to match the Primary/Secondary site that would push the client.
+                    # Client-push assignment follows network: a Primary pushes to DomainMembers on its
+                    # own network or any of its reporting Secondaries' networks (see ClientPush logic
+                    # in Common.GenConfig.ps1). Mirror that here so the menu groups clients visually
+                    # with their owning site.
+                    $clientNetwork = if ($virtualMachine.Network) { $virtualMachine.Network } else { $config.vmOptions.Network }
+                    if ($clientNetwork) {
+                        $siteServers = $allVMs | Where-Object { $_.role -in ("Primary", "Secondary") -and $_.SiteCode }
+                        # Direct match: site server on same network as the client
+                        $owningSite = $siteServers | Where-Object { $_.Network -eq $clientNetwork } | Select-Object -First 1
+                        if (-not $owningSite) {
+                            # Indirect match: a Secondary on the client's network reports to a Primary
+                            $secondaryOnNet = $siteServers | Where-Object { $_.role -eq "Secondary" -and $_.Network -eq $clientNetwork } | Select-Object -First 1
+                            if ($secondaryOnNet -and $secondaryOnNet.parentSiteCode) {
+                                $owningSite = $siteServers | Where-Object { $_.role -eq "Primary" -and $_.SiteCode -eq $secondaryOnNet.parentSiteCode } | Select-Object -First 1
+                            }
+                        }
+                        if ($owningSite -and $ColorMap.ContainsKey($owningSite.SiteCode)) {
+                            $color = $ColorMap[$owningSite.SiteCode]
+                        }
+                    }
+                }
 
             }
             default {
