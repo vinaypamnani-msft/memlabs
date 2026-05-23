@@ -656,6 +656,16 @@ $script:MenuLayout = @{
     TextWidthSlack  = 9    # Columns reserved for arrow/indent in wrap detection
 }
 
+# Pagination operation tokens. Previously sprinkled around as string literals
+# with inconsistent casing ("PgDnNeeded" vs "PGDNNEEDED"). -eq is case-
+# insensitive so the old code worked, but using constants prevents drift.
+$script:MenuOp = @{
+    PgUp        = 'PGUP'
+    PgDn        = 'PGDN'
+    PgDnNeeded  = 'PGDNNEEDED'
+    PgDnDone    = 'PGDNDONE'
+}
+
 # Classify a non-selectable menu item into a shrink tier so the same rule is
 # used by both the line-count scan and the render loop. Returns one of
 # 'Summary' | 'Header' | 'Blank' | 'Help', or $null when the item is selectable.
@@ -812,10 +822,10 @@ function Show-Menu {
         # PGUP/PGDN bookkeeping: reset Displayed flags so the upcoming render
         # walk knows where the new page starts. Done before measurement because
         # nothing about line counts depends on these flags.
-        if ($operation -eq "PGUP") {
+        if ($operation -eq $script:MenuOp.PgUp) {
             foreach ($mi in $menuItems) { $mi.Displayed = $false }
         }
-        elseif ($operation -eq "PGDN") {
+        elseif ($operation -eq $script:MenuOp.PgDn) {
             $pgDnHasMore = $false
             foreach ($mi in $menuItems) {
                 if (-not $mi.Displayed -and $mi.Selectable) { $pgDnHasMore = $true; break }
@@ -865,12 +875,12 @@ function Show-Menu {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
-        $PgUpAvailable = ($operation -eq "PGDN")
+        $PgUpAvailable = ($operation -eq $script:MenuOp.PgDn)
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
         $passedDisplayedItems = $false
         foreach ($menuItem in $menuItems) {
-            if ($operation -eq "PGDN") {
+            if ($operation -eq $script:MenuOp.PgDn) {
                 if ($menuItem.Displayed) {
                     $menuItem.Displayed = $false
                     $passedDisplayedItems = $true
@@ -881,13 +891,13 @@ function Show-Menu {
                     continue
                 }
                 if (-not $menuItem.Displayed -and $menuitem.Selectable) {
-                    $operation = "PGDNDone"
+                    $operation = $script:MenuOp.PgDnDone
                 }
             }
             $RoomLeft = Get-RoomLeftFromCurrentPosition
             if ($RoomLeft -le 2) {
                 $menuItem.Displayed = $false                
-                $Operation = "PgDnNeeded"
+                $Operation = $script:MenuOp.PgDnNeeded
                 continue
             }
             $CurrentPosition = Get-CursorPosition
@@ -964,17 +974,17 @@ function Show-Menu {
         if (-not $Maxshrink) {
             Write-Host ""
         }
-        if ($PgUpAvailable -and $Operation -eq "PGDNNeeded") {
+        if ($PgUpAvailable -and $Operation -eq $script:MenuOp.PgDnNeeded) {
             $Operation = ""
-            Write-MenuPgIndicator -Operation 'PGDNNeeded' -PgUpAvailable $true
+            Write-MenuPgIndicator -Operation $script:MenuOp.PgDnNeeded -PgUpAvailable $true
         }
-        elseif ($Operation -eq "PGDNDone") {
+        elseif ($Operation -eq $script:MenuOp.PgDnDone) {
             $Operation = ""
-            Write-MenuPgIndicator -Operation 'PGDNDone' -PgUpAvailable $false
+            Write-MenuPgIndicator -Operation $script:MenuOp.PgDnDone -PgUpAvailable $false
         }
-        elseif ($Operation -eq "PGDNNeeded") {
+        elseif ($Operation -eq $script:MenuOp.PgDnNeeded) {
             $Operation = ""
-            Write-MenuPgIndicator -Operation 'PGDNNeeded' -PgUpAvailable $false
+            Write-MenuPgIndicator -Operation $script:MenuOp.PgDnNeeded -PgUpAvailable $false
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition               
@@ -1295,14 +1305,14 @@ function Start-Navigation {
             if ($MoreItems) {
                 if ($key.VirtualKeyCode -eq 34) {
                     $return = [PSCustomObject]@{
-                        Action      = "PGDN"
+                        Action      = $script:MenuOp.PgDn
                         CurrentMenu = $MenuItems
                     }
                     return $return
                 }
                 if ($key.VirtualKeyCode -eq 33) {
                     $return = [PSCustomObject]@{
-                        Action      = "PGUP"
+                        Action      = $script:MenuOp.PgUp
                         CurrentMenu = $MenuItems
                     }
                     return $return
