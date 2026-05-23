@@ -721,7 +721,7 @@ function Get-RemainingMenuRows {
 # Consolidates the three near-duplicate if/elseif branches.
 function Write-MenuPgIndicator {
     param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Operation,
+        [Parameter(Mandatory)][string]$Operation,
         [Parameter(Mandatory)][bool]$PgUpAvailable
     )
     $pgDnNeeded = ($Operation -eq $script:MenuOp.PgDnNeeded)
