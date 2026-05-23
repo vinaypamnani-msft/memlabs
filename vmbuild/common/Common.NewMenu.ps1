@@ -634,53 +634,34 @@ function Get-Menu2 {
 }
 
 
-# Read the current console window size by opening a fresh CONOUT$ handle via
-# P/Invoke and calling GetConsoleScreenBufferInfo. [System.Console]::Window* and
-# $Host.UI.RawUI.WindowSize both reuse a cached stdout handle whose buffer info
-# can go stale (observed: size locks to first post-redraw value and never updates
-# again until something writes to the console). A fresh handle reads the current
-# console state each time, so this is the only reliable polling-time size read.
-if (-not ('MemLabsConsole.Native' -as [type])) {
-    Add-Type -Namespace MemLabsConsole -Name Native -MemberDefinition @'
+# Read the current console window size. Detection uses GetClientRect on the
+# console window HWND (pixel dimensions) because both [System.Console]::Window*
+# and a fresh CONOUT$ handle's GetConsoleScreenBufferInfo return cached buffer
+# info that goes stale until something writes to the console (observed: size
+# locks to first post-redraw value while user actively resizes). The OS window
+# manager always knows the real pixel size, so any change there reliably
+# signals a resize. The triggered redraw then writes to the console, which
+# refreshes conhost's char-cell cache as a side effect.
+if (-not ('MemLabsConsole.NativeV2' -as [type])) {
+    Add-Type -Namespace MemLabsConsole -Name NativeV2 -MemberDefinition @'
 [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-public struct COORD { public short X; public short Y; }
+public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 
-[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
 
-[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-public struct CONSOLE_SCREEN_BUFFER_INFO {
-    public COORD dwSize;
-    public COORD dwCursorPosition;
-    public short wAttributes;
-    public SMALL_RECT srWindow;
-    public COORD dwMaximumWindowSize;
-}
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+public static extern bool GetClientRect(System.IntPtr hWnd, out RECT lpRect);
 
-[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
-public static extern System.IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-    System.IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, System.IntPtr hTemplateFile);
-
-[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool GetConsoleScreenBufferInfo(System.IntPtr hConsoleOutput, out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
-
-[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-public static extern bool CloseHandle(System.IntPtr hObject);
-
-public static bool TryGetWindowSize(out int width, out int height) {
+public static bool TryGetWindowPixels(out int width, out int height) {
     width = 0; height = 0;
-    // GENERIC_READ | GENERIC_WRITE = 0xC0000000; FILE_SHARE_READ | FILE_SHARE_WRITE = 3; OPEN_EXISTING = 3
-    System.IntPtr h = CreateFile("CONOUT$", 0xC0000000u, 3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);
-    if (h == System.IntPtr.Zero || h.ToInt64() == -1) return false;
-    try {
-        CONSOLE_SCREEN_BUFFER_INFO info;
-        if (!GetConsoleScreenBufferInfo(h, out info)) return false;
-        width  = info.srWindow.Right  - info.srWindow.Left + 1;
-        height = info.srWindow.Bottom - info.srWindow.Top  + 1;
-        return true;
-    } finally {
-        CloseHandle(h);
-    }
+    System.IntPtr h = GetConsoleWindow();
+    if (h == System.IntPtr.Zero) return false;
+    RECT r;
+    if (!GetClientRect(h, out r)) return false;
+    width  = r.Right  - r.Left;
+    height = r.Bottom - r.Top;
+    return true;
 }
 '@
 }
@@ -688,7 +669,7 @@ public static bool TryGetWindowSize(out int width, out int height) {
 function Get-LiveWindowSize {
     $w = 0; $h = 0
     try {
-        if (-not [MemLabsConsole.Native]::TryGetWindowSize([ref]$w, [ref]$h)) {
+        if (-not [MemLabsConsole.NativeV2]::TryGetWindowPixels([ref]$w, [ref]$h)) {
             return $null
         }
     }
@@ -696,6 +677,8 @@ function Get-LiveWindowSize {
         return $null
     }
     if ($w -le 0 -or $h -le 0) { return $null }
+    # Width/Height are pixel dimensions of the console window's client area.
+    # Used only for change detection; comparisons (-ne) trigger redraw.
     return [pscustomobject]@{ Width = $w; Height = $h }
 }
 
