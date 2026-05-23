@@ -742,6 +742,28 @@ function Resolve-ShrinkPlan {
     return $plan
 }
 
+# Render the bottom-of-menu pagination hint ("Press [PgUp/PgDn] to see more"
+# etc). Caller passes Operation and whether PgUp is available; the helper
+# writes the hint to the console. Returns nothing.
+function Write-MenuPgIndicator {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Operation,
+        [Parameter(Mandatory)][bool]$PgUpAvailable
+    )
+    if ($PgUpAvailable -and $Operation -eq 'PGDNNeeded') {
+        Write-Host2
+        Write-Host2 'Press [PgUp/PgDn] to see more' -ForegroundColor Yellow
+    }
+    elseif ($Operation -eq 'PGDNDone') {
+        Write-Host2
+        Write-Host2 'Press [PgUp] to see more' -ForegroundColor Yellow
+    }
+    elseif ($Operation -eq 'PGDNNeeded') {
+        Write-Host2
+        Write-Host2 'Press [PgDn] to see more' -ForegroundColor Yellow
+    }
+}
+
 # Render a centered "───  Heading Text  ───" break line for a *B-prefixed
 # header item. Extracted verbatim from Show-Menu's inline render so callers
 # can read declaratively. Same colors, widths, and rounding as before.
@@ -944,18 +966,15 @@ function Show-Menu {
         }
         if ($PgUpAvailable -and $Operation -eq "PGDNNeeded") {
             $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgUp/PgDn] to see more" -ForegroundColor Yellow
+            Write-MenuPgIndicator -Operation 'PGDNNeeded' -PgUpAvailable $true
         }
         elseif ($Operation -eq "PGDNDone") {
             $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgUp] to see more" -ForegroundColor Yellow
+            Write-MenuPgIndicator -Operation 'PGDNDone' -PgUpAvailable $false
         }
         elseif ($Operation -eq "PGDNNeeded") {
             $Operation = ""
-            Write-Host2
-            Write-Host2 "Press [PgDn] to see more" -ForegroundColor Yellow
+            Write-MenuPgIndicator -Operation 'PGDNNeeded' -PgUpAvailable $false
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition               
