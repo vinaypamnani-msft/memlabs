@@ -99,10 +99,11 @@ function get-CMOptionsSummary {
         $tokens += (Format-OptionToken -Color "DimGray" -Text "SUP ") + (Format-OptionToken -Color "Tan" -Text "Offline")
     }
 
-    # BLM badge — only shown when EnableBLM is set (non-default)
-    if ($options.EnableBLM) {
-        $tokens += (Format-OptionToken -Color "DimGray" -Text "BLM ") + (Format-OptionToken -Color "ForestGreen" -Text "✓")
-    }
+    # BLM badge — always shown so users can tell at a glance whether BitLocker
+    # Management is on for this site server (green ✓ when on, tan ✗ when off).
+    $blmColor = if ($options.EnableBLM) { "ForestGreen" } else { "Tan" }
+    $blmMark = if ($options.EnableBLM) { "✓" } else { "✗" }
+    $tokens += (Format-OptionToken -Color "DimGray" -Text "BLM ") + (Format-OptionToken -Color $blmColor -Text $blmMark)
 
     $Output = $tokens -join $sep
 
