@@ -634,16 +634,63 @@ function Get-Menu2 {
 }
 
 
-# Read the current console window size directly from kernel32 via
-# [System.Console]::Window{Width,Height}. PowerShell's $Host.UI.RawUI.WindowSize
-# can return a stale cached value across RDP minimize/restore cycles, which
-# breaks the resize-watcher polling in Get-KeyStroke. Returning $null when the
-# window is minimized (either dim 0) signals callers to leave the captured
-# baseline untouched so we don't latch onto a 0x0 ghost size.
-function Get-LiveWindowSize {
+# Read the current console window size by opening a fresh CONOUT$ handle via
+# P/Invoke and calling GetConsoleScreenBufferInfo. [System.Console]::Window* and
+# $Host.UI.RawUI.WindowSize both reuse a cached stdout handle whose buffer info
+# can go stale (observed: size locks to first post-redraw value and never updates
+# again until something writes to the console). A fresh handle reads the current
+# console state each time, so this is the only reliable polling-time size read.
+if (-not ('MemLabsConsole.Native' -as [type])) {
+    Add-Type -Namespace MemLabsConsole -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct COORD { public short X; public short Y; }
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct SMALL_RECT { public short Left; public short Top; public short Right; public short Bottom; }
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct CONSOLE_SCREEN_BUFFER_INFO {
+    public COORD dwSize;
+    public COORD dwCursorPosition;
+    public short wAttributes;
+    public SMALL_RECT srWindow;
+    public COORD dwMaximumWindowSize;
+}
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+public static extern System.IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+    System.IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, System.IntPtr hTemplateFile);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleScreenBufferInfo(System.IntPtr hConsoleOutput, out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool CloseHandle(System.IntPtr hObject);
+
+public static bool TryGetWindowSize(out int width, out int height) {
+    width = 0; height = 0;
+    // GENERIC_READ | GENERIC_WRITE = 0xC0000000; FILE_SHARE_READ | FILE_SHARE_WRITE = 3; OPEN_EXISTING = 3
+    System.IntPtr h = CreateFile("CONOUT$", 0xC0000000u, 3u, System.IntPtr.Zero, 3u, 0u, System.IntPtr.Zero);
+    if (h == System.IntPtr.Zero || h.ToInt64() == -1) return false;
     try {
-        $w = [System.Console]::WindowWidth
-        $h = [System.Console]::WindowHeight
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (!GetConsoleScreenBufferInfo(h, out info)) return false;
+        width  = info.srWindow.Right  - info.srWindow.Left + 1;
+        height = info.srWindow.Bottom - info.srWindow.Top  + 1;
+        return true;
+    } finally {
+        CloseHandle(h);
+    }
+}
+'@
+}
+
+function Get-LiveWindowSize {
+    $w = 0; $h = 0
+    try {
+        if (-not [MemLabsConsole.Native]::TryGetWindowSize([ref]$w, [ref]$h)) {
+            return $null
+        }
     }
     catch {
         return $null
