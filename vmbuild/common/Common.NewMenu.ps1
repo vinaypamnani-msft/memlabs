@@ -1220,21 +1220,33 @@ function Get-KeyStroke {
     Add-Content -Path $diagPath -Value ("[{0}] ENTER watch={1} HostWin={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $lastLogged, $Host.UI.RawUI.WindowSize.Width, $Host.UI.RawUI.WindowSize.Height) -ErrorAction SilentlyContinue
     while ($true) {
         $iter++
-        if ($Host.UI.RawUI.KeyAvailable) {
+        try {
+            $ka = $Host.UI.RawUI.KeyAvailable
+        } catch {
+            Add-Content -Path $diagPath -Value ("[{0}] KA-THROW iter={1} ex={2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $_.Exception.Message) -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 75
+            continue
+        }
+        if ($ka) {
             Add-Content -Path $diagPath -Value ("[{0}] KEY iter={1}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter) -ErrorAction SilentlyContinue
             return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
-        $live = Get-LiveWindowSize
-        $hostWin = $Host.UI.RawUI.WindowSize
+        try {
+            $live = Get-LiveWindowSize
+            $hostWin = $Host.UI.RawUI.WindowSize
+        } catch {
+            Add-Content -Path $diagPath -Value ("[{0}] SIZE-THROW iter={1} ex={2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $_.Exception.Message) -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 75
+            continue
+        }
         $liveStr = if ($live) { "$($live.Width)x$($live.Height)" } else { "NULL" }
         $hostStr = "$($hostWin.Width)x$($hostWin.Height)"
         $curStr = "$($liveStr)/Host=$hostStr"
-        if ($curStr -ne $lastLogged -or ($iter % 60 -eq 0)) {
-            Add-Content -Path $diagPath -Value ("[{0}] iter={1} live={2} host={3} watch={4}x{5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $liveStr, $hostStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
+        # Heartbeat every ~1.1s (15 iters * 75ms) so we can tell if the poll is alive
+        if ($curStr -ne $lastLogged -or ($iter % 15 -eq 0)) {
+            Add-Content -Path $diagPath -Value ("[{0}] iter={1} ka=False live={2} host={3} watch={4}x{5}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $liveStr, $hostStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
             $lastLogged = $curStr
         }
-        # $null means the window is currently minimized; ignore it so we don't
-        # bounce out on a 0x0 transition. Only treat real dim changes as resizes.
         if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
             Add-Content -Path $diagPath -Value ("[{0}] RESIZE-EXIT live={1} watch={2}x{3}" -f (Get-Date -Format 'HH:mm:ss.fff'), $liveStr, $WatchSize.Width, $WatchSize.Height) -ErrorAction SilentlyContinue
             return $null
