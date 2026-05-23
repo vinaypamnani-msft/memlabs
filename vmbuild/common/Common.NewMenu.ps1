@@ -900,7 +900,7 @@ function Show-Menu {
             if ($RoomLeft -le 2) {
                 $menuItem.Displayed = $false                
                 $Operation = $script:MenuOp.PgDnNeeded
-                Write-Log -LogOnly "MenuDiag[$menuName]: PgDnNeeded fired at item '$($menuItem.itemName)' RoomLeft=$RoomLeft Op-now=$Operation"
+                Write-Log -LogOnly "MenuDiag[$menuName]: PgDnNeeded fired at item '$($menuItem.itemName)' RoomLeft=$RoomLeft Op-now=$Operation MenuOpType=$($script:MenuOp.GetType().Name) MenuOpCount=$($script:MenuOp.Count) PgDnNeededVal=[$($script:MenuOp.PgDnNeeded)] KeysList=$($script:MenuOp.Keys -join ',')"
                 continue
             }
             $CurrentPosition = Get-CursorPosition
