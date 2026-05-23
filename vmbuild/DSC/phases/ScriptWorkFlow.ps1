@@ -435,6 +435,12 @@ if ($CurrentRole -eq "Primary") {
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
+    # MUST re-assert Complete! -- EnableBLM's final status ("BitLocker Management
+    # configuration complete") overwrites the earlier Complete! marker written
+    # after PushClients. The orchestrator in Common.ScriptBlocks.ps1 polls for
+    # exact match "Complete!" / "Setting up ConfigMgr. Status: Complete!" and
+    # will otherwise hang on Phase 8 long after the work is done.
+    Write-DscStatus "Complete!"
 }
 
 
