@@ -820,6 +820,80 @@ function Write-MenuItem {
     return $result
 }
 
+# Compute the actual on-screen line count this item will consume after the
+# shrink plan is applied. Mirrors the kind/tier rules used by Write-MenuItem:
+# items dropped by shrink contribute 0; Selectable rows account for text wrap.
+function Get-MenuItemLineCost {
+    param(
+        [Parameter(Mandatory)] $MenuItem,
+        [Parameter(Mandatory)][hashtable]$Shrink,
+        [Parameter(Mandatory)][bool]$MaxShrink,
+        [Parameter(Mandatory)][int]$WrapAt
+    )
+    $kind = Get-MenuItemKind -MenuItem $MenuItem
+    switch ($kind) {
+        'Selectable' {
+            $cost = 1
+            if ($MenuItem.Text -and $MenuItem.Text.Length -gt $WrapAt) { $cost += 1 }
+            return $cost
+        }
+        'Summary' {
+            if ($Shrink.Summary) { return 0 }
+            return [int]$MenuItem.LineCount
+        }
+        'Help' {
+            if ($MaxShrink -or $Shrink.Help) { return 0 }
+            return [int]$MenuItem.LineCount
+        }
+        'Header' {
+            if ($MaxShrink -or $Shrink.Header) { return 0 }
+            return [int]$MenuItem.LineCount
+        }
+        'Decorative' {
+            if ($MaxShrink) { return 0 }
+            $tier = Get-MenuItemTier -MenuItem $MenuItem
+            if ($tier -and $Shrink[$tier]) { return 0 }
+            return [int]$MenuItem.LineCount
+        }
+    }
+    return 0
+}
+
+# Pre-compute which slice of $MenuItems fits in $AvailableRows starting at
+# $StartIndex, given the already-decided shrink plan. Replaces the legacy
+# reactive "Get-RoomLeftFromCurrentPosition -le 2" mid-render check with a
+# deterministic up-front calculation. Returns:
+#   StartIndex - echo of input
+#   EndIndex   - last item index that fits (inclusive); $StartIndex - 1 if none
+#   PgDnNeeded - $true when items remain after EndIndex
+function Get-PageLayout {
+    param(
+        [Parameter(Mandatory)][System.Collections.IEnumerable]$MenuItems,
+        [Parameter(Mandatory)][hashtable]$Shrink,
+        [Parameter(Mandatory)][bool]$MaxShrink,
+        [Parameter(Mandatory)][int]$WrapAt,
+        [Parameter(Mandatory)][int]$AvailableRows,
+        [Parameter(Mandatory)][int]$StartIndex
+    )
+    $items = @($MenuItems)
+    $count = $items.Count
+    if ($StartIndex -ge $count) { $StartIndex = 0 }
+    $used = 0
+    $endIndex = $StartIndex - 1
+    for ($i = $StartIndex; $i -lt $count; $i++) {
+        $cost = Get-MenuItemLineCost -MenuItem $items[$i] -Shrink $Shrink -MaxShrink $MaxShrink -WrapAt $WrapAt
+        if (($used + $cost) -gt $AvailableRows) { break }
+        $used += $cost
+        $endIndex = $i
+    }
+    $pgDnNeeded = ($endIndex -lt ($count - 1))
+    return @{
+        StartIndex = $StartIndex
+        EndIndex   = $endIndex
+        PgDnNeeded = $pgDnNeeded
+    }
+}
+
 # Render the bottom-of-menu pagination hint ("Press [PgUp/PgDn] to see more"
 # etc). Caller passes Operation and whether PgUp is available; the helper
 # writes the hint to the console. Returns nothing.
@@ -885,6 +959,8 @@ function Show-Menu {
     )
     $LongestBreakLine = 0
     $Operation = ""
+    $pageStartIndex = 0
+    $pageEndIndex   = -1
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
     While ($true) {
         # Reset per-iteration state. HelpPosition must be cleared each loop:
@@ -892,21 +968,15 @@ function Show-Menu {
         # it was drawn previously, and a stale position would cause Update-Prompt
         # to paint the help box over wherever that old coordinate points.
         $HelpPosition = $null
-        # PGUP/PGDN bookkeeping: reset Displayed flags so the upcoming render
-        # walk knows where the new page starts. Done before measurement because
-        # nothing about line counts depends on these flags.
+        # PGUP/PGDN bookkeeping: advance the page start index based on the
+        # previous render's EndIndex (saved in $pageEndIndex). PgUp always
+        # snaps back to the first page (preserves prior behavior).
         if ($operation -eq 'PGUP') {
-            foreach ($mi in $menuItems) { $mi.Displayed = $false }
+            $pageStartIndex = 0
         }
         elseif ($operation -eq 'PGDN') {
-            $pgDnHasMore = $false
-            foreach ($mi in $menuItems) {
-                if (-not $mi.Displayed -and $mi.Selectable) { $pgDnHasMore = $true; break }
-            }
-            if (-not $pgDnHasMore) {
-                foreach ($mi in $menuItems) { $mi.Displayed = $false }
-                $operation = ""
-            }
+            $pageStartIndex = $pageEndIndex + 1
+            if ($pageStartIndex -ge $menuItems.Count) { $pageStartIndex = 0 }
         }
 
         # Single pass over the menu collects every layout number we need.
@@ -952,41 +1022,47 @@ function Show-Menu {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
-        $PgUpAvailable = ($operation -eq 'PGDN')
+
+        # Lookahead: pre-compute which slice of $menuItems fits this page given
+        # the active shrink plan. Replaces the legacy "render until RoomLeft -le 2"
+        # reactive bailout with a deterministic up-front layout decision.
+        # Available rows reserves 2 lines for the trailing prompt / PgDn indicator
+        # (matches the prior "-le 2" threshold).
+        $wrapAt        = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
+        $availableRows = [Math]::Max(1, (Get-RoomLeftFromCurrentPosition) - 2)
+        $layout        = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
+                            -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
+        $pageStartIndex = $layout.StartIndex
+        $pageEndIndex   = $layout.EndIndex
+        $PgUpAvailable  = ($pageStartIndex -gt 0)
+        if ($layout.PgDnNeeded) {
+            $Operation = 'PGDNNEEDED'
+        }
+        elseif ($PgUpAvailable) {
+            $Operation = 'PGDNDONE'
+        }
+        else {
+            $Operation = ''
+        }
+
+        # Reset Displayed for every item, then mark the ones we actually render.
+        # Downstream selection / keystroke code still consults .Displayed.
+        foreach ($mi in $menuItems) { $mi.Displayed = $false }
+
         $CurrentPosition = Get-CursorPosition
         $MenuStart = $CurrentPosition.Y
-        $passedDisplayedItems = $false
-        foreach ($menuItem in $menuItems) {
-            if ($operation -eq 'PGDN') {
-                if ($menuItem.Displayed) {
-                    $menuItem.Displayed = $false
-                    $passedDisplayedItems = $true
-                    continue
-                }
-                if (-not $passedDisplayedItems) {
-                    # Items before current page (hidden by a previous PgDn) - skip
-                    continue
-                }
-                if (-not $menuItem.Displayed -and $menuitem.Selectable) {
-                    $operation = 'PGDNDONE'
-                }
-            }
-            $RoomLeft = Get-RoomLeftFromCurrentPosition
-            if ($RoomLeft -le 2) {
-                $menuItem.Displayed = $false                
-                $Operation = 'PGDNNEEDED'
-                continue
-            }
-            $CurrentPosition = Get-CursorPosition
-            Set-CursorPosition -x 0 -y $CurrentPosition.Y  # Make sure we are at the beginning of the line   
+        if ($pageEndIndex -ge $pageStartIndex) {
+            for ($i = $pageStartIndex; $i -le $pageEndIndex; $i++) {
+                $menuItem = $menuItems[$i]
+                $CurrentPosition = Get-CursorPosition
+                Set-CursorPosition -x 0 -y $CurrentPosition.Y
 
-            # Per-item render is dispatched in Write-MenuItem (kind-based switch).
-            # Loop body only handles PGDN bookkeeping above, then applies the
-            # Drawn / HelpPosition outputs returned here.
-            $itemResult = Write-MenuItem -MenuItem $menuItem -Shrink $shrink -MaxShrink $Maxshrink -LongestBreakLine $LongestBreakLine -MultiSelect:$MultiSelect
-            if ($itemResult.Drawn)        { $menuItem.Displayed = $true }
-            if ($itemResult.HelpPosition) { $HelpPosition = $itemResult.HelpPosition }
-        }   
+                # Per-item render dispatched in Write-MenuItem (kind-based switch).
+                $itemResult = Write-MenuItem -MenuItem $menuItem -Shrink $shrink -MaxShrink $Maxshrink -LongestBreakLine $LongestBreakLine -MultiSelect:$MultiSelect
+                if ($itemResult.Drawn)        { $menuItem.Displayed = $true }
+                if ($itemResult.HelpPosition) { $HelpPosition = $itemResult.HelpPosition }
+            }
+        }
         $CurrentPosition = (Get-CursorPosition).Y - $menuItems.Count 
 
         $AnySelections = $menuItems | Where-Object { $_.Selectable }
