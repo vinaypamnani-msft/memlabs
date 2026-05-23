@@ -56,99 +56,48 @@ else {
     Write-DscStatus "$Tag WARNING: Get-CMDeviceCollection returned null for '$blmCollectionName'"
 }
 
-# Add direct membership rules for BitLocker VMs
+# Add query membership rules for BitLocker VMs (by name - resilient to ResourceID changes)
 if ($blmCollection) {
     Write-DscStatus "$Tag Found $($blmVMs.Count) VM(s) with BitLocker=true in deployConfig"
 
-    # Collect VMs not yet in ConfigMgr for retry after AD discovery
-    $missingDevices = @()
-
     foreach ($blmVM in $blmVMs) {
         $vmResourceName = $blmVM.vmName
-        $cmDevice = Get-CMDevice -Name $vmResourceName -ErrorAction SilentlyContinue
-        if ($cmDevice) {
-            $existingRule = Get-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID -ErrorAction SilentlyContinue
-            if (-not $existingRule) {
-                Add-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID
-                Write-DscStatus "$Tag Added $vmResourceName (ResourceID: $($cmDevice.ResourceID)) to $blmCollectionName"
-            }
-            else {
-                Write-DscStatus "$Tag $vmResourceName already a direct member of $blmCollectionName"
-            }
+        $ruleName = "BLM-$vmResourceName"
+        $existingRule = Get-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -ErrorAction SilentlyContinue
+        if (-not $existingRule) {
+            $query = "SELECT * FROM SMS_R_System WHERE Name = '$vmResourceName'"
+            Add-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -QueryExpression $query
+            Write-DscStatus "$Tag Added query rule '$ruleName' to $blmCollectionName"
         }
         else {
-            $missingDevices += $blmVM
-        }
-    }
-
-    # If any BLM VMs are not yet discovered, trigger AD System Discovery and retry
-    if ($missingDevices.Count -gt 0) {
-        Write-DscStatus "$Tag $($missingDevices.Count) device(s) not yet in ConfigMgr. Triggering AD System Discovery..."
-        try {
-            $adDiscovery = Get-CimInstance -Namespace "root\SMS\site_$SiteCode" -ClassName SMS_SCI_Component -Filter "ComponentName='SMS_AD_SYSTEM_DISCOVERY_AGENT'" -ErrorAction Stop
-            if ($adDiscovery) {
-                Invoke-CimMethod -InputObject $adDiscovery -MethodName "RequestRefresh" -ErrorAction SilentlyContinue | Out-Null
-                Write-DscStatus "$Tag AD System Discovery refresh requested"
-            }
-        }
-        catch {
-            Write-DscStatus "$Tag WARNING: Failed to trigger AD Discovery: $($_.Exception.Message)"
-        }
-
-        # Wait for discovery to process DDRs (retry up to 5 minutes)
-        $maxRetries = 10
-        $retryDelay = 30
-        for ($retry = 1; $retry -le $maxRetries -and $missingDevices.Count -gt 0; $retry++) {
-            Write-DscStatus "$Tag Waiting ${retryDelay}s for discovery (attempt $retry/$maxRetries, $($missingDevices.Count) device(s) remaining)..."
-            Start-Sleep -Seconds $retryDelay
-            $stillMissing = @()
-            foreach ($blmVM in $missingDevices) {
-                $vmResourceName = $blmVM.vmName
-                $cmDevice = Get-CMDevice -Name $vmResourceName -ErrorAction SilentlyContinue
-                if ($cmDevice) {
-                    $existingRule = Get-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID -ErrorAction SilentlyContinue
-                    if (-not $existingRule) {
-                        Add-CMDeviceCollectionDirectMembershipRule -CollectionId $blmCollection.CollectionID -ResourceId $cmDevice.ResourceID
-                        Write-DscStatus "$Tag Added $vmResourceName (ResourceID: $($cmDevice.ResourceID)) to $blmCollectionName (discovered on retry $retry)"
-                    }
-                    else {
-                        Write-DscStatus "$Tag $vmResourceName already a direct member of $blmCollectionName"
-                    }
-                }
-                else {
-                    $stillMissing += $blmVM
-                }
-            }
-            $missingDevices = $stillMissing
-        }
-
-        if ($missingDevices.Count -gt 0) {
-            $names = ($missingDevices | ForEach-Object { $_.vmName }) -join ', '
-            Write-DscStatus "$Tag WARNING: $($missingDevices.Count) device(s) still not discovered after retries: $names. They will be added to BLM collection once discovered by the site."
+            Write-DscStatus "$Tag Query rule '$ruleName' already exists in $blmCollectionName"
         }
     }
 
     # Force collection membership evaluation and verify members appear
-    $expectedCount = ($blmVMs.Count - $missingDevices.Count)
     Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
-    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName (expecting $expectedCount members)"
+    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName"
 
     # Wait for evaluation to complete - members must be visible for deployment to work
+    # Query rules will match once the device is discovered (any ResourceID)
     $evalRetries = 12
     $evalDelay = 10
     for ($i = 1; $i -le $evalRetries; $i++) {
         Start-Sleep -Seconds $evalDelay
         $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue)
-        if ($members.Count -ge $expectedCount) {
-            Write-DscStatus "$Tag Collection evaluation complete: $($members.Count) member(s) visible"
+        $expectedNames = @($blmVMs | ForEach-Object { $_.vmName })
+        $found = @($members | Where-Object { $_.Name -in $expectedNames })
+        if ($found.Count -ge $expectedNames.Count) {
+            Write-DscStatus "$Tag Collection evaluation complete: $($members.Count) total member(s), $($found.Count)/$($expectedNames.Count) expected BLM clients visible"
             break
         }
         if ($i -lt $evalRetries) {
-            Write-DscStatus "$Tag Waiting for collection evaluation ($i/$evalRetries): $($members.Count)/$expectedCount members visible..."
+            Write-DscStatus "$Tag Waiting for collection evaluation ($i/$evalRetries): $($found.Count)/$($expectedNames.Count) expected BLM clients visible..."
             Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
         }
         else {
-            Write-DscStatus "$Tag WARNING: Collection shows $($members.Count)/$expectedCount members after $($evalRetries * $evalDelay)s. Deployment may be delayed."
+            $missing = $expectedNames | Where-Object { $_ -notin $members.Name }
+            Write-DscStatus "$Tag WARNING: After $($evalRetries * $evalDelay)s, missing members: $($missing -join ', '). They will appear once discovered by the site."
         }
     }
 }
