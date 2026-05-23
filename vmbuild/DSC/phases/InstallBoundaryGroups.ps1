@@ -22,7 +22,9 @@ $cm_svc = "$NetbiosDomainName\cm_svc"
 # Push is now per-VM (pushClient property). thisParams.ClientPush only contains
 # VMs that have opted in, so an empty list means nothing to push.
 $pushClients = [bool]$ClientNames
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }

@@ -13,8 +13,15 @@ if (-not $ConfigFilePath) {
 # Read config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
+# Resolve this VM and its cmOptions so multi-hierarchy deploys (CAS hierarchy
+# alongside a separate standalone Primary with differing EnableBLM) pick the
+# correct hierarchy's flag.
+$ThisMachineName = if ($deployConfig.parameters.ThisMachineName) { $deployConfig.parameters.ThisMachineName } else { $env:COMPUTERNAME }
+$ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+
 # Determine if BLM should run: either cmOptions.EnableBLM is set, or VMs have BitLocker=true
-$blmEnabled = $deployConfig.cmOptions.EnableBLM
+$blmEnabled = $cmo.EnableBLM
 $blmVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true })
 if (-not $blmEnabled -and $blmVMs.Count -eq 0) {
     Write-DscStatus "$Tag EnableBLM is not set and no VMs have BitLocker=true. Skipping."

@@ -23,7 +23,11 @@ $ClientNames = $thisVM.thisParams.ClientPush
 # Push is now per-VM (pushClient property). thisParams.ClientPush only contains
 # VMs that have opted in, so an empty list means nothing to push.
 $pushClients = [bool]$ClientNames
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Per-VM cmOptions wins over the rehydrated global so multi-hierarchy deploys
+# (CAS hierarchy alongside a separate standalone Primary with differing PKI)
+# pick this VM's own UsePKI setting.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }

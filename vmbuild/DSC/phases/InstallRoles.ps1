@@ -13,8 +13,10 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
-$usePKI = $deployConfig.cmOptions.UsePKI
-$offlineSUP = $deployConfig.cmOptions.OfflineSUP
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
+$offlineSUP = $cmo.OfflineSUP
 if (-not $usePKI) {
     $usePKI = $false
 }

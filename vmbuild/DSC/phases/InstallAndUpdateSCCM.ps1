@@ -9,12 +9,17 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
-$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
 $psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.ParentSiteCode -eq $thisVM.SiteCode }
 $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thisParams.Primary }
+
+# Per-VM cmOptions wins over the rehydrated global so multi-hierarchy deploys
+# (CAS hierarchy alongside a separate standalone Primary with differing
+# version/OfflineSCP/UsePKI) pick this VM's own hierarchy settings.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
 # Read locale settings
 $locale = $deployConfig.vmOptions.locale
@@ -168,7 +173,7 @@ CurrentBranch=1
     $productID = "EVAL"
 
     if ($CM -ne "CMTP") {
-        if (-not $($deployConfig.cmOptions.EVALVersion)) {
+        if (-not $($cmo.EVALVersion)) {
             if ($($deployConfig.parameters.ProductID)) {
                 $productID = $($deployConfig.parameters.ProductID)
             }
@@ -185,11 +190,11 @@ CurrentBranch=1
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
 
-    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+    if ($($cmo.InstallSCP) -eq $false) {
         $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
     }
 
-    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    if ($($cmo.OfflineSCP) -eq $true) {
         $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
     }
 
@@ -403,20 +408,20 @@ if (-not $exists) {
 
 # Check if we should update
 $UpdateRequired = $false
-if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
+if ($cmo.version -notin "current-branch", "tech-preview" -and $cmo.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
     $UpdateRequired = $true
 
-    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+    if ($($cmo.InstallSCP) -eq $false) {
         $UpdateRequired = $false
     }
 
-    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    if ($($cmo.OfflineSCP) -eq $true) {
         $UpdateRequired = $false        
     }
 
 }
 
-if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+if ($($cmo.OfflineSCP) -eq $true) {
     $UpdateRequired = $false
     Write-DscStatus "Installing Offline SCP"
     Add-CMServiceConnectionPoint -SiteSystemServerName "$env:computername.$DomainFullName" -SiteCode $SiteCode -Mode Offline
@@ -425,7 +430,7 @@ if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
 
 if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
     # Verify the update is actually installed before skipping
-    $targetVersion = $deployConfig.cmOptions.version
+    $targetVersion = $cmo.version
     $installedUpdate = Get-CMSiteUpdate -Fast | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $targetVersion" }
     if ($installedUpdate) {
         Write-DscStatus "Update 'Configuration Manager $targetVersion' verified as installed. Skipping upgrade."
@@ -581,7 +586,7 @@ if ($UpdateRequired) {
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
-    $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
+    $updatepack = Get-UpdatePack -UpdateVersion $cmo.version
     if ($updatepack -ne "") {
         Write-DscStatus "Found '$($updatepack.Name)' update."
     }
@@ -616,7 +621,7 @@ if ($UpdateRequired) {
             break
         }
 
-        if (-not $deployConfig.cmOptions.UsePKI) {
+        if (-not $cmo.UsePKI) {
             # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
             Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"

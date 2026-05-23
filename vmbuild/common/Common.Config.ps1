@@ -39,6 +39,72 @@ function Get-ConfigCmOptions {
     return $null
 }
 
+# Resolves the cmOptions block that should apply to a given VM, by walking up
+# its hierarchy to the top-level site server (CAS or standalone Primary) that
+# owns the canonical block. Returns $null when the VM has no hierarchy
+# affiliation (e.g. DC/DomainMember not bound to a site).
+#
+# Walks: $vm -> parentSiteCode -> ... -> top. For Passive/SiteSystem VMs which
+# only have a SiteCode (no parentSiteCode), finds the owning CAS/Primary in the
+# same SiteCode and resumes the walk from there. Cycle-guarded.
+function Resolve-VmCmOptions {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $true)] [object] $vm
+    )
+    if ($null -ne $vm.cmOptions) { return $vm.cmOptions }
+    $current = $vm
+    $visited = @{}
+    while ($current) {
+        if ($null -ne $current.cmOptions) { return $current.cmOptions }
+        $key = "$($current.vmName)"
+        if ($visited[$key]) { return $null }
+        $visited[$key] = $true
+
+        if ($current.parentSiteCode) {
+            $current = $Config.virtualMachines | Where-Object {
+                $_.SiteCode -eq $current.parentSiteCode -and $_.Role -in 'CAS', 'Primary'
+            } | Select-Object -First 1
+            continue
+        }
+
+        if ($current.SiteCode) {
+            $owner = $Config.virtualMachines | Where-Object {
+                $_.SiteCode -eq $current.SiteCode -and $_.Role -in 'CAS', 'Primary' -and $_.vmName -ne $current.vmName
+            } | Select-Object -First 1
+            if (-not $owner) { return $null }
+            $current = $owner
+            continue
+        }
+
+        return $null
+    }
+    return $null
+}
+
+# Stamps a resolved cmOptions block onto every site-role VM (CAS/Primary/
+# Secondary/PassiveSite/SiteSystem) in the config that doesn't already carry
+# one, so DSC phases can read $ThisVM.cmOptions directly without per-hierarchy
+# guesswork. Deep-clones via JSON round-trip so later mutations don't bleed
+# across VMs.
+function Set-VmCmOptionsResolved {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return }
+    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    foreach ($vm in $Config.virtualMachines) {
+        if ($vm.Role -notin $siteRoles) { continue }
+        if ($null -ne $vm.cmOptions) { continue }
+        $resolved = Resolve-VmCmOptions -Config $Config -vm $vm
+        if (-not $resolved) { continue }
+        $clone = $resolved | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $vm | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+    }
+}
+
 # Migrates a config's root-level cmOptions onto the top-level site server VM.
 # Idempotent: a no-op when root cmOptions is already absent. Called from
 # Get-UserConfiguration after all existing root-level reads have completed.
@@ -557,6 +623,13 @@ function New-DeployConfig {
                 $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootCmOptions -Force
             }
         }
+
+        # Stamp every site-role VM with its own resolved cmOptions block so
+        # multi-hierarchy deployments (e.g. one CAS + one standalone Primary with
+        # differing version/PKI/Offline settings) get correct per-VM values in
+        # DSC phases. The root $configObject.cmOptions remains as a single-top
+        # mirror for legacy reads; new/updated DSC phases prefer $ThisVM.cmOptions.
+        Set-VmCmOptionsResolved -Config $configObject
 
         if ($null -ne ($configObject.vmOptions.domainName)) { 
             if (($configObject.vmOptions.domainName) -eq "AUTO") {

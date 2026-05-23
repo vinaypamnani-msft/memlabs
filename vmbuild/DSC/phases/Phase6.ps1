@@ -135,7 +135,7 @@ configuration Phase6
         }
 
 
-        $usePKI = $deployConfig.cmOptions.UsePKI
+        $usePKI = if ($thisVM.cmOptions) { $thisVM.cmOptions.UsePKI } else { $deployConfig.cmOptions.UsePKI }
 
         if ($standalone) {
             $usePKI = $false
