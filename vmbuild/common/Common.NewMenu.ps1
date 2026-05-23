@@ -1283,7 +1283,11 @@ function Get-KeyStroke {
     while ($true) {
         $iter++
         try {
-            $ka = $Host.UI.RawUI.KeyAvailable
+            # Use [System.Console]::KeyAvailable (not $Host.UI.RawUI.KeyAvailable):
+            # after mstsc minimize/restore, the PS host's KeyAvailable property
+            # becomes blocking until input arrives, which freezes the resize
+            # poll loop entirely. The .NET API is guaranteed non-blocking.
+            $ka = [System.Console]::KeyAvailable
         } catch {
             Add-Content -Path $diagPath -Value ("[{0}] KA-THROW iter={1} ex={2}" -f (Get-Date -Format 'HH:mm:ss.fff'), $iter, $_.Exception.Message) -ErrorAction SilentlyContinue
             Start-Sleep -Milliseconds 75
