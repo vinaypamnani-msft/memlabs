@@ -566,7 +566,7 @@ function Select-NewDomainConfig {
         IncludeSSMSOnNONSQL         = $true
         EnableSUPOnSiteServers      = $false
         PushCMClientToClients       = $true
-        PushCMClientToServers       = $true
+        PushCMClientToServers       = $false
     }
 
     # Load saved defaults from previous run if available
