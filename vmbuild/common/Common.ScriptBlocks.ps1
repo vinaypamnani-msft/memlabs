@@ -2277,11 +2277,20 @@ $global:VM_Config = {
                     # Emit status text first (preserves legacy string consumers) then runid as a side property
                     [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId }
                 } -SuppressLog:$suppressNoisyLogging
-                # Unwrap to keep $status.ScriptBlockOutput a plain string for the existing code paths below
+                # Unwrap the bundled object into local snapshots WITHOUT mutating
+                # $status. On some failure paths Invoke-VmCommand returns an
+                # object whose ScriptBlockOutput is read-only/non-settable, and
+                # assigning to it threw "The property 'ScriptBlockOutput' cannot
+                # be found on this object" during Phase 2 startup.
                 $completedRunIdSnapshot = $null
+                $statusTextSnapshot = $null
                 if ($status -and $status.ScriptBlockOutput -is [pscustomobject]) {
                     $completedRunIdSnapshot = $status.ScriptBlockOutput.CompletedRunId
-                    $status.ScriptBlockOutput = $status.ScriptBlockOutput.StatusText
+                    $statusTextSnapshot = $status.ScriptBlockOutput.StatusText
+                }
+                elseif ($status) {
+                    # Fallback (e.g. when the scriptblock failed before returning a pscustomobject)
+                    $statusTextSnapshot = $status.ScriptBlockOutput
                 }
                 $stopwatch2.Stop()
 
@@ -2333,9 +2342,9 @@ $global:VM_Config = {
                     }
                 }
 
-                if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
+                if ($statusTextSnapshot -and $statusTextSnapshot -is [string]) {
                     $noStatus = $false
-                    $currentStatus = $status.ScriptBlockOutput | Out-String
+                    $currentStatus = $statusTextSnapshot | Out-String
 
                     # Write to log if status changed
                     if ($currentStatus -ne $previousStatus) {
@@ -2385,13 +2394,13 @@ $global:VM_Config = {
 
                     if (-not $skipProgress) {
                         # Write progress
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $status.ScriptBlockOutput
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $statusTextSnapshot
                     }
 
                     # Check if complete
-                    $complete = $status.ScriptBlockOutput -eq "Complete!"
+                    $complete = $statusTextSnapshot -eq "Complete!"
                     if (-not $complete) {
-                        $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
+                        $complete = $statusTextSnapshot -eq "Setting up ConfigMgr. Status: Complete!"
                     }
                     # Authoritative path: ScriptWorkflow.ps1 echoes our per-deploy RunId into
                     # ScriptWorkflow.completed.runid only after ALL its post-install scripts
