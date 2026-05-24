@@ -297,15 +297,15 @@ write_files:
     content: |
       #!/bin/bash
       set -euo pipefail
-      if [[ ${#} -lt 1 ]]; then
-        echo "Usage: $0 <dc-dns-ip> [search-domain]" >&2
+      if [[ `${#} -lt 1 ]]; then
+        echo "Usage: `$0 <dc-dns-ip> [search-domain]" >&2
         exit 1
       fi
-      DC_DNS="$1"
-      SEARCH="${2:-}"
+      DC_DNS="`$1"
+      SEARCH="`${2:-}"
       SEARCH_LINE=""
-      if [[ -n "$SEARCH" ]]; then
-        SEARCH_LINE="        search: [$SEARCH]"
+      if [[ -n "`$SEARCH" ]]; then
+        SEARCH_LINE="        search: [`$SEARCH]"
       fi
       cat > /etc/netplan/60-memlabs-dc-dns.yaml <<EOF
       network:
@@ -315,13 +315,13 @@ write_files:
             match:
               name: "e*"
             nameservers:
-              addresses: [$DC_DNS, 1.1.1.1, 8.8.8.8]
-      $SEARCH_LINE
+              addresses: [`$DC_DNS, 1.1.1.1, 8.8.8.8]
+      `$SEARCH_LINE
       EOF
       chmod 600 /etc/netplan/60-memlabs-dc-dns.yaml
       netplan apply
       systemctl restart systemd-resolved || true
-      echo "DNS now: $(resolvectl dns | grep -v '^$')"
+      echo "DNS now: `$(resolvectl dns | grep -v '^`$')"
 
 package_update: true
 package_upgrade: false
