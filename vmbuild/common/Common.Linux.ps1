@@ -920,6 +920,83 @@ function Test-VmIsLinux {
 }
 
 
+function Set-LinuxVmsDcDns {
+    <#
+    .SYNOPSIS
+        Flip all deployed Linux VMs from bootstrap public DNS (1.1.1.1 / 8.8.8.8)
+        to use the domain DC as the primary resolver, keeping public DNS as
+        fallback.
+
+    .DESCRIPTION
+        Linux VMs come up with public DNS pinned in their NoCloud netplan
+        (because during Phase 1 the DC isn't online yet and its address would
+        time out). Once Phase 2 has provisioned the DC, call this to invoke the
+        /usr/local/sbin/memlabs-set-dns helper that the seed ISO installed.
+        The helper drops a netplan override making per-link DNS:
+            [<DC-IP>, 1.1.1.1, 8.8.8.8]
+        with the AD domain set as the search suffix.
+
+        Skips silently if no non-hidden Linux VMs exist in the deployment.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$DeployConfig
+    )
+
+    $linuxVms = @($DeployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden })
+    if ($linuxVms.Count -eq 0) {
+        return $true
+    }
+
+    $domain = $DeployConfig.vmOptions.domainName
+    $dcVm = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+    if (-not $dcVm) {
+        $dcVm = Get-List -Type VM -DomainName $domain | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+    }
+    if (-not $dcVm) {
+        Write-Log "Set-LinuxVmsDcDns: No DC found for domain '$domain'; skipping" -Warning
+        return $true
+    }
+
+    # Resolve DC IPv4: prefer Hyper-V-reported, fall back to <network>.1
+    # (memlabs convention: DC is always the first usable IP on its subnet).
+    $dcIp = $null
+    try {
+        $dcIp = (Get-VMNetworkAdapter -VMName $dcVm.vmName -ErrorAction Stop).IPAddresses |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
+            Select-Object -First 1
+    }
+    catch {}
+    if (-not $dcIp) {
+        $net = $dcVm.network
+        if ($net -and $net -match '^(\d+\.\d+\.\d+)\.\d+$') {
+            $dcIp = "$($Matches[1]).1"
+        }
+    }
+    if (-not $dcIp) {
+        Write-Log "Set-LinuxVmsDcDns: Could not resolve DC '$($dcVm.vmName)' IPv4; skipping" -Warning
+        return $false
+    }
+
+    Write-Log "Set-LinuxVmsDcDns: Pointing $($linuxVms.Count) Linux VM(s) at DC $($dcVm.vmName) ($dcIp / $domain)" -Activity
+    $allOk = $true
+    foreach ($vm in $linuxVms) {
+        $cmd = "/usr/local/sbin/memlabs-set-dns $dcIp $domain"
+        $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
+            -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60
+        if ($res.ScriptBlockFailed -or -not $res.CommandResult) {
+            Write-Log "[Linux DNS] $($vm.vmName): failed to flip to DC DNS. $($res.ScriptBlockOutput)" -Warning
+            $allOk = $false
+        }
+        else {
+            Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
+        }
+    }
+    return $allOk
+}
+
+
 function Install-LinuxProxyServer {
     <#
     .SYNOPSIS
