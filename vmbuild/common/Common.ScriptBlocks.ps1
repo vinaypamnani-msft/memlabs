@@ -332,12 +332,28 @@ $global:VM_Create = {
 
             # Determine which OS image file to use for the VM
             if ($currentItem.role -notin "OSDClient") {
-                $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-                if ($imageFile) {
-                    $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+                # Linux VMs (Proxy etc.) don't ship in the Azure storage
+                # catalog - the base VHDX is built locally by
+                # baseimagestaging\New-LinuxBaseImage.ps1 and lives at a
+                # well-known path. Resolve directly and skip the fileList
+                # lookup, otherwise this throws "Could not find Ubuntu
+                # Server 24.04 LTS in file list" on any environment whose
+                # _fileList.json doesn't carry the Ubuntu entry.
+                if (Test-VmIsLinux -Vm $currentItem) {
+                    $linuxVhdxName = 'UbuntuServer2404.vhdx'
+                    $vhdxPath = Join-Path $Common.AzureImagePath $linuxVhdxName
+                    if (-not (Test-Path $vhdxPath)) {
+                        throw "Linux base image $vhdxPath not found. Run baseimagestaging\New-LinuxBaseImage.ps1 first."
+                    }
                 }
-                if (-not $vhdxPath) {
-                    throw "Could not find $($currentItem.operatingSystem) in file list"
+                else {
+                    $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+                    if ($imageFile) {
+                        $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+                    }
+                    if (-not $vhdxPath) {
+                        throw "Could not find $($currentItem.operatingSystem) in file list"
+                    }
                 }
             }
 
