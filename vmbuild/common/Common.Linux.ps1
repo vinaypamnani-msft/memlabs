@@ -231,6 +231,27 @@ instance-id: $instanceId
 local-hostname: $($VmName.ToLower())
 "@
 
+    # network-config: NoCloud picks this up and writes /etc/netplan/50-cloud-init.yaml.
+    # We use match: name "e*" so this applies to eth0 / enp* / ens* regardless of
+    # how the kernel names the Hyper-V NIC. dhcp4-overrides.use-dns=false makes us
+    # IGNORE the DNS servers DHCP advertises (which on a lab subnet is the domain
+    # DC — fine for AD resolution but it can't resolve external names like
+    # archive.ubuntu.com or bing.com). nameservers.addresses sets per-link DNS to
+    # public resolvers so external resolution always works. The DHCP-advertised
+    # search domain (e.g. adatum.com) is still honored via use-domains default.
+    $networkConfig = @"
+version: 2
+ethernets:
+  primary:
+    match:
+      name: "e*"
+    dhcp4: true
+    dhcp4-overrides:
+      use-dns: false
+    nameservers:
+      addresses: [1.1.1.1, 8.8.8.8]
+"@
+
     # user-data: '#cloud-config' header is mandatory.
     $userData = @"
 #cloud-config
@@ -289,6 +310,7 @@ power_state:
     # was in the string. Force LF by replacing CRLF before write.
     [System.IO.File]::WriteAllText((Join-Path $stage "meta-data"), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText((Join-Path $stage "user-data"), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $stage "network-config"), ($networkConfig -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
     # Ensure output dir exists.
     $outDir = Split-Path -Parent $OutputIsoPath
