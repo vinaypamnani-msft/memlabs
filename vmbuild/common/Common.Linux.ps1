@@ -494,11 +494,14 @@ function Wait-LinuxVmReady {
     write-progress2 "Wait for Linux VM" -Status "$VmName`: cloud-init running, waiting for IP..." -force
 
     $lastReportedIp = $null
+    $lastHeartbeatSec = 0
+    $heartbeatIntervalSec = 60
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
         if ($ip) {
             if ($ip -ne $lastReportedIp) {
+                Write-Log "$VmName`: got guest IP $ip; probing SSH (elapsed ${elapsed}s)"
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
                 $lastReportedIp = $ip
             }
@@ -520,6 +523,10 @@ function Wait-LinuxVmReady {
             }
         }
         else {
+            if (($elapsed - $lastHeartbeatSec) -ge $heartbeatIntervalSec) {
+                Write-Log "$VmName`: still waiting for guest IP / cloud-init (elapsed ${elapsed}s / ${TimeoutSeconds}s)"
+                $lastHeartbeatSec = $elapsed
+            }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
         Start-Sleep -Seconds $PollIntervalSeconds
