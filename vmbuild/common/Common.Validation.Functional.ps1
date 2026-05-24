@@ -1801,18 +1801,28 @@ function Test-DomainMemberFunctionality {
         }
 
         # Secure channel
-        try {
-            $sc = Test-ComputerSecureChannel -ErrorAction Stop
-            if ($sc) {
-                $results.Details.Add("OK: Secure channel to domain is healthy")
+        # Retry a few times: right after Phase 10 the netlogon service / DC can
+        # be transiently unreachable, especially in parallel runs, and a single
+        # false return would otherwise fail an otherwise-healthy client.
+        $sc = $false
+        $scError = $null
+        for ($i = 1; $i -le 4; $i++) {
+            try {
+                $sc = Test-ComputerSecureChannel -ErrorAction Stop
+                if ($sc) { break }
             }
-            else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False -- machine account password may be broken")
-            }
+            catch { $scError = $_ }
+            if ($i -lt 4) { Start-Sleep -Seconds (5 * $i) }
         }
-        catch {
-            $results.Details.Add("WARN: Test-ComputerSecureChannel threw: $($_.Exception.Message)")
+        if ($sc) {
+            $results.Details.Add("OK: Secure channel to domain is healthy")
+        }
+        elseif ($scError) {
+            $results.Details.Add("WARN: Test-ComputerSecureChannel threw after retries: $($scError.Exception.Message)")
+        }
+        else {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False after 4 attempts -- machine account password may be broken")
         }
 
         # Time sync
