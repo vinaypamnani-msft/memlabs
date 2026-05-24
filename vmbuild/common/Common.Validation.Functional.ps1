@@ -1108,16 +1108,16 @@ function Test-SiteSystemFunctionality {
                     $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
                 }
 
-                # WDS service for PXE -- memlabs always enables PXE on DPs (see
-                # ScriptFunctions.ps1 Add-CMDistributionPoint -EnablePxe). If it's
-                # off the build silently broke OSD scenarios.
+                # WDS service for PXE -- optional. memlabs DPs may be created
+                # with -EnablePxe or with NoWDS PXE, and PXE config can be
+                # toggled per-DP. Absence is informational only.
                 $results.Details.Add("CMD: Get-Service -Name 'WDSServer'")
                 $wds = Get-Service -Name 'WDSServer' -ErrorAction SilentlyContinue
                 if (-not $wds) {
-                    $results.Details.Add("WARN: WDSServer service not found (PXE not yet enabled or NoWDS PXE in use)")
+                    $results.Details.Add("INFO: WDSServer service not installed (PXE not enabled, or NoWDS PXE in use)")
                 }
                 elseif ($wds.Status -ne 'Running') {
-                    $results.Details.Add("WARN: WDSServer is $($wds.Status) (PXE responses may be delayed/unavailable)")
+                    $results.Details.Add("INFO: WDSServer is $($wds.Status) (PXE may be intentionally disabled on this DP)")
                 }
                 else {
                     $results.Details.Add("OK: WDSServer is Running (PXE active)")
@@ -1236,16 +1236,20 @@ function Test-ReportingFunctionality {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        # Check SQL Server Reporting Services service
-        $results.Details.Add("CMD: Get-Service -Name 'SQLServerReportingServices' or 'ReportServer'")
-        $svc = Get-Service -Name 'SQLServerReportingServices' -ErrorAction SilentlyContinue
-        if (-not $svc) {
-            $svc = Get-Service -Name 'ReportServer' -ErrorAction SilentlyContinue
+        # MEMLABS RP role installs Power BI Report Server (PowerBIReportServer
+        # service). Pre-2024 builds used classic SSRS (SQLServerReportingServices
+        # or legacy ReportServer). Accept any of them.
+        $results.Details.Add("CMD: Get-Service -Name 'PowerBIReportServer','SQLServerReportingServices','ReportServer'")
+        $svc = $null
+        foreach ($name in @('PowerBIReportServer', 'SQLServerReportingServices', 'ReportServer')) {
+            $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+            if ($svc) { break }
         }
         if (-not $svc) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Neither 'SQLServerReportingServices' nor 'ReportServer' service found")
-            $results.Details.Add("  Available services matching 'Report*' or 'SQLSR*': $(( Get-Service -Name 'Report*','SQLSR*' -EA SilentlyContinue | ForEach-Object { $_.Name } ) -join ', ')")
+            $results.Details.Add("FAIL: No Reporting Services service found (PowerBIReportServer / SQLServerReportingServices / ReportServer)")
+            $available = (Get-Service -Name 'Report*', 'SQLSR*', 'PowerBI*' -EA SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
+            $results.Details.Add("  Available services matching 'Report*'/'SQLSR*'/'PowerBI*': $available")
             return $results
         }
         if ($svc.Status -ne 'Running') {
@@ -1517,7 +1521,19 @@ function Test-MaintenanceTasks {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        $requiredTasks = @('Disable-IEESC', 'EnableLogMachine')
+        # Fix-DisableIEESC is server-only (Win32_OperatingSystem.ProductType == 1
+        # means workstation, in which case the fix returns 'not applicable' and
+        # never registers the task). Detect OS here and skip on workstations.
+        $os = Get-CimInstance -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+        $isWorkstation = ($os -and $os.ProductType -eq 1)
+        $requiredTasks = @('EnableLogMachine')
+        if (-not $isWorkstation) {
+            $requiredTasks += 'Disable-IEESC'
+        }
+        else {
+            $results.Details.Add("OK: Workstation OS detected; Disable-IEESC not applicable")
+        }
+
         foreach ($taskName in $requiredTasks) {
             $results.Details.Add("CMD: Get-ScheduledTask -TaskName '$taskName'")
             $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -2093,7 +2109,10 @@ function Test-AdditionalDisks {
     Write-Log "[Phase $Phase] $VMName [Disks]: Verifying $($disks.Count) additional disk(s): $($disks -join ', ')" -LogOnly
 
     $scriptBlock = {
-        param($expected)
+        # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList which flattens
+        # arrays. We pass the disk list as a comma-joined string and split here.
+        param($expectedCsv)
+        $expected = $expectedCsv -split ','
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         foreach ($letter in $expected) {
@@ -2116,7 +2135,7 @@ function Test-AdditionalDisks {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList (, [string[]]$disks) `
+        -ScriptBlock $scriptBlock -ArgumentList (($disks -join ',')) `
         -DisplayName "Phase11-Disks-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Disks' -Result $result)
@@ -2219,26 +2238,34 @@ function Test-CMSiteWideFunctionality {
     $siteCode = $CurrentItem.siteCode
     $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
 
-    # Load expected apps from Apps.json on the host -- pass names down to the VM
+    # Load expected apps from Apps.json on the host -- pass names down to the VM.
+    # Only verify apps when the deployment opted in to pre-populating objects;
+    # otherwise Apps.json apps are never imported and absence is expected.
     $expectedAppNames = @()
-    $appsJsonPath = Join-Path $PSScriptRoot '..\Apps.json'
-    if (Test-Path $appsJsonPath) {
-        try {
-            $expectedAppNames = @((Get-Content -Raw -Path $appsJsonPath | ConvertFrom-Json) |
-                Select-Object -ExpandProperty AppName -ErrorAction SilentlyContinue)
-        }
-        catch {
-            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not read Apps.json: $($_.Exception.Message)" -Warning
+    $prePopulate = [bool]$DeployConfig.cmOptions.PrePopulateObjects
+    if ($prePopulate) {
+        $appsJsonPath = Join-Path $PSScriptRoot '..\Apps.json'
+        if (Test-Path $appsJsonPath) {
+            try {
+                $expectedAppNames = @((Get-Content -Raw -Path $appsJsonPath | ConvertFrom-Json) |
+                    Select-Object -ExpandProperty AppName -ErrorAction SilentlyContinue)
+            }
+            catch {
+                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not read Apps.json: $($_.Exception.Message)" -Warning
+            }
         }
     }
 
     Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
 
     $scriptBlock = {
-        # NOTE: Invoke-VmCommand stringifies ArgumentList -- compare bool args
-        # to the string 'True' explicitly (any non-empty string is truthy).
-        param($sc, $usePkiInner, $expectedApps)
+        # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList which (a)
+        # stringifies bools (any non-empty string is truthy) and (b) flattens
+        # nested arrays. Bools are passed as '0'/'1' strings; arrays are
+        # passed as a single CSV string and split inside.
+        param($sc, $usePkiInner, $expectedAppsCsv)
         $usePki = ($usePkiInner -eq 'True')
+        $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         $ns = "root\SMS\site_$sc"
@@ -2276,11 +2303,13 @@ function Test-CMSiteWideFunctionality {
                 }
             }
             else {
-                $results.Details.Add("WARN: SMS_AD_SYSTEM_DISCOVERY_AGENT component not found")
+                # Component name varies across CM versions / on CAS; not finding
+                # it isn't actionable, so log-only rather than surface a WARN.
+                $results.Details.Add("INFO: SMS_AD_SYSTEM_DISCOVERY_AGENT component not found (may be named differently on this site role)")
             }
         }
         catch {
-            $results.Details.Add("WARN: AD discovery query failed: $($_.Exception.Message)")
+            $results.Details.Add("INFO: AD discovery query failed: $($_.Exception.Message)")
         }
 
         # 3. Site comms mode -- aligns with cmOptions.UsePKI
@@ -2340,8 +2369,9 @@ function Test-CMSiteWideFunctionality {
         return $results
     }
 
+    $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $expectedAppNames `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel "CMSite-$siteCode" -Result $result)
