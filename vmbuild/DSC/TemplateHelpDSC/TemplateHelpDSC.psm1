@@ -2480,7 +2480,8 @@ class TestDomainJoin {
                 }
             }
             catch {
-                Write-Status "Reset-ComputerMachinePassword attempt $i failed: $($_.Exception.Message)"
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                Write-Status "Reset-ComputerMachinePassword attempt $i failed: $msg"
             }
             if ($i -lt 3) { Start-Sleep -Seconds 15 }
         }
@@ -2492,14 +2493,16 @@ class TestDomainJoin {
             Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
         }
         catch {
-            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $($_.Exception.Message)"
+            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $msg"
         }
         try {
             Add-Computer -DomainName $_DomainName -Credential $_credential -Force -ErrorAction Stop
             Write-Status "Add-Computer succeeded. Rebooting to complete rejoin."
         }
         catch {
-            Write-Status "Add-Computer failed during self-heal: $($_.Exception.Message)"
+            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+            Write-Status "Add-Computer failed during self-heal: $msg"
             throw
         }
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
