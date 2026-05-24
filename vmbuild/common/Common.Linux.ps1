@@ -245,7 +245,7 @@ users:
     ssh_authorized_keys:
       - $($sshKey.PublicKey)
 
-ssh_pwauth: false
+ssh_pwauth: true
 disable_root: false
 $chpasswdBlock
 
