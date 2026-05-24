@@ -1700,6 +1700,56 @@ function New-HostProxyShortcuts {
             return $false
         }
 
+        # Drop the memlabs keypair into the deploying user's ~/.ssh as
+        # id_ed25519 so bare `ssh vmbuildadmin@<proxy>` works (without
+        # needing -i). Only overwrites the file if it's missing or already
+        # contains the memlabs key -- never clobbers a user's own id_ed25519.
+        $userSshDir = Join-Path $HOME '.ssh'
+        if (-not (Test-Path $userSshDir)) {
+            New-Item -ItemType Directory -Path $userSshDir -Force | Out-Null
+        }
+        $userKey = Join-Path $userSshDir 'id_ed25519'
+        $userPub = "$userKey.pub"
+        $memlabsPriv = (Get-Content -Raw -Path $key.PrivateKeyPath)
+        $memlabsPub  = (Get-Content -Raw -Path $key.PublicKeyPath)
+
+        $shouldWrite = $true
+        if (Test-Path $userKey) {
+            try {
+                $existing = Get-Content -Raw -Path $userKey
+                if ($existing.Trim() -eq $memlabsPriv.Trim()) {
+                    $shouldWrite = $false  # already the memlabs key
+                }
+                else {
+                    Write-Log "[Proxy] $userKey already exists with a different key; not overwriting. Use -i $($key.PrivateKeyPath) or copy manually." -Warning
+                    $shouldWrite = $false
+                }
+            }
+            catch { $shouldWrite = $false }
+        }
+
+        if ($shouldWrite) {
+            [System.IO.File]::WriteAllText($userKey, ($memlabsPriv -replace "`r`n", "`n"))
+            [System.IO.File]::WriteAllText($userPub,  ($memlabsPub  -replace "`r`n", "`n"))
+
+            # OpenSSH refuses to use the key if perms are too loose: only the
+            # current user should have access. Strip inheritance, grant just
+            # the current user FullControl.
+            try {
+                $acl = New-Object System.Security.AccessControl.FileSecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                $me = "$env:USERDOMAIN\$env:USERNAME"
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $me, 'FullControl', 'Allow')
+                $acl.AddAccessRule($rule)
+                Set-Acl -Path $userKey -AclObject $acl
+            }
+            catch {
+                Write-Log "[Proxy] Failed to tighten ACL on $userKey`: $_" -Warning
+            }
+            Write-Log "[Proxy] Installed memlabs key at $userKey (bare 'ssh vmbuildadmin@<proxy>' now works)"
+        }
+
         $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
         $desktop = [Environment]::GetFolderPath('Desktop')
         if (-not $desktop -or -not (Test-Path $desktop)) {
