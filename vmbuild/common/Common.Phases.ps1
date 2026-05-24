@@ -104,41 +104,10 @@ function Start-Phase {
         }
     }
 
-    # Linux Proxy: install Squid in parallel with Phase 2 so the DC/clients
-    # don't have to wait on apt-get update/install before their DSC kicks off.
-    # The proxy only needs to be listening by the time Set-WindowsClientProxyForConfig
-    # runs (at the end of Phase 2), so a background ThreadJob is safe.
-    # Falls back to synchronous install if ThreadJob isn't available (PS5).
-    $proxyJob = $null
-    if ($Phase -eq 2) {
-        $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-        if ($proxyVm) {
-            $proxyNote = Get-VMNote -VMName $proxyVm.vmName
-            if ($proxyNote -and $proxyNote.lastPhaseComplete -ge 2 -and -not $global:ForceProxyInstall) {
-                Write-Log "[Phase $Phase] Proxy $($proxyVm.vmName) already installed (lastPhaseComplete=$($proxyNote.lastPhaseComplete)); skipping Squid install"
-            }
-            elseif (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) {
-                Write-Log "[Phase $Phase] Installing Squid on Proxy VM $($proxyVm.vmName) (background; awaited before Phase 2 finalization)"
-                $proxyJob = Start-ThreadJob -Name "MemLabs-ProxyInstall-$($proxyVm.vmName)" -ScriptBlock {
-                    param($cfg, $vm)
-                    try {
-                        Install-LinuxProxyServer -deployConfig $cfg -ProxyVM $vm
-                    }
-                    catch {
-                        Write-Log "[Proxy] Background install threw: $_" -Failure
-                        return $false
-                    }
-                } -ArgumentList $deployConfig, $proxyVm
-            }
-            else {
-                Write-Log "[Phase $Phase] Installing Squid on Proxy VM $($proxyVm.vmName) (synchronous; Start-ThreadJob not available)"
-                $proxyOk = Install-LinuxProxyServer -deployConfig $deployConfig -ProxyVM $proxyVm
-                if (-not $proxyOk) {
-                    Write-Log "[Phase $Phase] Proxy install failed; continuing with phase (clients may not be able to reach proxy)" -Warning
-                }
-            }
-        }
-    }
+    # Linux Proxy Squid install is dispatched as a per-VM job through
+    # Start-PhaseJobs in Phase 2 (see $global:Proxy_Install), so it shows
+    # up in the same Wait-Phase progress block as the DC/client jobs and
+    # benefits from the same lifetime/error handling.
 
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
@@ -152,11 +121,6 @@ function Start-Phase {
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"
 
     if ($result.Failed -gt 0) {
-        # Drain the proxy job even on failure so it doesn't leak.
-        if ($proxyJob) {
-            try { Wait-Job -Job $proxyJob -Timeout 60 | Out-Null } catch {}
-            try { Remove-Job -Job $proxyJob -Force -ErrorAction SilentlyContinue } catch {}
-        }
         return $false
     }
 
@@ -165,32 +129,6 @@ function Start-Phase {
     # PSDirect so we don't have to thread proxy config through DSC. No-op if
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
-        # Make sure the background Squid install has finished before we start
-        # configuring clients to point at it.
-        if ($proxyJob) {
-            Write-Log "[Phase $Phase] Waiting for background Squid install to complete..."
-            $proxyJobOk = $true
-            try {
-                $jobResult = Wait-Job -Job $proxyJob -Timeout 600 | Receive-Job -ErrorAction SilentlyContinue
-                if ($null -ne $jobResult -and $jobResult -is [bool] -and -not $jobResult) {
-                    $proxyJobOk = $false
-                }
-                if ($proxyJob.State -ne 'Completed') {
-                    Write-Log "[Phase $Phase] Background Squid install ended in state '$($proxyJob.State)'" -Warning
-                    $proxyJobOk = $false
-                }
-            }
-            catch {
-                Write-Log "[Phase $Phase] Background Squid install wait threw: $_" -Warning
-                $proxyJobOk = $false
-            }
-            finally {
-                try { Remove-Job -Job $proxyJob -Force -ErrorAction SilentlyContinue } catch {}
-            }
-            if (-not $proxyJobOk) {
-                Write-Log "[Phase $Phase] Proxy install failed; continuing with phase (clients may not be able to reach proxy)" -Warning
-            }
-        }
         Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
         # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
         # in deployConfig (VM Notes not yet written on first-run cases).
@@ -378,8 +316,9 @@ function Start-PhaseJobs {
         }
 
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
+        # Exception: Linux Proxy in Phase 2 — handled below by $global:Proxy_Install.
         $vmNamefull = "$($currentItem.vmName).$($currentItem.domain)"
-        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName)) {
+        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName) -and -not ($Phase -eq 2 -and $currentItem.role -eq 'Proxy')) {
             Write-Log -Verbose "Skipping $($currentItem.vmName) because it does not exist in ConfigData"
             continue
         }
@@ -398,6 +337,30 @@ function Start-PhaseJobs {
         }
         if ($currentItem.role.Length -gt $maxRoleNameLength) {
             $maxRoleNameLength = $currentItem.role.Length
+        }
+
+        # Linux Proxy (Phase 2): dispatch a per-VM job that runs the Squid
+        # install. This gives the Proxy VM the same Wait-Phase progress row
+        # as the Windows DSC jobs, and bypasses the multi-node DSC skip
+        # below (the Proxy has no DSC config so it isn't in
+        # $ConfigurationData.AllNodes).
+        if ($Phase -eq 2 -and $currentItem.role -eq 'Proxy') {
+            $proxyNote = Get-VMNote -VMName $currentItem.vmName
+            if ($proxyNote -and $proxyNote.lastPhaseComplete -ge 2 -and -not $global:ForceProxyInstall) {
+                Write-Log "[Phase $Phase] Proxy $($currentItem.vmName) already installed (lastPhaseComplete=$($proxyNote.lastPhaseComplete)); skipping Squid install" -LogOnly
+                continue
+            }
+            $job = Start-Job -ScriptBlock $global:Proxy_Install -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if (-not $job) {
+                Write-Log "[Phase $Phase] Failed to create Proxy_Install job for VM $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
+            else {
+                Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Proxy_Install)" -LogOnly
+                $jobs += $job
+                $job_created_yes++
+            }
+            continue
         }
 
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {

@@ -2602,3 +2602,51 @@ $global:VM_Config = {
         Write-Progress "Exception Occurred" -Status "Failed end2 $_"
     }
 }
+# Per-VM Phase 2 job for the Linux Proxy VM. Runs Install-LinuxProxyServer
+# inside the same Wait-Phase tracking loop as the Windows VM_Config jobs so
+# progress and elapsed time render consistently with the rest of Phase 2.
+$global:Proxy_Install = {
+    try {
+        $global:ScriptBlockName = "Proxy_Install"
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+
+        $deployConfig = $using:deployConfigCopy
+        $currentItem  = $using:currentItem
+        $Phase        = $using:Phase
+
+        if (-not ($Common.LogPath)) {
+            Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+            return
+        }
+        try { Flush-LogBuffer -All } catch {}
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Installing Squid forward proxy" -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing Squid forward proxy" -OutputStream
+
+        $ok = Install-LinuxProxyServer -deployConfig $deployConfig -ProxyVM $currentItem
+        if (-not $ok) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Squid install failed." -OutputStream -Failure
+            return
+        }
+
+        # Mark Phase 2 complete on the VM note so re-runs short-circuit.
+        try {
+            $note = Get-VMNote -VMName $currentItem.vmName
+            if ($note) {
+                $note.lastPhaseComplete = [Math]::Max([int]$note.lastPhaseComplete, 2)
+                Set-VMNote -VMName $currentItem.vmName -vmNote $note
+            }
+        } catch {}
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Squid install complete" -Completed
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Squid install complete." -OutputStream -Success
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+    }
+}
