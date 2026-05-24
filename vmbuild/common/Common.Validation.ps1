@@ -189,30 +189,39 @@ function Test-ValidCmOptions {
         [object] $ReturnObject
     )
 
+    # Resolve cmOptions wherever it lives now (root, top-level site server, or any
+    # CAS/Primary in add-to-existing configs). After Move-CmOptionsToTopLevelSiteServer
+    # the block no longer lives at $ConfigObject.cmOptions for new configs.
+    $cmOptions = Get-ConfigCmOptions -Config $ConfigObject
+    if (-not $cmOptions) {
+        Add-ValidationMessage -Message "CM Options Validation: no cmOptions block found on the config or on any CAS/Primary VM." -ReturnObject $ReturnObject -Failure
+        return
+    }
+
     # version
-    if ($Common.Supported.CMVersions -notcontains $ConfigObject.cmOptions.version) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
+    if ($Common.Supported.CMVersions -notcontains $cmOptions.version) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
     }
 
     # install
-    if ($ConfigObject.cmOptions.install -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    if ($cmOptions.install -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
     # usePKI
-    if ($ConfigObject.cmOptions.usePKI -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    if ($cmOptions.usePKI -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
     # EnableBLM
-    if ($null -ne $ConfigObject.cmOptions.EnableBLM -and $ConfigObject.cmOptions.EnableBLM -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.EnableBLM has an invalid value [$($ConfigObject.cmOptions.EnableBLM)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    if ($null -ne $cmOptions.EnableBLM -and $cmOptions.EnableBLM -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.EnableBLM has an invalid value [$($cmOptions.EnableBLM)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    if ($ConfigObject.cmOptions.EnableBLM) {
+    if ($cmOptions.EnableBLM) {
         # BLM requires ConfigMgr 2002 or later
         $blmMinVersion = "2002"
-        $cmVer = $ConfigObject.cmOptions.Version
+        $cmVer = $cmOptions.Version
         if ($cmVer -and $cmVer -ne "current-branch" -and $cmVer -ne "tech-preview" -and $cmVer -lt $blmMinVersion) {
             Add-ValidationMessage -Message "CM Options Validation: BitLocker Management requires ConfigMgr version 2002 or later. Current version is [$cmVer]." -ReturnObject $ReturnObject -Failure
         }
@@ -227,7 +236,7 @@ function Test-ValidCmOptions {
         }
     }
 
-    if ($ConfigObject.cmOptions.usePKI) {
+    if ($cmOptions.usePKI) {
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
         if (-not $ConfigObject.pkiOptions) {
             $ConfigObject | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{

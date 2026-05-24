@@ -36,6 +36,13 @@ function Get-ConfigCmOptions {
     if ($null -ne $Config.cmOptions) { return $Config.cmOptions }
     $topLevel = Get-TopLevelSiteServer -Config $Config
     if ($topLevel -and $topLevel.cmOptions) { return $topLevel.cmOptions }
+    # Add-to-existing fallback: a child Primary (parentSiteCode set) may carry
+    # the cmOptions block when the parent CAS lives in the existing deployment
+    # and isn't in this config. Return the first CAS/Primary that has one.
+    $anySiteServer = $Config.virtualMachines | Where-Object {
+        $_.role -in @('CAS', 'Primary') -and $_.cmOptions
+    } | Select-Object -First 1
+    if ($anySiteServer) { return $anySiteServer.cmOptions }
     return $null
 }
 
