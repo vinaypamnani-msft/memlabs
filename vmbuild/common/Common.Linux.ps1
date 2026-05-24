@@ -489,11 +489,19 @@ function Wait-LinuxVmReady {
     $knownHostsPath = Join-Path (Split-Path $keyPair.PrivateKeyPath) "known_hosts"
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $startedAt = Get-Date
     Write-Log "$VmName`: Waiting for Linux VM to become SSH-ready (timeout ${TimeoutSeconds}s)"
+    write-progress2 "Wait for Linux VM" -Status "$VmName`: cloud-init running, waiting for IP..." -force
 
+    $lastReportedIp = $null
     while ((Get-Date) -lt $deadline) {
+        $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
         if ($ip) {
+            if ($ip -ne $lastReportedIp) {
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
+                $lastReportedIp = $ip
+            }
             $sshArgs = @(
                 '-i', $keyPair.PrivateKeyPath,
                 '-o', 'StrictHostKeyChecking=accept-new',
@@ -507,13 +515,18 @@ function Wait-LinuxVmReady {
             $null = & $sshExe @sshArgs 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "$VmName`: SSH ready at $ip" -LogOnly
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH ready at $ip" -force -Completed
                 return $ip
             }
+        }
+        else {
+            write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 
     Write-Log "$VmName`: Timeout waiting for Linux VM SSH readiness (${TimeoutSeconds}s)" -Failure
+    write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
     return $null
 }
 

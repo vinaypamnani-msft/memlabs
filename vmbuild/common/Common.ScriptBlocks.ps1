@@ -389,6 +389,7 @@ $global:VM_Create = {
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
                 # dynamic DNS registration themselves).
+                write-progress2 "Register DNS" -Status "$($currentItem.vmName): registering A record on DC" -force
                 $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
                 if (-not $dcVm) {
                     $dcVm = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
@@ -402,6 +403,7 @@ $global:VM_Create = {
 
                 New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM creation completed (IP $linuxIP)." -OutputStream -Success
+                write-progress2 "Linux VM" -Status "$($currentItem.vmName): ready at $linuxIP" -force -Completed
                 return
             }
 
