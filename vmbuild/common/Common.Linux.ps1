@@ -635,3 +635,60 @@ function Invoke-LinuxVmCommand {
 
     return $return
 }
+
+
+function Register-LinuxVmDns {
+    <#
+    .SYNOPSIS
+        Create / refresh an A record (and PTR) on the domain DC for a Linux VM.
+
+    .DESCRIPTION
+        Linux VMs are not domain-joined and do not register themselves with
+        AD-integrated DNS the way Windows clients do via secure dynamic update.
+        This calls the DC over PSDirect (Invoke-VmCommand) to add an A record
+        for <VmName>.<Domain> -> <IPAddress>, creating the PTR if the reverse
+        lookup zone exists. Idempotent: deletes any existing A record for the
+        same node first so re-runs after a DHCP lease change are safe.
+
+    .OUTPUTS
+        $true on success, $false on failure.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DCName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$IPAddress
+    )
+
+    $scriptBlock = {
+        $node = $using:VmName
+        $zone = $using:Domain
+        $ip   = $using:IPAddress
+
+        $existing = Get-DnsServerResourceRecord -ZoneName $zone -Node $node -RRType A -ErrorAction SilentlyContinue
+        if ($existing) {
+            foreach ($r in $existing) {
+                Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $r -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -CreatePtr -AllowUpdateAny -ErrorAction Stop
+        return $true
+    }
+
+    $result = Invoke-VmCommand -VmName $DCName -VmDomainName $Domain -ScriptBlock $scriptBlock -DisplayName "Register DNS A: $VmName -> $IPAddress" -CommandReturnsBool
+    if ($result.ScriptBlockFailed -or -not $result.CommandResult) {
+        Write-Log "$VmName`: Failed to register DNS A record on $DCName ($Domain -> $IPAddress)" -Failure
+        return $false
+    }
+    Write-Log "$VmName`: Registered DNS A record $VmName.$Domain -> $IPAddress on $DCName"
+    return $true
+}
