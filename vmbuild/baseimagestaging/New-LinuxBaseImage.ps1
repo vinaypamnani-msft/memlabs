@@ -103,7 +103,9 @@ if (-not $resolvedQemu) {
     $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
     if ($winget) {
         try {
-            & $winget.Source install --id qemu.qemu -e --accept-source-agreements --accept-package-agreements --silent
+            # Force --source winget; the msstore source is often blocked on
+            # locked-down corporate boxes and would otherwise fail the whole call.
+            & $winget.Source install --id qemu.qemu -e --source winget --accept-source-agreements --accept-package-agreements --silent
             if ($LASTEXITCODE -ne 0) {
                 Write-Log "winget install returned exit code $LASTEXITCODE." -Warning
             }
