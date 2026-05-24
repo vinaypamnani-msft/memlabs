@@ -1788,6 +1788,41 @@ function New-HostProxyShortcuts {
     }
 }
 
+function Remove-HostProxyShortcuts {
+    <#
+    .SYNOPSIS
+        Delete the host-side desktop shortcuts that point at a specific proxy
+        FQDN. Called from Remove-VirtualMachine when a Proxy VM is removed.
+    .DESCRIPTION
+        The shared ~/.ssh/id_ed25519 key is left in place on purpose -- it's
+        used by every Linux VM in every memlabs domain, so removing one
+        domain must not break access to the others.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)] [string]$ProxyFqdn
+    )
+
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop -or -not (Test-Path $desktop)) { return }
+
+        $candidates = @(
+            (Join-Path $desktop "SSH to $ProxyFqdn.lnk"),
+            (Join-Path $desktop "Squid Access Log - $ProxyFqdn.lnk")
+        )
+        foreach ($lnk in $candidates) {
+            if (Test-Path $lnk) {
+                Remove-Item -Path $lnk -Force -ErrorAction Stop
+                Write-Log "[Proxy] Removed host desktop shortcut: $(Split-Path $lnk -Leaf)" -SubActivity
+            }
+        }
+    }
+    catch {
+        Write-Log "[Proxy] Remove-HostProxyShortcuts ($ProxyFqdn) failed: $_" -Warning
+    }
+}
+
 function Invoke-LinuxBaseImageBake {
     <#
     .SYNOPSIS

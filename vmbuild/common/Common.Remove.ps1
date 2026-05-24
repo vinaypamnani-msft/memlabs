@@ -181,6 +181,15 @@ function Remove-VirtualMachine {
             Remove-Item -Path $parent.FullName -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
         }
     }
+
+    # -- Proxy: clean up host desktop shortcuts pointing at this proxy --
+    # The shared ~/.ssh/id_ed25519 key stays put -- other domains' proxies
+    # (and any future Linux VMs) still depend on it.
+    if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
+        if (Get-Command -Name Remove-HostProxyShortcuts -ErrorAction SilentlyContinue) {
+            Remove-HostProxyShortcuts -ProxyFqdn "$VmName.$($vmFromList.domain)"
+        }
+    }
 }
 
 function Remove-DhcpScope {
