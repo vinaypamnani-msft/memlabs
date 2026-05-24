@@ -692,3 +692,39 @@ function Register-LinuxVmDns {
     Write-Log "$VmName`: Registered DNS A record $VmName.$Domain -> $IPAddress on $DCName"
     return $true
 }
+
+
+function Test-VmIsLinux {
+    <#
+    .SYNOPSIS
+        Return $true if a VM object (from $deployConfig.virtualMachines or
+        Get-List) represents a memlabs Linux VM.
+
+    .DESCRIPTION
+        Recognises either the explicit osFamily=Linux property (set by the
+        Phase 1g schema work) or, as a fallback for VMs loaded before that
+        property was added, an operatingSystem/deployedOS value matching
+        Ubuntu*. Safe to call on $null (returns $false).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, ValueFromPipeline = $true)]
+        [object]$Vm
+    )
+
+    if (-not $Vm) { return $false }
+
+    if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') {
+        return $true
+    }
+
+    foreach ($prop in @('operatingSystem', 'deployedOS')) {
+        if ($Vm.PSObject.Properties.Name -contains $prop) {
+            $val = $Vm.$prop
+            if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) {
+                return $true
+            }
+        }
+    }
+    return $false
+}

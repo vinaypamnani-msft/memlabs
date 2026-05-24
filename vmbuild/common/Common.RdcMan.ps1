@@ -438,6 +438,10 @@ function New-RDCManFileFromHyperV {
         }
 
         foreach ($vm in $vmListFull) {
+            if (Test-VmIsLinux -Vm $vm) {
+                Write-Verbose "Skipping Linux VM $($vm.VmName) (RDCMan is RDP-only)"
+                continue
+            }
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
@@ -703,6 +707,10 @@ function New-RDCManFileFromHyperV {
         }
 
         foreach ($vm in $unknownVMs) {
+            if (Test-VmIsLinux -Vm $vm) {
+                Write-Verbose "New-RDCManFileFromHyperV: Skipping Linux VM $($vm.VmName) (RDCMan is RDP-only)"
+                continue
+            }
             Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
