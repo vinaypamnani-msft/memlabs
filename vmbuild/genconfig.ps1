@@ -690,6 +690,11 @@ function Select-MainMenu {
         # StandaloneRootCA VM that we previously auto-added (user-created ones are preserved).
         try { Add-OfflineRootCAVMIfMissing -ConfigToModify $Global:Config } catch { Write-Log "Add-OfflineRootCAVMIfMissing failed: $_" -LogOnly }
         try { Remove-OfflineRootCAVMIfAutoAdded -ConfigToModify $Global:Config } catch { Write-Log "Remove-OfflineRootCAVMIfAutoAdded failed: $_" -LogOnly }
+        # Same pattern for Proxy: if anything opted into the proxy (domainDefaults
+        # UseProxyFor* or a per-VM useProxy=true flipped on) and no Proxy VM
+        # exists in this config or the existing domain, auto-add one.
+        try { Add-ProxyVMIfMissing -ConfigToModify $Global:Config } catch { Write-Log "Add-ProxyVMIfMissing failed: $_" -LogOnly }
+        try { Remove-ProxyVMIfAutoAdded -ConfigToModify $Global:Config } catch { Write-Log "Remove-ProxyVMIfAutoAdded failed: $_" -LogOnly }
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
         if ($carryOver) {

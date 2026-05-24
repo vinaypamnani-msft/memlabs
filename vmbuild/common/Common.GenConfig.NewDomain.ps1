@@ -674,6 +674,15 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
             }
         }
+        # If domainDefaults opted into proxy (UseProxyForClients / UseProxyForCM),
+        # auto-add a Linux Proxy VM up front so the new config is internally
+        # consistent before the user ever sees the Deployment Menu. The
+        # Select-MainMenu loop also calls this every iteration, so a later
+        # toggle still adds/removes the Proxy VM as needed.
+        if (-not $newConfig.vmOptions.domainName) {
+            $newConfig.vmOptions.domainName = $newconfig.domainDefaults.DomainName
+        }
+        try { Add-ProxyVMIfMissing -ConfigToModify $newconfig } catch { Write-Log "Add-ProxyVMIfMissing (NewDomain) failed: $_" -LogOnly }
         $valid = $true
         if ($test) {
             $valid = Get-TestResult -Config $newConfig -SuccessOnWarning

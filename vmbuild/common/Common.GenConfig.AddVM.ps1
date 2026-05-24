@@ -864,3 +864,100 @@ function Remove-OfflineRootCAVMIfAutoAdded {
         Remove-VMFromConfig -vmName $vm.vmName -ConfigToModify $ConfigToModify
     }
 }
+
+function Test-ConfigNeedsProxy {
+    # Returns $true if anything in the in-memory config opts into the Squid
+    # proxy: domainDefaults.UseProxyForClients / UseProxyForCM (or the legacy
+    # single UseProxy key), or any non-hidden VM with useProxy=$true.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigToModify
+    )
+
+    $dd = $ConfigToModify.domainDefaults
+    if ($dd) {
+        if ($dd.UseProxyForClients) { return $true }
+        if ($dd.UseProxyForCM) { return $true }
+        if ($null -ne $dd.UseProxy -and [bool]$dd.UseProxy) { return $true }
+    }
+    foreach ($vm in @($ConfigToModify.virtualMachines)) {
+        if ($vm.hidden) { continue }
+        if ($vm.PSObject.Properties.Name -contains 'useProxy' -and [bool]$vm.useProxy) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-ProxyVMIfMissing {
+    # When the in-memory config opts into the proxy (domainDefaults.UseProxyFor*
+    # or any per-VM useProxy=$true) but no Proxy VM exists -- neither in the
+    # config nor already deployed in the target domain -- auto-add a Linux
+    # Proxy VM so the user doesn't have to. Counterpart to
+    # Remove-ProxyVMIfAutoAdded.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.vmOptions -or -not $ConfigToModify.vmOptions.domainName) { return }
+    if (-not (Test-ConfigNeedsProxy -ConfigToModify $ConfigToModify)) { return }
+
+    $existsInConfig = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+    if ($existsInConfig) { return }
+
+    $domainName = $ConfigToModify.vmOptions.domainName
+    try {
+        $existsInDomain = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+        if ($existsInDomain) { return }
+    } catch {}
+
+    write-log "[Proxy] Proxy is enabled (domainDefaults or per-VM useProxy) but no Proxy VM found - auto-adding one to domain $domainName"
+    $existingNames = @($ConfigToModify.virtualMachines | ForEach-Object { $_.vmName })
+    Add-NewVMForRole -Role 'Proxy' -Domain $domainName -ConfigToModify $ConfigToModify -Quiet:$true | Out-Null
+    # Tag the VM we just added so Remove-ProxyVMIfAutoAdded can safely
+    # auto-remove it later if the user disables proxy. User-created Proxy
+    # VMs are never tagged, so manual additions are preserved.
+    $newVM = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'Proxy' -and $existingNames -notcontains $_.vmName } | Select-Object -First 1
+    if ($newVM) {
+        $newVM | Add-Member -MemberType NoteProperty -Name '_autoAddedByProxy' -Value $true -Force
+    }
+}
+
+function Remove-ProxyVMIfAutoAdded {
+    # Counterpart to Add-ProxyVMIfMissing: when nothing in the config opts
+    # into the proxy any longer, remove any Proxy VM that we previously
+    # auto-added. Only removes VMs tagged with _autoAddedByProxy and not
+    # already deployed in the domain, so user-created Proxy VMs are preserved.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.virtualMachines) { return }
+    if (Test-ConfigNeedsProxy -ConfigToModify $ConfigToModify) { return }
+
+    $domainName = if ($ConfigToModify.vmOptions) { $ConfigToModify.vmOptions.domainName } else { $null }
+    $deployedNames = @()
+    if ($domainName) {
+        try {
+            $deployedNames = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | ForEach-Object { $_.vmName })
+        } catch {}
+    }
+
+    $toRemove = @($ConfigToModify.virtualMachines | Where-Object {
+        $_.role -eq 'Proxy' -and
+        $_.PSObject.Properties['_autoAddedByProxy'] -and
+        $_._autoAddedByProxy -and
+        ($deployedNames -notcontains $_.vmName)
+    })
+    foreach ($vm in $toRemove) {
+        write-log "[Proxy] Proxy no longer enabled - auto-removing previously auto-added Proxy VM '$($vm.vmName)'"
+        Remove-VMFromConfig -vmName $vm.vmName -ConfigToModify $ConfigToModify
+    }
+}
