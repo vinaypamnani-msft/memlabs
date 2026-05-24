@@ -99,8 +99,41 @@ foreach ($candidate in $candidates) {
 }
 
 if (-not $resolvedQemu) {
+    Write-Log "qemu-img.exe not found. Attempting install via winget (qemu.qemu)..." -Warning
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($winget) {
+        try {
+            & $winget.Source install --id qemu.qemu -e --accept-source-agreements --accept-package-agreements --silent
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "winget install returned exit code $LASTEXITCODE." -Warning
+            }
+        }
+        catch {
+            Write-Log "winget install threw: $_" -Warning
+        }
+
+        # Re-probe default install location and PATH (current session PATH won't pick up changes)
+        $reProbe = @(
+            "C:\Program Files\qemu\qemu-img.exe",
+            (Join-Path ${env:ProgramFiles} 'qemu\qemu-img.exe')
+        ) | Select-Object -Unique
+        foreach ($candidate in $reProbe) {
+            if (Test-Path $candidate -PathType Leaf) {
+                $resolvedQemu = (Resolve-Path $candidate).Path
+                Write-Log "qemu-img installed via winget: $resolvedQemu" -Success
+                break
+            }
+        }
+    }
+    else {
+        Write-Log "winget.exe not available on this system." -Warning
+    }
+}
+
+if (-not $resolvedQemu) {
     Write-Log "qemu-img.exe not found." -Failure
-    Write-Log "Install QEMU for Windows from https://qemu.weilnetz.de/w64/ (any recent build is fine)," -Failure
+    Write-Log "Install QEMU for Windows via 'winget install --id qemu.qemu -e'," -Failure
+    Write-Log "or download from https://qemu.weilnetz.de/w64/ (any recent build is fine)," -Failure
     Write-Log "or drop qemu-img.exe (and its required DLLs) at: $(Join-Path $Common.AzureToolsPath 'qemu\qemu-img.exe')." -Failure
     return
 }
