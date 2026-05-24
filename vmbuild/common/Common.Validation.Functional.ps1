@@ -1292,27 +1292,76 @@ function Test-ReportingFunctionality {
         }
         $results.Details.Add("OK: Reporting service '$($svc.Name)' is Running")
 
-        # Try common SSRS/PBIRS portal URLs
-        $urls = @(
-            'http://localhost/Reports',
-            'http://localhost:80/Reports',
-            'https://localhost/Reports'
-        )
-        $results.Details.Add("CMD: Invoke-WebRequest (trying: $($urls -join ', '))")
-        $reachable = $false
-        $lastErr = ''
-        foreach ($url in $urls) {
-            try {
-                $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
-                if ($response.StatusCode -eq 200) {
-                    $results.Details.Add("OK: Reporting portal reachable at '$url'")
-                    $reachable = $true
-                    break
+        # Probe the configured PBIRS/SSRS portal URL. memlabs binds the
+        # portal to the FQDN (URL reservations in IIS/HTTP.SYS often don't
+        # include 'localhost', and HTTPS bindings may use a cert with a CN
+        # that doesn't match 'localhost'). Pull the configured URL from
+        # WMI when possible, then fall back to FQDN/COMPUTERNAME guesses.
+        $urls = @()
+        try {
+            $rsConfig = Get-WmiObject -Namespace 'root\Microsoft\SqlServer\ReportServer\RS_PBIRS\v15\Admin' `
+                -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if (-not $rsConfig) {
+                $rsConfig = Get-WmiObject -Namespace 'root\Microsoft\SqlServer\ReportServer\RS_SSRS\v15\Admin' `
+                    -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+            }
+            if ($rsConfig) {
+                $listing = $rsConfig.ListReservedUrls()
+                if ($listing -and $listing.UrlString) {
+                    foreach ($u in $listing.UrlString) {
+                        if ($u -match 'Reports') { $urls += $u.TrimEnd('/') }
+                    }
                 }
             }
-            catch {
-                $lastErr = $_.Exception.Message
+        }
+        catch { }
+
+        $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+        $urls += @(
+            "http://$fqdn/Reports",
+            "http://$env:COMPUTERNAME/Reports",
+            "https://$fqdn/Reports",
+            'http://localhost/Reports'
+        )
+        $urls = $urls | Select-Object -Unique
+
+        # Bypass cert validation (self-signed lab cert) and force TLS 1.2
+        $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+        $origProto = [System.Net.ServicePointManager]::SecurityProtocol
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
+
+        $results.Details.Add("CMD: Invoke-WebRequest -UseDefaultCredentials (trying: $($urls -join ', '))")
+        $reachable = $false
+        $lastErr = ''
+        try {
+            foreach ($url in $urls) {
+                try {
+                    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -UseDefaultCredentials `
+                        -TimeoutSec 15 -MaximumRedirection 5 -ErrorAction Stop
+                    if ($response.StatusCode -in 200, 301, 302) {
+                        $results.Details.Add("OK: Reporting portal reachable at '$url' (status $([int]$response.StatusCode))")
+                        $reachable = $true
+                        break
+                    }
+                }
+                catch {
+                    # 401/403 also means IIS is answering; portal just requires different auth
+                    $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                    if ($code -in 401, 403) {
+                        $results.Details.Add("OK: Reporting portal responding at '$url' (status $code -- requires auth)")
+                        $reachable = $true
+                        break
+                    }
+                    $lastErr = "$url -> $($_.Exception.Message)"
+                }
             }
+        }
+        finally {
+            [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
+            [System.Net.ServicePointManager]::SecurityProtocol = $origProto
         }
         if (-not $reachable) {
             # Portal unreachable is a WARN, not a FAIL - the service being
