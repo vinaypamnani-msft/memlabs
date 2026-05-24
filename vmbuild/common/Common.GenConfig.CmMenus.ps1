@@ -101,6 +101,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "WSUS" { return $ServerList }
         "SQLAO" { return $ServerList }
         "PassiveSite" { return $ServerList }
+        "Proxy" { return @("Ubuntu Server 24.04 LTS") }
         "DomainMember" {
             if ($vm -and $vm.SqlVersion) {
                 return $ServerList

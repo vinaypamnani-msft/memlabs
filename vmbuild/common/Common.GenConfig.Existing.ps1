@@ -309,6 +309,7 @@ function Format-Roles {
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
             "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS Server]" }
             "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding))`t[Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
+            "Proxy" { $newRoles += "$($role.PadRight($padding))`t[Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
             default { $newRoles += $role }
         }
     }

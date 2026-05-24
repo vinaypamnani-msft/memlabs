@@ -171,7 +171,11 @@ function Add-NewVMForRole {
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem SiteCode: $SiteCode ParentSiteCode: $parentSiteCode Network: $network"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
+        if ($role -eq "Proxy") {
+            # Proxy is always Linux (Ubuntu) -- no OS choice.
+            $OperatingSystem = "Ubuntu Server 24.04 LTS"
+        }
+        elseif ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             $operatingSystem = "Windows 10 Latest (64-bit)"
             if ($ConfigToModify.domainDefaults.DefaultClientOS) {
@@ -250,10 +254,19 @@ function Add-NewVMForRole {
         tpmEnabled      = $true
     }
 
+    if ($role -eq "Proxy") {
+        # Linux VM: no TPM, fixed lightweight footprint, osFamily marker so
+        # Test-VmIsLinux short-circuits the Windows create/validation paths.
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "1GB"
+        $virtualMachine.virtualProcs = 1
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+    }
+
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force

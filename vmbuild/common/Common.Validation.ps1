@@ -284,6 +284,18 @@ function Test-ValidCmOptions {
     if ($offlineRootEnabled -and $rootCAVMs.Count -eq 0) {
         Add-ValidationMessage -Message "VM Validation: pkiOptions.UseOfflineRoot is enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
     }
+
+    # Validate Proxy role -- at most one per configuration (a single domain
+    # may only host one Squid forward proxy; clients use it via useProxy).
+    $proxyVMs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "Proxy" })
+    if ($proxyVMs.Count -gt 1) {
+        Add-ValidationMessage -Message "VM Validation: Only one Proxy VM is allowed per configuration. Found $($proxyVMs.Count)." -ReturnObject $ReturnObject -Failure
+    }
+    foreach ($pvm in $proxyVMs) {
+        if (-not (Test-VmIsLinux -Vm $pvm)) {
+            Add-ValidationMessage -Message "VM Validation: Proxy VM [$($pvm.vmName)] must be Linux (osFamily=Linux or operatingSystem like 'Ubuntu*'). Got osFamily=[$($pvm.osFamily)] operatingSystem=[$($pvm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
     if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
         $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $ConfigObject.pkiOptions.OfflineRootCAVM }
         if (-not $rootVMObj) {
