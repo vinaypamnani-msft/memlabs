@@ -898,6 +898,20 @@ function Restore-DynamicMemory {
         return
     }
 
+    # Drop VMs that no longer exist - typically rolled back by a failed/cancelled
+    # Phase 1 (VM_Create removes its half-built VM on failure). Restoring memory
+    # on a missing VM is a no-op and just generates noise.
+    $missing = @($vmsToRestore | Where-Object { -not (Get-VM2 -Name $_.vmName -ErrorAction SilentlyContinue) })
+    if ($missing.Count -gt 0) {
+        Write-Log "[Phase 11] Skipping $($missing.Count) VM(s) that no longer exist (likely rolled back by failed Phase 1): $($missing.vmName -join ', ')" -LogOnly
+        $vmsToRestore = @($vmsToRestore | Where-Object { $_.vmName -notin $missing.vmName })
+    }
+
+    if ($vmsToRestore.Count -eq 0) {
+        Write-Log "[Phase 11] No live VMs need dynamic memory restored; skipping" -LogOnly
+        return
+    }
+
     Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
 
     foreach ($vmConfig in $vmsToRestore) {
@@ -905,7 +919,10 @@ function Restore-DynamicMemory {
         try {
             $vm = Get-VM2 -Name $vmName -ErrorAction SilentlyContinue
             if (-not $vm) {
-                Write-Log "[Phase 11]   $vmName`: VM not found, skipping" -Warning
+                # Expected after a failed/cancelled phase 1: the create path
+                # rolls back and removes the VM, so there's nothing to
+                # restore. Log quietly instead of warning.
+                Write-Log "[Phase 11]   $vmName`: VM not found, skipping (likely rolled back by failed Phase 1)" -LogOnly
                 continue
             }
 
