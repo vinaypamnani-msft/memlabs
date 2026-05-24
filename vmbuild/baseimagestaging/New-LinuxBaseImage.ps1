@@ -105,7 +105,8 @@ if (-not $resolvedQemu) {
         try {
             # Force --source winget; the msstore source is often blocked on
             # locked-down corporate boxes and would otherwise fail the whole call.
-            & $winget.Source install --id qemu.qemu -e --source winget --accept-source-agreements --accept-package-agreements --silent
+            # No -e: some installs of the winget source require a looser match.
+            & $winget.Source install --id qemu.qemu --source winget --accept-source-agreements --accept-package-agreements --silent
             if ($LASTEXITCODE -ne 0) {
                 Write-Log "winget install returned exit code $LASTEXITCODE." -Warning
             }
@@ -133,8 +134,44 @@ if (-not $resolvedQemu) {
 }
 
 if (-not $resolvedQemu) {
+    # Fallback: download the latest qemu-w64-setup-YYYYMMDD.exe from weilnetz.de
+    # and run it silently. NSIS installer supports /S for unattended install.
+    Write-Log "Falling back to direct download from https://qemu.weilnetz.de/w64/ ..." -Warning
+    try {
+        $indexUrl = "https://qemu.weilnetz.de/w64/"
+        $html = (Invoke-WebRequest -Uri $indexUrl -UseBasicParsing -ErrorAction Stop).Content
+        $matches = [regex]::Matches($html, 'qemu-w64-setup-(\d{8})\.exe')
+        if ($matches.Count -gt 0) {
+            $latest = $matches | Sort-Object { [int]$_.Groups[1].Value } -Descending | Select-Object -First 1
+            $installerName = $latest.Value
+            $installerUrl = "$indexUrl$installerName"
+            $installerPath = Join-Path $env:TEMP $installerName
+            Write-Log "Downloading $installerUrl" -Activity
+            Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+            Write-Log "Running $installerName /S (silent install)..." -Activity
+            $proc = Start-Process -FilePath $installerPath -ArgumentList '/S' -Wait -PassThru -ErrorAction Stop
+            if ($proc.ExitCode -ne 0) {
+                Write-Log "Installer exited with code $($proc.ExitCode)." -Warning
+            }
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+            $defaultQemu = "C:\Program Files\qemu\qemu-img.exe"
+            if (Test-Path $defaultQemu -PathType Leaf) {
+                $resolvedQemu = (Resolve-Path $defaultQemu).Path
+                Write-Log "qemu-img installed via weilnetz installer: $resolvedQemu" -Success
+            }
+        }
+        else {
+            Write-Log "Could not find qemu-w64-setup-*.exe in directory listing at $indexUrl." -Warning
+        }
+    }
+    catch {
+        Write-Log "Direct-download fallback failed: $_" -Warning
+    }
+}
+
+if (-not $resolvedQemu) {
     Write-Log "qemu-img.exe not found." -Failure
-    Write-Log "Install QEMU for Windows via 'winget install --id qemu.qemu -e'," -Failure
+    Write-Log "Install QEMU for Windows via 'winget install --id qemu.qemu'," -Failure
     Write-Log "or download from https://qemu.weilnetz.de/w64/ (any recent build is fine)," -Failure
     Write-Log "or drop qemu-img.exe (and its required DLLs) at: $(Join-Path $Common.AzureToolsPath 'qemu\qemu-img.exe')." -Failure
     return
