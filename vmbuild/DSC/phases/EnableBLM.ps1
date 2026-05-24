@@ -431,35 +431,31 @@ if ($blmEnabled) {
                 Write-DscStatus "$Tag WARNING: AD group setup failed: $($_.Exception.Message)"
             }
 
-            # ---- IIS + ASP.NET 4.5 prereqs ------------------------------------
+            # ---- IIS + ASP.NET 4.5 prereqs (verify-only) ----------------------
+            # Web-Server / Web-Asp-Net45 / Web-Mgmt-Console are installed by
+            # InstallFeatureForSCCM (TemplateHelpDSC) under the "Site Server"
+            # role during Phase 2/3. We only verify here -- any miss indicates
+            # a real upstream prereq failure and should surface loudly.
             Write-DscStatus "$Tag Verifying IIS / ASP.NET 4.5 features..."
             try {
-                $needed = @('Web-Server','Web-Asp-Net45','Web-Mgmt-Console')
+                $needed  = @('Web-Server','Web-Asp-Net45','Web-Mgmt-Console')
                 $missing = @()
                 foreach ($f in $needed) {
                     $feat = Get-WindowsFeature -Name $f -ErrorAction SilentlyContinue
-                    if (-not $feat) { Write-DscStatus "$Tag   feature '$f' not recognized on this OS" ; continue }
-                    if ($feat.Installed) {
-                        Write-DscStatus "$Tag   $f : installed"
-                    } else {
-                        Write-DscStatus "$Tag   $f : MISSING - will install"
-                        $missing += $f
-                    }
+                    if (-not $feat -or -not $feat.Installed) { $missing += $f }
                 }
                 if ($missing.Count -gt 0) {
-                    $iisResult = Install-WindowsFeature -Name $missing -ErrorAction Stop
-                    Write-DscStatus "$Tag   Install-WindowsFeature: Success=$($iisResult.Success) RestartNeeded=$($iisResult.RestartNeeded)"
-                    if ($iisResult.RestartNeeded -eq 'Yes') {
-                        Write-DscStatus "$Tag WARNING: IIS install requested reboot; continuing anyway. May fail until reboot."
+                    Write-DscStatus "$Tag ERROR: missing IIS prereq features: $($missing -join ', '). Expected to be installed by InstallFeatureForSCCM in Phase 2/3."
+                } else {
+                    $defaultSite = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+                    if (-not $defaultSite) {
+                        Write-DscStatus "$Tag ERROR: 'Default Web Site' is missing in IIS."
+                    } else {
+                        Write-DscStatus "$Tag   IIS prereqs OK; 'Default Web Site' state=$($defaultSite.State)"
                     }
                 }
-                $defaultSite = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
-                if (-not $defaultSite) {
-                    throw "'Default Web Site' is missing in IIS after feature install."
-                }
-                Write-DscStatus "$Tag   'Default Web Site' state=$($defaultSite.State) bindings=$($defaultSite.bindings.Collection.bindingInformation -join ',')"
             } catch {
-                Write-DscStatus "$Tag WARNING: IIS prereq step failed: $($_.Exception.Message)"
+                Write-DscStatus "$Tag WARNING: IIS prereq check failed: $($_.Exception.Message)"
             }
 
             # ---- Locate and sanity-check the installer ------------------------
