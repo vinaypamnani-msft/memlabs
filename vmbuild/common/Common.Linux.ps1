@@ -1211,6 +1211,10 @@ for i in `$(seq 1 60); do
     sleep 5
 done
 
+# Recover from a prior hard cancel that left dpkg half-configured.
+# No-op when dpkg is clean.
+dpkg --configure -a || true
+
 apt-get update -y
 apt-get install -y squid ufw
 
