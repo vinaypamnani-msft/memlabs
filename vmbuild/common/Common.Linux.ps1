@@ -190,6 +190,9 @@ chpasswd:
     - name: vmbuildadmin
       password: $pwQuoted
       type: text
+    - name: root
+      password: $pwQuoted
+      type: text
 "@
     }
     else {
@@ -243,7 +246,7 @@ users:
       - $($sshKey.PublicKey)
 
 ssh_pwauth: false
-disable_root: true
+disable_root: false
 $chpasswdBlock
 
 package_update: true
