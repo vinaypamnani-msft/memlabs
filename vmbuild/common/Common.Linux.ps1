@@ -728,3 +728,183 @@ function Test-VmIsLinux {
     }
     return $false
 }
+
+
+function Install-LinuxProxyServer {
+    <#
+    .SYNOPSIS
+        Install and configure Squid forward proxy on a Linux Proxy VM.
+
+    .DESCRIPTION
+        Idempotently installs squid + ufw via apt, writes a minimal
+        /etc/squid/squid.conf that listens on :3128 and ACLs the lab
+        network(s) discovered from deployConfig.vmOptions.network plus
+        any additional subnets used by other VMs in the config, enables
+        and (re)starts the service, opens 3128/tcp in ufw if active, and
+        records lastPhaseComplete=2 in the VM note so re-runs are quick.
+
+        Driven over SSH by Invoke-LinuxVmCommand. Safe to call multiple
+        times (apt-get is idempotent; squid.conf is rewritten each run;
+        ufw rule re-add is a no-op).
+
+    .PARAMETER deployConfig
+        The deployment config (used to find subnets and the Proxy VM).
+
+    .PARAMETER ProxyVM
+        Optional. The Proxy VM object. If omitted, the first VM in
+        deployConfig.virtualMachines with role=Proxy is used.
+
+    .OUTPUTS
+        [bool] $true on success, $false on any failure (logged).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$deployConfig,
+        [Parameter(Mandatory = $false)]
+        [object]$ProxyVM
+    )
+
+    if (-not $ProxyVM) {
+        $ProxyVM = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    }
+    if (-not $ProxyVM) {
+        Write-Log "Install-LinuxProxyServer: no Proxy VM found in config; skipping" -LogOnly
+        return $true
+    }
+
+    $vmName = $ProxyVM.vmName
+    Write-Log "[Proxy] $vmName`: Installing Squid forward proxy"
+
+    # Make sure the VM is up and SSH-reachable before doing anything.
+    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds 900
+    if (-not $ip) {
+        Write-Log "[Proxy] $vmName`: VM not reachable over SSH; cannot install Squid" -Failure
+        return $false
+    }
+
+    # Build ACL list: every subnet referenced by any non-hidden VM in this
+    # config, plus the default vmOptions.network if set. We emit /24 ACLs
+    # because all memlabs networks are /24.
+    $subnets = New-Object System.Collections.Generic.HashSet[string]
+    if ($deployConfig.vmOptions.network) {
+        [void]$subnets.Add($deployConfig.vmOptions.network)
+    }
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.network) { [void]$subnets.Add($vm.network) }
+    }
+    $aclLines = @()
+    $i = 0
+    foreach ($s in $subnets) {
+        # Normalize: memlabs stores "192.168.1.0" already, but be defensive.
+        $base = $s
+        if ($base -notmatch '/\d+$') { $base = "$base/24" }
+        $aclLines += "acl memlabs_net$i src $base"
+        $i++
+    }
+    $aclNames = (0..($i - 1) | ForEach-Object { "memlabs_net$_" }) -join ' '
+
+    $squidConf = @"
+# memlabs Squid forward proxy
+# Managed by Install-LinuxProxyServer -- changes will be overwritten.
+
+http_port 3128
+
+$($aclLines -join "`n")
+
+http_access allow $aclNames
+http_access allow localhost
+http_access deny all
+
+# Disable disk cache; lab proxy is for outbound NAT control, not perf.
+cache deny all
+
+# Keep memory cache small (default 256MB is excessive for 1GB VM).
+cache_mem 64 MB
+
+# Honour client UA / forwarded-for for diagnostics; this is a lab.
+forwarded_for on
+via off
+
+# Standard ports allowed via CONNECT (HTTPS, etc.)
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 21
+acl Safe_ports port 443
+acl Safe_ports port 70
+acl Safe_ports port 210
+acl Safe_ports port 1025-65535
+acl Safe_ports port 280
+acl Safe_ports port 488
+acl Safe_ports port 591
+acl Safe_ports port 777
+acl CONNECT method CONNECT
+
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+
+coredump_dir /var/spool/squid
+"@
+
+    # Base64-encode the config so we can pipe it through bash without
+    # quoting hell.
+    $confBytes = [System.Text.Encoding]::UTF8.GetBytes($squidConf)
+    $confB64 = [Convert]::ToBase64String($confBytes)
+
+    $bash = @"
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+# Wait for any background apt/unattended-upgrades to finish (cloud-init may
+# still be running at this point on a freshly-provisioned VM).
+for i in `$(seq 1 60); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+       ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    sleep 5
+done
+
+apt-get update -y
+apt-get install -y squid ufw
+
+install -d -m 0755 /etc/squid
+echo '$confB64' | base64 -d > /etc/squid/squid.conf
+chmod 0644 /etc/squid/squid.conf
+
+systemctl enable squid
+systemctl restart squid
+
+# Open 3128 in ufw if the firewall is active; otherwise just stage the rule.
+ufw allow 3128/tcp || true
+
+# Quick self-test
+ss -ltnp 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128'; exit 1; }
+
+echo PROXY_READY
+"@
+
+    $result = Invoke-LinuxVmCommand -VmName $vmName -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
+    if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
+        Write-Log "[Proxy] $vmName`: Squid install failed (ExitCode=$($result.ExitCode))`n$($result.ScriptBlockOutput)" -Failure
+        return $false
+    }
+    if ($result.ScriptBlockOutput -notmatch 'PROXY_READY') {
+        Write-Log "[Proxy] $vmName`: Squid install did not report ready`n$($result.ScriptBlockOutput)" -Failure
+        return $false
+    }
+
+    Write-Log "[Proxy] $vmName`: Squid listening on ${ip}:3128 (ACLs: $($subnets -join ', '))"
+
+    # Mark phase complete in VM note so subsequent re-runs can short-circuit
+    # via the normal lastPhaseComplete check used by Windows VMs.
+    try {
+        New-VmNote -VmName $vmName -DeployConfig $deployConfig -Successful $true -Phase 2 | Out-Null
+    }
+    catch {
+        Write-Log "[Proxy] $vmName`: Failed to update VM note: $_" -Warning
+    }
+
+    return $true
+}
+

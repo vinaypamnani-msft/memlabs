@@ -104,6 +104,26 @@ function Start-Phase {
         }
     }
 
+    # Linux Proxy: install Squid before Phase 2 so any client whose DSC
+    # configures WinHTTP/IE proxy in Phase 2+ has a listener to point at.
+    # No-op when no Proxy VM is present in the config.
+    if ($Phase -eq 2) {
+        $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+        if ($proxyVm) {
+            $proxyNote = Get-VMNote -VMName $proxyVm.vmName
+            if ($proxyNote -and $proxyNote.lastPhaseComplete -ge 2 -and -not $global:ForceProxyInstall) {
+                Write-Log "[Phase $Phase] Proxy $($proxyVm.vmName) already installed (lastPhaseComplete=$($proxyNote.lastPhaseComplete)); skipping Squid install"
+            }
+            else {
+                Write-Log "[Phase $Phase] Installing Squid on Proxy VM $($proxyVm.vmName)"
+                $proxyOk = Install-LinuxProxyServer -deployConfig $deployConfig -ProxyVM $proxyVm
+                if (-not $proxyOk) {
+                    Write-Log "[Phase $Phase] Proxy install failed; continuing with phase (clients may not be able to reach proxy)" -Warning
+                }
+            }
+        }
+    }
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
