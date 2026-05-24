@@ -39,6 +39,16 @@ $global:Phase10Job = {
         if ($currentItem.Role -in @("OSDClient", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
+        # Linux VMs have no Windows-side maintenance; Start-VMMaintenance also
+        # short-circuits, but log a clearer message here.
+        $jobIsLinuxVm = $false
+        if ($currentItem.role -eq 'Proxy') { $jobIsLinuxVm = $true }
+        elseif ($currentItem.PSObject.Properties.Name -contains 'osFamily' -and $currentItem.osFamily -eq 'Linux') { $jobIsLinuxVm = $true }
+        elseif ($currentItem.operatingSystem -and ($currentItem.operatingSystem -like 'Ubuntu*' -or $currentItem.operatingSystem -like 'Debian*' -or $currentItem.operatingSystem -like 'Linux*')) { $jobIsLinuxVm = $true }
+        if ($jobIsLinuxVm) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
+            return
+        }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure

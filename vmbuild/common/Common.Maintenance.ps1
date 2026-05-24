@@ -188,6 +188,20 @@ function Start-VMMaintenance {
         return $false
     }
 
+    # Linux VMs (e.g. role=Proxy / osFamily=Linux) have no Windows-side
+    # maintenance pipeline: no PSDirect, no C:\Staging, no Windows fixes.
+    # Inline check (don't depend on Test-VmIsLinux load order).
+    $isLinuxVm = $false
+    if ($vmNoteObject.role -eq 'Proxy') { $isLinuxVm = $true }
+    elseif ($vmNoteObject.PSObject.Properties.Name -contains 'osFamily' -and $vmNoteObject.osFamily -eq 'Linux') { $isLinuxVm = $true }
+    elseif ($vmNoteObject.operatingSystem -and ($vmNoteObject.operatingSystem -like 'Ubuntu*' -or $vmNoteObject.operatingSystem -like 'Debian*' -or $vmNoteObject.operatingSystem -like 'Linux*')) { $isLinuxVm = $true }
+    elseif ($vmNoteObject.deployedOS -and ($vmNoteObject.deployedOS -like 'Ubuntu*' -or $vmNoteObject.deployedOS -like 'Debian*' -or $vmNoteObject.deployedOS -like 'Linux*')) { $isLinuxVm = $true }
+
+    if ($isLinuxVm) {
+        Write-Log "$VMName`: Linux VM (role '$($vmNoteObject.role)'); Windows maintenance pipeline not applicable. Skipping." -Success
+        return $true
+    }
+
     # Offline Root CAs are intentionally powered off; skip if not running
     if ($vmNoteObject.role -eq "StandaloneRootCA") {
         $vmState = (Get-VM2 -Name $VMName -ErrorAction SilentlyContinue).State
