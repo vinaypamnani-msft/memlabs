@@ -217,7 +217,11 @@ chpasswd:
         'systemctl enable --now ssh || true',
         'systemctl enable --now hv-kvp-daemon.service || true',
         'systemctl enable --now hv-vss-daemon.service || true',
-        'ufw allow OpenSSH || true'
+        'ufw allow OpenSSH || true',
+        # systemd-resolved consults FallbackDNS only when no DHCP/static DNS
+        # answers. Restart so the dropin in write_files is picked up before
+        # cloud-init's package_update tries to resolve archive.ubuntu.com.
+        'systemctl restart systemd-resolved || true'
     ) + $ExtraRunCmd
     $runcmdYaml = ($runcmd | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -248,6 +252,18 @@ users:
 ssh_pwauth: true
 disable_root: false
 $chpasswdBlock
+
+# Fallback DNS for the brief window where a VM is up but the domain DC
+# (which serves DNS for the lab subnet) hasn't been provisioned yet, so
+# cloud-init's package_update can still resolve archive.ubuntu.com etc.
+# Once the DC is up and DHCP hands out its IP as the primary DNS,
+# systemd-resolved prefers that and only uses these as fallback.
+write_files:
+  - path: /etc/systemd/resolved.conf.d/memlabs-fallback.conf
+    permissions: '0644'
+    content: |
+      [Resolve]
+      FallbackDNS=1.1.1.1 8.8.8.8
 
 package_update: true
 package_upgrade: false
