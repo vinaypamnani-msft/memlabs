@@ -318,6 +318,10 @@ if (-not (Test-Path $tempVhdx)) {
 # the extra unallocated space on first boot via cloud-init growpart.
 Write-Log "Resizing VHDX to ${DiskSizeGB}G via Resize-VHD..." -Activity
 try {
+    # qemu-img creates the VHDX as a sparse file on NTFS, which Resize-VHD
+    # rejects with 0xC03A001A ("must not be sparse"). Clear the sparse
+    # attribute first; this is a metadata-only flip, not a rewrite.
+    & fsutil sparse setflag $tempVhdx 0 | Out-Null
     $targetBytes = [int64]$DiskSizeGB * 1GB
     Resize-VHD -Path $tempVhdx -SizeBytes $targetBytes -ErrorAction Stop
 }
