@@ -729,6 +729,7 @@ function Select-MainMenu {
                         continue
                     }
                 }
+                Write-Log "[carryOver] Re-injecting validation msg from prior save: $($co.Message)" -LogOnly
                 $global:GenConfigErrorMessages += $co
             }
         }

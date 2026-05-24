@@ -52,6 +52,31 @@ function Add-ErrorMessage {
         Message  = $message
     }
     Write-Verbose "Add-ErrorMessage $message"
+
+    # Log every banner-visible validation message with caller context so we
+    # can correlate the red X / yellow ! on screen with the exact emission
+    # site and time. Without this we can't tell live failures from ghosts
+    # carried over from prior save attempts.
+    try {
+        $stack = Get-PSCallStack
+        # Skip frame 0 (this function). Prefer the first frame outside this
+        # file so 'Convert-ValidationMessages' style funnels show their
+        # caller too.
+        $thisFile = $PSCommandPath
+        $caller = $null
+        for ($i = 1; $i -lt $stack.Count; $i++) {
+            if (-not $thisFile -or $stack[$i].ScriptName -ne $thisFile) {
+                $caller = $stack[$i]
+                break
+            }
+        }
+        if (-not $caller -and $stack.Count -gt 1) { $caller = $stack[1] }
+        $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+        $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+        Write-Log "[Add-ErrorMessage] $level $message  (from $callerName`:$callerLine)" -LogOnly
+    } catch {
+        Write-Log "[Add-ErrorMessage] $level $message" -LogOnly
+    }
 }
 
 
