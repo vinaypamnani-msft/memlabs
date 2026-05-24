@@ -947,3 +947,181 @@ function Restore-DynamicMemory {
 
     Write-Log "[Phase 11] Dynamic memory restore complete" -Success
 }
+
+
+# region Proxy enforcement (Phase 6) --------------------------------------
+#
+# Enforces "you must use the proxy" at the Hyper-V vSwitch layer via
+# VMNetworkAdapter Extended ACLs. We deny outbound TCP 80/443 and outbound
+# DNS (53/UDP+TCP) to any destination, then allow:
+#   - intra-lab subnet (so AD/SMB/CM/SQL keep working)
+#   - the Linux Proxy VM on TCP/3128
+#   - the DC on UDP+TCP 53 (legit DNS path)
+#
+# Why port ACLs and not Windows Firewall on the host: with Hyper-V Internal +
+# New-NetNat the host firewall sees post-NAT traffic (source = host) so it
+# can't filter by originating VM. Port ACLs sit on the VM's vNIC pre-NAT and
+# can match the VM as source. They survive VM reboots and are removed
+# automatically when the VM is removed, so no cleanup hook is needed in
+# Remove-Lab.
+#
+# Weight ordering: Hyper-V evaluates highest weight first. We pick the band
+# 5000-5099 so we can wipe-and-replace only our own rules without touching
+# anything else (currently nothing else in memlabs uses extended ACLs).
+
+$global:MemLabsProxyAclWeightMin = 5000
+$global:MemLabsProxyAclWeightMax = 5099
+
+function Get-VmIPv4FromHyperV {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName
+    )
+    try {
+        $nic = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
+        if (-not $nic) { return $null }
+        $ipv4 = $nic.IPAddresses | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -notlike '169.254.*' } | Select-Object -First 1
+        return $ipv4
+    }
+    catch {
+        return $null
+    }
+}
+
+function Clear-VmProxyEnforcement {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName
+    )
+    try {
+        $existing = Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue
+        if (-not $existing) { return }
+        foreach ($acl in $existing) {
+            if ($acl.Weight -ge $global:MemLabsProxyAclWeightMin -and `
+                    $acl.Weight -le $global:MemLabsProxyAclWeightMax) {
+                Remove-VMNetworkAdapterExtendedAcl -VMName $VmName -Direction $acl.Direction -Weight $acl.Weight -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Log "[Proxy] $VmName`: Failed to clear existing enforcement ACLs: $_" -Warning
+    }
+}
+
+function Set-VmProxyEnforcement {
+    <#
+    .SYNOPSIS
+        Apply Hyper-V port-ACL "must use proxy" enforcement to a Windows VM.
+
+    .DESCRIPTION
+        Adds extended ACLs on the VM's network adapter that deny outbound
+        TCP 80/443 and outbound DNS to non-DC destinations, while allowing
+        intra-subnet traffic, the proxy on TCP/3128, and DNS to the DC.
+        Idempotent: removes any prior memlabs proxy ACLs (weight band
+        5000-5099) before re-adding.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName,
+        [Parameter(Mandatory = $true)] [string]$Subnet,        # e.g. "192.168.1.0"
+        [Parameter(Mandatory = $true)] [string]$ProxyIp,
+        [Parameter(Mandatory = $false)] [string]$DcIp
+    )
+
+    $cidr = "$Subnet/24"
+
+    Clear-VmProxyEnforcement -VmName $VmName
+
+    try {
+        # --- High-priority ALLOW rules (weight 5090-5099) ---
+
+        # Allow all intra-subnet traffic (AD/SMB/CM/SQL stay native)
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
+            -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
+            -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
+
+        # Allow outbound to proxy on 3128 (TCP)
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
+            -RemoteIPAddress "$ProxyIp/32" -RemotePort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
+        # And reply traffic back
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
+            -RemoteIPAddress "$ProxyIp/32" -LocalPort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
+
+        # Allow DNS to the DC (UDP+TCP 53)
+        if ($DcIp) {
+            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
+                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol UDP -Weight 5097 -ErrorAction Stop | Out-Null
+            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
+                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol TCP -Weight 5097 -ErrorAction Stop | Out-Null
+        }
+
+        # --- Low-priority DENY rules (weight 5000-5009) ---
+
+        # Block outbound HTTP/HTTPS to anywhere (forces proxy)
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
+            -RemotePort 80 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
+            -RemotePort 443 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
+
+        # Block outbound DNS to non-DC (covered by allow at higher weight)
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
+            -RemotePort 53 -Protocol UDP -Weight 5000 -ErrorAction Stop | Out-Null
+        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
+            -RemotePort 53 -Protocol TCP -Weight 5000 -ErrorAction Stop | Out-Null
+
+        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (proxy=$ProxyIp, dc=$DcIp, subnet=$cidr)"
+        return $true
+    }
+    catch {
+        Write-Log "[Proxy] $VmName`: Failed to apply enforcement ACLs: $_" -Warning
+        return $false
+    }
+}
+
+function Set-VmProxyEnforcementForConfig {
+    <#
+    .SYNOPSIS
+        Apply Hyper-V proxy enforcement to every opted-in VM in a deploy
+        configuration.
+
+    .DESCRIPTION
+        Mirrors Set-WindowsClientProxyForConfig: enumerates the deployConfig,
+        filters via Test-VmUsesProxy, resolves the Proxy VM's IP and the
+        owning DC's IP from Hyper-V, then calls Set-VmProxyEnforcement per
+        VM. No-op when no Proxy VM or no opted-in clients exist.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object]$deployConfig
+    )
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    $clients = @($deployConfig.virtualMachines | Where-Object { Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig })
+
+    if (-not $clients) { return $true }
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($clients.Count) VM(s) opted-in but no Proxy VM in config; skipping enforcement" -Warning
+        return $false
+    }
+
+    $proxyIp = Get-VmIPv4FromHyperV -VmName $proxyVm.vmName
+    if (-not $proxyIp) {
+        Write-Log "[Proxy] Could not resolve IP for Proxy VM $($proxyVm.vmName); skipping enforcement" -Warning
+        return $false
+    }
+
+    $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -in @('DC', 'BDC') } | Select-Object -First 1
+    $dcIp = $null
+    if ($dcVm) { $dcIp = Get-VmIPv4FromHyperV -VmName $dcVm.vmName }
+
+    $subnet = $deployConfig.vmOptions.network
+
+    $ok = $true
+    foreach ($vm in $clients) {
+        $r = Set-VmProxyEnforcement -VmName $vm.vmName -Subnet $subnet -ProxyIp $proxyIp -DcIp $dcIp
+        if (-not $r) { $ok = $false }
+    }
+    return $ok
+}
+# endregion Proxy enforcement ---------------------------------------------

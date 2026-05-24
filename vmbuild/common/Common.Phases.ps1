@@ -145,6 +145,7 @@ function Start-Phase {
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
         Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
+        Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
     }
 
     return $true
