@@ -498,14 +498,27 @@ function Test-ValidVmSupported {
         # base-image check separately.
         # Inline check (don't depend on Test-VmIsLinux being loaded yet).
         $isLinuxVm = $false
-        if ($VM.role -eq 'Proxy') { $isLinuxVm = $true }
-        elseif ($VM.PSObject.Properties.Name -contains 'osFamily' -and $VM.osFamily -eq 'Linux') { $isLinuxVm = $true }
-        elseif ($VM.operatingSystem -and ($VM.operatingSystem -like 'Ubuntu*' -or $VM.operatingSystem -like 'Debian*' -or $VM.operatingSystem -like 'Linux*')) { $isLinuxVm = $true }
+        $linuxReason = $null
+        $vmRoleStr = if ($null -ne $VM.role) { [string]$VM.role } else { '' }
+        $vmOsStr = if ($null -ne $VM.operatingSystem) { [string]$VM.operatingSystem } else { '' }
+        $vmOsFamilyStr = $null
+        if ($VM.PSObject.Properties.Name -contains 'osFamily') { $vmOsFamilyStr = [string]$VM.osFamily }
+
+        if ($vmRoleStr -ieq 'Proxy') { $isLinuxVm = $true; $linuxReason = 'role=Proxy' }
+        elseif ($vmOsFamilyStr -ieq 'Linux') { $isLinuxVm = $true; $linuxReason = 'osFamily=Linux' }
+        elseif ($vmOsStr -like 'Ubuntu*' -or $vmOsStr -like 'Debian*' -or $vmOsStr -like 'Linux*') { $isLinuxVm = $true; $linuxReason = "operatingSystem=$vmOsStr" }
+        elseif (Get-Command -Name Test-VmIsLinux -ErrorAction SilentlyContinue) {
+            if (Test-VmIsLinux -Vm $VM) { $isLinuxVm = $true; $linuxReason = 'Test-VmIsLinux' }
+        }
 
         if (-not $isLinuxVm) {
             if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+                Write-Log "[Test-ValidVmSupported] [$vmName] failing OS check: role=[$vmRoleStr] osFamily=[$vmOsFamilyStr] operatingSystem=[$vmOsStr]" -LogOnly
                 Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
             }
+        }
+        else {
+            Write-Log "[Test-ValidVmSupported] [$vmName] bypassing supported-OS check ($linuxReason)" -LogOnly
         }
     }
 
