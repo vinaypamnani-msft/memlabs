@@ -51,7 +51,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
     [switch]$Restore,
     [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
-    [switch]$NoSnapshot
+    [switch]$NoSnapshot,
+    [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
+    [switch]$KeepFailedVMs
 
 )
 
@@ -973,20 +975,28 @@ finally {
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
-        if ($NewLabsuccess) {
-            Write-Log "Phase 1 encountered failures. Removing all VMs created in Phase 1." -Warning
-            $NewLabsuccess = $false
+        if ($KeepFailedVMs) {
+            Write-Log "Phase 1 did not complete cleanly, but -KeepFailedVMs was specified. NOT removing: $($global:vm_remove_list -join ', ')" -Warning
+            Write-Log "Inspect VMs in Hyper-V Manager. Use the 'Delete Failed/In-Progress VMs' option in genconfig.ps1 to clean up when done." -Warning
+            if ($NewLabsuccess) { $NewLabsuccess = $false }
         }
         else {
-            Write-Log "Script exited before Phase 1 completion. Removing all VMs created in Phase 1." -Warning
-        }
-        Write-Host
+            if ($NewLabsuccess) {
+                Write-Log "Phase 1 encountered failures. Removing all VMs created in Phase 1." -Warning
+                $NewLabsuccess = $false
+            }
+            else {
+                Write-Log "Script exited before Phase 1 completion. Removing all VMs created in Phase 1." -Warning
+            }
+            Write-Log "(Re-run with -KeepFailedVMs to preserve failed VMs for investigation.)" -Warning
+            Write-Host
 
-        foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
-        }
+            foreach ($vmname in $global:vm_remove_list) {
+                Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
+            }
 
-        # Get-Job | Stop-Job
+            # Get-Job | Stop-Job
+        }
     }
 
     # Clear vm remove list
