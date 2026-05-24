@@ -54,10 +54,10 @@ function Test-VmFunctionality {
 
     switch ($role) {
         'DC' {
-            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain
+            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
         }
         'BDC' {
-            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC
+            $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC -DeployConfig $DeployConfig
         }
         'CAS' {
             $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
@@ -192,18 +192,42 @@ function Test-DCFunctionality {
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][string]$Domain,
-        [switch]$IsBDC
+        [switch]$IsBDC,
+        [object]$DeployConfig
     )
 
     $Phase = 11
     $label = if ($IsBDC) { 'BDC' } else { 'DC' }
     Write-Log "[Phase $Phase] $VMName [$label]: Testing AD DS, DNS, and Netlogon services" -LogOnly
 
+    # Build "vmName=ip" CSV from Hyper-V network adapter view of every non-hidden
+    # VM in the deploy that lives in this domain. The DC-side scriptblock will
+    # Resolve-DnsName each and flag mismatches. Catches stale static records
+    # (e.g. an old ADA-DC1 -> 192.168.x.21 entry left over from a prior deploy
+    # where roles got reassigned) which otherwise cause cascading secure-channel
+    # failures on clients that resolve a DC name to the wrong IP.
+    $expectedDnsCsv = ''
+    if ($DeployConfig) {
+        $entries = New-Object System.Collections.Generic.List[string]
+        foreach ($vm in $DeployConfig.virtualMachines) {
+            if ($vm.hidden) { continue }
+            if ($vm.domain -and $vm.domain -ne $Domain) { continue }
+            try {
+                $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+                $ip = $ips | Select-Object -First 1
+                if ($ip) { $entries.Add("$($vm.vmName)=$ip") }
+            }
+            catch {}
+        }
+        $expectedDnsCsv = ($entries -join ',')
+    }
+
     $scriptBlock = {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList, so any bool we pass
         # in arrives as the string 'True'/'False' (both truthy in `if`). Compare to
         # the string 'True' explicitly to avoid the BDC branch firing on every DC.
-        param($domainFqdn, $isBdcInner)
+        param($domainFqdn, $isBdcInner, $expectedDnsCsv)
         $isBdc = ($isBdcInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -238,6 +262,51 @@ function Test-DCFunctionality {
         catch {
             $results.Passed = $false
             $results.Details.Add("FAIL: DNS cannot resolve '$domainFqdn': $($_.Exception.Message)")
+        }
+
+        # Per-VM DNS sanity check: for each non-hidden VM in the deploy, confirm
+        # its A record on this DC resolves to its actual Hyper-V-reported IPv4.
+        # Catches stale static records (no aging) left by older code paths or
+        # earlier deploys -- e.g. an ADA-DC1 -> 192.168.x.21 entry from when a
+        # role used to live at .21, which now causes clients to talk to the
+        # wrong host and see "server is not operational" / secure-channel breaks.
+        if ($expectedDnsCsv) {
+            $expected = @{}
+            foreach ($pair in $expectedDnsCsv.Split(',')) {
+                if ($pair -match '^([^=]+)=(.+)$') { $expected[$Matches[1]] = $Matches[2] }
+            }
+            $mismatches = 0
+            foreach ($name in $expected.Keys) {
+                $expectedIp = $expected[$name]
+                $fqdn = "$name.$domainFqdn"
+                try {
+                    $recs = Resolve-DnsName -Name $fqdn -Type A -Server 127.0.0.1 -DnsOnly -ErrorAction Stop |
+                        Where-Object { $_.Type -eq 'A' }
+                    $resolvedIps = @($recs | ForEach-Object { $_.IPAddress })
+                    if (-not $resolvedIps -or $resolvedIps.Count -eq 0) {
+                        $results.Passed = $false
+                        $mismatches++
+                        $results.Details.Add("FAIL: DNS '$fqdn' returned no A records (expected $expectedIp)")
+                    }
+                    elseif ($resolvedIps -notcontains $expectedIp) {
+                        $results.Passed = $false
+                        $mismatches++
+                        $results.Details.Add("FAIL: DNS '$fqdn' -> $($resolvedIps -join ',') (expected $expectedIp; stale record?)")
+                    }
+                    elseif ($resolvedIps.Count -gt 1) {
+                        $extras = @($resolvedIps | Where-Object { $_ -ne $expectedIp })
+                        $results.Details.Add("WARN: DNS '$fqdn' has extra A record(s): $($extras -join ',') (expected only $expectedIp)")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $mismatches++
+                    $results.Details.Add("FAIL: DNS lookup for '$fqdn' threw: $($_.Exception.Message)")
+                }
+            }
+            if ($mismatches -eq 0) {
+                $results.Details.Add("OK: DNS A records for $($expected.Count) deploy VM(s) match Hyper-V IPs")
+            }
         }
 
         # dcdiag quick checks. Advertising + NetLogons added because a half-promoted
@@ -325,7 +394,7 @@ function Test-DCFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent) `
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv `
         -DisplayName "Phase11-$label-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
