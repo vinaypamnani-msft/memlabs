@@ -170,12 +170,50 @@ function New-LinuxSeedIso {
     $instanceId = "memlabs-$VmName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
     $fqdn = "$VmName.$Domain".ToLower()
 
-    $packages = @('openssh-server', 'qemu-guest-agent') + $ExtraPackages | Select-Object -Unique
+    # vmbuildadmin gets the same password as the Windows LocalAdmin so the user
+    # can log in at the Hyper-V console (vmconnect) for diagnostics. SSH still
+    # requires the key (ssh_pwauth stays false) so this isn't a remote-auth
+    # downgrade.
+    $consolePassword = $null
+    if ($Common -and $Common.LocalAdmin) {
+        try { $consolePassword = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $consolePassword = $null }
+    }
+    if ($consolePassword) {
+        $lockPasswdYaml = 'false'
+        # YAML single-quote escape: ' -> ''
+        $pwQuoted = "'" + ($consolePassword -replace "'", "''") + "'"
+        $chpasswdBlock = @"
+
+chpasswd:
+  expire: false
+  users:
+    - name: vmbuildadmin
+      password: $pwQuoted
+      type: text
+"@
+    }
+    else {
+        $lockPasswdYaml = 'true'
+        $chpasswdBlock = ''
+    }
+
+    # linux-tools-virtual / linux-cloud-tools-virtual provide hv_kvp_daemon and
+    # hv_vss_daemon. Without them Get-VMNetworkAdapter.IPAddresses stays empty
+    # on the host even after the guest has a working DHCP lease, and we have no
+    # way to discover the VM's IP.
+    $packages = @(
+        'openssh-server',
+        'qemu-guest-agent',
+        'linux-tools-virtual',
+        'linux-cloud-tools-virtual'
+    ) + $ExtraPackages | Select-Object -Unique
     $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
 
     $runcmd = @(
         'systemctl enable --now qemu-guest-agent || true',
         'systemctl enable --now ssh || true',
+        'systemctl enable --now hv-kvp-daemon.service || true',
+        'systemctl enable --now hv-vss-daemon.service || true',
         'ufw allow OpenSSH || true'
     ) + $ExtraRunCmd
     $runcmdYaml = ($runcmd | ForEach-Object { "  - $_" }) -join "`n"
@@ -200,12 +238,13 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     groups: sudo
     shell: /bin/bash
-    lock_passwd: true
+    lock_passwd: $lockPasswdYaml
     ssh_authorized_keys:
       - $($sshKey.PublicKey)
 
 ssh_pwauth: false
 disable_root: true
+$chpasswdBlock
 
 package_update: true
 package_upgrade: false
