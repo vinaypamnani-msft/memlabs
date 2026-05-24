@@ -942,8 +942,10 @@ finally {
         Write-Host
     }
     # Restore dynamic memory settings (were pinned to max during deploy for performance).
-    # Runs unconditionally: even if a phase failed or was skipped.
-    if ($deployConfig -and $currentPhase -ge 1) {
+    # Skip if we never made it past Phase 1 (VMs being created/removed there aren't
+    # worth touching, and the noisy "[Phase 11] Restoring dynamic memory" line on
+    # an early cancel is just confusing).
+    if ($deployConfig -and $currentPhase -gt 1) {
         try { Restore-DynamicMemory -DeployConfig $deployConfig } catch {
             Write-Log "Restore-DynamicMemory failed: $_" -Warning
         }
