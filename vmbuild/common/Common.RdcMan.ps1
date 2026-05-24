@@ -544,16 +544,24 @@ function New-RDCManFileFromHyperV {
                 $supTag = "WSUS"
             }
 
+            # Proxy-client tag: VM is opted in to route HTTP(S) through the
+            # Linux Squid proxy (per-VM useProxy=true, set from genconfig).
+            $proxyTag = $null
+            if ($vm.useProxy) {
+                $proxyTag = "Proxy"
+            }
+
             # Dedup: skip role tag if VM name already contains it
             if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
                 $roleTag = $null
             }
 
-            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP]
+            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP Proxy]
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
             if ($caTag) { $tagParts += $caTag }
             if ($supTag) { $tagParts += $supTag }
+            if ($proxyTag) { $tagParts += $proxyTag }
 
             $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
             # Dedup: skip OS tag if VM name already contains it
