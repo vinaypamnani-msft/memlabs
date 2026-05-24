@@ -972,22 +972,6 @@ function Restore-DynamicMemory {
 $global:MemLabsProxyAclWeightMin = 5000
 $global:MemLabsProxyAclWeightMax = 5099
 
-function Get-VmIPv4FromHyperV {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)] [string]$VmName
-    )
-    try {
-        $nic = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-        if (-not $nic) { return $null }
-        $ipv4 = $nic.IPAddresses | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -notlike '169.254.*' } | Select-Object -First 1
-        return $ipv4
-    }
-    catch {
-        return $null
-    }
-}
-
 function Clear-VmProxyEnforcement {
     [CmdletBinding()]
     param (
