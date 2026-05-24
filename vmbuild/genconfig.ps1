@@ -702,10 +702,26 @@ function Select-MainMenu {
             # doesn't reproduce (they'd otherwise vanish from the error box).
             # Skip any that fast validation already added (avoid duplicates).
             $existingMsgs = @($global:GenConfigErrorMessages | ForEach-Object { $_.Message })
+            # Drop carryOver entries that reference VMs no longer present in
+            # the current config (e.g. config was rebuilt, VM was renamed, or
+            # an auto-add changed the shape). Without this filter, a stale
+            # "VM Validation: [OLDNAME] does not contain a supported
+            # operatingSystem [Ubuntu Server 24.04 LTS]" from a prior pass
+            # keeps surfacing even after the Linux bypass correctly fires.
+            $currentVmNames = @($Global:Config.virtualMachines | ForEach-Object { $_.vmName } | Where-Object { $_ })
             foreach ($co in $carryOver) {
-                if ($co.Message -and $co.Message -notin $existingMsgs) {
-                    $global:GenConfigErrorMessages += $co
+                if (-not $co.Message) { continue }
+                if ($co.Message -in $existingMsgs) { continue }
+                # If the message looks like "[VMNAME] ..." but VMNAME isn't in
+                # the current config, drop it as stale.
+                if ($co.Message -match '\[([^\]]+)\]') {
+                    $refVm = $matches[1]
+                    if ($currentVmNames -and ($currentVmNames -notcontains $refVm)) {
+                        Write-Log "[carryOver] Dropping stale msg for missing VM [$refVm]: $($co.Message)" -LogOnly
+                        continue
+                    }
                 }
+                $global:GenConfigErrorMessages += $co
             }
         }
 

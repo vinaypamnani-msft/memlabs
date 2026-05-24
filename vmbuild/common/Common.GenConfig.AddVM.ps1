@@ -822,6 +822,40 @@ function Add-OfflineRootCAVMIfMissing {
         if ($pkiOpts -and -not $pkiOpts.OfflineRootCAVM) {
             $pkiOpts.OfflineRootCAVM = $newVM.vmName
         }
+        # Drop any stale validation messages referencing this newly-added VM
+        # (see Add-ProxyVMIfMissing for the carryOver-staleness rationale).
+        Clear-StaleValidationMessagesForVM -VmName $newVM.vmName
+    }
+}
+
+function Clear-StaleValidationMessagesForVM {
+    # Removes any entries from $global:GenConfigErrorMessages and
+    # $global:PendingValidationErrors whose Message references the given VM
+    # name. Called whenever an auto-add/auto-remove mutates the config so
+    # stale messages from a previous validation pass (different config shape)
+    # don't surface to the user via the carryOver mechanism in genconfig.ps1.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $VmName
+    )
+
+    if (-not $VmName) { return }
+    $needle = "[$VmName]"
+
+    if ($global:GenConfigErrorMessages) {
+        $kept = @($global:GenConfigErrorMessages | Where-Object { $_.Message -notlike "*$needle*" })
+        if ($kept.Count -ne $global:GenConfigErrorMessages.Count) {
+            Write-Log "[Clear-StaleValidationMessagesForVM] Dropped $($global:GenConfigErrorMessages.Count - $kept.Count) stale msg(s) for $VmName from GenConfigErrorMessages" -LogOnly
+            $global:GenConfigErrorMessages = $kept
+        }
+    }
+    if ($global:PendingValidationErrors) {
+        $kept = @($global:PendingValidationErrors | Where-Object { $_.Message -notlike "*$needle*" })
+        if ($kept.Count -ne $global:PendingValidationErrors.Count) {
+            Write-Log "[Clear-StaleValidationMessagesForVM] Dropped $($global:PendingValidationErrors.Count - $kept.Count) stale msg(s) for $VmName from PendingValidationErrors" -LogOnly
+            $global:PendingValidationErrors = $kept
+        }
     }
 }
 
@@ -924,6 +958,10 @@ function Add-ProxyVMIfMissing {
     $newVM = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'Proxy' -and $existingNames -notcontains $_.vmName } | Select-Object -First 1
     if ($newVM) {
         $newVM | Add-Member -MemberType NoteProperty -Name '_autoAddedByProxy' -Value $true -Force
+        # Drop any stale validation messages that reference this newly-added
+        # VM name. They can only have come from a previous validation pass
+        # (different config shape) and would mislead the user.
+        Clear-StaleValidationMessagesForVM -VmName $newVM.vmName
     }
 }
 
