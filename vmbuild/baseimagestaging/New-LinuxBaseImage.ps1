@@ -310,11 +310,17 @@ if (-not (Test-Path $tempVhdx)) {
 # ---------------------------------------------------------------------------
 # 6. Resize VHDX to the requested final size
 # ---------------------------------------------------------------------------
-Write-Log "Resizing VHDX to ${DiskSizeGB}G..." -Activity
-$resizeArgs = @('resize', $tempVhdx, "${DiskSizeGB}G")
-& $resolvedQemu @resizeArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Log "qemu-img resize failed with exit code $LASTEXITCODE." -Failure
+# qemu-img's VHDX driver does NOT support 'resize' ("Image format driver does
+# not support resize"). Use Hyper-V's Resize-VHD instead, which works on
+# dynamic VHDX. Note: we're only growing the virtual size; Linux will pick up
+# the extra unallocated space on first boot via cloud-init growpart.
+Write-Log "Resizing VHDX to ${DiskSizeGB}G via Resize-VHD..." -Activity
+try {
+    $targetBytes = [int64]$DiskSizeGB * 1GB
+    Resize-VHD -Path $tempVhdx -SizeBytes $targetBytes -ErrorAction Stop
+}
+catch {
+    Write-Log "Resize-VHD failed: $_" -Failure
     return
 }
 
