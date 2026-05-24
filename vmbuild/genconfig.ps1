@@ -26,6 +26,14 @@ if (-not $InternalUseOnly.IsPresent) {
 
 $configDir = Join-Path $PSScriptRoot "config"
 
+# Clear any stale validation state from a previous genconfig invocation in the
+# same PowerShell session. Without this, $global:PendingValidationErrors set
+# by a prior save attempt (potentially under different validation rules) gets
+# re-injected by the carryOver merge in Select-MainMenu and surfaces ghost
+# errors that the current validation no longer produces.
+$global:PendingValidationErrors = $null
+$global:GenConfigErrorMessages = @()
+
 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "New-Lab Configuration generator:"
 Write-Host2 -ForegroundColor DeepSkyBlue "You can use this tool to customize your MemLabs deployment."
 Write-Host2 -ForegroundColor DeepSkyBlue "Press Ctrl-C to exit without saving."

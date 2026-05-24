@@ -12,10 +12,28 @@
 
     if ($Failure.IsPresent) {
         $ReturnObject.Failures += 1
+        # Log every failure with caller context so we can correlate menu
+        # errors back to the validation site (and time) that produced them.
+        try {
+            $caller = (Get-PSCallStack | Select-Object -Skip 1 -First 1)
+            $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+            $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+            Write-Log "[ValidationFailure] $Message  (from $callerName`:$callerLine)" -LogOnly
+        } catch {
+            Write-Log "[ValidationFailure] $Message" -LogOnly
+        }
     }
 
     if ($Warning.IsPresent) {
         $ReturnObject.Warnings += 1
+        try {
+            $caller = (Get-PSCallStack | Select-Object -Skip 1 -First 1)
+            $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+            $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+            Write-Log "[ValidationWarning] $Message  (from $callerName`:$callerLine)" -LogOnly
+        } catch {
+            Write-Log "[ValidationWarning] $Message" -LogOnly
+        }
     }
 }
 
