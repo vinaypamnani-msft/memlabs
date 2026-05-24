@@ -757,14 +757,33 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed -or $killedAlready) {
 
-        # Capture current foreground window so we can restore focus after RDCMan starts
-        $getFgW = Add-Type -MemberDefinition @"
+        # Capture our console's window handle BEFORE launching RDCMan. We restore
+        # focus to this specific window (not "whatever was foreground") because
+        # RDCMan's launch + minimize loop briefly takes foreground itself, so a
+        # GetForegroundWindow() call later would return the wrong hwnd.
+        $focusApi = Add-Type -MemberDefinition @"
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetConsoleWindow();
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+            [DllImport("user32.dll")]
+            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
             [DllImport("user32.dll")]
             public static extern IntPtr GetForegroundWindow();
             [DllImport("user32.dll")]
-            public static extern bool SetForegroundWindow(IntPtr hWnd);
-"@ -Name "FgWindow" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
-        $previousFgWindow = $getFgW::GetForegroundWindow()
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            [DllImport("kernel32.dll")]
+            public static extern uint GetCurrentThreadId();
+            [DllImport("user32.dll")]
+            public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+            [DllImport("user32.dll")]
+            public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+"@ -Name "FocusApi" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+        $ourWindow = $focusApi::GetConsoleWindow()
+        # Fallback to current foreground if no console (e.g. running in ISE/VSCode terminal)
+        if (-not $ourWindow -or $ourWindow -eq [IntPtr]::Zero) {
+            $ourWindow = $focusApi::GetForegroundWindow()
+        }
 
         $rdcProc = Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
         $i = 0
@@ -775,9 +794,38 @@ function New-RDCManFileFromHyperV {
         }
         Set-RdcManMin
 
-        # Restore focus to the window that was active before RDCMan launched
-        if ($previousFgWindow -ne [IntPtr]::Zero) {
-            $getFgW::SetForegroundWindow($previousFgWindow) | Out-Null
+        # Restore focus to our terminal. Windows blocks SetForegroundWindow from
+        # processes that don't own the current foreground; the standard
+        # workaround is twofold:
+        #   1. keybd_event Alt-down/up tricks Win32 into thinking the user just
+        #      interacted with us, granting us foreground-set privilege.
+        #   2. AttachThreadInput to the current foreground thread also lifts the
+        #      restriction (belt-and-suspenders if step 1 didn't take).
+        if ($ourWindow -and $ourWindow -ne [IntPtr]::Zero) {
+            try {
+                # Step 1: synthesize Alt press/release (VK_MENU = 0x12, KEYEVENTF_KEYUP = 0x2)
+                $focusApi::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+                $focusApi::keybd_event(0x12, 0, 0x2, [UIntPtr]::Zero)
+
+                # Step 2: attach to foreground thread, set, detach
+                $fg = $focusApi::GetForegroundWindow()
+                $fgPid = [uint32]0
+                $fgThread = $focusApi::GetWindowThreadProcessId($fg, [ref]$fgPid)
+                $ourThread = $focusApi::GetCurrentThreadId()
+                $attached = $false
+                if ($fgThread -ne 0 -and $fgThread -ne $ourThread) {
+                    $attached = $focusApi::AttachThreadInput($ourThread, $fgThread, $true)
+                }
+                # SW_RESTORE = 9 (in case our window got minimized too)
+                $focusApi::ShowWindow($ourWindow, 9) | Out-Null
+                $focusApi::SetForegroundWindow($ourWindow) | Out-Null
+                if ($attached) {
+                    $focusApi::AttachThreadInput($ourThread, $fgThread, $false) | Out-Null
+                }
+            }
+            catch {
+                # Focus restoration is best-effort; don't fail the whole update.
+            }
         }
 
         if ($rdcProc) {
