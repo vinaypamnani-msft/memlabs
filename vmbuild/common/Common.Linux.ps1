@@ -664,11 +664,15 @@ function Wait-LinuxVmReady {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $startedAt = Get-Date
     Write-Log "$VmName`: Waiting for Linux VM to become SSH-ready (timeout ${TimeoutSeconds}s)"
+    Write-Log "$VmName`: SSH probe details: exe=$sshExe key=$($keyPair.PrivateKeyPath) known_hosts=$knownHostsPath" -LogOnly
     write-progress2 "Wait for Linux VM" -Status "$VmName`: cloud-init running, waiting for IP..." -force
 
     $lastReportedIp = $null
     $lastHeartbeatSec = 0
     $heartbeatIntervalSec = 60
+    $loggedKnownHostsForIp = $null
+    $lastSshErrLogSec = -9999
+    $sshErrLogIntervalSec = 30
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -678,6 +682,30 @@ function Wait-LinuxVmReady {
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
                 $lastReportedIp = $ip
             }
+
+            # One-time diagnostic per IP: log any pre-existing known_hosts
+            # entry for this IP. A stale entry from a prior deploy will
+            # cause StrictHostKeyChecking to silently reject the new VM's
+            # host key (accept-new only writes a NEW entry; mismatched keys
+            # always fail). Logged once per distinct IP seen.
+            if ($ip -ne $loggedKnownHostsForIp) {
+                $loggedKnownHostsForIp = $ip
+                if (Test-Path $knownHostsPath) {
+                    $khEntries = @(Select-String -Path $knownHostsPath -Pattern "^[^ ]*\b$([regex]::Escape($ip))\b" -ErrorAction SilentlyContinue)
+                    if ($khEntries.Count -gt 0) {
+                        Write-Log "$VmName`: pre-existing known_hosts entries for ${ip}: $($khEntries.Count) match(es)" -Warning
+                        foreach ($e in $khEntries) {
+                            $line = $e.Line
+                            if ($line.Length -gt 100) { $line = $line.Substring(0, 100) + '...' }
+                            Write-Log "$VmName`:   known_hosts> $line" -LogOnly
+                        }
+                    }
+                    else {
+                        Write-Log "$VmName`: no pre-existing known_hosts entries for $ip (good)" -LogOnly
+                    }
+                }
+            }
+
             $sshArgs = @(
                 '-i', $keyPair.PrivateKeyPath,
                 '-o', 'StrictHostKeyChecking=accept-new',
@@ -688,11 +716,32 @@ function Wait-LinuxVmReady {
                 "vmbuildadmin@$ip",
                 'true'
             )
-            $null = & $sshExe @sshArgs 2>$null
+            # Capture stderr (was swallowed with 2>$null). Don't spam the
+            # log; throttle to once per $sshErrLogIntervalSec.
+            $sshErr = & $sshExe @sshArgs 2>&1
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "$VmName`: SSH ready at $ip" -LogOnly
                 write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH ready at $ip" -force -Completed
                 return $ip
+            }
+
+            if (($elapsed - $lastSshErrLogSec) -ge $sshErrLogIntervalSec) {
+                $lastSshErrLogSec = $elapsed
+                $errText = ($sshErr | Out-String).Trim()
+                if (-not $errText) { $errText = '(no stderr output)' }
+                # Also test TCP/22 so we know if sshd is even listening.
+                $tcpOk = $false
+                try {
+                    $tc = [System.Net.Sockets.TcpClient]::new()
+                    $iar = $tc.BeginConnect($ip, 22, $null, $null)
+                    if ($iar.AsyncWaitHandle.WaitOne(2000, $false)) {
+                        $tc.EndConnect($iar) | Out-Null
+                        $tcpOk = $tc.Connected
+                    }
+                    $tc.Close()
+                }
+                catch { }
+                Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$LASTEXITCODE, tcp/22=$tcpOk): $errText" -LogOnly
             }
         }
         else {
@@ -706,6 +755,65 @@ function Wait-LinuxVmReady {
     }
 
     Write-Log "$VmName`: Timeout waiting for Linux VM SSH readiness (${TimeoutSeconds}s)" -Failure
+
+    # Final autopsy: capture verbose ssh output so the next run's log tells
+    # us *why* SSH never came up (auth failure, no banner, conn refused,
+    # host key mismatch, etc.) without needing the VM to still exist.
+    if ($lastReportedIp) {
+        Write-Log "$VmName`: Final SSH autopsy against $lastReportedIp" -LogOnly
+        try {
+            $tc = [System.Net.Sockets.TcpClient]::new()
+            $iar = $tc.BeginConnect($lastReportedIp, 22, $null, $null)
+            $tcpOpen = $false
+            if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                $tc.EndConnect($iar) | Out-Null
+                $tcpOpen = $tc.Connected
+            }
+            Write-Log "$VmName`:   TCP/22 open: $tcpOpen" -LogOnly
+            if ($tcpOpen) {
+                try {
+                    $stream = $tc.GetStream()
+                    $stream.ReadTimeout = 2000
+                    $buf = New-Object byte[] 256
+                    Start-Sleep -Milliseconds 800
+                    if ($stream.DataAvailable) {
+                        $n = $stream.Read($buf, 0, $buf.Length)
+                        $banner = [System.Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+                        Write-Log "$VmName`:   SSH banner: $banner" -LogOnly
+                    }
+                    else {
+                        Write-Log "$VmName`:   SSH banner: (none; sshd accepted TCP but sent no banner)" -LogOnly
+                    }
+                }
+                catch { Write-Log "$VmName`:   banner read error: $($_.Exception.Message)" -LogOnly }
+            }
+            $tc.Close()
+        }
+        catch { Write-Log "$VmName`:   TCP probe error: $($_.Exception.Message)" -LogOnly }
+
+        $verboseSshArgs = @(
+            '-i', $keyPair.PrivateKeyPath,
+            '-o', 'StrictHostKeyChecking=accept-new',
+            '-o', "UserKnownHostsFile=$knownHostsPath",
+            '-o', 'BatchMode=yes',
+            '-o', 'ConnectTimeout=10',
+            '-o', 'LogLevel=DEBUG1',
+            "vmbuildadmin@$lastReportedIp",
+            'true'
+        )
+        $verboseOut = & $sshExe @verboseSshArgs 2>&1
+        $verboseText = ($verboseOut | Out-String).Trim()
+        if ($verboseText) {
+            foreach ($line in ($verboseText -split "`r?`n")) {
+                Write-Log "$VmName`:   ssh-v> $line" -LogOnly
+            }
+        }
+        Write-Log "$VmName`:   verbose ssh exit code: $LASTEXITCODE" -LogOnly
+    }
+    else {
+        Write-Log "$VmName`: No guest IP was ever reported via KVP; cloud-init/DHCP likely failed inside guest." -LogOnly
+    }
+
     write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
     return $null
 }
