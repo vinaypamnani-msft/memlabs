@@ -284,7 +284,9 @@ else {
 # 5. Convert qcow2 -> dynamic VHDX
 # ---------------------------------------------------------------------------
 # Use a temp filename next to the final output so the move is atomic.
-$tempVhdx = Join-Path $linuxStagingDir ($VhdxFileName + ".partial")
+# Resize-VHD requires the file to have a .vhd/.vhdx extension, so we can't
+# append .partial; instead prefix the basename.
+$tempVhdx = Join-Path $linuxStagingDir ("_partial_" + $VhdxFileName)
 if (Test-Path $tempVhdx) { Remove-Item $tempVhdx -Force }
 
 Write-Log "Converting qcow2 to VHDX (dynamic, subformat=dynamic)..." -Activity
