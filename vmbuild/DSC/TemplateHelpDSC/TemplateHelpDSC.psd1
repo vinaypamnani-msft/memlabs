@@ -32,6 +32,7 @@ DscResourcesToExport = @(
     'InitializeDisks',
     'AddUserToLocalAdminGroup',
     'JoinDomain',
+    'TestDomainJoin',
     'OpenFirewallPortForSCCM',
     'InstallFeatureForSCCM',
     'SetCustomPagingFile',

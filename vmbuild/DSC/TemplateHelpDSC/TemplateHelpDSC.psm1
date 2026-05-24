@@ -2417,6 +2417,101 @@ class JoinDomain {
 }
 
 [DscResource()]
+class TestDomainJoin {
+    # Runs after JoinDomain (which always ends with a reboot). On the post-reboot
+    # DSC pass JoinDomain.Test() returns true (we're joined), so this resource is
+    # the first thing to actually exercise the machine-account secret against the
+    # DC. If the secret is out of sync (e.g. JoinDomain's retry loop fired
+    # Add-Computer twice against a half-promoted DC and rolled the password), we
+    # detect it here and self-heal before any downstream resource tries to talk
+    # to AD with a broken secure channel.
+    #
+    # Self-heal strategy:
+    #   1. Reset-ComputerMachinePassword against the named DC (no reboot needed).
+    #   2. If still broken, full Remove-Computer + Add-Computer + reboot.
+    [DscProperty(Key)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [string] $DCName
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $Credential
+
+    [bool] Test() {
+        $_DomainName = $this.DomainName
+        $cs = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if (-not $cs -or $cs.Domain -ne $_DomainName) {
+            # Not joined yet -- nothing for us to test. JoinDomain should have run
+            # first; if it hasn't, returning true here just defers to its ordering.
+            return $true
+        }
+
+        # Retry a few times to ride out transient netlogon hiccups right after
+        # the reboot from JoinDomain. Only declare broken if all attempts fail.
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                if (Test-ComputerSecureChannel -ErrorAction Stop) {
+                    return $true
+                }
+            }
+            catch {
+                Write-Verbose "TestDomainJoin: Test-ComputerSecureChannel threw on attempt $i : $_"
+            }
+            if ($i -lt 3) { Start-Sleep -Seconds 10 }
+        }
+        return $false
+    }
+
+    [void] Set() {
+        $_DomainName = $this.DomainName
+        $_DCName = $this.DCName
+        $_credential = $this.Credential
+
+        # Step 1: try Reset-ComputerMachinePassword. Cheap, no reboot.
+        Write-Status "Secure channel to $_DomainName is broken. Resetting machine password against $_DCName."
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                Reset-ComputerMachinePassword -Server $_DCName -Credential $_credential -ErrorAction Stop
+                Start-Sleep -Seconds 5
+                if (Test-ComputerSecureChannel -ErrorAction SilentlyContinue) {
+                    Write-Status "Reset-ComputerMachinePassword restored secure channel (attempt $i)."
+                    return
+                }
+            }
+            catch {
+                Write-Status "Reset-ComputerMachinePassword attempt $i failed: $($_.Exception.Message)"
+            }
+            if ($i -lt 3) { Start-Sleep -Seconds 15 }
+        }
+
+        # Step 2: full unjoin + rejoin. Requires reboot, but avoids leaving the
+        # node wedged with a broken secret that every later phase will trip on.
+        Write-Status "Reset failed. Performing full Remove-Computer + Add-Computer cycle."
+        try {
+            Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $($_.Exception.Message)"
+        }
+        try {
+            Add-Computer -DomainName $_DomainName -Credential $_credential -Force -ErrorAction Stop
+            Write-Status "Add-Computer succeeded. Rebooting to complete rejoin."
+        }
+        catch {
+            Write-Status "Add-Computer failed during self-heal: $($_.Exception.Message)"
+            throw
+        }
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1
+    }
+
+    [TestDomainJoin] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
 class OpenFirewallPortForSCCM {
     [DscProperty(Key)]
     [string] $Name

@@ -119,9 +119,21 @@
             DependsOn  = "[WriteStatus]DomainJoin"
         }
 
+        # Validate secure channel after the post-JoinDomain reboot. If the machine
+        # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
+        # against a half-promoted DC), Reset-ComputerMachinePassword or a full
+        # rejoin recovers automatically before any downstream resource depends on
+        # AD auth.
+        TestDomainJoin TestDomainJoin {
+            DomainName = $DomainName
+            DCName     = $DCName
+            Credential = $DomainCreds
+            DependsOn  = "[JoinDomain]JoinDomain"
+        }
+
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
+            DependsOn = "[TestDomainJoin]TestDomainJoin"
         }
 
         File ShareFolder {
