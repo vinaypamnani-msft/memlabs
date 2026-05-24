@@ -2078,7 +2078,8 @@ function Test-DHCPScope {
         }
 
         $DHCPDefaultGateway = $network + ".200"
-        $DHCPScopeStart = $network + ".20"
+        # Proxy VMs are pinned to .20; start the dynamic pool at .21 to avoid clash.
+        $DHCPScopeStart = $network + ".21"
         $DHCPScopeEnd = $network + ".199"
 
         $scope = $null
