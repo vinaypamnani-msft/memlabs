@@ -377,9 +377,7 @@ function Test-ValidVmSupported {
     param (
         [object] $VM,
         [object] $ConfigObject,
-        [object] $ReturnObject,
-        [Parameter(Mandatory = $false)]
-        [object] $LinuxImageNames
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -450,13 +448,7 @@ function Test-ValidVmSupported {
     # Supported OS
     if ($VM.role -ne "OSDClient") {
         if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            # Only consult Linux image list if needed; expensive (disk read of JSON)
-            if ($null -eq $LinuxImageNames) {
-                $LinuxImageNames = (Get-LinuxImages).Name
-            }
-            if ($LinuxImageNames -notcontains $vm.operatingSystem) {
-                Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
-            }
+            Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -470,19 +462,15 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
             # DC is caught in Test-ValidDC
-            if ($vm.role -ne "Linux") {
-                $supportedRoles = $Common.Supported.RolesForExisting -join ", "
-                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
-            }
+            $supportedRoles = $Common.Supported.RolesForExisting -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
-            if ($vm.role -ne "Linux") {
-                $supportedRoles = $Common.Supported.Roles -join ", "
-                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
-            }
+            $supportedRoles = $Common.Supported.Roles -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -1068,14 +1056,6 @@ function Test-ValidDiskSpace {
             return
         }
 
-        $linuxImageNames = $null
-        try {
-            $linuxImageNames = @((Get-LinuxImages).Name)
-        }
-        catch {
-            $linuxImageNames = @()
-        }
-
         $totalRequiredBytes = [int64]0
         $assumedSizeBytes = [int64]16GB
         $unknownSizeVms = @()
@@ -1089,9 +1069,6 @@ function Test-ValidDiskSpace {
             $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $os } | Select-Object -First 1
             if ($imageFile -and $imageFile.filename) {
                 $sourcePath = Join-Path $Common.AzureFilesPath $imageFile.filename
-            }
-            elseif ($linuxImageNames -contains $os) {
-                $sourcePath = Join-Path $Common.AzureImagePath ($os + ".vhdx")
             }
 
             $size = $null
@@ -1326,14 +1303,6 @@ function Test-Configuration {
 
         # VM Validations
         # ==============
-        # Cache Linux image names once for the entire validation pass — Get-LinuxImages reads JSON from disk.
-        $linuxImageNamesCache = $null
-        try {
-            $linuxImageNamesCache = @((Get-LinuxImages).Name)
-        }
-        catch {
-            $linuxImageNamesCache = @()
-        }
 
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
@@ -1344,7 +1313,7 @@ function Test-Configuration {
             }
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
             # Supported values
-            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return -LinuxImageNames $linuxImageNamesCache
+            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return
 
             # Valid Memory
             Test-ValidVmMemory -VM $vm -ReturnObject $return
@@ -1769,12 +1738,6 @@ function Test-Configuration {
                     }
                 }
 
-                # Linux: needed in Phase 1 (VM creation)
-                $hasLinux = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Linux' }
-                if ($hasLinux) {
-                    $requiredUrlKeys += 'Linux'
-                }
-
                 # BgInfo is only used during base image creation, skip during deployment.
 
                 # De-duplicate
@@ -1872,7 +1835,7 @@ function Test-Configuration {
             $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
             $return.DeployConfig = $deployConfigEx
 
-            # Disk space validation for VHDX copies (slow: hits Get-LinuxImages cache, disk I/O for file sizes, drive query)
+            # Disk space validation for VHDX copies (slow: disk I/O for file sizes, drive query)
             Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
             Test-ValidDiskSpace -ConfigObject $deployConfig -ReturnObject $return
         }

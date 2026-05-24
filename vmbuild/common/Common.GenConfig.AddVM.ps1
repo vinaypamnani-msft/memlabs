@@ -186,42 +186,27 @@ function Add-NewVMForRole {
             }
         }
         else {
-            if ($role -eq "Linux") {
-                $OSList = Get-SupportedOperatingSystemsForRole -role $role
-                if ($null -eq $OSList ) {
-                    $OperatingSystem = "Linux Unknown"
-                }
-                else {
-                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                    $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false
-                    if ($OperatingSystem -eq "ESCAPE") {
-                        return
-                    }
+            $OSList = Get-SupportedOperatingSystemsForRole -role $role
+            if ($role.Contains("Client")) {
+                $DefaultOperatingSystem = "Windows 10 Latest (64-bit)"
+                if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
                 }
             }
             else {
-                $OSList = Get-SupportedOperatingSystemsForRole -role $role
-                if ($role.Contains("Client")) {
-                    $DefaultOperatingSystem = "Windows 10 Latest (64-bit)"
-                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
-                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
-                    }
+                $DefaultOperatingSystem = "Server 2022"
+                if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
                 }
-                else {
-                    $DefaultOperatingSystem = "Server 2022"
-                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
-                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
-                    }
-                }
-                if ($null -ne $OSList) {
-                    if (-not $OperatingSystem) {                        
-                        Write-Log -Verbose "No Default OS defined" 
-                        Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                        $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $DefaultOperatingSystem
-                        if ($OperatingSystem -eq "ESCAPE") {
-                            $OperatingSystem = $DefaultOperatingSystem
-                            return
-                        }
+            }
+            if ($null -ne $OSList) {
+                if (-not $OperatingSystem) {                        
+                    Write-Log -Verbose "No Default OS defined" 
+                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
+                    $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $DefaultOperatingSystem
+                    if ($OperatingSystem -eq "ESCAPE") {
+                        $OperatingSystem = $DefaultOperatingSystem
+                        return
                     }
                 }
             }
@@ -256,31 +241,19 @@ function Add-NewVMForRole {
         $installSSMS = $false
     }
 
-    if ($role -eq "Linux") {
-        $virtualMachine = [PSCustomObject]@{
-            vmName          = $null
-            role            = $actualRoleName
-            operatingSystem = $OperatingSystem
-            memory          = $memory
-            virtualProcs    = $vprocs
-            vmGeneration    = 1
-        }
-    }
-    else {
-        $virtualMachine = [PSCustomObject]@{
-            vmName          = $null
-            role            = $actualRoleName
-            operatingSystem = $OperatingSystem
-            memory          = $memory
-            virtualProcs    = $vprocs
-            tpmEnabled      = $true
-        }
+    $virtualMachine = [PSCustomObject]@{
+        vmName          = $null
+        role            = $actualRoleName
+        operatingSystem = $OperatingSystem
+        memory          = $memory
+        virtualProcs    = $vprocs
+        tpmEnabled      = $true
     }
 
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Linux")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force

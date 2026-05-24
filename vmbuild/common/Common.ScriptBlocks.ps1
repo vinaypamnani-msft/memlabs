@@ -36,7 +36,7 @@ $global:Phase10Job = {
         if ($NewVMS) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
         }
-        if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+        if ($currentItem.Role -in @("OSDClient", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
         }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
@@ -327,13 +327,7 @@ $global:VM_Create = {
                     $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
                 }
                 if (-not $vhdxPath) {
-                    $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
-                    if ($linuxFile) {
-                        $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
-                    }
-                    if (-not $vhdxPath) {
-                        throw "Could not find $($currentItem.operatingSystem) in file list"
-                    }
+                    throw "Could not find $($currentItem.operatingSystem) in file list"
                 }
             }
 
@@ -383,10 +377,6 @@ $global:VM_Create = {
                 $HashArguments.Add("SwitchName2", "cluster")
             }
 
-            if ($currentItem.role -eq "Linux") {
-                $HashArguments.Add("DiskControllerType", "IDE")
-            }
-
             $created = New-VirtualMachine @HashArguments
 
             if (-not ($created -eq $true)) {
@@ -395,7 +385,7 @@ $global:VM_Create = {
             }
 
             if (-not $Migrate) {
-                if ($currentItem.role -in ("OSDClient", "Linux")) {
+                if ($currentItem.role -eq "OSDClient") {
                     New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                     return

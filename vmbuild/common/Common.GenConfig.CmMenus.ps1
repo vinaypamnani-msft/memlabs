@@ -115,7 +115,6 @@ Function Get-SupportedOperatingSystemsForRole {
         "InternetClient" { return $ClientList }
         "AADClient" { return $ClientList }
         "OSDClient" { return $null }
-        "Linux" { Return (Get-LinuxImages).name }
         default {
             return $AllList
         }

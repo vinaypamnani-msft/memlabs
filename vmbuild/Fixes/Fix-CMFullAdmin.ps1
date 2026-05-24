@@ -83,7 +83,7 @@ $fixesToPerform += [PSCustomObject]@{
     AppliesToNew      = $false
     AppliesToExisting = $true
     AppliesToRoles    = @("CASorStandalonePrimary")
-    NotAppliesToRoles = @("OSDClient", "Linux", "AADClient")
+    NotAppliesToRoles = @("OSDClient", "AADClient")
     DependentVMs      = @($dc.vmName, $vmNote.remoteSQLVM)
     ScriptBlock       = $Fix_CMFullAdmin
 }

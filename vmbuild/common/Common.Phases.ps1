@@ -290,10 +290,8 @@ function Start-PhaseJobs {
         }
 
         # Skip everything for OSDClient, nothing for us to do
-        if ($Phase -gt 1 -and $currentItem.role -in ("OSDClient", "Linux")) {
-            if ($currentItem.role -in ("OSDClient")) {
-                stop-vm2 -Name $currentItem.vmName -TurnOff
-            }
+        if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
+            stop-vm2 -Name $currentItem.vmName -TurnOff
             continue
         }
 
@@ -325,11 +323,11 @@ function Start-PhaseJobs {
             if ($Phase -eq 11) {
                 # Phase 11 = functional validation. Skip only roles that have no
                 # PSDirect-reachable validation surface (OSDClient is the boot
-                # task-sequence image, Linux/AADClient aren't in the domain so
+                # task-sequence image, AADClient isn't in the domain so
                 # Invoke-VmCommand's domain-cred path can't reach them reliably).
                 # Client roles (DomainMember/WorkgroupMember/InternetClient) DO
                 # run -- see Test-DomainMemberFunctionality et al.
-                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
                 }
                 $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
@@ -339,7 +337,7 @@ function Start-PhaseJobs {
                 }
             }
             elseif ($Phase -eq 10) {         
-                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
                 }       
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
@@ -752,7 +750,7 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out machines with an unconnectable OS, except AADClient, which has a special case to skip the DSC
-        if ($vm.role -notin "OSDClient", "Linux") {
+        if ($vm.role -ne "OSDClient") {
             if (-not $vm.Hidden) {
                 $cd
                 #Write-Host "xxxReturning $cd for $($vm.vmName)"
@@ -784,7 +782,7 @@ function Get-Phase3ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient", "StandaloneRootCA") {
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA") {
             continue
         }
 
@@ -831,7 +829,7 @@ function Get-Phase4ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
             continue
         }
 
@@ -957,7 +955,7 @@ function Get-Phase6ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -1009,7 +1007,7 @@ function Get-Phase7ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC", "StandaloneRootCA") {
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
             continue
         }
 

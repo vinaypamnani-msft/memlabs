@@ -20,7 +20,7 @@ $fixesToPerform += [PSCustomObject]@{
     AppliesToNew      = $true
     AppliesToExisting = $true
     AppliesToRoles    = @()
-    NotAppliesToRoles = @("DC", "OSDClient", "Linux", "AADClient")
+    NotAppliesToRoles = @("DC", "OSDClient", "AADClient")
     DependentVMs      = @()
     ScriptBlock       = $Fix_AccountExpiry
 }

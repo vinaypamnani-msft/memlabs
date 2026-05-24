@@ -287,7 +287,6 @@ function Get-RDCManOSShortName {
         "Server 2016*"     { return "S16" }
         "Windows 11*"      { return "W11" }
         "Windows 10*"      { return "W10" }
-        "Linux*"           { return "Linux" }
         default            { return $null }
     }
 }
@@ -510,7 +509,6 @@ function New-RDCManFileFromHyperV {
                 "WSUS"            { $roleTag = "WSUS" }
                 "FileServer"      { $roleTag = "FS" }
                 "OSDClient"       { $roleTag = "OSD" }
-                "Linux"           { $roleTag = "Linux" }
                 "StandaloneRootCA" { $roleTag = "RootCA" }
                 "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
                 "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
@@ -597,7 +595,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -in ("OSDClient", "AADClient", "Linux")) {
+            if ($vm.Role -in ("OSDClient", "AADClient")) {
                 $vmID = $vm.vmId
             }
 
@@ -665,40 +663,6 @@ function New-RDCManFileFromHyperV {
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
         }
         $clonedSG = $SmartGroupToClone.clone()
-        if ($roles -contains "Linux") {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Linux"
-            $clonedSG.ruleGroup.rule.value = "Linux"
-            [void]$findgroup.AppendChild($clonedSG)
-            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
-            $subKeys = @(
-                "AllowDefaultCredentialsDomain",
-                "AllowSavedCredentialsDomain",
-                "AllowDefaultCredentials",
-                "AllowFreshCredentialsDomain",
-                "AllowFreshCredentials",
-                "AllowFreshCredentialsWhenNTLMOnly",
-                "AllowFreshCredentialsWhenNTLMOnlyDomain",
-                "AllowSavedCredentials",
-                "AllowSavedCredentialsWhenNTLMOnly"
-            )
-            foreach ($subKey in $subKeys) {
-                $fullPath = Join-Path $policyDefaultsPath $subKey
-
-                if (-not (Test-Path $fullPath)) {
-                    New-Item -Path $fullPath -Force | Out-Null
-                }
-            }
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnlyDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-        }
         #if ($roles -contains "AADClient") {
         #    Write-Host "Adding SmartGroup AAD Clients"
         #    $clonedSG = $SmartGroupToClone.clone()

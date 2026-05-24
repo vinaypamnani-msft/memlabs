@@ -231,9 +231,6 @@ function show-NewVMMenu {
         if ($role -eq "H") {
             $role = "PassiveSite"
         }
-        if ($role -eq "L") {
-            $role = "Linux"
-        }
     }
 
     $parentSiteCode = Get-ParentSiteCodeMenu -role $role -CurrentValue $null -Domain $Global:Config.vmOptions.domainName

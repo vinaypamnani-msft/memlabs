@@ -361,7 +361,6 @@ function Select-RolesForExisting {
     $existingRoles2 = Format-Roles $existingRoles2
 
     $OptionArray = @{ "H" = $ha_Text }
-    $OptionArray += @{  "L" = "Add Linux VM from Hyper-V Gallery" }
     $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
 
     if ($role -eq "ESCAPE") {

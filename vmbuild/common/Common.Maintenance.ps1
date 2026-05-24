@@ -27,7 +27,7 @@ function Start-Maintenance {
     # offered for maintenance or auto-started.
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object {
         $_.inProgress -ne $true -and
-        -not ($_.Role -in @("OSDClient", "Linux", "AADClient")) -and
+        -not ($_.Role -in @("OSDClient", "AADClient")) -and
         -not ($_.Role -eq "StandaloneRootCA" -and $_.State -ne "Running")
     }
     $newVmsNeedingMaintenance = @()
@@ -333,7 +333,7 @@ function Start-VMFixes {
 
     # If deploying a new VM and fixes were applicable but none actually ran
     # their script block, something is wrong — do not stamp the version.
-    # (If zero were applicable, e.g. OSDClient/Linux/AADClient, that's expected.)
+    # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
     if ($ApplyNewOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
         Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
         $success = $false

@@ -104,7 +104,7 @@ function Test-VmFunctionality {
         default {
             # Any role not in this switch falls through silently. The phase
             # dispatcher in Common.Phases.ps1 already filters out OSDClient/
-            # Linux/AADClient. Unknown roles get a log line but don't fail.
+            # AADClient. Unknown roles get a log line but don't fail.
             Write-Log "[Phase $Phase] $VMName [$role]: No role-specific tests defined; skipping" -LogOnly
         }
     }
@@ -156,7 +156,7 @@ function Test-VmFunctionality {
     }
 
     # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly)
-    if ($testsPassed -and $role -notin @('OSDClient', 'Linux', 'AADClient', 'StandaloneRootCA')) {
+    if ($testsPassed -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
 
