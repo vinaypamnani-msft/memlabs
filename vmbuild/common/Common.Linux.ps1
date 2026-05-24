@@ -285,6 +285,43 @@ write_files:
     content: |
       [Resolve]
       FallbackDNS=1.1.1.1 8.8.8.8
+  # Helper: once the DC is online and serving DNS for the AD domain,
+  # invoke this to make the DC the primary resolver while keeping public
+  # resolvers as fallback. Usage (run as root):
+  #   memlabs-set-dns 192.168.6.1 [adatum.com]
+  # The script writes a netplan drop-in (60-memlabs-dc-dns.yaml) that
+  # merges with the cloud-init-generated 50-cloud-init.yaml. Per-link DNS
+  # becomes: <DC>, 1.1.1.1, 8.8.8.8 with the AD domain as search suffix.
+  - path: /usr/local/sbin/memlabs-set-dns
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      if [[ ${#} -lt 1 ]]; then
+        echo "Usage: $0 <dc-dns-ip> [search-domain]" >&2
+        exit 1
+      fi
+      DC_DNS="$1"
+      SEARCH="${2:-}"
+      SEARCH_LINE=""
+      if [[ -n "$SEARCH" ]]; then
+        SEARCH_LINE="        search: [$SEARCH]"
+      fi
+      cat > /etc/netplan/60-memlabs-dc-dns.yaml <<EOF
+      network:
+        version: 2
+        ethernets:
+          primary:
+            match:
+              name: "e*"
+            nameservers:
+              addresses: [$DC_DNS, 1.1.1.1, 8.8.8.8]
+      $SEARCH_LINE
+      EOF
+      chmod 600 /etc/netplan/60-memlabs-dc-dns.yaml
+      netplan apply
+      systemctl restart systemd-resolved || true
+      echo "DNS now: $(resolvectl dns | grep -v '^$')"
 
 package_update: true
 package_upgrade: false
