@@ -928,7 +928,13 @@ function Test-VmUsesProxy {
     )
 
     if (-not $Vm) { return $false }
-    if ($Vm.role -eq 'Proxy') { return $false }
+    # Hard exclusions: roles that must never route through the proxy.
+    # Mirrors the exclusion list in Common.GenConfig.AddVM.ps1 so a
+    # domainDefaults.UseProxy=$true setting on an existing/hidden VM
+    # (which has no per-VM useProxy property) can't accidentally apply
+    # client proxy + firewall enforcement to a DC, BDC, or offline root CA.
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    if ($Vm.role -in $hardExclude) { return $false }
     if (Test-VmIsLinux -Vm $Vm) { return $false }
 
     if ($Vm.PSObject.Properties.Name -contains 'useProxy') {

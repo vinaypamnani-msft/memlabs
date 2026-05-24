@@ -1044,15 +1044,23 @@ function Set-VmProxyEnforcement {
         # Allow outbound to proxy on 3128 (TCP)
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
             -RemoteIPAddress "$ProxyIp/32" -RemotePort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
-        # And reply traffic back
+        # And reply traffic back (source on the wire is proxy:3128, so
+        # -RemotePort 3128 is correct -- LocalPort would mean the VM is
+        # the listener, which is wrong for client-side traffic).
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-            -RemoteIPAddress "$ProxyIp/32" -LocalPort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
+            -RemoteIPAddress "$ProxyIp/32" -RemotePort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
 
         # Allow DNS to the DC (UDP+TCP 53)
         if ($DcIp) {
             Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
                 -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol UDP -Weight 5097 -ErrorAction Stop | Out-Null
             Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
+                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol TCP -Weight 5097 -ErrorAction Stop | Out-Null
+            # Reply traffic back from DC:53 (needed for cross-subnet DC where
+            # the intra-subnet allow doesn't cover it).
+            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
+                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol UDP -Weight 5097 -ErrorAction Stop | Out-Null
+            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
                 -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol TCP -Weight 5097 -ErrorAction Stop | Out-Null
         }
 
