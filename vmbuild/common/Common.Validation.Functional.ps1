@@ -2321,30 +2321,31 @@ function Test-CMSiteWideFunctionality {
     $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
     $role = $CurrentItem.role
 
-    # Load expected apps from Apps.json on the host -- pass names down to the VM.
-    # Only verify apps when the deployment opted in to pre-populating objects
-    # AND when running against a Primary site. memlabs perfloading.ps1 imports
-    # MEMLABS-* apps on the Primary; in a CAS hierarchy they don't necessarily
-    # show up on the CAS (and even when they do, replication lag makes this
-    # check unreliable for Phase 11 timing).
+    # Build expected apps list by mirroring perfloading.ps1 EXACTLY:
+    #   $apps = $deployconfig.Tools | where { $_.Appinstall -eq $true }
+    #   $appname = "MEMLABS-" + $_.Name
+    # Apps.json is the source catalog for tool downloads but is NOT the
+    # per-site enabled list -- only Tools[] with Appinstall=true get
+    # turned into CM apps, and their CM name is "MEMLABS-<Tools.Name>"
+    # which may not match Apps.json's AppName field at all.
     #
-    # IMPORTANT: perfloading.ps1 resolves cmOptions per-VM ($ThisVM.cmOptions
-    # falling back to $deployConfig.cmOptions). We must mirror that exact
-    # precedence -- a multi-hierarchy deploy can have one Primary with
-    # PrePopulateObjects=true and another with false.
+    # Only verify when the deployment opted in to pre-populating objects
+    # AND when running against a Primary site (CAS doesn't run perfloading).
+    #
+    # cmOptions resolved per-VM ($ThisVM.cmOptions falling back to
+    # $deployConfig.cmOptions) to match perfloading's own resolution -- a
+    # multi-hierarchy deploy can have one Primary with PrePopulateObjects=true
+    # and another with false.
     $expectedAppNames = @()
     $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
     $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
     if ($prePopulate -and $role -ne 'CAS') {
-        $appsJsonPath = Join-Path $PSScriptRoot '..\Apps.json'
-        if (Test-Path $appsJsonPath) {
-            try {
-                $expectedAppNames = @((Get-Content -Raw -Path $appsJsonPath | ConvertFrom-Json) |
-                    Select-Object -ExpandProperty AppName -ErrorAction SilentlyContinue)
-            }
-            catch {
-                Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not read Apps.json: $($_.Exception.Message)" -Warning
-            }
+        try {
+            $enabledTools = @($DeployConfig.Tools | Where-Object { $_.Appinstall -eq $true })
+            $expectedAppNames = @($enabledTools | ForEach-Object { "MEMLABS-$($_.Name)" })
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Could not enumerate deployConfig.Tools: $($_.Exception.Message)" -Warning
         }
     }
 
@@ -2422,7 +2423,8 @@ function Test-CMSiteWideFunctionality {
             $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
         }
 
-        # 4. Apps from Apps.json must be present as SMS_ApplicationLatest objects
+        # 4. Apps enabled via deployConfig.Tools[Appinstall=true] must be present
+        #    as SMS_ApplicationLatest objects (created by perfloading.ps1)
         if ($expectedApps -and $expectedApps.Count -gt 0) {
             $results.Details.Add("CMD: Get-WmiObject SMS_ApplicationLatest -Filter `"LocalizedDisplayName LIKE 'MEMLABS-%'`"")
             try {
@@ -2431,14 +2433,14 @@ function Test-CMSiteWideFunctionality {
                 $appNames = $apps | Select-Object -ExpandProperty LocalizedDisplayName
                 $missing = @($expectedApps | Where-Object { $_ -notin $appNames })
                 if ($missing.Count -eq 0) {
-                    $results.Details.Add("OK: All $($expectedApps.Count) Apps.json apps present in CM site")
+                    $results.Details.Add("OK: All $($expectedApps.Count) MEMLABS apps present in CM site")
                 }
                 elseif ($missing.Count -le ($expectedApps.Count / 2)) {
                     $results.Details.Add("WARN: $($missing.Count)/$($expectedApps.Count) apps missing: $(($missing | Select-Object -First 5) -join ', ')")
                 }
                 else {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: $($missing.Count)/$($expectedApps.Count) Apps.json apps missing in CM site")
+                    $results.Details.Add("FAIL: $($missing.Count)/$($expectedApps.Count) MEMLABS apps missing in CM site: $(($missing | Select-Object -First 5) -join ', ')")
                 }
             }
             catch {
