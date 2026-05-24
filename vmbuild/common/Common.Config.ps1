@@ -3239,7 +3239,27 @@ Function Show-Summary {
             })
 
         if (-not $topLevels) {
-            Write-RedX "ConfigMgr will not be installed (no top-level site server in config)"
+            # Add-to-existing: the top-level CAS/Primary lives in the already-
+            # deployed hierarchy. Check hidden existing VMs in the deployConfig
+            # first (cheap), then fall back to Get-ExistingSiteServer in the
+            # domain (Hyper-V round-trip). Surface a green confirmation rather
+            # than a misleading red X.
+            $existingTop = @($existingConfig | Where-Object {
+                    ($_.Role -in 'CAS', 'Primary') -and -not $_.parentSiteCode
+                }) | Select-Object -First 1
+            if (-not $existingTop -and $deployConfig.vmOptions.domainName) {
+                $existingTop = @(Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role 'CAS') +
+                               @(Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role 'Primary') |
+                    Where-Object { $_ -and -not $_.ParentSiteCode } |
+                    Select-Object -First 1
+            }
+            if ($existingTop) {
+                $topName = if ($existingTop.VMName) { $existingTop.VMName } else { $existingTop.vmName }
+                $topSite = if ($existingTop.SiteCode) { $existingTop.SiteCode } else { $existingTop.siteCode }
+                Write-GreenCheck "ConfigMgr will be added to existing hierarchy (top-level: $topName [$topSite])"
+            } else {
+                Write-RedX "ConfigMgr will not be installed (no top-level site server in config or existing deployment)"
+            }
         }
 
         foreach ($top in $topLevels) {
