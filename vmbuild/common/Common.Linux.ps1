@@ -1512,6 +1512,231 @@ function Set-WindowsClientProxyForConfig {
     return $ok
 }
 
+function Set-ProxyAdminAccessOnVm {
+    <#
+    .SYNOPSIS
+        Install host's memlabs ed25519 keypair on a Windows VM and create
+        Public-Desktop shortcuts for SSHing to the Proxy and tailing the
+        Squid access log.
+
+    .DESCRIPTION
+        Cloud-init already authorizes the host's ed25519 public key for
+        vmbuildadmin on every Linux VM. This drops the matching private
+        key (plus .pub) into C:\ProgramData\memlabs\ssh on the target VM
+        with admin-only ACLs so an interactive Administrator can ssh
+        without typing a password, and stamps two shortcuts on the
+        all-users desktop pointing at ssh.exe.
+
+        Idempotent. Safe to call repeatedly.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)] [string]$VmName,
+        [Parameter(Mandatory)] [string]$Domain,
+        [Parameter(Mandatory)] [string]$ProxyFqdn,
+        [Parameter(Mandatory)] [string]$PrivateKeyContent,
+        [Parameter(Mandatory)] [string]$PublicKeyContent
+    )
+
+    $scriptBlock = {
+        param($privKey, $pubKey, $proxyFqdn)
+        $ErrorActionPreference = 'Stop'
+        try {
+            $sshDir = 'C:\ProgramData\memlabs\ssh'
+            if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
+
+            $privPath = Join-Path $sshDir 'memlabs_ed25519'
+            $pubPath  = "$privPath.pub"
+
+            # Write LF-only (OpenSSH on Windows is happy with either, but
+            # ed25519 PEM blocks prefer LF). Use [IO.File] to avoid BOM.
+            [System.IO.File]::WriteAllText($privPath, ($privKey -replace "`r`n", "`n"))
+            [System.IO.File]::WriteAllText($pubPath, ($pubKey -replace "`r`n", "`n"))
+
+            # Lock private key down: SYSTEM + Administrators full, no inherit
+            $acl = New-Object System.Security.AccessControl.FileSecurity
+            $acl.SetAccessRuleProtection($true, $false)
+            $sys = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                'NT AUTHORITY\SYSTEM', 'FullControl', 'Allow')
+            $adm = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                'BUILTIN\Administrators', 'FullControl', 'Allow')
+            $acl.AddAccessRule($sys)
+            $acl.AddAccessRule($adm)
+            Set-Acl -Path $privPath -AclObject $acl
+
+            # Locate ssh.exe (built-in OpenSSH client; present on all current
+            # server SKUs by default). Fall back to Get-Command.
+            $sshExe = 'C:\Windows\System32\OpenSSH\ssh.exe'
+            if (-not (Test-Path $sshExe)) {
+                $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
+                if ($cmd) { $sshExe = $cmd.Source }
+            }
+            if (-not (Test-Path $sshExe)) {
+                return @{ Ok = $false; Error = "ssh.exe not found on target VM" }
+            }
+
+            $desktop = 'C:\Users\Public\Desktop'
+            $shell = New-Object -ComObject WScript.Shell
+
+            # Common ssh args: identity file, batch mode for the tail (no
+            # password prompt), accept unknown host key, suppress known_hosts
+            # churn. cmd.exe /k keeps the window open after exit so the user
+            # can see error messages.
+            $sshArgsBase = "-i `"$privPath`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
+
+            # Interactive SSH shell
+            $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
+            $sc1 = $shell.CreateShortcut($lnk1)
+            $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
+            $sc1.Arguments = "/k `"$sshExe`" $sshArgsBase"
+            $sc1.WorkingDirectory = 'C:\'
+            $sc1.IconLocation = "$sshExe,0"
+            $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
+            $sc1.Save()
+
+            # Squid access-log tail
+            $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
+            $sc2 = $shell.CreateShortcut($lnk2)
+            $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
+            $sc2.Arguments = "/k `"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log"
+            $sc2.WorkingDirectory = 'C:\'
+            $sc2.IconLocation = "$sshExe,0"
+            $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
+            $sc2.Save()
+
+            return @{ Ok = $true; SshDir = $sshDir; Shortcuts = @($lnk1, $lnk2) }
+        }
+        catch {
+            return @{ Ok = $false; Error = $_.ToString() }
+        }
+    }
+
+    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -ArgumentList $PrivateKeyContent, $PublicKeyContent, $ProxyFqdn `
+        -DisplayName "Install proxy SSH key + shortcuts"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
+        return $false
+    }
+    $payload = $result.ScriptBlockOutput
+    if (-not $payload -or -not $payload.Ok) {
+        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm failed: $($payload.Error)" -Failure
+        return $false
+    }
+    Write-Log "[Proxy] $VmName`: Installed SSH key + Public Desktop shortcuts (-> $ProxyFqdn)"
+    return $true
+}
+
+function Set-ProxyAdminAccessForConfig {
+    <#
+    .SYNOPSIS
+        Push the host SSH key + Squid-log shortcuts to every DC and CM
+        site-server VM in a deploy config, so operators can SSH to the
+        Proxy from those VMs without typing a password.
+
+    .DESCRIPTION
+        Scope is limited to roles that an operator routinely RDPs to
+        (DC, BDC, CAS, Primary, Secondary, SiteSystem, PassiveSite).
+        Skipped entirely if the config contains no Proxy VM.
+
+        Idempotent. Safe to call repeatedly.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)] [object]$deployConfig
+    )
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) { return $true }
+
+    $adminRoles = @('DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $targets = @($deployConfig.virtualMachines | Where-Object {
+        ($_.role -in $adminRoles) -and -not $_.hidden -and -not (Test-VmIsLinux -Vm $_)
+    })
+    if (-not $targets) { return $true }
+
+    $key = Get-LinuxAdminSshKeyPair
+    $privContent = (Get-Content -Raw -Path $key.PrivateKeyPath)
+    $pubContent  = (Get-Content -Raw -Path $key.PublicKeyPath)
+
+    $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+
+    $ok = $true
+    foreach ($vm in $targets) {
+        Write-Log "[Proxy] Installing SSH key + shortcuts on $($vm.vmName) -> $proxyFqdn"
+        $r = Set-ProxyAdminAccessOnVm -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
+                -ProxyFqdn $proxyFqdn -PrivateKeyContent $privContent -PublicKeyContent $pubContent
+        if (-not $r) { $ok = $false }
+    }
+    return $ok
+}
+
+function New-HostProxyShortcuts {
+    <#
+    .SYNOPSIS
+        Create "SSH to <proxy>" and "Squid Access Log" shortcuts on the
+        deploying user's desktop on the Hyper-V host.
+
+    .DESCRIPTION
+        The host already has the memlabs ed25519 keypair cached (under
+        vmbuild\cache\ssh) and the matching public key authorized on the
+        Proxy VM via cloud-init. This just makes that access discoverable.
+
+        Skipped if no Proxy VM is in the config. Idempotent.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)] [object]$deployConfig
+    )
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) { return $true }
+
+    try {
+        $key = Get-LinuxAdminSshKeyPair
+        $sshExe = Get-LinuxSshExePath
+        if (-not $sshExe -or -not (Test-Path $sshExe)) {
+            Write-Log "[Proxy] Host ssh.exe not found; skipping host desktop shortcuts" -Warning
+            return $false
+        }
+
+        $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if (-not $desktop -or -not (Test-Path $desktop)) {
+            Write-Log "[Proxy] Could not resolve host Desktop folder; skipping shortcuts" -Warning
+            return $false
+        }
+
+        $shell = New-Object -ComObject WScript.Shell
+        $sshArgsBase = "-i `"$($key.PrivateKeyPath)`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
+
+        $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
+        $sc1 = $shell.CreateShortcut($lnk1)
+        $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
+        $sc1.Arguments = "/k `"$sshExe`" $sshArgsBase"
+        $sc1.WorkingDirectory = 'C:\'
+        $sc1.IconLocation = "$sshExe,0"
+        $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
+        $sc1.Save()
+
+        $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
+        $sc2 = $shell.CreateShortcut($lnk2)
+        $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
+        $sc2.Arguments = "/k `"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log"
+        $sc2.WorkingDirectory = 'C:\'
+        $sc2.IconLocation = "$sshExe,0"
+        $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
+        $sc2.Save()
+
+        Write-Log "[Proxy] Host desktop shortcuts created for $proxyFqdn"
+        return $true
+    }
+    catch {
+        Write-Log "[Proxy] New-HostProxyShortcuts failed: $_" -Warning
+        return $false
+    }
+}
+
 function Invoke-LinuxBaseImageBake {
     <#
     .SYNOPSIS

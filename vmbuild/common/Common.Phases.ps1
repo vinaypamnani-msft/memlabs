@@ -145,6 +145,12 @@ function Start-Phase {
         # with the now-updated global subnet union, so adding/removing a lab
         # or subnet here doesn't leave neighbouring labs with stale ACLs.
         Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+
+        # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
+        # site-server desktops, and stamp matching shortcuts on the host
+        # user's desktop. No-op when no Proxy VM is in this config.
+        Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
+        New-HostProxyShortcuts -deployConfig $deployConfig | Out-Null
     }
 
     return $true
