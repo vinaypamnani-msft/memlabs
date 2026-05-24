@@ -1130,4 +1130,158 @@ function Set-VmProxyEnforcementForConfig {
     }
     return $ok
 }
+
+function Get-VmProxyEnforcementSubnets {
+    <#
+    .SYNOPSIS
+        Build the global union of every memlabs lab subnet currently known
+        to the host, normalized for use as Set-VmProxyEnforcement -LabSubnets.
+
+    .DESCRIPTION
+        Combines Get-NetworkList (every lab's subnet stored in cached VM
+        metadata) with optional extras from an in-flight deployConfig
+        (vmOptions.network + any per-VM .network overrides) so that the
+        very deploy that's invoking us can also feed its brand-new subnets
+        into the union before those subnets show up in Get-NetworkList.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)] [object]$deployConfig
+    )
+
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    try {
+        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
+        foreach ($n in $allKnown) { if ($n) { [void]$set.Add($n) } }
+    }
+    catch {
+        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with deploy-only subnet set" -Warning
+    }
+    if ($deployConfig) {
+        if ($deployConfig.vmOptions -and $deployConfig.vmOptions.network) {
+            [void]$set.Add($deployConfig.vmOptions.network)
+        }
+        if ($deployConfig.virtualMachines) {
+            foreach ($vm in $deployConfig.virtualMachines) {
+                if ($vm.network) { [void]$set.Add($vm.network) }
+            }
+        }
+    }
+    return @($set)
+}
+
+function Set-VmProxyEnforcementForAllLabs {
+    <#
+    .SYNOPSIS
+        Reconcile Hyper-V proxy enforcement ACLs across every memlabs VM
+        on the host, not just the VMs in the current deployConfig.
+
+    .DESCRIPTION
+        Adding a new domain / new subnet / new lab on a host that already
+        hosts other proxy-enforced labs changes the "allowed lab subnet"
+        union. The per-deploy Set-VmProxyEnforcementForConfig only touches
+        VMs in the new deployConfig, so VMs in OTHER labs keep ACLs frozen
+        at their original deploy time and would deny traffic to the new
+        subnet (which the user almost certainly wants to permit, e.g. for
+        a freshly added second hierarchy). Similarly when a lab is removed,
+        the surviving labs keep stale allow rules for the gone subnet.
+
+        This function:
+          1. Builds the current global subnet union (Get-NetworkList +
+             optional in-flight deployConfig extras).
+          2. Enumerates every memlabs VM on the host via Get-List -Type VM.
+          3. For each VM with useProxy=true in its VM Note (Windows, not
+             role-excluded) -> re-stamps ACLs against the global union.
+          4. For each opted-out VM that still has stale ACLs in the
+             memlabs weight band (5000-5099) -> clears them.
+
+        Safe to call repeatedly; per-VM failures are logged and never
+        abort the sweep.
+
+    .PARAMETER deployConfig
+        Optional. If supplied, its subnets are folded into the union so
+        the current deploy's brand-new networks are honored before
+        Get-NetworkList sees them.
+
+    .PARAMETER WhatIf
+        Standard PowerShell switch; reports the intended actions without
+        touching any ACLs.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param (
+        [Parameter(Mandatory = $false)] [object]$deployConfig
+    )
+
+    $labSubnets = Get-VmProxyEnforcementSubnets -deployConfig $deployConfig
+    if (-not $labSubnets -or $labSubnets.Count -eq 0) {
+        Write-Log "[Proxy] Reconcile: no lab subnets known; skipping (would be wide-open deny)" -Warning
+        return $false
+    }
+    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
+
+    try {
+        $allVms = @(Get-List -Type VM)
+    }
+    catch {
+        Write-Log "[Proxy] Reconcile: Get-List -Type VM failed: $_" -Warning
+        return $false
+    }
+
+    if (-not $allVms -or $allVms.Count -eq 0) {
+        Write-Log "[Proxy] Reconcile: no memlabs VMs found on host; nothing to do"
+        return $true
+    }
+
+    # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
+    # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
+    # have no extended ACLs to manage.
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+
+    $applied = 0; $cleared = 0; $skipped = 0; $failed = 0
+    foreach ($vm in $allVms) {
+        if (-not $vm.vmName) { continue }
+        if ($vm.role -in $hardExclude) { $skipped++; continue }
+        # OperatingSystem comes from deployedOS in VM Note; Linux distros contain "Linux" / "Ubuntu".
+        if ($vm.OperatingSystem -and ($vm.OperatingSystem -match 'Linux|Ubuntu|Debian|CentOS|RHEL|Fedora')) {
+            $skipped++; continue
+        }
+
+        $optedIn = $false
+        if ($vm.PSObject.Properties.Name -contains 'useProxy') {
+            $optedIn = [bool]$vm.useProxy
+        }
+
+        try {
+            if ($optedIn) {
+                if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
+                    $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+                    if ($r) { $applied++ } else { $failed++ }
+                }
+            }
+            else {
+                # Not opted-in: clear any stale ACLs from a prior deploy where
+                # useProxy was true. Cheap no-op if the VM has none.
+                $existing = Get-VMNetworkAdapterExtendedAcl -VMName $vm.vmName -ErrorAction SilentlyContinue
+                $stale = @($existing | Where-Object {
+                        $_.Weight -ge $global:MemLabsProxyAclWeightMin -and
+                        $_.Weight -le $global:MemLabsProxyAclWeightMax
+                    })
+                if ($stale.Count -gt 0) {
+                    if ($PSCmdlet.ShouldProcess($vm.vmName, "Clear stale proxy enforcement ACLs ($($stale.Count) rules)")) {
+                        Clear-VmProxyEnforcement -VmName $vm.vmName
+                        $cleared++
+                        Write-Log "[Proxy] Reconcile: $($vm.vmName): cleared $($stale.Count) stale ACL(s) (useProxy=false/missing)"
+                    }
+                }
+            }
+        }
+        catch {
+            $failed++
+            Write-Log "[Proxy] Reconcile: $($vm.vmName): unexpected error: $_" -Warning
+        }
+    }
+
+    Write-Log "[Proxy] Reconcile complete: $applied applied, $cleared cleared, $skipped skipped (excluded/Linux), $failed failed"
+    return ($failed -eq 0)
+}
 # endregion Proxy enforcement ---------------------------------------------

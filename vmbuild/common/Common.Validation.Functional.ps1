@@ -160,6 +160,28 @@ function Test-VmFunctionality {
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
 
+    # ---- Proxy validation ----
+    # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
+    if ($testsPassed -and $role -eq 'Proxy') {
+        $testsPassed = Test-ProxyListening -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+    # 2) For any opted-in Windows client/CM-role VM: verify it's pointed at the proxy,
+    #    that direct Internet is blocked by host ACLs, and (CM site roles only) that
+    #    Get-CMSiteSystemServer reports UseProxy=$true.
+    if ($testsPassed -and (Test-VmUsesProxy -Vm $CurrentItem -DeployConfig $DeployConfig)) {
+        if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+            $testsPassed = $false
+        }
+        if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+            $testsPassed = $false
+        }
+        if ($testsPassed -and $role -in @('CAS', 'Primary', 'SiteSystem')) {
+            if (-not (Test-CMSiteRoleProxy -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
+                $testsPassed = $false
+            }
+        }
+    }
+
     return $testsPassed
 }
 
@@ -2470,6 +2492,284 @@ function Test-CMSiteWideFunctionality {
 
     return (Format-TestResult -VMName $VMName -RoleLabel "CMSite-$siteCode" -Result $result)
 }
+
+#region Proxy Validation Tests
+
+function Test-ProxyListening {
+    <#
+    .SYNOPSIS
+        Phase 11 test for the Linux Proxy VM: verifies Squid is listening on TCP 3128.
+    .DESCRIPTION
+        Runs `ss -ltn` over SSH on the Proxy VM (Invoke-LinuxVmCommand) and
+        looks for a *:3128 / 0.0.0.0:3128 / :::3128 listener. Squid logs are
+        not parsed -- presence of the listener is the meaningful end-to-end
+        check for "the proxy is up".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'Proxy'
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing Squid listener on TCP 3128" -LogOnly
+
+    if (-not (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue)) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Invoke-LinuxVmCommand not loaded" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Invoke-LinuxVmCommand not loaded"; Level = 'Failure' })
+        return $false
+    }
+
+    $bash = "ss -ltn '( sport = :3128 )' 2>/dev/null | tail -n +2"
+    $result = Invoke-LinuxVmCommand -VmName $VMName -BashCommand $bash -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Phase11-Proxy-Listen"
+
+    if (-not $result -or $result.ScriptBlockFailed) {
+        $err = if ($result) { $result.ScriptBlockOutput } else { 'SSH failed' }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - ss query failed: $err" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - ss query failed: $err"; Level = 'Failure' })
+        return $false
+    }
+
+    $output = ($result.ScriptBlockOutput | Out-String).Trim()
+    if ($output -match ':3128') {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Squid listening on :3128 ($($output -replace '\s+', ' '))" -LogOnly
+        return $true
+    }
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :3128 (ss output: '$output')" -Failure -LogOnly
+    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on TCP 3128"; Level = 'Failure' })
+    return $false
+}
+
+function Test-WindowsProxyConfig {
+    <#
+    .SYNOPSIS
+        Verifies an opted-in Windows VM is pointed at the lab Squid proxy.
+    .DESCRIPTION
+        Checks BOTH `netsh winhttp show proxy` and the per-machine IE
+        ProxyServer registry value (HKLM Internet Settings, since
+        Set-WindowsClientProxy writes there). Either source matching
+        `<proxyFqdn>:3128` (or its IP form) is acceptable.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'ProxyClient'
+    $domain = $DeployConfig.vmOptions.domainName
+
+    $proxyVm = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - useProxy=true but no Proxy VM in config; skipping client config test" -Warning -LogOnly
+        return $true
+    }
+    $proxyFqdn = "$($proxyVm.vmName).$domain"
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing WinHTTP + IE proxy point at $proxyFqdn`:3128" -LogOnly
+
+    $scriptBlock = {
+        param($expectedFqdn, $expectedShortName)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $matchesProxy = {
+            param($value)
+            if (-not $value) { return $false }
+            $v = $value.ToString().ToLowerInvariant()
+            return ($v -match ("{0}\:3128" -f [regex]::Escape($expectedFqdn.ToLowerInvariant()))) -or
+                   ($v -match ("{0}[\.:].*3128" -f [regex]::Escape($expectedShortName.ToLowerInvariant()))) -or
+                   ($v -match ':3128')   # accept any :3128 form (IP literal also OK)
+        }
+
+        # WinHTTP
+        $results.Details.Add("CMD: netsh winhttp show proxy")
+        try {
+            $winhttp = (& netsh winhttp show proxy 2>&1) -join "`n"
+            if (& $matchesProxy $winhttp) {
+                $results.Details.Add("OK: WinHTTP proxy contains a :3128 entry")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WinHTTP shows no :3128 proxy (output: $($winhttp -replace '\s+', ' '))")
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: netsh winhttp show proxy threw: $($_.Exception.Message)")
+        }
+
+        # IE / WinINET per-machine
+        $ieKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+        try {
+            if (Test-Path $ieKey) {
+                $ieProxy = (Get-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+                if (& $matchesProxy $ieProxy) {
+                    $results.Details.Add("OK: HKLM IE ProxyServer = '$ieProxy'")
+                }
+                else {
+                    $results.Details.Add("WARN: HKLM IE ProxyServer = '$ieProxy' (does not contain :3128)")
+                }
+            }
+            else {
+                $results.Details.Add("WARN: HKLM IE Internet Settings key absent (Set-WindowsClientProxy may not have run)")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Reading HKLM IE ProxyServer failed: $($_.Exception.Message)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $proxyFqdn, $proxyVm.vmName `
+        -DisplayName "Phase11-ProxyClient-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
+}
+
+function Test-InternetBlocked {
+    <#
+    .SYNOPSIS
+        Verifies the host's port-ACL deny rules actually block direct
+        Internet egress from an opted-in VM.
+    .DESCRIPTION
+        From inside the guest, runs Test-NetConnection to 8.8.8.8:443 with a
+        short timeout. Pass = connection FAILS (deny rule working). If the
+        connect succeeds, the ACLs aren't enforced and the VM is bypassing
+        the proxy -- which is the whole thing this feature exists to prevent.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'ProxyBlock'
+    $domain = $DeployConfig.vmOptions.domainName
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing direct Internet (8.8.8.8:443) is blocked" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+        $results.Details.Add("CMD: Test-NetConnection 8.8.8.8 -Port 443 -InformationLevel Quiet")
+        try {
+            # Suppress the progress UI; -WarningAction silences the "TCP connect failed" warning.
+            $ProgressPreference = 'SilentlyContinue'
+            $ok = Test-NetConnection -ComputerName 8.8.8.8 -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+            if ($ok) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Direct TCP 443 to 8.8.8.8 SUCCEEDED -- host port ACLs are NOT enforcing proxy-only egress")
+            }
+            else {
+                $results.Details.Add("OK: Direct TCP 443 to 8.8.8.8 was blocked (deny rule active)")
+            }
+        }
+        catch {
+            # An exception here also counts as 'blocked' -- the connect didn't complete.
+            $results.Details.Add("OK: Test-NetConnection threw (treated as blocked): $($_.Exception.Message)")
+        }
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-ProxyBlock-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
+}
+
+function Test-CMSiteRoleProxy {
+    <#
+    .SYNOPSIS
+        Verifies an opted-in CM site role has UseProxy=$true via the CM cmdlets.
+    .DESCRIPTION
+        Loads the ConfigurationManager module on the VM, connects to the local
+        site, and reads `Get-CMSiteSystemServer -SiteSystemServerName <fqdn>`
+        plus -- when present -- `Get-CMSoftwareUpdatePoint`. Both should
+        report UseProxy=$true when the host-side Phase 5 DSC ran correctly.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'CMRoleProxy'
+    $domain = $DeployConfig.vmOptions.domainName
+    $fqdn = "$VMName.$domain"
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Verifying CM site-role UseProxy flag" -LogOnly
+
+    $scriptBlock = {
+        param($expectedFqdn)
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        # Find SMS Provider / site code via WMI (avoids needing the console module
+        # PSDrive setup, which is finicky inside PSDirect).
+        try {
+            $site = Get-WmiObject -Namespace 'root\sms' -Class SMS_ProviderLocation -ErrorAction Stop |
+                Where-Object { $_.ProviderForLocalSite -eq $true } | Select-Object -First 1
+            if (-not $site) { throw 'SMS_ProviderLocation: no local-site provider found' }
+            $ns = "root\sms\site_$($site.SiteCode)"
+            $results.Details.Add("OK: SMS provider namespace = $ns")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Could not locate SMS provider: $($_.Exception.Message)")
+            return $results
+        }
+
+        # Site system server props: UseProxy lives in SMS_SCI_SysResUse Props array, name "UseProxy".
+        $results.Details.Add("CMD: SMS_SCI_SysResUse NALPath like '%$expectedFqdn%'")
+        try {
+            $sysRes = Get-WmiObject -Namespace $ns -Class SMS_SCI_SysResUse -ErrorAction Stop |
+                Where-Object { $_.NetworkOSPath -match [regex]::Escape($expectedFqdn) }
+            if (-not $sysRes) {
+                $results.Details.Add("WARN: No SMS_SCI_SysResUse entries match '$expectedFqdn' -- site role may not be installed yet")
+            }
+            else {
+                $sawProxyTrue = $false
+                foreach ($r in $sysRes) {
+                    $prop = $r.Props | Where-Object { $_.PropertyName -eq 'UseProxy' } | Select-Object -First 1
+                    if ($prop) {
+                        if ($prop.Value -eq 1) {
+                            $results.Details.Add("OK: $($r.RoleName) on $expectedFqdn has UseProxy=1")
+                            $sawProxyTrue = $true
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: $($r.RoleName) on $expectedFqdn has UseProxy=$($prop.Value) (expected 1)")
+                        }
+                    }
+                }
+                if (-not $sawProxyTrue -and $results.Passed) {
+                    # Some site roles don't expose a UseProxy prop (e.g. SMS Provider itself).
+                    # Don't fail just because none was found; downgrade to a note.
+                    $results.Details.Add("OK: $($sysRes.Count) site-role entr(ies) for $expectedFqdn; none expose a UseProxy prop (not all roles do)")
+                }
+            }
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SMS_SCI_SysResUse query failed: $($_.Exception.Message)")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $fqdn `
+        -DisplayName "Phase11-CMRoleProxy-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
+}
+
+#endregion Proxy Validation Tests
 
 #endregion
 

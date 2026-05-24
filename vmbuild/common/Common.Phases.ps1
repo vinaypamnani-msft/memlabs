@@ -145,7 +145,13 @@ function Start-Phase {
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
         Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
+        # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
+        # in deployConfig (VM Notes not yet written on first-run cases).
         Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
+        # Cross-lab reconciliation: re-stamps every other lab's opted-in VMs
+        # with the now-updated global subnet union, so adding/removing a lab
+        # or subnet here doesn't leave neighbouring labs with stale ACLs.
+        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
     }
 
     return $true
