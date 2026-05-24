@@ -961,13 +961,37 @@ function Register-LinuxVmDns {
             }
         }
 
+        # Write A and PTR as SEPARATE operations. Previous version used
+        # Add-DnsServerResourceRecordA -CreatePtr which fails atomically: if
+        # the PTR write hits any snag (existing record owned by another
+        # principal, zone DDNS scope mismatch, etc.) the A record is never
+        # written either -- and the error message often contains "PTR",
+        # which the old catch swallowed, leading to a false success log.
         try {
-            Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -CreatePtr -AllowUpdateAny -ErrorAction Stop
+            Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -AllowUpdateAny -ErrorAction Stop
         }
         catch {
-            # If PTR still failed (e.g. zone creation was blocked), swallow --
-            # the A record was already written and forward resolution works.
-            if ($_.Exception.Message -notmatch 'PTR') { throw }
+            throw "A record write failed for $node.$zone -> $ip : $($_.Exception.Message)"
+        }
+
+        # Read back to confirm the A record actually landed in the zone before
+        # we declare success. Add-DnsServerResourceRecordA can return without
+        # throwing yet leave nothing in the zone in odd ACL scenarios.
+        $verify = Get-DnsServerResourceRecord -ZoneName $zone -Node $node -RRType A -ErrorAction SilentlyContinue
+        $verifyIp = $verify | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString } | Where-Object { $_ -eq $ip }
+        if (-not $verifyIp) {
+            throw "A record write reported success but read-back found no $node.$zone -> $ip in zone"
+        }
+
+        # PTR is best-effort: if it fails, forward resolution still works
+        # (which is the only thing AD/Kerberos clients need).
+        if ($reverseZone) {
+            try {
+                Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$node.$zone." -AllowUpdateAny -ErrorAction Stop
+            }
+            catch {
+                # Swallow: A record (the important part) is already in place.
+            }
         }
         return $true
     }
