@@ -799,14 +799,10 @@ try {
                         }
                     }
 
-                    # Linux DNS: flip Linux VMs from bootstrap public DNS (1.1.1.1)
-                    # to the DC's DNS now that AD DNS is online. The helper
-                    # /usr/local/sbin/memlabs-set-dns was installed by the cloud-init
-                    # seed. Non-fatal: failures log a warning but don't abort the deploy.
-                    $hasLinux = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count -gt 0
-                    if ($hasLinux) {
-                        $null = Set-LinuxVmsDcDns -DeployConfig $deployConfig
-                    }
+                    # Linux DNS flip from bootstrap public DNS (1.1.1.1) to the
+                    # DC happens inside Start-PhaseDeployment for Phase 2 -- it
+                    # must run before the proxy client config / enforcement so
+                    # the Proxy is fully configured before clients route to it.
                 }
                 if ($i -eq 11) {
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists

@@ -129,6 +129,14 @@ function Start-Phase {
     # PSDirect so we don't have to thread proxy config through DSC. No-op if
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
+        # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
+        # to the DC's DNS first, so the Proxy can resolve internal names
+        # and clients pointed at it land on a fully-configured upstream.
+        $hasLinux = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count -gt 0
+        if ($hasLinux) {
+            $null = Set-LinuxVmsDcDns -DeployConfig $deployConfig
+        }
+
         Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
         # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
         # in deployConfig (VM Notes not yet written on first-run cases).
