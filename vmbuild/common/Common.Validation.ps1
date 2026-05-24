@@ -315,6 +315,25 @@ function Test-ValidCmOptions {
         }
     }
 
+    # Cross-domain enforcement: a domain may host at most one Proxy. If the
+    # new config adds a Proxy and the domain already has one deployed (i.e.
+    # not in this new config), reject -- two proxies would race for the
+    # static .2 address and clients would have ambiguous routing.
+    $newProxiesNotHidden = @($proxyVMs | Where-Object { -not $_.hidden })
+    if ($newProxiesNotHidden.Count -ge 1 -and $ConfigObject.vmOptions.domainName) {
+        $existingProxies = $null
+        try {
+            $existingProxies = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName |
+                    Where-Object { $_.role -eq 'Proxy' -and ($newProxiesNotHidden.vmName -notcontains $_.vmName) })
+        }
+        catch { $existingProxies = @() }
+        if ($existingProxies.Count -gt 0) {
+            $existingNames = ($existingProxies | Select-Object -ExpandProperty vmName) -join ', '
+            $newNames = ($newProxiesNotHidden | Select-Object -ExpandProperty vmName) -join ', '
+            Add-ValidationMessage -Message "VM Validation: Domain [$($ConfigObject.vmOptions.domainName)] already has a Proxy VM [$existingNames]. Only one Proxy per domain is allowed; remove [$newNames] from the config or delete the existing proxy first." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
     # If any VM is opted-in to use the proxy (either via per-VM useProxy or via
     # the domainDefaults UseProxyFor* fallback), a reachable Proxy VM must
     # exist -- either in this config or already deployed (hidden) in the

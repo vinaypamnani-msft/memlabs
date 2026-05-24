@@ -159,7 +159,20 @@ function New-LinuxSeedIso {
         [string[]]$ExtraPackages = @(),
 
         [Parameter(Mandatory = $false)]
-        [string[]]$ExtraRunCmd = @()
+        [string[]]$ExtraRunCmd = @(),
+
+        # When set, the VM gets a static IPv4 via cloud-init network-config
+        # instead of DHCP. All three (StaticIPv4 / Gateway / Prefix) must be
+        # provided together. Used to pin role-specific VMs (e.g. Proxy at .2)
+        # to a deterministic address that lab clients can hard-code.
+        [Parameter(Mandatory = $false)]
+        [string]$StaticIPv4,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Gateway,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Prefix = 24
     )
 
     # oscdimg is preferred when available (faster, more deterministic), but
@@ -239,7 +252,25 @@ local-hostname: $($VmName.ToLower())
     # archive.ubuntu.com or bing.com). nameservers.addresses sets per-link DNS to
     # public resolvers so external resolution always works. The DHCP-advertised
     # search domain (e.g. adatum.com) is still honored via use-domains default.
-    $networkConfig = @"
+    if ($StaticIPv4) {
+        if (-not $Gateway) { throw "New-LinuxSeedIso: -Gateway is required when -StaticIPv4 is specified." }
+        $networkConfig = @"
+version: 2
+ethernets:
+  primary:
+    match:
+      name: "e*"
+    dhcp4: false
+    addresses: [$StaticIPv4/$Prefix]
+    routes:
+      - to: default
+        via: $Gateway
+    nameservers:
+      addresses: [1.1.1.1, 8.8.8.8]
+"@
+    }
+    else {
+        $networkConfig = @"
 version: 2
 ethernets:
   primary:
@@ -251,6 +282,7 @@ ethernets:
     nameservers:
       addresses: [1.1.1.1, 8.8.8.8]
 "@
+    }
 
     # user-data: '#cloud-config' header is mandatory.
     $userData = @"
@@ -497,9 +529,33 @@ function New-LinuxVirtualMachine {
 
         Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType SCSI -ControllerNumber 0 | Out-Null
 
-        # Build and attach the cloud-init seed ISO.
+        # Build and attach the cloud-init seed ISO. Role-specific static IPs
+        # (e.g. Proxy pinned to <network>.2) are derived from $DeployConfig
+        # and the VM's network, then handed to New-LinuxSeedIso to emit a
+        # static netplan config instead of the default DHCP one.
         $seedIsoPath = Join-Path $vm.Path "$VmName-seed.iso"
-        $null = New-LinuxSeedIso -VmName $VmName -Domain $Domain -OutputIsoPath $seedIsoPath
+        $seedArgs = @{
+            VmName        = $VmName
+            Domain        = $Domain
+            OutputIsoPath = $seedIsoPath
+        }
+        if ($DeployConfig) {
+            $thisVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVm -and $thisVm.role -eq 'Proxy') {
+                $netBase = $thisVm.network
+                if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+                if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+                    $base = $Matches[1]
+                    $seedArgs.StaticIPv4 = "$base.2"
+                    $seedArgs.Gateway = "$base.200"
+                    Write-Log "$VmName`: Proxy role detected; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
+                }
+                else {
+                    Write-Log "$VmName`: Proxy role but network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
+                }
+            }
+        }
+        $null = New-LinuxSeedIso @seedArgs
         Add-VMDvdDrive -VMName $VmName -Path $seedIsoPath | Out-Null
 
         # Boot order: hard disk first, DVD (seed) as fallback. NoCloud
@@ -778,7 +834,12 @@ function Invoke-LinuxVmCommand {
         # Async drains so we don't deadlock on a full pipe buffer.
         $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
         $stderrTask = $proc.StandardError.ReadToEndAsync()
-        $proc.StandardInput.Write($BashCommand)
+        # Normalize line endings: PowerShell here-strings on Windows produce
+        # CRLF, which bash sees as part of the option/token (yields cryptic
+        # errors like "set: -<CR>: invalid option" and "$'\r': command not
+        # found"). Strip CR before piping to remote bash -s.
+        $payload = $BashCommand -replace "`r`n", "`n" -replace "`r", ""
+        $proc.StandardInput.Write($payload)
         $proc.StandardInput.Close()
 
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
@@ -991,6 +1052,24 @@ function Set-LinuxVmsDcDns {
         }
         else {
             Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
+        }
+
+        # Now that the DC is promoted and has the DNS Server role, register
+        # an A record for the Linux VM. In Phase 1 this would have failed
+        # because the DC wasn't a DC yet (DSC promotion runs in Phase 2),
+        # so the call was deferred to here.
+        $vmIp = $null
+        try {
+            $vmIp = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
+                Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
+                Select-Object -First 1
+        }
+        catch {}
+        if ($vmIp) {
+            $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIp
+        }
+        else {
+            Write-Log "[Linux DNS] $($vm.vmName): could not resolve IPv4; skipping DNS A record registration" -Warning
         }
     }
     return $allOk

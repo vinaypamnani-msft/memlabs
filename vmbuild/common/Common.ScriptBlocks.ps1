@@ -388,14 +388,23 @@ $global:VM_Create = {
 
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
-                # dynamic DNS registration themselves).
-                write-progress2 "Register DNS" -Status "$($currentItem.vmName): registering A record on DC" -force
+                # dynamic DNS registration themselves). Skip this when the DC
+                # in the deploy is a brand-new (non-hidden) VM -- it hasn't
+                # been promoted to a Domain Controller yet (DSC runs in
+                # Phase 2), so the DNS Server role isn't installed and the
+                # Add-DnsServerResourceRecordA call would just fail. The
+                # post-Phase-2 Set-LinuxVmsDcDns path picks this up later.
                 $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
                 if (-not $dcVm) {
                     $dcVm = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
                 }
-                if ($dcVm) {
+                $dcIsExisting = $dcVm -and ($dcVm.hidden -eq $true)
+                if ($dcVm -and $dcIsExisting) {
+                    write-progress2 "Register DNS" -Status "$($currentItem.vmName): registering A record on DC" -force
                     $null = Register-LinuxVmDns -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName -DCName $dcVm.vmName -IPAddress $linuxIP
+                }
+                elseif ($dcVm) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring DNS A record registration until DC '$($dcVm.vmName)' is promoted (Phase 2)." -LogOnly
                 }
                 else {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): No DC found in deployConfig or domain; skipping DNS registration." -Warning

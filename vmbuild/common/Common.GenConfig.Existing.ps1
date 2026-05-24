@@ -338,6 +338,21 @@ function Select-RolesForExisting {
     if ($DC) {
         $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DC" }
     }
+
+    # Only one Proxy is allowed per domain (config + existing combined).
+    $proxyInConfig = @($global:config.VirtualMachines | Where-Object { $_.Role -eq "Proxy" }).Count -gt 0
+    $proxyInDomain = $false
+    if (-not $proxyInConfig -and $global:config.vmOptions.domainName) {
+        try {
+            $proxyInDomain = @(Get-List -Type VM -DomainName $global:config.vmOptions.domainName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Role -eq "Proxy" }).Count -gt 0
+        }
+        catch { $proxyInDomain = $false }
+    }
+    if ($proxyInConfig -or $proxyInDomain) {
+        $existingRoles = $existingRoles | Where-Object { $_ -ne "Proxy" }
+    }
+
     $existingRoles2 = @()
     $CurrentValue = $null
     if ($enhance) {
