@@ -323,6 +323,15 @@ function Start-PhaseJobs {
             continue
         }
 
+        # Linux VMs (Proxy) have no Windows DSC config. Phase 2 has a dedicated
+        # dispatch branch below ($global:Proxy_Install). Skip all other phases
+        # so we don't queue a $global:VM_Config job that would hang on
+        # "Waiting for VM to respond" (Invoke-VmCommand is Windows-only).
+        if ($Phase -ge 3 -and (Test-VmIsLinux -Vm $currentItem)) {
+            Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
+            continue
+        }
+
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
         # Exception: Linux Proxy in Phase 2 — handled below by $global:Proxy_Install.
         $vmNamefull = "$($currentItem.vmName).$($currentItem.domain)"
@@ -831,8 +840,8 @@ function Get-Phase3ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA") {
+        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy") {
             continue
         }
 
@@ -878,8 +887,8 @@ function Get-Phase4ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
+        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy") {
             continue
         }
 
@@ -1004,8 +1013,8 @@ function Get-Phase6ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
+        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -1056,8 +1065,8 @@ function Get-Phase7ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA") {
+        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy") {
             continue
         }
 
