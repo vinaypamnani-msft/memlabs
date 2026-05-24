@@ -625,11 +625,17 @@ function Add-NewVMForRole {
     # Add useProxy property for Windows VMs that can sensibly route through
     # the domain's Squid proxy. Excludes the Proxy VM itself, DCs (DNS for the
     # domain itself), and StandaloneRootCA (offline, no networking).
+    # Default is seeded from one of two domainDefaults keys depending on the
+    # VM's purpose:
+    #   ConfigMgr site-system roles -> UseProxyForCM
+    #   everything else (clients, plain DomainMembers) -> UseProxyForClients
     $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
     if ($role -notin $proxyExcluded -and -not (Test-VmIsLinux -Vm $virtualMachine)) {
+        $cmRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
+        $useProxyKey = if ($role -in $cmRoles) { 'UseProxyForCM' } else { 'UseProxyForClients' }
         $useProxyDefault = $false
-        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.UseProxy)) {
-            $useProxyDefault = [bool]$ConfigToModify.domainDefaults.UseProxy
+        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$useProxyKey)) {
+            $useProxyDefault = [bool]$ConfigToModify.domainDefaults.$useProxyKey
         }
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "useProxy" -Value $useProxyDefault -Force
     }

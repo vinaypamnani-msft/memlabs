@@ -537,7 +537,8 @@ function Get-NewDomainConfigHelp {
         "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
         "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
         "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
-        "UseProxy" { "Default value for the per-VM 'useProxy' flag. When true, new Windows VMs are configured to route HTTP/HTTPS through the domain's Linux Squid Proxy VM (requires a Proxy role VM in the config)." }
+        "UseProxyForClients" { "Default value for the per-VM 'useProxy' flag on newly added non-site-system Windows VMs (clients + plain DomainMembers). When true, those VMs are configured to route HTTP/HTTPS through the domain's Linux Squid Proxy VM and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
+        "UseProxyForCM" { "Default value for the per-VM 'useProxy' flag on newly added ConfigMgr site-system VMs (CAS/Primary/Secondary/SiteSystem/PassiveSite/WSUS/SQLAO/FileServer). When true, CM site roles (including SUP) are configured to use the Proxy for their outbound calls and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -570,7 +571,8 @@ function Select-NewDomainConfig {
         PushCMClientToClients       = $true
         PushCMClientToServers       = $false
         PushCMClientToSiteSystems   = $false
-        UseProxy                    = $false
+        UseProxyForClients          = $false
+        UseProxyForCM               = $false
     }
 
     # Load saved defaults from previous run if available
@@ -580,8 +582,16 @@ function Select-NewDomainConfig {
     if (Test-Path $savedDefaultsPath) {
         try {
             $savedDefaults = Get-Content -Path $savedDefaultsPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            # Migration: an old saved file may still contain a single 'UseProxy'
+            # property. Seed both split keys from it on first load.
+            $legacyUseProxy = $savedDefaults.PSObject.Properties['UseProxy']
+            if ($legacyUseProxy -and $null -ne $legacyUseProxy.Value) {
+                $domainDefaults.UseProxyForClients = [bool]$legacyUseProxy.Value
+                $domainDefaults.UseProxyForCM = [bool]$legacyUseProxy.Value
+            }
             foreach ($prop in $savedDefaults.psobject.Properties) {
                 if ($prop.Name -in $nonStickyProps) { continue }
+                if ($prop.Name -eq 'UseProxy') { continue }   # legacy key, already migrated above
                 if ($null -ne $domainDefaults."$($prop.Name)") {
                     $domainDefaults."$($prop.Name)" = $prop.Value
                 }
@@ -605,6 +615,7 @@ function Select-NewDomainConfig {
         'DeploymentType'        = 'Domain'
         'CMVersion'             = 'ConfigMgr'
         'PushCMClientToClients' = 'Client Push'
+        'UseProxyForClients'    = 'Proxy Settings'
     }
     $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp" -Sections $sections
 

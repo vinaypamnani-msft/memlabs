@@ -182,6 +182,9 @@ function Get-SortedProperties {
         'PushCMClientToClients'     = 'PushCMClientToClients'
         'PushCMClientToServers'     = 'PushCMClientToServers'
         'PushCMClientToSiteSystems' = 'PushCMClientToSiteSystems'
+        # Proxy Settings group (section header attaches to UseProxyForClients).
+        'UseProxyForClients'        = 'UseProxyForClients'
+        'UseProxyForCM'             = 'UseProxyForCM'
         'adminName'           = 'AdminName'
         'basePath'            = 'BasePath'
         'domainUser'          = 'DomainUser'

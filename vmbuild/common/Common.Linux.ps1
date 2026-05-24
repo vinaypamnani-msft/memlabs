@@ -916,8 +916,9 @@ function Test-VmUsesProxy {
 
     .DESCRIPTION
         Honours the per-VM 'useProxy' boolean if present; otherwise falls back
-        to deployConfig.domainDefaults.UseProxy. Returns $false for the Proxy
-        VM itself and for any Linux VM (proxy clients are Windows-only).
+        to deployConfig.domainDefaults.UseProxyForCM (for CM site-system roles)
+        or UseProxyForClients (for everything else). Returns $false for the
+        Proxy VM itself and for any Linux VM (proxy clients are Windows-only).
     #>
     [CmdletBinding()]
     param (
@@ -930,7 +931,7 @@ function Test-VmUsesProxy {
     if (-not $Vm) { return $false }
     # Hard exclusions: roles that must never route through the proxy.
     # Mirrors the exclusion list in Common.GenConfig.AddVM.ps1 so a
-    # domainDefaults.UseProxy=$true setting on an existing/hidden VM
+    # domainDefaults.UseProxyFor* setting on an existing/hidden VM
     # (which has no per-VM useProxy property) can't accidentally apply
     # client proxy + firewall enforcement to a DC, BDC, or offline root CA.
     $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
@@ -940,9 +941,15 @@ function Test-VmUsesProxy {
     if ($Vm.PSObject.Properties.Name -contains 'useProxy') {
         return [bool]$Vm.useProxy
     }
-    if ($DeployConfig -and $DeployConfig.domainDefaults -and `
-            ($null -ne $DeployConfig.domainDefaults.UseProxy)) {
-        return [bool]$DeployConfig.domainDefaults.UseProxy
+    if ($DeployConfig -and $DeployConfig.domainDefaults) {
+        $cmRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
+        $key = if ($Vm.role -in $cmRoles) { 'UseProxyForCM' } else { 'UseProxyForClients' }
+        $val = $DeployConfig.domainDefaults.$key
+        if ($null -ne $val) { return [bool]$val }
+        # Legacy fallback: old configs may still have the single 'UseProxy' key.
+        if ($null -ne $DeployConfig.domainDefaults.UseProxy) {
+            return [bool]$DeployConfig.domainDefaults.UseProxy
+        }
     }
     return $false
 }
