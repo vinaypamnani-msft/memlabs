@@ -1280,8 +1280,18 @@ function Test-Configuration {
             if ($global:TestConfigFastCache -and $global:TestConfigFastCache.Key -eq $fastCacheKey) {
                 $cachedFailures = 0
                 try { $cachedFailures = [int]$global:TestConfigFastCache.Value.Failures } catch { }
-                Write-Log "[Test-Configuration] cache HIT (hash $($fastCacheKey.Substring(0,12))) Failures=$cachedFailures - returning prior TestObject without re-running validators" -LogOnly
-                return $global:TestConfigFastCache.Value
+                if ($cachedFailures -gt 0) {
+                    # Self-heal: a cached failure may be a ghost from a prior run
+                    # under different validator logic. Drop the entry and fall
+                    # through to a fresh validation pass; if the failure is
+                    # real, the re-run reproduces it and re-caches it below.
+                    Write-Log "[Test-Configuration] cache HIT with Failures=$cachedFailures (hash $($fastCacheKey.Substring(0,12))) - invalidating cache and re-running validators to confirm" -LogOnly
+                    $global:TestConfigFastCache = $null
+                }
+                else {
+                    Write-Log "[Test-Configuration] cache HIT (hash $($fastCacheKey.Substring(0,12))) Failures=0 - returning prior TestObject without re-running validators" -LogOnly
+                    return $global:TestConfigFastCache.Value
+                }
             }
         }
         catch {
