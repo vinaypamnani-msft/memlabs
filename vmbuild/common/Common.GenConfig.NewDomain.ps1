@@ -537,6 +537,7 @@ function Get-NewDomainConfigHelp {
         "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
         "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
         "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
+        "UseProxy" { "Default value for the per-VM 'useProxy' flag. When true, new Windows VMs are configured to route HTTP/HTTPS through the domain's Linux Squid Proxy VM (requires a Proxy role VM in the config)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -569,6 +570,7 @@ function Select-NewDomainConfig {
         PushCMClientToClients       = $true
         PushCMClientToServers       = $false
         PushCMClientToSiteSystems   = $false
+        UseProxy                    = $false
     }
 
     # Load saved defaults from previous run if available

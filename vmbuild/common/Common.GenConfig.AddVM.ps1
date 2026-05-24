@@ -622,6 +622,18 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $defaultVal -Force
     }
 
+    # Add useProxy property for Windows VMs that can sensibly route through
+    # the domain's Squid proxy. Excludes the Proxy VM itself, DCs (DNS for the
+    # domain itself), and StandaloneRootCA (offline, no networking).
+    $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    if ($role -notin $proxyExcluded -and -not (Test-VmIsLinux -Vm $virtualMachine)) {
+        $useProxyDefault = $false
+        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.UseProxy)) {
+            $useProxyDefault = [bool]$ConfigToModify.domainDefaults.UseProxy
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "useProxy" -Value $useProxyDefault -Force
+    }
+
     if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
         # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
         $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }

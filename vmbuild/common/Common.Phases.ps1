@@ -139,6 +139,14 @@ function Start-Phase {
         return $false
     }
 
+    # After Phase 2 (domain-join + initial member config) succeeds, push proxy
+    # client settings to any VM with useProxy=true. Done from the host over
+    # PSDirect so we don't have to thread proxy config through DSC. No-op if
+    # no Proxy VM or no opted-in clients are present.
+    if ($Phase -eq 2) {
+        Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
+    }
+
     return $true
 }
 

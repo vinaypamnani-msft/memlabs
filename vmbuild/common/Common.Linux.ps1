@@ -908,3 +908,187 @@ echo PROXY_READY
     return $true
 }
 
+
+function Test-VmUsesProxy {
+    <#
+    .SYNOPSIS
+        Return $true if a VM is opted into routing through the lab Squid proxy.
+
+    .DESCRIPTION
+        Honours the per-VM 'useProxy' boolean if present; otherwise falls back
+        to deployConfig.domainDefaults.UseProxy. Returns $false for the Proxy
+        VM itself and for any Linux VM (proxy clients are Windows-only).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Vm,
+        [Parameter(Mandatory = $false)]
+        [object]$DeployConfig
+    )
+
+    if (-not $Vm) { return $false }
+    if ($Vm.role -eq 'Proxy') { return $false }
+    if (Test-VmIsLinux -Vm $Vm) { return $false }
+
+    if ($Vm.PSObject.Properties.Name -contains 'useProxy') {
+        return [bool]$Vm.useProxy
+    }
+    if ($DeployConfig -and $DeployConfig.domainDefaults -and `
+            ($null -ne $DeployConfig.domainDefaults.UseProxy)) {
+        return [bool]$DeployConfig.domainDefaults.UseProxy
+    }
+    return $false
+}
+
+
+function Set-WindowsClientProxy {
+    <#
+    .SYNOPSIS
+        Configure a Windows VM to route HTTP/HTTPS traffic through the lab
+        Squid proxy.
+
+    .DESCRIPTION
+        Run remotely on the target VM via Invoke-VmCommand. Sets:
+          - WinHTTP system proxy (netsh winhttp set proxy)
+          - Machine-wide HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
+          - HKLM proxy policy for default-user profile fallback
+
+        The proxy server is "<proxyFqdn>:3128" and the bypass list always
+        includes <local>, the domain DNS suffix, and the domain subnet so
+        intra-lab traffic never traverses Squid (which would just bounce
+        back through host NAT).
+
+        Idempotent. Safe to call repeatedly.
+
+    .PARAMETER VmName
+        Target Windows VM name (PSDirect-reachable).
+
+    .PARAMETER Domain
+        Active Directory domain (used for PSDirect creds + bypass list).
+
+    .PARAMETER ProxyFqdn
+        FQDN of the Linux Proxy VM (e.g. PROXY1.adatum.com).
+
+    .PARAMETER BypassNetwork
+        Optional. The /24 network base (e.g. 192.168.1.0). Added to bypass
+        list as 192.168.1.* so intra-subnet traffic stays local.
+
+    .OUTPUTS
+        [bool] $true on success, $false on failure (logged).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName,
+        [Parameter(Mandatory = $true)] [string]$Domain,
+        [Parameter(Mandatory = $true)] [string]$ProxyFqdn,
+        [Parameter(Mandatory = $false)] [string]$BypassNetwork
+    )
+
+    $proxyServer = "$ProxyFqdn`:3128"
+
+    $bypassEntries = @('<local>', "*.$Domain", $ProxyFqdn)
+    if ($BypassNetwork) {
+        # Memlabs networks are /24 -> "192.168.1.*"
+        $base = $BypassNetwork.TrimEnd('.0')
+        if ($base -match '^(\d+\.\d+\.\d+)\.0$') { $base = $Matches[1] }
+        elseif ($BypassNetwork -match '^(\d+\.\d+\.\d+)\.\d+$') { $base = $Matches[1] }
+        $bypassEntries += "$base.*"
+    }
+    $bypassList = ($bypassEntries | Select-Object -Unique) -join ';'
+
+    $scriptBlock = {
+        param($proxyServer, $bypassList)
+        $ErrorActionPreference = 'Stop'
+
+        try {
+            # 1) WinHTTP (used by BITS, Windows Update, .NET in some modes)
+            & netsh winhttp set proxy proxy-server="$proxyServer" bypass-list="$bypassList" | Out-Null
+
+            # 2) Machine-wide env vars (used by curl, PowerShell Invoke-WebRequest
+            #    if -Proxy not specified, apt-style tooling, etc.)
+            [Environment]::SetEnvironmentVariable('HTTP_PROXY', "http://$proxyServer", 'Machine')
+            [Environment]::SetEnvironmentVariable('HTTPS_PROXY', "http://$proxyServer", 'Machine')
+            [Environment]::SetEnvironmentVariable('NO_PROXY', $bypassList, 'Machine')
+
+            # 3) HKLM proxy policy (applies to default user profile + any user
+            #    whose HKCU doesn't override)
+            $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
+            New-ItemProperty -Path $key -Name 'ProxySettingsPerUser' -PropertyType DWord -Value 0 -Force | Out-Null
+
+            $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+            New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
+            New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+
+            # Show resulting WinHTTP state for the log
+            $current = & netsh winhttp show proxy
+            return @{ Ok = $true; WinHttp = ($current -join "`n") }
+        }
+        catch {
+            return @{ Ok = $false; Error = $_.ToString() }
+        }
+    }
+
+    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -ArgumentList $proxyServer, $bypassList `
+        -DisplayName "Set proxy -> $proxyServer"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "[Proxy] $VmName`: Set-WindowsClientProxy ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
+        return $false
+    }
+    $payload = $result.ScriptBlockOutput
+    if (-not $payload -or -not $payload.Ok) {
+        Write-Log "[Proxy] $VmName`: Set-WindowsClientProxy failed: $($payload.Error)" -Failure
+        return $false
+    }
+    Write-Log "[Proxy] $VmName`: Routing via $proxyServer (bypass: $bypassList)"
+    return $true
+}
+
+
+function Set-WindowsClientProxyForConfig {
+    <#
+    .SYNOPSIS
+        Apply proxy client settings to every opted-in Windows VM in a deploy
+        configuration.
+
+    .DESCRIPTION
+        Enumerates deployConfig.virtualMachines, filters via Test-VmUsesProxy,
+        and calls Set-WindowsClientProxy for each. The proxy FQDN is built
+        from the lone Proxy VM in the config; if no Proxy VM exists (and any
+        VM has useProxy=true), logs a warning and returns.
+
+        Designed to be invoked from Start-Phase after Phase 2 completes
+        successfully, when domain-joined VMs are first reachable for config.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object]$deployConfig
+    )
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    $clients = @($deployConfig.virtualMachines | Where-Object { Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig })
+
+    if (-not $clients) { return $true }
+
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($clients.Count) VM(s) have useProxy=true but no Proxy VM is in the config; skipping client config" -Warning
+        return $false
+    }
+
+    $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+    $bypassNet = $deployConfig.vmOptions.network
+
+    $ok = $true
+    foreach ($vm in $clients) {
+        Write-Log "[Proxy] Configuring $($vm.vmName) -> $proxyFqdn`:3128"
+        $r = Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
+                -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
+        if (-not $r) { $ok = $false }
+    }
+    return $ok
+}
+
+
