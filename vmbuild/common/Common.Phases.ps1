@@ -343,13 +343,10 @@ function Start-PhaseJobs {
         # install. This gives the Proxy VM the same Wait-Phase progress row
         # as the Windows DSC jobs, and bypasses the multi-node DSC skip
         # below (the Proxy has no DSC config so it isn't in
-        # $ConfigurationData.AllNodes).
+        # $ConfigurationData.AllNodes). The install bash short-circuits
+        # quickly when squid is already healthy, so dispatching
+        # unconditionally is cheap and keeps the progress UI consistent.
         if ($Phase -eq 2 -and $currentItem.role -eq 'Proxy') {
-            $proxyNote = Get-VMNote -VMName $currentItem.vmName
-            if ($proxyNote -and $proxyNote.lastPhaseComplete -ge 2 -and -not $global:ForceProxyInstall) {
-                Write-Log "[Phase $Phase] Proxy $($currentItem.vmName) already installed (lastPhaseComplete=$($proxyNote.lastPhaseComplete)); skipping Squid install" -LogOnly
-                continue
-            }
             $job = Start-Job -ScriptBlock $global:Proxy_Install -Name $jobName -ErrorAction Stop -ErrorVariable Err
             if (-not $job) {
                 Write-Log "[Phase $Phase] Failed to create Proxy_Install job for VM $($currentItem.vmName). $Err" -Failure

@@ -1201,35 +1201,56 @@ coredump_dir /var/spool/squid
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
-# Wait for any background apt/unattended-upgrades to finish (cloud-init may
-# still be running at this point on a freshly-provisioned VM).
-for i in `$(seq 1 60); do
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-       ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-        break
-    fi
-    sleep 5
-done
+# Fast-path: if squid is already installed, active, and listening on 3128,
+# we still rewrite the config (subnets may have changed) and reload, but
+# skip apt-get entirely. Saves ~30-60s on re-runs.
+FAST_PATH=0
+if command -v squid >/dev/null 2>&1 && systemctl is-active --quiet squid && \
+   ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
+    FAST_PATH=1
+fi
 
-# Recover from a prior hard cancel that left dpkg half-configured.
-# No-op when dpkg is clean.
-dpkg --configure -a || true
+if [ "`$FAST_PATH" = "0" ]; then
+    # Wait for any background apt/unattended-upgrades to finish (cloud-init
+    # may still be running at this point on a freshly-provisioned VM).
+    for i in `$(seq 1 60); do
+        if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
+           ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+            break
+        fi
+        sleep 5
+    done
 
-apt-get update -y
-apt-get install -y squid ufw
+    # Recover from a prior hard cancel that left dpkg half-configured.
+    # No-op when dpkg is clean.
+    dpkg --configure -a || true
+
+    apt-get update -y
+    apt-get install -y squid ufw
+fi
 
 install -d -m 0755 /etc/squid
-echo '$confB64' | base64 -d > /etc/squid/squid.conf
-chmod 0644 /etc/squid/squid.conf
+NEW_CONF=`$(mktemp)
+echo '$confB64' | base64 -d > "`$NEW_CONF"
+if [ -f /etc/squid/squid.conf ] && cmp -s "`$NEW_CONF" /etc/squid/squid.conf; then
+    rm -f "`$NEW_CONF"
+    CONF_CHANGED=0
+else
+    mv "`$NEW_CONF" /etc/squid/squid.conf
+    chmod 0644 /etc/squid/squid.conf
+    CONF_CHANGED=1
+fi
 
-systemctl enable squid
-systemctl restart squid
+systemctl enable squid >/dev/null 2>&1 || true
+if [ "`$FAST_PATH" = "0" ] || [ "`$CONF_CHANGED" = "1" ]; then
+    systemctl restart squid
+fi
 
-# Open 3128 in ufw if the firewall is active; otherwise just stage the rule.
-ufw allow 3128/tcp || true
+# Open 3128 in ufw if installed; otherwise just stage the rule.
+command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
 
 # Quick self-test
-ss -ltnp 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128'; exit 1; }
+ss -ltn 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128'; exit 1; }
 
 echo PROXY_READY
 "@
