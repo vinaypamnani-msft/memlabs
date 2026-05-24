@@ -36,7 +36,17 @@ param (
     [switch]$SkipChecksum,
 
     [Parameter(Mandatory = $false, HelpMessage = "Path to qemu-img.exe. Overrides the auto-discovery search order.")]
-    [string]$QemuImgPath
+    [string]$QemuImgPath,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Skip the first-boot bake (apt install of Hyper-V daemons + qemu-guest-agent). Use when iterating on conversion logic.")]
+    [switch]$SkipBake,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Hyper-V switch name for the bake VM. Must have outbound internet.")]
+    [string]$BakeSwitchName = 'Default Switch',
+
+    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM.")]
+    [ValidateRange(5, 120)]
+    [int]$BakeTimeoutMinutes = 20
 )
 
 # Check for admin rights (qemu-img doesn't strictly require it, but Hyper-V mounts later will)
@@ -331,7 +341,29 @@ catch {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Move into AzureImagePath as the final VHDX
+# 7. First-boot bake: install Hyper-V integration daemons + qemu-guest-agent
+#    while the bake VM still has internet, then cloud-init clean so the next
+#    boot (with a fresh deploy seed) re-runs first-boot from scratch.
+#    memlabs lab subnets can't resolve archive.ubuntu.com (DC isn't up yet
+#    when Linux VMs are created in phase 1), so apt at deploy time fails.
+# ---------------------------------------------------------------------------
+if (-not $SkipBake) {
+    Write-Log "Baking $tempVhdx via temp VM on switch '$BakeSwitchName' (timeout ${BakeTimeoutMinutes}m)..." -Activity
+    try {
+        Invoke-LinuxBaseImageBake -VhdxPath $tempVhdx -SwitchName $BakeSwitchName -TimeoutMinutes $BakeTimeoutMinutes | Out-Null
+    }
+    catch {
+        Write-Log "Bake failed: $_" -Failure
+        Write-Log "The VHDX at $tempVhdx is left in place for inspection. Re-run with -SkipBake to publish without baking." -Warning
+        return
+    }
+}
+else {
+    Write-Log "-SkipBake specified; publishing raw VHDX (Hyper-V KVP daemon will NOT be installed)." -Warning
+}
+
+# ---------------------------------------------------------------------------
+# 8. Move into AzureImagePath as the final VHDX
 # ---------------------------------------------------------------------------
 if (Test-Path $outputVhdx) {
     Remove-Item $outputVhdx -Force

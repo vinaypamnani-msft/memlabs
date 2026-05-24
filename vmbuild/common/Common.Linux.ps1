@@ -1219,4 +1219,154 @@ function Set-WindowsClientProxyForConfig {
     return $ok
 }
 
+function Invoke-LinuxBaseImageBake {
+    <#
+    .SYNOPSIS
+        First-boot a base VHDX on an internet-connected switch, install
+        Hyper-V integration daemons + agents via apt, then cloud-init clean
+        so the image is pristine for downstream lab deploys.
+
+    .DESCRIPTION
+        memlabs lab subnets DNS-forward to the domain DC. Until the DC is
+        provisioned, Linux VMs created in phase 1 cannot resolve
+        archive.ubuntu.com and apt fails. The Hyper-V KVP daemon is what
+        publishes the guest IP back to the host via
+        Get-VMNetworkAdapter.IPAddresses; without it, host-side IP discovery
+        breaks. Solution: bake the daemons + qemu-guest-agent into the base
+        VHDX during image build (which has internet) so deploy time needs
+        zero apt.
+
+        Creates a temp Gen2 VM from $VhdxPath, attaches a NoCloud seed ISO
+        that installs the packages, runs `cloud-init clean --logs --seed
+        --machine-id`, and powers off. Removes the temp VM, leaves the
+        modified VHDX in place. Re-runnable; safe if interrupted.
+
+    .PARAMETER VhdxPath
+        Path to the VHDX to modify in place.
+
+    .PARAMETER SwitchName
+        Hyper-V switch with outbound internet (e.g. 'Default Switch',
+        'MemLabsNAT'). Default tries 'Default Switch'.
+
+    .PARAMETER TimeoutMinutes
+        Wall-clock cap on the bake VM. Hard powers off on timeout.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VhdxPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SwitchName = 'Default Switch',
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutMinutes = 20
+    )
+
+    if (-not (Test-Path $VhdxPath)) {
+        throw "Bake: VHDX '$VhdxPath' not found."
+    }
+    $switch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+    if (-not $switch) {
+        throw "Bake: Hyper-V switch '$SwitchName' not found. Pick a switch with outbound internet (-BakeSwitchName)."
+    }
+
+    $vmName = "memlabs-bake-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+    $stageDir = Join-Path $env:TEMP "memlabs-bake-$vmName"
+    $isoPath = Join-Path $stageDir 'seed.iso'
+    New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+
+    $instanceId = "memlabs-bake-$([guid]::NewGuid().ToString('N'))"
+    $metaData = @"
+instance-id: $instanceId
+local-hostname: memlabs-bake
+"@
+
+    # cloud-init bake recipe:
+    #   - install KVP/VSS daemons (Hyper-V integration), qemu-guest-agent,
+    #     openssh-server (already present but be explicit)
+    #   - enable the services (will auto-start at deploy time, no apt needed)
+    #   - cloud-init clean: wipe instance state so next boot (with a new
+    #     instance-id from the deploy seed) re-runs the full first-boot flow
+    #   - truncate machine-id so each deployed VM regenerates a unique one
+    #   - remove cloud-init netplan so deploy seed's network config wins
+    #   - power off; the script polls VM state and removes the temp VM
+    $userData = @'
+#cloud-config
+hostname: memlabs-bake
+preserve_hostname: false
+
+package_update: true
+package_upgrade: false
+packages:
+  - linux-tools-virtual
+  - linux-cloud-tools-virtual
+  - qemu-guest-agent
+  - openssh-server
+
+runcmd:
+  - systemctl enable qemu-guest-agent.service || true
+  - systemctl enable hv-kvp-daemon.service || true
+  - systemctl enable hv-vss-daemon.service || true
+  - cloud-init clean --logs --seed --machine-id || true
+  - truncate -s 0 /etc/machine-id
+  - rm -f /var/lib/dbus/machine-id
+  - rm -f /etc/netplan/50-cloud-init.yaml
+  - shutdown -h +1 "memlabs bake complete"
+'@
+
+    [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $stageDir 'user-data'), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+
+    $oscdimg = Get-OscdimgPath
+    if ($oscdimg) {
+        & $oscdimg -j2 -lcidata -m -n $stageDir $isoPath | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $isoPath)) {
+            throw "Bake: oscdimg failed (exit=$LASTEXITCODE) building $isoPath"
+        }
+    }
+    else {
+        New-NoCloudSeedIsoWithImapi -SourceDir $stageDir -OutputIsoPath $isoPath -VolumeLabel 'cidata'
+        if (-not (Test-Path $isoPath)) { throw "Bake: IMAPI2FS ISO build failed for $isoPath" }
+    }
+
+    Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName'" -Activity
+    $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes 2GB -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
+    try {
+        Set-VM -VM $vm -ProcessorCount 2 -CheckpointType Disabled -ErrorAction Stop
+        Set-VMFirmware -VM $vm -EnableSecureBoot Off -ErrorAction Stop
+        Add-VMDvdDrive -VM $vm -Path $isoPath -ErrorAction Stop
+        $hdd = Get-VMHardDiskDrive -VM $vm
+        $dvd = Get-VMDvdDrive -VM $vm
+        Set-VMFirmware -VM $vm -BootOrder $hdd, $dvd -ErrorAction Stop
+
+        Start-VM -VM $vm -ErrorAction Stop
+        Write-Log "Bake: VM started; waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
+
+        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+        $clean = $false
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 10
+            $state = (Get-VM -Name $vmName -ErrorAction SilentlyContinue).State
+            if ($state -eq 'Off') { $clean = $true; break }
+        }
+        if (-not $clean) {
+            Write-Log "Bake: VM did not shutdown within $TimeoutMinutes min; forcing off." -Warning
+            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
+            throw "Bake VM '$vmName' did not shutdown within $TimeoutMinutes minutes."
+        }
+        Write-Log "Bake: VM shut down cleanly." -Success
+    }
+    finally {
+        # Remove-VM keeps the VHDX file; we only want to drop the VM config and DVD attachment.
+        Remove-VM -Name $vmName -Force -ErrorAction SilentlyContinue
+        Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Log "Bake complete on $VhdxPath" -Success
+    return $true
+}
+
+
+
 
