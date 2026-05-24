@@ -2327,8 +2327,14 @@ function Test-CMSiteWideFunctionality {
     # MEMLABS-* apps on the Primary; in a CAS hierarchy they don't necessarily
     # show up on the CAS (and even when they do, replication lag makes this
     # check unreliable for Phase 11 timing).
+    #
+    # IMPORTANT: perfloading.ps1 resolves cmOptions per-VM ($ThisVM.cmOptions
+    # falling back to $deployConfig.cmOptions). We must mirror that exact
+    # precedence -- a multi-hierarchy deploy can have one Primary with
+    # PrePopulateObjects=true and another with false.
     $expectedAppNames = @()
-    $prePopulate = [bool]$DeployConfig.cmOptions.PrePopulateObjects
+    $effectiveCmOptions = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $prePopulate = [bool]$effectiveCmOptions.PrePopulateObjects
     if ($prePopulate -and $role -ne 'CAS') {
         $appsJsonPath = Join-Path $PSScriptRoot '..\Apps.json'
         if (Test-Path $appsJsonPath) {
