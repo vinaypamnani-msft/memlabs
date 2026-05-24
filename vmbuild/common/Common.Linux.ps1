@@ -924,12 +924,27 @@ function Register-LinuxVmDns {
         $zone = $using:Domain
         $ip   = $using:IPAddress
 
+        # --- DIAG: snapshot helper that returns ada-dc1 + the target node's A records ---
+        function _Snap([string]$label) {
+            $snap = Get-DnsServerResourceRecord -ZoneName $zone -RRType A -ErrorAction SilentlyContinue |
+                Where-Object { $_.HostName -eq 'ada-dc1' -or $_.HostName -eq $node } |
+                ForEach-Object {
+                    "{0,-12} {1,-22} {2}" -f $_.HostName, $_.RecordData.IPv4Address.IPAddressToString, ($_.Timestamp)
+                }
+            Write-Host "[RegisterLinuxDns DIAG] $label  (node=$node ip=$ip zone=$zone)"
+            if ($snap) { $snap | ForEach-Object { Write-Host "  $_" } } else { Write-Host "  (no matching records)" }
+        }
+
+        _Snap "STEP 0  before any change"
+
         $existing = Get-DnsServerResourceRecord -ZoneName $zone -Node $node -RRType A -ErrorAction SilentlyContinue
         if ($existing) {
             foreach ($r in $existing) {
+                Write-Host "[RegisterLinuxDns DIAG] STEP 1  removing existing A: HostName=$($r.HostName) IP=$($r.RecordData.IPv4Address.IPAddressToString)"
                 Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $r -Force -ErrorAction SilentlyContinue
             }
         }
+        _Snap "STEP 1  after cleanup of existing A for node=$node"
 
         # Ensure an AD-integrated /24 reverse lookup zone exists for this IP so
         # -CreatePtr can write the PTR record. memlabs DC build does not create
@@ -956,10 +971,12 @@ function Register-LinuxVmDns {
             $existingPtr = Get-DnsServerResourceRecord -ZoneName $reverseZone -Node $ptrName -RRType Ptr -ErrorAction SilentlyContinue
             if ($existingPtr) {
                 foreach ($p in $existingPtr) {
+                    Write-Host "[RegisterLinuxDns DIAG] STEP 2  removing existing PTR: $($p.HostName) -> $($p.RecordData.PtrDomainName) in $reverseZone"
                     Remove-DnsServerResourceRecord -ZoneName $reverseZone -InputObject $p -Force -ErrorAction SilentlyContinue
                 }
             }
         }
+        _Snap "STEP 2  after PTR cleanup (zone=$reverseZone)"
 
         # Write A and PTR as SEPARATE operations. Previous version used
         # Add-DnsServerResourceRecordA -CreatePtr which fails atomically: if
@@ -968,11 +985,14 @@ function Register-LinuxVmDns {
         # written either -- and the error message often contains "PTR",
         # which the old catch swallowed, leading to a false success log.
         try {
+            Write-Host "[RegisterLinuxDns DIAG] STEP 3  calling: Add-DnsServerResourceRecordA -ZoneName '$zone' -Name '$node' -IPv4Address '$ip' -AllowUpdateAny"
             Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -AllowUpdateAny -ErrorAction Stop
         }
         catch {
+            _Snap "STEP 3  AFTER FAILED A write"
             throw "A record write failed for $node.$zone -> $ip : $($_.Exception.Message)"
         }
+        _Snap "STEP 3  after A write"
 
         # Read back to confirm the A record actually landed in the zone before
         # we declare success. Add-DnsServerResourceRecordA can return without
@@ -987,12 +1007,14 @@ function Register-LinuxVmDns {
         # (which is the only thing AD/Kerberos clients need).
         if ($reverseZone) {
             try {
+                Write-Host "[RegisterLinuxDns DIAG] STEP 4  calling: Add-DnsServerResourceRecordPtr -ZoneName '$reverseZone' -Name '$($octets[3])' -PtrDomainName '$node.$zone.' -AllowUpdateAny"
                 Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$node.$zone." -AllowUpdateAny -ErrorAction Stop
             }
             catch {
-                # Swallow: A record (the important part) is already in place.
+                Write-Host "[RegisterLinuxDns DIAG] STEP 4  PTR write failed (swallowed): $($_.Exception.Message)"
             }
         }
+        _Snap "STEP 4  after PTR write (end of scriptblock)"
         return $true
     }
 
