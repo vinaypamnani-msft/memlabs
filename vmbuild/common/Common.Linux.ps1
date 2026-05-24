@@ -362,3 +362,276 @@ function New-LinuxVirtualMachine {
         $Global:ProgressPreference = $oldProgress
     }
 }
+
+function Get-LinuxSshExePath {
+    [CmdletBinding()]
+    param ()
+    $ssh = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if ($ssh) { return $ssh.Source }
+    $fallback = Join-Path $env:WINDIR "System32\OpenSSH\ssh.exe"
+    if (Test-Path $fallback) { return $fallback }
+    throw "ssh.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
+}
+
+function Get-LinuxVmIPAddress {
+    <#
+    .SYNOPSIS
+        Resolve a Linux Hyper-V VM's IPv4 address via Hyper-V KVP integration.
+
+    .DESCRIPTION
+        Ubuntu 24.04's hv_utils kernel module + linux-azure or linux-virtual
+        userspace daemons publish guest IPs through the Hyper-V Data Exchange
+        service. Get-VMNetworkAdapter surfaces this as the .IPAddresses array.
+        Returns $null if no IPv4 is reported yet (VM still booting / running
+        cloud-init / awaiting DHCP).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName
+    )
+
+    $adapters = Get-VMNetworkAdapter -VMName $VmName -ErrorAction SilentlyContinue
+    if (-not $adapters) { return $null }
+
+    foreach ($a in $adapters) {
+        foreach ($ip in $a.IPAddresses) {
+            if ($ip -and $ip -notmatch ':' -and $ip -notmatch '^169\.254\.') {
+                return $ip
+            }
+        }
+    }
+    return $null
+}
+
+function Wait-LinuxVmReady {
+    <#
+    .SYNOPSIS
+        Block until a Linux VM is reachable over SSH as vmbuildadmin.
+
+    .DESCRIPTION
+        Polls for a usable IPv4 from Hyper-V KVP, then attempts a no-op SSH
+        login (`true`) with the cached host key. First-boot pipeline:
+        cloud-init applies user-data, installs openssh-server, reboots, then
+        SSH comes up. Default TimeoutSeconds=900 (15 min) accommodates the
+        first-boot apt install on a new VM.
+
+    .OUTPUTS
+        IPv4 string on success; $null on timeout.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 900,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PollIntervalSeconds = 10
+    )
+
+    $sshExe = Get-LinuxSshExePath
+    $keyPair = Get-LinuxAdminSshKeyPair
+    $knownHostsPath = Join-Path (Split-Path $keyPair.PrivateKeyPath) "known_hosts"
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    Write-Log "$VmName`: Waiting for Linux VM to become SSH-ready (timeout ${TimeoutSeconds}s)"
+
+    while ((Get-Date) -lt $deadline) {
+        $ip = Get-LinuxVmIPAddress -VmName $VmName
+        if ($ip) {
+            $sshArgs = @(
+                '-i', $keyPair.PrivateKeyPath,
+                '-o', 'StrictHostKeyChecking=accept-new',
+                '-o', "UserKnownHostsFile=$knownHostsPath",
+                '-o', 'BatchMode=yes',
+                '-o', 'ConnectTimeout=5',
+                '-o', 'LogLevel=ERROR',
+                "vmbuildadmin@$ip",
+                'true'
+            )
+            $null = & $sshExe @sshArgs 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "$VmName`: SSH ready at $ip" -LogOnly
+                return $ip
+            }
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    }
+
+    Write-Log "$VmName`: Timeout waiting for Linux VM SSH readiness (${TimeoutSeconds}s)" -Failure
+    return $null
+}
+
+function Invoke-LinuxVmCommand {
+    <#
+    .SYNOPSIS
+        Run a bash command on a memlabs Linux VM over SSH as vmbuildadmin.
+
+    .DESCRIPTION
+        SSH analog of Invoke-VmCommand for Linux guests. Resolves the VM's
+        IPv4 via Hyper-V KVP (or accepts -IPAddress explicitly), connects with
+        the cached ed25519 keypair, runs the supplied bash command, and
+        returns an object shaped like Invoke-VmCommand's result:
+
+            CommandResult     [bool]   $true if exit code == 0
+            ScriptBlockFailed [bool]   $true on SSH or command failure
+            ScriptBlockOutput [string] combined stdout (stderr appended on failure)
+            ExitCode          [int]    raw ssh/remote exit code
+
+        Use -Sudo to wrap the command in `sudo -n` (passwordless sudo is
+        configured by the cloud-init user-data).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BashCommand,
+
+        [Parameter(Mandatory = $false)]
+        [string]$IPAddress,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DisplayName,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 180,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Sudo,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SuppressLog,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if (-not $DisplayName) {
+        $DisplayName = if ($BashCommand.Length -gt 80) { $BashCommand.Substring(0, 77) + '...' } else { $BashCommand }
+    }
+
+    $return = [pscustomobject]@{
+        CommandResult     = $false
+        ScriptBlockFailed = $false
+        ScriptBlockOutput = $null
+        ExitCode          = -1
+    }
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "WhatIf: Would run '$DisplayName' on Linux VM $VmName"
+        $return.CommandResult = $true
+        return $return
+    }
+
+    if (-not $IPAddress) {
+        $IPAddress = Get-LinuxVmIPAddress -VmName $VmName
+    }
+    if (-not $IPAddress) {
+        if (-not $SuppressLog) {
+            Write-Log "$VmName`: Cannot resolve IPv4 (Hyper-V KVP not reporting). Skip '$DisplayName'." -Failure
+        }
+        $return.ScriptBlockFailed = $true
+        return $return
+    }
+
+    if (-not $SuppressLog) {
+        Write-Log "$VmName`: Running '$DisplayName' (ssh $IPAddress)" -Verbose
+    }
+
+    $sshExe = Get-LinuxSshExePath
+    $keyPair = Get-LinuxAdminSshKeyPair
+    $knownHostsPath = Join-Path (Split-Path $keyPair.PrivateKeyPath) "known_hosts"
+
+    # Pipe the command in via stdin to avoid Windows command-line quoting
+    # mismatches; remote `bash -s` reads the entire script from stdin.
+    $remoteShell = if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' }
+
+    $sshArgs = @(
+        '-i', $keyPair.PrivateKeyPath,
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', "UserKnownHostsFile=$knownHostsPath",
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=10',
+        '-o', "ServerAliveInterval=$([Math]::Max(15, [int]($TimeoutSeconds / 4)))",
+        '-o', 'LogLevel=ERROR',
+        "vmbuildadmin@$IPAddress",
+        $remoteShell
+    )
+
+    try {
+        # Build a quoted argument string. ProcessStartInfo.ArgumentList isn't
+        # available in PS 5.1, so escape manually: any arg containing whitespace
+        # or quotes gets wrapped in double quotes with internal quotes doubled.
+        $quotedArgs = foreach ($a in $sshArgs) {
+            if ($a -match '[\s"]') {
+                '"' + ($a -replace '"', '""') + '"'
+            }
+            else {
+                $a
+            }
+        }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $sshExe
+        $psi.Arguments = ($quotedArgs -join ' ')
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+
+        # Async drains so we don't deadlock on a full pipe buffer.
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        $proc.StandardInput.Write($BashCommand)
+        $proc.StandardInput.Close()
+
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $proc.Kill() } catch { }
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: SSH command '$DisplayName' timed out after ${TimeoutSeconds}s" -Failure
+            }
+            $return.ScriptBlockFailed = $true
+            $return.ScriptBlockOutput = "TIMEOUT after ${TimeoutSeconds}s"
+            return $return
+        }
+
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $return.ExitCode = $proc.ExitCode
+
+        if ($proc.ExitCode -eq 0) {
+            $return.CommandResult = $true
+            $return.ScriptBlockOutput = $stdout
+        }
+        else {
+            $return.ScriptBlockFailed = $true
+            $combined = $stdout
+            if ($stderr) {
+                if ($combined) { $combined += "`n" }
+                $combined += $stderr
+            }
+            $return.ScriptBlockOutput = $combined
+            if (-not $SuppressLog) {
+                $excerpt = if ($combined) { ($combined -replace "`r`n", "`n").Trim() } else { '(no output)' }
+                if ($excerpt.Length -gt 400) { $excerpt = $excerpt.Substring(0, 400) + '...' }
+                Write-Log "$VmName`: '$DisplayName' failed (exit=$($proc.ExitCode)): $excerpt" -Failure
+            }
+        }
+    }
+    catch {
+        $return.ScriptBlockFailed = $true
+        $return.ScriptBlockOutput = "$_"
+        if (-not $SuppressLog) {
+            Write-Log "$VmName`: Exception running '$DisplayName': $_" -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        }
+    }
+
+    return $return
+}
