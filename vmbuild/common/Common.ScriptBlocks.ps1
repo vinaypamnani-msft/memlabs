@@ -334,6 +334,51 @@ $global:VM_Create = {
             # Create VM
             $vmSwitch = Get-VMSwitch2 -NetworkName $network
 
+            # Linux VMs follow a separate create path: Gen2 with cloud-init
+            # seed ISO instead of sysprepped Windows + OOBE wait + DSC.
+            # Test-VmIsLinux recognises osFamily=Linux as well as Ubuntu*/
+            # Debian*/Linux* operatingSystem strings (forward-compatible).
+            if (Test-VmIsLinux -Vm $currentItem) {
+                $createdLinux = New-LinuxVirtualMachine `
+                    -VmName $currentItem.vmName `
+                    -VmPath $virtualMachinePath `
+                    -SourceDiskPath $vhdxPath `
+                    -Memory $currentItem.memory `
+                    -DynamicMinRam $dynamicMinRam `
+                    -Processors $currentItem.virtualProcs `
+                    -SwitchName $vmSwitch.Name `
+                    -Domain $deployConfig.vmOptions.domainName `
+                    -DeployConfig $deployConfig
+                if (-not ($createdLinux -eq $true)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM creation failed." -Failure -OutputStream -HostOnly
+                    return
+                }
+
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900
+                if (-not $linuxIP) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
+                    return
+                }
+
+                # Push an A record to the domain DC so other VMs can resolve
+                # this Linux host by name (Linux VMs do not perform secure
+                # dynamic DNS registration themselves).
+                $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                if (-not $dcVm) {
+                    $dcVm = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                }
+                if ($dcVm) {
+                    $null = Register-LinuxVmDns -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName -DCName $dcVm.vmName -IPAddress $linuxIP
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DC found in deployConfig or domain; skipping DNS registration." -Warning
+                }
+
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM creation completed (IP $linuxIP)." -OutputStream -Success
+                return
+            }
+
             $Generation = 2
             if ($currentItem.vmGeneration) {
                 $Generation = $currentItem.vmGeneration
