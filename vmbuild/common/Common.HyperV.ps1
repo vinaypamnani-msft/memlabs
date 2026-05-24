@@ -1014,71 +1014,79 @@ function Set-VmProxyEnforcement {
         Apply Hyper-V port-ACL "must use proxy" enforcement to a Windows VM.
 
     .DESCRIPTION
-        Adds extended ACLs on the VM's network adapter that deny outbound
-        TCP 80/443 and outbound DNS to non-DC destinations, while allowing
-        intra-subnet traffic, the proxy on TCP/3128, and DNS to the DC.
+        Adds extended ACLs on the VM's network adapter that allow ALL traffic
+        to/from any known memlabs lab subnet (so AD, SMB, CM, SQL, and
+        inter-domain hierarchy traffic stay native), then deny outbound
+        TCP 80/443 and DNS (UDP+TCP 53) to anything else. Net effect: free
+        movement inside the lab, but any attempt to reach the public
+        Internet on web or DNS ports is blocked -- forcing HTTP/HTTPS
+        through the Squid proxy.
+
         Idempotent: removes any prior memlabs proxy ACLs (weight band
         5000-5099) before re-adding.
+
+    .PARAMETER VmName
+        The Windows VM whose vNIC ACLs are being managed.
+
+    .PARAMETER LabSubnets
+        Array of /24 subnet base addresses (e.g. "192.168.1.0") covering
+        every memlabs network the VM is allowed to reach freely. Typically
+        produced by combining this deployConfig's vmOptions.network with
+        the output of Get-NetworkList so cross-domain hierarchies still
+        work.
     #>
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)] [string]$VmName,
-        [Parameter(Mandatory = $true)] [string]$Subnet,        # e.g. "192.168.1.0"
-        [Parameter(Mandatory = $true)] [string]$ProxyIp,
-        [Parameter(Mandatory = $false)] [string]$DcIp
+        [Parameter(Mandatory = $true)] [string[]]$LabSubnets
     )
 
-    $cidr = "$Subnet/24"
+    # Normalize -> "x.y.z.0/24", dedupe.
+    $cidrs = @($LabSubnets |
+        Where-Object { $_ } |
+        ForEach-Object {
+            $s = $_.Trim()
+            if ($s -match '/\d+$') { $s } else { "$s/24" }
+        } |
+        Select-Object -Unique)
+
+    if (-not $cidrs -or $cidrs.Count -eq 0) {
+        Write-Log "[Proxy] $VmName`: No lab subnets provided; skipping enforcement (would be wide-open deny)" -Warning
+        return $false
+    }
 
     Clear-VmProxyEnforcement -VmName $VmName
 
     try {
-        # --- High-priority ALLOW rules (weight 5090-5099) ---
-
-        # Allow all intra-subnet traffic (AD/SMB/CM/SQL stay native)
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
-            -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-            -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
-
-        # Allow outbound to proxy on 3128 (TCP)
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
-            -RemoteIPAddress "$ProxyIp/32" -RemotePort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
-        # And reply traffic back (source on the wire is proxy:3128, so
-        # -RemotePort 3128 is correct -- LocalPort would mean the VM is
-        # the listener, which is wrong for client-side traffic).
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-            -RemoteIPAddress "$ProxyIp/32" -RemotePort 3128 -Protocol TCP -Weight 5098 -ErrorAction Stop | Out-Null
-
-        # Allow DNS to the DC (UDP+TCP 53)
-        if ($DcIp) {
+        # --- High-priority ALLOW rules (weight 5099) ---
+        # Allow all traffic both directions to/from any known lab subnet.
+        # Catches intra-subnet AD/SMB/SQL/CM, cross-subnet hierarchy traffic
+        # (CAS<->Primary across separate networks), and the Linux proxy +
+        # DCs which always live in one of these subnets.
+        foreach ($cidr in $cidrs) {
             Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
-                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol UDP -Weight 5097 -ErrorAction Stop | Out-Null
-            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
-                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol TCP -Weight 5097 -ErrorAction Stop | Out-Null
-            # Reply traffic back from DC:53 (needed for cross-subnet DC where
-            # the intra-subnet allow doesn't cover it).
+                -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
             Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol UDP -Weight 5097 -ErrorAction Stop | Out-Null
-            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-                -RemoteIPAddress "$DcIp/32" -RemotePort 53 -Protocol TCP -Weight 5097 -ErrorAction Stop | Out-Null
+                -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
         }
 
-        # --- Low-priority DENY rules (weight 5000-5009) ---
-
-        # Block outbound HTTP/HTTPS to anywhere (forces proxy)
+        # --- Low-priority DENY rules (weight 5000-5001) ---
+        # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
+        # The proxy itself reaches the Internet via the host NAT, so clients
+        # MUST go through the proxy for any web traffic.
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
             -RemotePort 80 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
             -RemotePort 443 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
 
-        # Block outbound DNS to non-DC (covered by allow at higher weight)
+        # Block outbound DNS to non-lab resolvers (lab DCs are covered by
+        # the lab-subnet allow above).
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
             -RemotePort 53 -Protocol UDP -Weight 5000 -ErrorAction Stop | Out-Null
         Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
             -RemotePort 53 -Protocol TCP -Weight 5000 -ErrorAction Stop | Out-Null
 
-        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (proxy=$ProxyIp, dc=$DcIp, subnet=$cidr)"
+        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
         return $true
     }
     catch {
@@ -1095,9 +1103,11 @@ function Set-VmProxyEnforcementForConfig {
 
     .DESCRIPTION
         Mirrors Set-WindowsClientProxyForConfig: enumerates the deployConfig,
-        filters via Test-VmUsesProxy, resolves the Proxy VM's IP and the
-        owning DC's IP from Hyper-V, then calls Set-VmProxyEnforcement per
-        VM. No-op when no Proxy VM or no opted-in clients exist.
+        filters via Test-VmUsesProxy, builds a union of every known memlabs
+        lab subnet (this deploy's vmOptions.network + every VM's .network +
+        Get-NetworkList for cross-domain hierarchies), then calls
+        Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
+        opted-in clients exist.
     #>
     [CmdletBinding()]
     param (
@@ -1113,21 +1123,25 @@ function Set-VmProxyEnforcementForConfig {
         return $false
     }
 
-    $proxyIp = Get-VmIPv4FromHyperV -VmName $proxyVm.vmName
-    if (-not $proxyIp) {
-        Write-Log "[Proxy] Could not resolve IP for Proxy VM $($proxyVm.vmName); skipping enforcement" -Warning
-        return $false
+    # Union all known lab subnets so inter-domain hierarchy traffic isn't blocked.
+    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
+    if ($deployConfig.vmOptions.network) { [void]$subnetSet.Add($deployConfig.vmOptions.network) }
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
     }
-
-    $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -in @('DC', 'BDC') } | Select-Object -First 1
-    $dcIp = $null
-    if ($dcVm) { $dcIp = Get-VmIPv4FromHyperV -VmName $dcVm.vmName }
-
-    $subnet = $deployConfig.vmOptions.network
+    try {
+        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
+        foreach ($n in $allKnown) { if ($n) { [void]$subnetSet.Add($n) } }
+    }
+    catch {
+        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with config-only subnet set" -Warning
+    }
+    $labSubnets = @($subnetSet)
+    Write-Log "[Proxy] Lab subnets allowed past enforcement: $($labSubnets -join ', ')"
 
     $ok = $true
     foreach ($vm in $clients) {
-        $r = Set-VmProxyEnforcement -VmName $vm.vmName -Subnet $subnet -ProxyIp $proxyIp -DcIp $dcIp
+        $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
         if (-not $r) { $ok = $false }
     }
     return $ok
