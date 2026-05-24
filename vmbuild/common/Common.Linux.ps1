@@ -1769,7 +1769,8 @@ function New-HostProxyShortcuts {
         $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
         $sc1.Save()
 
-        $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
+        # Qualify with FQDN on the host so multiple labs/domains don't collide.
+        $lnk2 = Join-Path $desktop "Squid Access Log - $proxyFqdn.lnk"
         $sc2 = $shell.CreateShortcut($lnk2)
         $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
         $sc2.Arguments = "/k `"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log"
