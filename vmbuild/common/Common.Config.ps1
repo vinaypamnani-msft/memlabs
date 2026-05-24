@@ -118,6 +118,15 @@ function Move-CmOptionsToTopLevelSiteServer {
     )
     if ($null -eq $Config.cmOptions) { return }
     $topLevel = Get-TopLevelSiteServer -Config $Config
+    if (-not $topLevel) {
+        # Add-to-existing scenarios: the file only contains a child Primary
+        # (parentSiteCode references a CAS in the existing deployment, which
+        # isn't in this file). Fall back to any CAS/Primary so the authored
+        # cmOptions are preserved instead of silently dropped.
+        $topLevel = $Config.virtualMachines | Where-Object {
+            $_.role -in @('CAS', 'Primary')
+        } | Select-Object -First 1
+    }
     if ($topLevel) {
         # Deep-clone via JSON round-trip so subsequent mutations of either copy
         # don't bleed across.
