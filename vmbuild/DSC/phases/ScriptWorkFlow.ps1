@@ -459,6 +459,32 @@ if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Complete!"
 }
 
+# Reset SMS component status counts on site servers. New installs accumulate
+# transient warnings/errors from components that started before all their
+# dependencies were ready (SMS_DATABASE_NOTIFICATION_MONITOR,
+# SMS_DISCOVERY_DATA_MANAGER, etc.). Once the site is fully wired these
+# components are healthy but their status counters still show the startup
+# noise, which Phase 11 validation flags as WARN. This is equivalent to
+# right-clicking each component in the console and choosing "Reset Counts".
+if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
+    try {
+        $svrSiteCode = $ThisVM.siteCode
+        if ($svrSiteCode) {
+            Write-DscStatus "Resetting SMS component status counts for site $svrSiteCode"
+            $ns = "root\sms\site_$svrSiteCode"
+            $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
+            $resetCount = 0
+            foreach ($s in $sums) {
+                try { [void]$s.ResetCounts(); $resetCount++ } catch { }
+            }
+            Write-DscStatus "Reset component counts on $resetCount of $($sums.Count) summarizer entries"
+        }
+    }
+    catch {
+        Write-DscStatus "WARNING: Failed to reset SMS component status counts: $($_.Exception.Message)"
+    }
+}
+
 # Stamp the completion RunId as the very last action. The orchestrator's
 # monitoring loop treats a matching RunId as authoritative completion,
 # which is bulletproof against any later status writes from background
