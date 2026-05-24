@@ -985,8 +985,8 @@ function Register-LinuxVmDns {
         # written either -- and the error message often contains "PTR",
         # which the old catch swallowed, leading to a false success log.
         try {
-            Write-Host "[RegisterLinuxDns DIAG] STEP 3  calling: Add-DnsServerResourceRecordA -ZoneName '$zone' -Name '$node' -IPv4Address '$ip' -AllowUpdateAny"
-            Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -AllowUpdateAny -ErrorAction Stop
+            Write-Host "[RegisterLinuxDns DIAG] STEP 3  calling: Add-DnsServerResourceRecordA -ZoneName '$zone' -Name '$node' -IPv4Address '$ip'"
+            Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -ErrorAction Stop
         }
         catch {
             _Snap "STEP 3  AFTER FAILED A write"
@@ -1007,8 +1007,8 @@ function Register-LinuxVmDns {
         # (which is the only thing AD/Kerberos clients need).
         if ($reverseZone) {
             try {
-                Write-Host "[RegisterLinuxDns DIAG] STEP 4  calling: Add-DnsServerResourceRecordPtr -ZoneName '$reverseZone' -Name '$($octets[3])' -PtrDomainName '$node.$zone.' -AllowUpdateAny"
-                Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$node.$zone." -AllowUpdateAny -ErrorAction Stop
+                Write-Host "[RegisterLinuxDns DIAG] STEP 4  calling: Add-DnsServerResourceRecordPtr -ZoneName '$reverseZone' -Name '$($octets[3])' -PtrDomainName '$node.$zone.'"
+                Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$node.$zone." -ErrorAction Stop
             }
             catch {
                 Write-Host "[RegisterLinuxDns DIAG] STEP 4  PTR write failed (swallowed): $($_.Exception.Message)"
