@@ -491,7 +491,15 @@ function Test-ValidVmSupported {
 
     # Supported OS
     if ($VM.role -ne "OSDClient") {
-        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+        # Linux VMs (e.g. role=Proxy / osFamily=Linux) use locally-built
+        # base images via baseimagestaging\New-LinuxBaseImage.ps1 and may
+        # not appear in the active _fileList*.json OS list. Skip the Azure
+        # supported-OS check for them; the Linux deploy path handles the
+        # base-image check separately.
+        if ((Test-VmIsLinux -Vm $VM) -or $VM.role -eq 'Proxy') {
+            # no-op
+        }
+        elseif ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
             Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
         }
     }
