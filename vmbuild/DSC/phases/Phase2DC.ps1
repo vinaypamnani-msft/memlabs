@@ -382,6 +382,34 @@
             $nextDepend = $adSiteDependency
         }
       
+        # Reverse lookup zones: one AD-integrated /24 in-addr.arpa zone per
+        # distinct VM network in this deployment. Provides PTR records for
+        # every host the DC serves (Windows clients via Secure dynamic update,
+        # Linux via Register-LinuxVmDns). Idempotent: DnsServerADZone is a
+        # no-op when the zone already exists.
+        $reverseZoneNames = @{}
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if (-not $vm.network) { continue }
+            $oct = $vm.network.Split('.')
+            if ($oct.Count -ne 4) { continue }
+            $reverseZoneNames["$($oct[2]).$($oct[1]).$($oct[0]).in-addr.arpa"] = $true
+        }
+        $revIdx = 0
+        $reverseZoneDeps = @($nextDepend)
+        foreach ($zoneName in $reverseZoneNames.Keys) {
+            $revIdx++
+            DnsServerADZone "ReverseZone$revIdx" {
+                Name             = $zoneName
+                DynamicUpdate    = 'Secure'
+                ReplicationScope = 'Domain'
+                Ensure           = 'Present'
+                DependsOn        = $nextDepend
+            }
+            $reverseZoneDeps += "[DnsServerADZone]ReverseZone$revIdx"
+        }
+        if ($revIdx -gt 0) {
+            $nextDepend = $reverseZoneDeps
+        }
 
         if ($OtherDC) {
             DnsServerConditionalForwarder 'Forwarder1' {
