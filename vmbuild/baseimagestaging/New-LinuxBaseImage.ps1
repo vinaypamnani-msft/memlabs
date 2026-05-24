@@ -237,7 +237,14 @@ if (-not $SkipChecksum.IsPresent) {
     Write-Log "Verifying SHA256 against $sha256Url..." -Activity
     try {
         $sumsResponse = Invoke-WebRequest -Uri $sha256Url -UseBasicParsing
-        $sumsText = $sumsResponse.Content
+        # .Content can be byte[] when server sends application/octet-stream;
+        # coerce to UTF-8 string in that case.
+        if ($sumsResponse.Content -is [byte[]]) {
+            $sumsText = [System.Text.Encoding]::UTF8.GetString($sumsResponse.Content)
+        }
+        else {
+            $sumsText = [string]$sumsResponse.Content
+        }
     }
     catch {
         Write-Log "Failed to fetch SHA256SUMS from $sha256Url`: $_" -Warning
@@ -246,9 +253,16 @@ if (-not $SkipChecksum.IsPresent) {
     }
 
     if ($sumsText) {
-        $expectedLine = $sumsText -split "`n" | Where-Object { $_ -match [regex]::Escape($releaseInfo.ImageFileName) } | Select-Object -First 1
+        # Lines look like: "<hash>  *<filename>" (BSD style) or "<hash>  <filename>".
+        # Match filename at end of line, optionally preceded by '*', anchored to avoid
+        # partial hits on .manifest / .squashfs / etc.
+        $escaped = [regex]::Escape($releaseInfo.ImageFileName)
+        $expectedLine = $sumsText -split "`n" |
+            Where-Object { $_ -match "^(?<hash>[0-9a-fA-F]{64})\s+\*?$escaped\s*$" } |
+            Select-Object -First 1
         if (-not $expectedLine) {
             Write-Log "SHA256SUMS does not contain an entry for $($releaseInfo.ImageFileName). Aborting." -Failure
+            Write-Log "First 200 chars of fetched content: $($sumsText.Substring(0, [Math]::Min(200, $sumsText.Length)))" -Failure
             return
         }
         $expectedHash = ($expectedLine -split '\s+')[0].ToLower()
