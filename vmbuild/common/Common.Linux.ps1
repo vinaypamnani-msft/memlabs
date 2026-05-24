@@ -80,6 +80,51 @@ function Get-OscdimgPath {
     return $null
 }
 
+function New-NoCloudSeedIsoWithImapi {
+    <#
+    .SYNOPSIS
+        Build a NoCloud seed ISO using IMAPI2FS (built into Windows since
+        Vista) so we don't depend on oscdimg.exe from the Windows ADK.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$SourceDir,
+        [Parameter(Mandatory = $true)][string]$OutputIsoPath,
+        [Parameter(Mandatory = $false)][string]$VolumeLabel = 'cidata'
+    )
+
+    # IStream -> file helper (canonical pattern from New-IsoFile).
+    if (-not ('MemlabsIsoFile' -as [type])) {
+        Add-Type -CompilerOptions '/unsafe' -TypeDefinition @'
+public class MemlabsIsoFile {
+    public unsafe static void Create(string path, object stream, int blockSize, int totalBlocks) {
+        int bytes = 0;
+        byte[] buf = new byte[blockSize];
+        var ptr = (System.IntPtr)(&bytes);
+        var o = System.IO.File.OpenWrite(path);
+        var i = stream as System.Runtime.InteropServices.ComTypes.IStream;
+        if (o != null) {
+            while (totalBlocks-- > 0) { i.Read(buf, blockSize, ptr); o.Write(buf, 0, bytes); }
+            o.Flush(); o.Close();
+        }
+    }
+}
+'@
+    }
+
+    $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+    try {
+        $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
+        $fsi.VolumeName = $VolumeLabel
+        $fsi.Root.AddTree($SourceDir, $false)
+        $result = $fsi.CreateResultImage()
+        [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
+    }
+}
+
 function New-LinuxSeedIso {
     <#
     .SYNOPSIS
@@ -117,10 +162,9 @@ function New-LinuxSeedIso {
         [string[]]$ExtraRunCmd = @()
     )
 
+    # oscdimg is preferred when available (faster, more deterministic), but
+    # we fall back to IMAPI2FS so the build doesn't require the Windows ADK.
     $oscdimg = Get-OscdimgPath
-    if (-not $oscdimg) {
-        throw "oscdimg.exe not found. Install the Windows ADK Deployment Tools, or drop oscdimg.exe (+ its DLLs) at $(Join-Path $Common.AzureToolsPath 'oscdimg\oscdimg.exe')."
-    }
 
     $sshKey = Get-LinuxAdminSshKeyPair
     $instanceId = "memlabs-$VmName-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
@@ -195,13 +239,22 @@ power_state:
     }
     if (Test-Path $OutputIsoPath) { Remove-Item $OutputIsoPath -Force }
 
-    # Build the ISO. -lcidata sets the volume label NoCloud looks for.
-    # -j2 = Joliet + ISO9660 (cloud-init reads either); -m = ignore max size;
-    # -n = allow long filenames.
-    $oscdimgArgs = @('-j2', '-lcidata', '-m', '-n', $stage, $OutputIsoPath)
-    & $oscdimg @oscdimgArgs | Out-Null
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutputIsoPath)) {
-        throw "oscdimg failed (exit=$LASTEXITCODE) building $OutputIsoPath from $stage"
+    if ($oscdimg) {
+        # Build the ISO. -lcidata sets the volume label NoCloud looks for.
+        # -j2 = Joliet + ISO9660 (cloud-init reads either); -m = ignore max size;
+        # -n = allow long filenames.
+        $oscdimgArgs = @('-j2', '-lcidata', '-m', '-n', $stage, $OutputIsoPath)
+        & $oscdimg @oscdimgArgs | Out-Null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $OutputIsoPath)) {
+            throw "oscdimg failed (exit=$LASTEXITCODE) building $OutputIsoPath from $stage"
+        }
+    }
+    else {
+        Write-Log "oscdimg.exe not found; building NoCloud seed ISO via IMAPI2FS for $VmName."
+        New-NoCloudSeedIsoWithImapi -SourceDir $stage -OutputIsoPath $OutputIsoPath -VolumeLabel 'cidata'
+        if (-not (Test-Path $OutputIsoPath)) {
+            throw "IMAPI2FS ISO build failed for $OutputIsoPath"
+        }
     }
 
     Write-Log "Built cloud-init seed ISO for $VmName at $OutputIsoPath"

@@ -887,14 +887,13 @@ function Restore-DynamicMemory {
     )
 
     $domain = $DeployConfig.vmOptions.domainName
-    Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
 
     $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
         $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1))
     })
 
     if ($vmsToRestore.Count -eq 0) {
-        Write-Log "[Phase 11] No VMs have dynamic memory configured; skipping restore" -LogOnly
+        Write-Log "[Phase 11] No VMs have dynamic memory configured for domain '$domain'; skipping restore" -LogOnly
         return
     }
 
@@ -908,10 +907,12 @@ function Restore-DynamicMemory {
     }
 
     if ($vmsToRestore.Count -eq 0) {
-        Write-Log "[Phase 11] No live VMs need dynamic memory restored; skipping" -LogOnly
+        Write-Log "[Phase 11] No live VMs need dynamic memory restored for domain '$domain'; skipping" -LogOnly
         return
     }
 
+    # Only now (after we know there's work) emit the visible Activity header.
+    Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
     Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
 
     foreach ($vmConfig in $vmsToRestore) {
