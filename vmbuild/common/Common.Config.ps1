@@ -115,8 +115,10 @@ function Set-VmCmOptionsResolved {
 # Migrates a config's root-level cmOptions onto the top-level site server VM.
 # Idempotent: a no-op when root cmOptions is already absent. Called from
 # Get-UserConfiguration after all existing root-level reads have completed.
-# When no top-level site server exists, the orphan root block is dropped
-# (no consumer can use it).
+# When no site-server VM exists in the file to receive it (e.g. add-to-existing
+# configs that only contain PassiveSite/SiteSystem/FileServer), the root block
+# is preserved so Get-ConfigCmOptions and downstream consumers can still find
+# it.
 function Move-CmOptionsToTopLevelSiteServer {
     [CmdletBinding()]
     param (
@@ -126,7 +128,7 @@ function Move-CmOptionsToTopLevelSiteServer {
     if ($null -eq $Config.cmOptions) { return }
     $topLevel = Get-TopLevelSiteServer -Config $Config
     if (-not $topLevel) {
-        # Add-to-existing scenarios: the file only contains a child Primary
+        # Add-to-existing scenarios: the file may only contain a child Primary
         # (parentSiteCode references a CAS in the existing deployment, which
         # isn't in this file). Fall back to any CAS/Primary so the authored
         # cmOptions are preserved instead of silently dropped.
@@ -134,13 +136,18 @@ function Move-CmOptionsToTopLevelSiteServer {
             $_.role -in @('CAS', 'Primary')
         } | Select-Object -First 1
     }
-    if ($topLevel) {
-        # Deep-clone via JSON round-trip so subsequent mutations of either copy
-        # don't bleed across.
-        if ($null -eq $topLevel.cmOptions) {
-            $clone = $Config.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
-            $topLevel | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
-        }
+    if (-not $topLevel) {
+        # No site-server VM in this file at all (e.g. PassiveSite/SiteSystem-only
+        # add-to-existing). Leave root cmOptions intact - it's still the only
+        # place it can live, and Get-ConfigCmOptions checks $Config.cmOptions
+        # first.
+        return
+    }
+    # Deep-clone via JSON round-trip so subsequent mutations of either copy
+    # don't bleed across.
+    if ($null -eq $topLevel.cmOptions) {
+        $clone = $Config.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $topLevel | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
     }
     $Config.PSObject.Properties.Remove('cmOptions')
 }
