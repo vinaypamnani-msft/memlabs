@@ -931,22 +931,43 @@ function Register-LinuxVmDns {
             }
         }
 
-        # Create the A record. PTR is best-effort: most memlabs labs do not
-        # provision a reverse lookup zone for 192.168.x.0/24, and passing
-        # -CreatePtr against a missing reverse zone makes Add-DnsServerResourceRecordA
-        # throw *after* the A record is already written. We try with -CreatePtr
-        # first (in case the reverse zone exists), and fall back to A-only.
+        # Ensure an AD-integrated /24 reverse lookup zone exists for this IP so
+        # -CreatePtr can write the PTR record. memlabs DC build does not create
+        # reverse zones by default; without one, Add-DnsServerResourceRecordA
+        # -CreatePtr throws *after* writing the A record.
+        $octets = $ip.Split('.')
+        if ($octets.Count -eq 4) {
+            $reverseZone = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+            $networkId   = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+            $existingZone = Get-DnsServerZone -Name $reverseZone -ErrorAction SilentlyContinue
+            if (-not $existingZone) {
+                try {
+                    Add-DnsServerPrimaryZone -NetworkId $networkId -ReplicationScope Domain -DynamicUpdate Secure -ErrorAction Stop
+                }
+                catch {
+                    # Non-fatal: PTR creation below will just be skipped.
+                }
+            }
+        }
+
+        # Existing PTR (if any) for this IP — remove so PTR points at the new name.
+        if ($reverseZone) {
+            $ptrName = $octets[3]
+            $existingPtr = Get-DnsServerResourceRecord -ZoneName $reverseZone -Node $ptrName -RRType Ptr -ErrorAction SilentlyContinue
+            if ($existingPtr) {
+                foreach ($p in $existingPtr) {
+                    Remove-DnsServerResourceRecord -ZoneName $reverseZone -InputObject $p -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
         try {
             Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -CreatePtr -AllowUpdateAny -ErrorAction Stop
         }
         catch {
-            if ($_.Exception.Message -match 'PTR') {
-                # A record was created; PTR side failed due to missing reverse zone.
-                # Treat as success -- forward resolution is what proxy clients need.
-            }
-            else {
-                throw
-            }
+            # If PTR still failed (e.g. zone creation was blocked), swallow --
+            # the A record was already written and forward resolution works.
+            if ($_.Exception.Message -notmatch 'PTR') { throw }
         }
         return $true
     }
