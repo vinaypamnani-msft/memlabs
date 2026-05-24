@@ -207,8 +207,11 @@ function Test-DCFunctionality {
         $isBdc = ($isBdcInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        # Check critical services
-        $services = @('NTDS', 'DNS', 'Netlogon')
+        # Check critical services. KDC included: if it's stopped, machine-account
+        # Kerberos breaks while user auth (via cached tickets) may still appear to
+        # work, which produces very confusing "secure channel False" symptoms on
+        # otherwise-healthy clients.
+        $services = @('NTDS', 'DNS', 'Netlogon', 'Kdc')
         foreach ($svc in $services) {
             $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
             if (-not $s) {
@@ -237,10 +240,13 @@ function Test-DCFunctionality {
             $results.Details.Add("FAIL: DNS cannot resolve '$domainFqdn': $($_.Exception.Message)")
         }
 
-        # dcdiag quick checks (Services + Replications)
-        $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /q")
+        # dcdiag quick checks. Advertising + NetLogons added because a half-promoted
+        # DC (e.g. Phase 2 interrupted mid-DCPROMO) can show all services Running
+        # yet refuse to serve authentications -- Advertising/NetLogons catches that
+        # before downstream DomainMember tests fail with cryptic ERROR_NO_LOGON_SERVERS.
+        $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q")
         try {
-            $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /q 2>&1
+            $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
             $dcdiagText = $dcdiag -join "`n"
             $failCount = ([regex]::Matches($dcdiagText, 'failed test')).Count
             if ($failCount -gt 0) {
@@ -250,7 +256,7 @@ function Test-DCFunctionality {
                 foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
             }
             else {
-                $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck passed")
+                $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck/Advertising/NetLogons passed")
             }
         }
         catch {
@@ -267,6 +273,23 @@ function Test-DCFunctionality {
             else {
                 $results.Details.Add("OK: SMB share '$shr' -> '$($s.Path)'")
             }
+        }
+
+        # NETLOGON 5781 = "Dynamic registration of DNS records failed" -- an early
+        # warning that the DC came up without fully registering its SRV records,
+        # which downstream clients then can't locate. Surface recent occurrences.
+        try {
+            $since = (Get-Date).AddMinutes(-30)
+            $5781 = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'NETLOGON'; Id = 5781; StartTime = $since } -ErrorAction SilentlyContinue
+            if ($5781) {
+                $results.Details.Add("WARN: NETLOGON 5781 (DNS SRV registration failed) seen $($5781.Count) time(s) in last 30 min -- run 'nltest /dsregdns' to re-register")
+            }
+            else {
+                $results.Details.Add("OK: No NETLOGON 5781 (DNS SRV registration failure) events in last 30 min")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Could not query NETLOGON event log: $($_.Exception.Message)")
         }
 
         # BDC-only: confirm we can replicate inbound from at least one partner
