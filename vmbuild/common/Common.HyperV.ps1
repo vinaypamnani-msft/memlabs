@@ -998,12 +998,14 @@ function Clear-VmProxyEnforcement {
     try {
         $existing = Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue
         if (-not $existing) { return }
-        foreach ($acl in $existing) {
-            if ($acl.Weight -ge $global:MemLabsProxyAclWeightMin -and `
-                    $acl.Weight -le $global:MemLabsProxyAclWeightMax) {
-                Remove-VMNetworkAdapterExtendedAcl -VMName $VmName -Direction $acl.Direction -Weight $acl.Weight -ErrorAction SilentlyContinue
-            }
-        }
+        # Pipe filtered ACLs straight into Remove so each rule is removed by
+        # full identity (Direction+Weight+RemoteIP+Protocol+Port). Removing
+        # by Direction+Weight alone is ambiguous when several rules share a
+        # weight (e.g. one Allow per lab subnet at weight 5099), and can
+        # leave stragglers that then collide on re-add with 0x800700B7.
+        $existing |
+            Where-Object { $_.Weight -ge $global:MemLabsProxyAclWeightMin -and $_.Weight -le $global:MemLabsProxyAclWeightMax } |
+            Remove-VMNetworkAdapterExtendedAcl -ErrorAction SilentlyContinue
     }
     catch {
         Write-Log "[Proxy] $VmName`: Failed to clear existing enforcement ACLs: $_" -Warning
@@ -1059,6 +1061,24 @@ function Set-VmProxyEnforcement {
 
     Clear-VmProxyEnforcement -VmName $VmName
 
+    # Helper: Add-VMNetworkAdapterExtendedAcl can return 0x800700B7 when an
+    # identical rule somehow survived the clear (e.g. switch port settings
+    # cached the rule across a clear/add race). Treat that as benign --
+    # the rule we wanted is already in place.
+    $addAcl = {
+        param([hashtable]$params)
+        try {
+            Add-VMNetworkAdapterExtendedAcl @params -ErrorAction Stop | Out-Null
+        }
+        catch {
+            if ($_.Exception.Message -match '0x800700B7|already exists') {
+                Write-Log "[Proxy] $VmName`: rule already present, treating as success ($($params | Out-String))" -LogOnly
+                return
+            }
+            throw
+        }
+    }
+
     try {
         # --- High-priority ALLOW rules (weight 5099) ---
         # Allow all traffic both directions to/from any known lab subnet.
@@ -1066,27 +1086,21 @@ function Set-VmProxyEnforcement {
         # (CAS<->Primary across separate networks), and the Linux proxy +
         # DCs which always live in one of these subnets.
         foreach ($cidr in $cidrs) {
-            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Outbound `
-                -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
-            Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Allow -Direction Inbound `
-                -RemoteIPAddress $cidr -Weight 5099 -ErrorAction Stop | Out-Null
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = 5099 }
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = 5099 }
         }
 
         # --- Low-priority DENY rules (weight 5000-5001) ---
         # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
         # The proxy itself reaches the Internet via the host NAT, so clients
         # MUST go through the proxy for any web traffic.
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
-            -RemotePort 80 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
-            -RemotePort 443 -Protocol TCP -Weight 5001 -ErrorAction Stop | Out-Null
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5001 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5001 }
 
         # Block outbound DNS to non-lab resolvers (lab DCs are covered by
         # the lab-subnet allow above).
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
-            -RemotePort 53 -Protocol UDP -Weight 5000 -ErrorAction Stop | Out-Null
-        Add-VMNetworkAdapterExtendedAcl -VMName $VmName -Action Deny -Direction Outbound `
-            -RemotePort 53 -Protocol TCP -Weight 5000 -ErrorAction Stop | Out-Null
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5000 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
 
         Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
         return $true
