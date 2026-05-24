@@ -931,7 +931,23 @@ function Register-LinuxVmDns {
             }
         }
 
-        Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -CreatePtr -AllowUpdateAny -ErrorAction Stop
+        # Create the A record. PTR is best-effort: most memlabs labs do not
+        # provision a reverse lookup zone for 192.168.x.0/24, and passing
+        # -CreatePtr against a missing reverse zone makes Add-DnsServerResourceRecordA
+        # throw *after* the A record is already written. We try with -CreatePtr
+        # first (in case the reverse zone exists), and fall back to A-only.
+        try {
+            Add-DnsServerResourceRecordA -ZoneName $zone -Name $node -IPv4Address $ip -CreatePtr -AllowUpdateAny -ErrorAction Stop
+        }
+        catch {
+            if ($_.Exception.Message -match 'PTR') {
+                # A record was created; PTR side failed due to missing reverse zone.
+                # Treat as success -- forward resolution is what proxy clients need.
+            }
+            else {
+                throw
+            }
+        }
         return $true
     }
 
