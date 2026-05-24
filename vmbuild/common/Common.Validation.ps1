@@ -1278,7 +1278,9 @@ function Test-Configuration {
                 $sha.Dispose()
             }
             if ($global:TestConfigFastCache -and $global:TestConfigFastCache.Key -eq $fastCacheKey) {
-                Write-Log -Verbose "Test-Configuration: returning cached -Fast result (hash $($fastCacheKey.Substring(0,12)))"
+                $cachedFailures = 0
+                try { $cachedFailures = [int]$global:TestConfigFastCache.Value.Failures } catch { }
+                Write-Log "[Test-Configuration] cache HIT (hash $($fastCacheKey.Substring(0,12))) Failures=$cachedFailures - returning prior TestObject without re-running validators" -LogOnly
                 return $global:TestConfigFastCache.Value
             }
         }

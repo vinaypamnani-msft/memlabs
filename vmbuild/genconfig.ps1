@@ -33,6 +33,14 @@ $configDir = Join-Path $PSScriptRoot "config"
 # errors that the current validation no longer produces.
 $global:PendingValidationErrors = $null
 $global:GenConfigErrorMessages = @()
+# Also drop the Test-Configuration -Fast memoization cache. It's keyed by a
+# hash of the InputObject JSON only, so if validation logic was changed
+# (e.g. a new Linux/Proxy bypass) between runs, a cache hit on the same
+# config returns the OLD TestObject - failures and all - and ghost errors
+# show up in the banner even though current validators no longer produce
+# them. Add-ValidationMessage logging won't fire on a cache hit either,
+# which is the telltale we just chased.
+$global:TestConfigFastCache = $null
 
 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "New-Lab Configuration generator:"
 Write-Host2 -ForegroundColor DeepSkyBlue "You can use this tool to customize your MemLabs deployment."
