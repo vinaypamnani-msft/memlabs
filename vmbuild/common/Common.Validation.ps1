@@ -296,6 +296,38 @@ function Test-ValidCmOptions {
             Add-ValidationMessage -Message "VM Validation: Proxy VM [$($pvm.vmName)] must be Linux (osFamily=Linux or operatingSystem like 'Ubuntu*'). Got osFamily=[$($pvm.osFamily)] operatingSystem=[$($pvm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
         }
     }
+
+    # If any VM is opted-in to use the proxy (either via per-VM useProxy or via
+    # the domainDefaults UseProxyFor* fallback), a reachable Proxy VM must
+    # exist -- either in this config or already deployed (hidden) in the
+    # same domain. Otherwise clients get configured to point at a host that
+    # doesn't exist and the host-side ACLs deny-all their Internet egress.
+    if (Get-Command Test-VmUsesProxy -ErrorAction SilentlyContinue) {
+        $optedIn = @($ConfigObject.virtualMachines | Where-Object {
+                -not $_.hidden -and (Test-VmUsesProxy -Vm $_ -DeployConfig $ConfigObject)
+            })
+        if ($optedIn.Count -gt 0 -and $proxyVMs.Count -eq 0) {
+            $existingProxy = $null
+            try {
+                $existingProxy = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName |
+                        Where-Object { $_.role -eq 'Proxy' })
+            }
+            catch { $existingProxy = $null }
+            if (-not $existingProxy -or $existingProxy.Count -eq 0) {
+                $names = ($optedIn | Select-Object -ExpandProperty vmName) -join ', '
+                $cause = if ($ConfigObject.domainDefaults -and
+                             (($ConfigObject.domainDefaults.UseProxyForClients) -or
+                              ($ConfigObject.domainDefaults.UseProxyForCM) -or
+                              ($ConfigObject.domainDefaults.UseProxy))) {
+                    "domainDefaults UseProxyForClients/UseProxyForCM is enabled"
+                }
+                else {
+                    "one or more VMs have useProxy=true"
+                }
+                Add-ValidationMessage -Message "VM Validation: $cause but no Proxy VM exists in this config or the existing '$($ConfigObject.vmOptions.domainName)' domain. Affected VM(s): $names. Add a Linux VM with role=Proxy, or set UseProxyForClients/UseProxyForCM to false." -ReturnObject $ReturnObject -Failure
+            }
+        }
+    }
     if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
         $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $ConfigObject.pkiOptions.OfflineRootCAVM }
         if (-not $rootVMObj) {
