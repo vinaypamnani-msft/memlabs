@@ -38,7 +38,8 @@ try {
     })
 
     if (-not $proxyVm -or $proxyClients.Count -eq 0) {
-        Write-DscStatus "ConfigureCMProxy: no Proxy VM or no opted-in clients; nothing to do"
+        $proxyState = if ($proxyVm) { "Proxy=$($proxyVm.vmName)" } else { "Proxy=<none>" }
+        Write-DscStatus "ConfigureCMProxy: nothing to do. $proxyState; opted-in clients=$($proxyClients.Count); total VMs in deployConfig=$(@($deployConfig.virtualMachines).Count)"
     }
     else {
         # Connect to the CM site PS drive (sets $SiteCode and cd's into <SiteCode>:\)

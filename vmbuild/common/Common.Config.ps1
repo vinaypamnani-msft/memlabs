@@ -991,6 +991,21 @@ function Add-ExistingVMsToDeployConfig {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
     }
+
+    # Add existing Proxy VM to list when any non-hidden VM opts into useProxy.
+    # Phase 5 DSC (ConfigureCMProxy.ps1) needs the Proxy VM in deployConfig
+    # to apply Set-CMSiteSystemServer -UseProxy on opted-in site systems.
+    $proxyClients = @($config.virtualMachines | Where-Object { $_.useProxy -eq $true -and -not $_.Hidden })
+    if ($proxyClients.Count -gt 0) {
+        $proxyInConfig = @($config.virtualMachines | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+        if (-not $proxyInConfig) {
+            $existingProxy = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role 'Proxy'
+            if ($existingProxy) {
+                $proxyName = if ($existingProxy -is [array]) { $existingProxy[0] } else { $existingProxy }
+                Add-ExistingVMToDeployConfig -vmName $proxyName -configToModify $config
+            }
+        }
+    }
 }
 
 function Add-ModifiedExistingVMToDeployConfig {
