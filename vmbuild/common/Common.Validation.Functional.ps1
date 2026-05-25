@@ -175,15 +175,7 @@ function Test-VmFunctionality {
         if ($testsPassed -and -not (Test-InternetBlocked -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
             $testsPassed = $false
         }
-        # UseProxy on a Site System Server only matters for roles that actually
-        # make outbound HTTP from that box (SUP, SCP, CMG connector). A plain
-        # DPMP-only SiteSystem has nothing that honors the flag, so CM leaves
-        # it at 0 and there's nothing to validate. CAS/Primary typically host
-        # SCP, so always validate them.
-        $needsCmProxyCheck = $false
-        if ($role -in @('CAS', 'Primary')) { $needsCmProxyCheck = $true }
-        elseif ($role -eq 'SiteSystem' -and $CurrentItem.installSUP -eq $true) { $needsCmProxyCheck = $true }
-        if ($testsPassed -and $needsCmProxyCheck) {
+        if ($testsPassed -and $role -in @('CAS', 'Primary', 'SiteSystem')) {
             if (-not (Test-CMSiteRoleProxy -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
                 $testsPassed = $false
             }

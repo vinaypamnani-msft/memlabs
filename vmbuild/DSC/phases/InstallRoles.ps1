@@ -338,14 +338,9 @@ try {
         $proxyPort = 3128
         Write-DscStatus "Applying CM proxy ($proxyFqdn`:$proxyPort) to $($proxyClients.Count) opted-in VM(s)"
 
-        # Only set UseProxy on site systems whose installed roles actually make
-        # outbound HTTP from that box. CAS/Primary typically host SCP; SUP-bearing
-        # site systems need it for catalog/binaries downloads. Plain DP/MP-only
-        # site systems do not consume the flag, so don't bother setting it.
-        $alwaysProxyRoles = @('CAS', 'Primary')
+        $siteSystemRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
         foreach ($cvm in $proxyClients) {
-            $needsProxy = ($cvm.role -in $alwaysProxyRoles) -or ($cvm.installSUP -eq $true)
-            if (-not $needsProxy) { continue }
+            if ($cvm.role -notin $siteSystemRoles -and -not ($cvm.installSUP -eq $true)) { continue }
 
             $fqdn = "$($cvm.vmName).$DomainFullName"
             $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
