@@ -639,8 +639,8 @@ Configuration Phase8
         WaitForAll ActiveNode {
             ResourceName     = '[WriteStatus]Complete'
             NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 25
-            RetryCount       = 1300
+            RetryIntervalSec = 5
+            RetryCount       = 6500
             DependsOn        = '[WriteStatus]WaitActive'
         }
 

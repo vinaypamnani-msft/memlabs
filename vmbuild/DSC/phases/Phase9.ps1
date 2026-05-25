@@ -439,8 +439,8 @@ Configuration Phase9
         WaitForAll ActiveNode {
             ResourceName     = '[WriteStatus]Complete'
             NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 15
-            RetryCount       = 1200
+            RetryIntervalSec = 5
+            RetryCount       = 3600
             DependsOn        = '[WriteStatus]WaitActive'
         }
 
