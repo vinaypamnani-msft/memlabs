@@ -202,8 +202,16 @@ class InstallADK {
         Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
         # Local helper: invoke adksetup with a dedicated log file, check
-        # exit code, and tail the log on failure so we never silently loop
-        # claiming success when the install actually bailed out.
+        # exit code, and surface the real failure on error.
+        #
+        # adksetup is a WiX Burn bundle; on failure it dumps ~hundreds of
+        # WixBundle* variables at the end of the log, so a plain "last 40
+        # lines" tail just captures variable dumps and tells us nothing
+        # useful. Burn prefixes meaningful lines with single-letter codes:
+        #   i### informational, w### warning, e### error, f### fatal
+        # We extract the error/warning/fatal lines (plus a few lines of
+        # surrounding context) so the DSC status surfaces the actual root
+        # cause -- which package failed, MSI return, missing prereq, etc.
         $invokeAdk = {
             param($exe, [string[]]$argv, $label)
             $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
@@ -212,13 +220,26 @@ class InstallADK {
             Write-Status ("Running adksetup: {0} {1}" -f $exe, ($full -join ' '))
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
-            Write-Status ("adksetup ({0}) exit code: {1}" -f $label, $code)
+            Write-Status ("adksetup ({0}) exit code: {1} (0x{2:x})" -f $label, $code, $code)
             if ($code -ne 0) {
-                $tail = ''
+                $errLines = @()
                 if (Test-Path $logFile) {
-                    try { $tail = (Get-Content -LiteralPath $logFile -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } catch { }
+                    try {
+                        # Pull all e###/f###/w### lines + any line containing
+                        # 'Error', 'failed', 'returned exit code', or 'cancel'
+                        # (case-insensitive). Also grab "Applying ..." lines
+                        # right before failures so we know which package blew up.
+                        $all = Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue
+                        $pattern = '^\s*\[[^\]]+\]\s*[efw]\d{3}:|Error\s+\d|failed|returned\s+(error|exit code)|cancel|Applying execute package'
+                        $errLines = $all | Where-Object { $_ -match $pattern } | Select-Object -Last 40
+                    } catch { }
                 }
-                Write-Status ("adksetup ({0}) failed. Log {1}. Tail:`n{2}" -f $label, $logFile, $tail)
+                if (-not $errLines -or $errLines.Count -eq 0) {
+                    # Fallback to plain tail if our regex matched nothing
+                    try { $errLines = Get-Content -LiteralPath $logFile -Tail 25 -ErrorAction SilentlyContinue } catch { }
+                }
+                $diag = ($errLines -join "`n")
+                Write-Status ("adksetup ({0}) failed. Log {1}. Diagnostic lines:`n{2}" -f $label, $logFile, $diag)
             }
             return $code
         }
