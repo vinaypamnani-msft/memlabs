@@ -1631,7 +1631,10 @@ function Set-WindowsClientProxy {
             foreach ($mcPath in $machineConfigPaths) {
                 if (-not (Test-Path $mcPath)) { continue }
                 $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
-                $configNode = $xml.configuration
+                # Use DocumentElement (live XmlElement) instead of $xml.configuration
+                # which goes through PS XML adapter and can return a detached view
+                # whose AppendChild mutations don't survive Save().
+                $configNode = $xml.DocumentElement
                 $sysNet = $configNode.SelectSingleNode('system.net')
                 if (-not $sysNet) {
                     $sysNet = $xml.CreateElement('system.net')
