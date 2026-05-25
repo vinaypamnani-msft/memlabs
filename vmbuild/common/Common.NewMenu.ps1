@@ -1138,6 +1138,20 @@ function Show-Menu {
                             -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
         }
 
+        # Final chicken-and-egg check: BottomReserve in Get-RoomLeftFromCurrentPosition
+        # holds 1 row for the PgDn indicator. If we'd still paginate after
+        # exhausting shrink, retry with that row reclaimed -- if the remaining
+        # items fit in the indicator's slot, we don't need the indicator at all.
+        if ($layout.PgDnNeeded -and $pageStartIndex -eq 0) {
+            $bannerWillDraw = (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help)
+            $reclaimRows    = [Math]::Max(1, $RoomLeft - $(if ($bannerWillDraw) { $helpBannerCost } else { 0 }) + 1)
+            $retryLayout    = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
+                                -WrapAt $wrapAt -AvailableRows $reclaimRows -StartIndex $pageStartIndex
+            if (-not $retryLayout.PgDnNeeded) {
+                $layout = $retryLayout
+            }
+        }
+
         # Now that the shrink plan is final, draw the help banner if it survived.
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
