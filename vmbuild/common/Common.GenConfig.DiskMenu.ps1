@@ -360,7 +360,7 @@ function Select-VMDisksMenu {
                 if ($global:GenConfigErrorMessages) {
                     $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
                     if ($diskErr) {
-                        $text = $text.PadRight(34) + "[x] $($diskErr.Message)"
+                        $text = $text.PadRight(45) + "[x] $($diskErr.Message)"
                         $color = "Salmon"
                         $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
                     }
