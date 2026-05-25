@@ -750,19 +750,25 @@ function Select-VirtualMachines {
                             "*B1" = ""
                             "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
                         }
-                        # Inline one row per existing disk (when present). itemName
-                        # is "d<letter>" -- 2 chars keeps Write-Option's
-                        # PadRight(4 - len) happy. "-D" prefix marks the row
-                        # deletable; Delete key returns "-Dd<letter>".
-                        # Picking a row (uppercased to "D<letter>" by dispatch)
-                        # edits the size. Letter-collision with single-letter
-                        # actions (M/S/U/H/X/Z) is avoided by the "d" prefix.
+                        # Inline one row per existing disk (when present).
+                        # itemName must be either a single letter or a number;
+                        # multi-letter alpha keys ("dE" etc.) are not dispatched
+                        # correctly by Get-Menu2. Use high numeric IDs (90+) so
+                        # they don't collide with the property list's 1..N
+                        # numbering, and keep a $diskNumToLetter map for the
+                        # reverse lookup. "-D" prefix marks the row deletable
+                        # (Delete key returns "-D<num>").
                         $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
+                        $diskNumToLetter = @{}
+                        $diskNum = 90
                         foreach ($dl in $diskLettersInline) {
                             $dsize = $virtualMachine.additionalDisks.$dl
                             $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
-                            $customOptions["-Dd$dl"] = "$($dl):  $dsize".PadRight(20) + "($dusage)"
-                            $customOptions["Hd$dl"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
+                            $key = [string]$diskNum
+                            $customOptions["-D$key"] = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                            $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
+                            $diskNumToLetter[$key] = $dl
+                            $diskNum++
                         }
                         $customOptions["M"]  = "Manage Disks  ($diskSummary)"
                         $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
@@ -990,15 +996,16 @@ function Select-VirtualMachines {
                             Select-VMDisksMenu -VirtualMachine $virtualMachine
                             $newValue = "Start"
                         }
-                        # Inline disk rows: itemName "d<letter>" -> uppercased to
-                        # "D<letter>" in dispatch. Edit size on pick; Delete key
-                        # returns "-DD<letter>" -> remove.
-                        if ($newValue -match '^-DD([E-Y])$') {
-                            $null = Invoke-RemoveDisk -VirtualMachine $virtualMachine -Letter $matches[1]
+                        # Inline disk rows: itemName is "<num>" (90+). Pick
+                        # returns "<num>" -> Invoke-EditDiskSize. Delete key
+                        # returns "-D<num>" -> Invoke-RemoveDisk. Map back to
+                        # disk letter via $diskNumToLetter populated above.
+                        if ($newValue -match '^-D(9\d)$' -and $diskNumToLetter.ContainsKey($matches[1])) {
+                            $null = Invoke-RemoveDisk -VirtualMachine $virtualMachine -Letter $diskNumToLetter[$matches[1]]
                             $newValue = "Start"
                         }
-                        elseif ($newValue -match '^D([E-Y])$') {
-                            $null = Invoke-EditDiskSize -VirtualMachine $virtualMachine -Letter $matches[1]
+                        elseif ($newValue -match '^(9\d)$' -and $diskNumToLetter.ContainsKey($matches[1])) {
+                            $null = Invoke-EditDiskSize -VirtualMachine $virtualMachine -Letter $diskNumToLetter[$matches[1]]
                             $newValue = "Start"
                         }
                         if (-not ($newValue -eq "Z")) {
