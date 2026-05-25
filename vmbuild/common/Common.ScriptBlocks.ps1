@@ -266,9 +266,11 @@ $global:VM_Create = {
             # Linux VMs get static memory; no balloon driver gymnastics.
             # If memory amount changed, stop, set static, restart. Otherwise
             # just ensure dynamic is off (cheap, no-op if already off).
-            $isLinux = Test-VmIsLinux -Vm $currentItem
+            # NB: $IsLinux is a PowerShell automatic constant -- use a
+            # different name or assignment throws "read-only or constant".
+            $vmIsLinux = Test-VmIsLinux -Vm $currentItem
 
-            if ($isLinux) {
+            if ($vmIsLinux) {
                 if ($memory -ne $currentMemory) {
                     if ($vm.State -eq "Running") {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping Linux VM."
