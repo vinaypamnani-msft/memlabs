@@ -107,22 +107,94 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
 #   * setupdl.exe (the pre-req downloader) is idempotent -- it has its own
 #     two-successes-in-a-row verification loop and will quickly re-verify
 #     already-downloaded files. Safe to re-run.
-#   * setup.exe (the actual site installer) does NOT handle re-entry well
-#     against a partial install; the supported recovery is to restore the
-#     Phase 8 checkpoint on this VM.
+#   * setup.exe before it creates the site database: nothing of substance
+#     committed yet (no CM_<sitecode> on the SQL server). Safe to re-run.
+#   * setup.exe after the CM_<sitecode> database exists: partial install
+#     state lives in SQL and on disk; re-running setup.exe is unsafe and
+#     the supported recovery is to restore the Phase 8 checkpoint on this
+#     VM.
 #
-# We distinguish the two with a breadcrumb file written immediately before
-# we launch setup.exe (see $setupExeStartedFlag below). Missing breadcrumb
-# means we never got past setupdl, so we reset 'Running' -> 'NotStart' and
-# let the install block re-run. Present breadcrumb means setup.exe was at
-# least started -- fail loudly and demand the checkpoint restore.
+# Two breadcrumbs disambiguate:
+#   $setupExeStartedFlag: written just before Start-Process setup.exe.
+#   CM_<SiteCode> database on $sqlServerName\$sqlInstanceName: probed via
+#     a short-timeout System.Data.SqlClient query against sys.databases.
+#
+# Decision matrix on Status='Running' re-entry:
+#   flag absent                      -> setupdl/ini phase, reset to NotStart
+#   flag present + DB absent         -> setup.exe failed early, reset
+#   flag present + DB present        -> fail loudly, demand checkpoint
+#   flag present + SQL unreachable   -> fail loudly (conservative; can't
+#                                       confirm DB state, assume worst)
 $setupExeStartedFlag = 'C:\staging\DSC\InstallSCCM.setupexe.started'
 if ($Configuration.InstallSCCM.Status -eq 'Running') {
-    if (Test-Path $setupExeStartedFlag) {
-        Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry and setup.exe breadcrumb is present ($setupExeStartedFlag) -- prior setup.exe attempt was killed mid-flight. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got." -Failure
+
+    $resetReason = $null      # if set, we will reset to NotStart
+    $failReason = $null      # if set, we will Write-DscStatus -Failure and return
+
+    if (-not (Test-Path $setupExeStartedFlag)) {
+        $resetReason = "setup.exe breadcrumb absent -- prior attempt was killed before setup.exe launched (still in setupdl or earlier)."
+    }
+    else {
+        # Breadcrumb present. Probe the site DB to decide whether setup.exe
+        # got far enough to do real damage.
+        $cmDbName = "CM_$SiteCode"
+        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+            $sqlDataSource = "$sqlServerName\$sqlInstanceName"
+        }
+        else {
+            $sqlDataSource = $sqlServerName
+        }
+        if ($sqlPort -and $sqlPort -ne 1433) {
+            $sqlDataSource = "$sqlServerName,$sqlPort"
+        }
+        Write-DscStatus "InstallSCCM.Status='Running' on re-entry with setup.exe breadcrumb present. Probing [$sqlDataSource] for database [$cmDbName] to decide whether retry is safe..."
+
+        $probeReached = $false
+        $probeDbExists = $false
+        $probeError = $null
+        try {
+            $cs = "Data Source=$sqlDataSource;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+            $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $conn.Open()
+            try {
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @n"
+                $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128)
+                $p.Value = $cmDbName
+                [int]$probeCount = $cmd.ExecuteScalar()
+                $probeDbExists = ($probeCount -gt 0)
+                $probeReached = $true
+            }
+            finally {
+                $conn.Close()
+            }
+        }
+        catch {
+            $probeError = $_.Exception.Message
+        }
+
+        if (-not $probeReached) {
+            $failReason = "setup.exe breadcrumb present but SQL probe of [$sqlDataSource] failed: $probeError. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+        }
+        elseif ($probeDbExists) {
+            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- prior setup.exe attempt created the site database before being killed. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+        }
+        else {
+            $resetReason = "setup.exe breadcrumb present but [$cmDbName] does not exist on [$sqlDataSource] -- prior setup.exe attempt failed before creating the site database, so no install state was committed. Safe to retry."
+        }
+    }
+
+    if ($failReason) {
+        Write-DscStatus $failReason -Failure
         return
     }
-    Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry but setup.exe breadcrumb is absent -- prior attempt was killed before setup.exe launched (still in setupdl or earlier). Resetting to 'NotStart' so setupdl + setup.exe re-run from a clean state."
+
+    # Otherwise reset and fall through to the install block.
+    Write-DscStatus "InstallSCCM.Status='Running' on re-entry: $resetReason Resetting to 'NotStart' so setupdl + setup.exe re-run from a clean state."
+    # Clear the breadcrumb so the next attempt starts from a clean state.
+    if (Test-Path $setupExeStartedFlag) {
+        Remove-Item -Path $setupExeStartedFlag -Force -ErrorAction SilentlyContinue
+    }
     $Configuration.InstallSCCM.Status = 'NotStart'
     $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
