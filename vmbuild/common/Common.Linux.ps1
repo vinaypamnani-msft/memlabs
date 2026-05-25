@@ -1677,6 +1677,18 @@ function Set-WindowsClientProxy {
                 }
             }
 
+            # .NET Framework reads machine.config ONCE per AppDomain. If
+            # WmiPrvSE.exe (DSC's host) was already running before we wrote
+            # <defaultProxy>, the cached AppDomain still has no proxy and
+            # any DSC-driven download bypasses the proxy -> hits the deny
+            # ACL -> "Unable to connect to the remote server". Killing the
+            # WMI provider hosts forces fresh AppDomain load on the next
+            # WMI call, which picks up the new machine.config.
+            try {
+                Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            } catch { }
+
             # Show resulting WinHTTP state for the log
             $current = & netsh winhttp show proxy
             return @{ Ok = $true; WinHttp = ($current -join "`n") }
