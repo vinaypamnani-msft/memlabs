@@ -198,6 +198,16 @@ function Start-NormalJobs {
     # (e.g. Start-Maintenance) has no deployConfig. The script blocks guard
     # against null before using it.
     $deployConfigCopy = $null
+
+    # ThreadJob's $using: parser only supports bare variable expressions --
+    # member access like $using:Common.DevBranch throws "Cannot get the value
+    # of the Using expression". Pre-extract the few $Common properties used
+    # by ThreadJob-eligible scriptblocks (Phase10Job, DeleteVMs) into locals
+    # so they can be referenced as $using:devBranchValue / etc. Harmless when
+    # ThreadJob isn't in play -- Start-Job also resolves these names fine.
+    $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
+    $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
+    $localAdmin = if ($Common) { $Common.LocalAdmin } else { $null }
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {

@@ -446,7 +446,7 @@ function Remove-Domain {
             # Remove-VirtualMachine only needs Get-List / Get-VM2 / DHCP cmdlets
             # / $Common.CachePath -- none of which depend on storage init,
             # supported-options, hotfix lookup, or env detection.
-            . $rootPath\Common.ps1 -InJob -StartupProfile Fast -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+            . $rootPath\Common.ps1 -InJob -StartupProfile Fast -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase

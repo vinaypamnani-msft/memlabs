@@ -13,7 +13,7 @@ $global:Phase10Job = {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue -GetLatestHotfixVersion
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
         # Get variables from parent scope
