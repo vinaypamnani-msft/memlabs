@@ -2833,6 +2833,25 @@ function Test-CMSiteRoleProxy {
     $fqdn = "$VMName.$domain"
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Verifying CM site-role UseProxy flag" -LogOnly
 
+    # SMS Provider / root\sms only exists on the site server (CAS/Primary).
+    # For a SiteSystem (DPMP/etc.), redirect the WMI query to its owning site
+    # server and match this VM's fqdn in SMS_SCI_SysResUse there.
+    $targetVM = $VMName
+    if ($CurrentItem.role -eq 'SiteSystem') {
+        $siteCode = $CurrentItem.siteCode
+        if (-not $siteCode) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SiteSystem has no siteCode; cannot locate site server" -Warning
+            return $false
+        }
+        $siteServer = Get-SiteServerForSiteCode -deployConfig $DeployConfig -SiteCode $siteCode -type Name -DomainName $domain
+        if (-not $siteServer) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Could not find site server for siteCode '$siteCode'" -Warning
+            return $false
+        }
+        $targetVM = $siteServer
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Querying SMS provider on site server '$targetVM' for SiteSystem '$fqdn'" -LogOnly
+    }
+
     $scriptBlock = {
         param($expectedFqdn)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -2890,7 +2909,7 @@ function Test-CMSiteRoleProxy {
         return $results
     }
 
-    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+    $result = Invoke-VmCommand -VmName $targetVM -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $fqdn `
         -DisplayName "Phase11-CMRoleProxy-Test" -SuppressLog
 
