@@ -102,6 +102,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "SQLAO" { return $ServerList }
         "PassiveSite" { return $ServerList }
         "Proxy" { return @("Ubuntu Server 24.04 LTS") }
+        "LinuxServer" { return @("Ubuntu Server 24.04 LTS") }
         "DomainMember" {
             if ($vm -and $vm.SqlVersion) {
                 return $ServerList

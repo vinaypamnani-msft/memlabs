@@ -310,6 +310,7 @@ function Format-Roles {
             "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS Server]" }
             "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding))`t[Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
             "Proxy" { $newRoles += "$($role.PadRight($padding))`t[Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
+            "LinuxServer" { $newRoles += "$($role.PadRight($padding))`t[Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
             default { $newRoles += $role }
         }
     }
@@ -382,7 +383,7 @@ function Select-RolesForExisting {
         @{ Name = "SQL Servers"           ; Roles = @("SqlServer", "SQLAO") }
         @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient") }
         @{ Name = "Configuration Manager" ; Roles = @("CAS", "CAS and Primary", "Primary", "Secondary", "SiteSystem") }
-        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy") }
+        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy", "LinuxServer") }
     )
 
     # Build an ordered list of roles bucketed by group, plus an "Other" bucket

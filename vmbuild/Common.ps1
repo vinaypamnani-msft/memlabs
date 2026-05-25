@@ -4684,7 +4684,8 @@ function Set-SupportedOptions {
         "DC",
         "BDC",
         "StandaloneRootCA",
-        "Proxy"
+        "Proxy",
+        "LinuxServer"
     )
 
     $rolesForExisting = @(
@@ -4703,7 +4704,8 @@ function Set-SupportedOptions {
         "WSUS",
         "BDC",
         "StandaloneRootCA",
-        "Proxy"
+        "Proxy",
+        "LinuxServer"
     )
 
     $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs")

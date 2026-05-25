@@ -410,6 +410,149 @@ power_state:
     return $OutputIsoPath
 }
 
+function Get-LinuxDomainJoinSeedArgs {
+    <#
+    .SYNOPSIS
+        Build the ExtraPackages + ExtraRunCmd additions needed to realm-join a
+        Linux VM to the lab AD domain during cloud-init first boot.
+
+    .DESCRIPTION
+        Returns $null when prerequisites aren't met (missing network base, DC,
+        or LocalAdmin credential). Otherwise returns a hashtable with:
+          ExtraPackages : @(realmd, sssd, ...)
+          ExtraRunCmd   : @(wait-for-dns, set-dns, realm-join, mkhomedir, ...)
+          DcIp          : resolved DC IPv4 used for DNS reconfig
+          AdminUser     : domain admin username used for the join
+        Caller merges these into seedArgs before invoking New-LinuxSeedIso.
+
+        Credentials end up in /var/log/cloud-init-output.log on the VM, which
+        is an acceptable lab tradeoff (same password is already exposed via
+        console login chpasswd in the seed ISO).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$DeployConfig,
+
+        [Parameter(Mandatory = $true)]
+        [object]$ThisVm,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain
+    )
+
+    if (-not $DeployConfig -or -not $DeployConfig.vmOptions) { return $null }
+
+    # DC IP: memlabs convention is <network>.1. Prefer the VM's own network
+    # if set, otherwise fall back to vmOptions.network.
+    $netBase = $ThisVm.network
+    if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+    if (-not ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$')) {
+        Write-Log "Get-LinuxDomainJoinSeedArgs: network '$netBase' isn't /24 a.b.c.0 form; cannot derive DC IP" -Warning
+        return $null
+    }
+    $dcIp = "$($Matches[1]).1"
+
+    # Admin user: vmOptions.adminName is the lab domain admin account.
+    $adminUser = $DeployConfig.vmOptions.adminName
+    if (-not $adminUser) {
+        Write-Log "Get-LinuxDomainJoinSeedArgs: vmOptions.adminName is empty; cannot realm-join" -Warning
+        return $null
+    }
+
+    # Password from host-side $Common.LocalAdmin. Same password the rest of
+    # the lab uses for the domain admin (memlabs convention).
+    $adminPwd = $null
+    if ($Common -and $Common.LocalAdmin) {
+        try { $adminPwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $adminPwd = $null }
+    }
+    if (-not $adminPwd) {
+        Write-Log "Get-LinuxDomainJoinSeedArgs: \$Common.LocalAdmin not available; cannot realm-join" -Warning
+        return $null
+    }
+
+    # Bash single-quote escape: ' -> '\''
+    $pwBashSingle = $adminPwd -replace "'", "'\''"
+    $domainLower = $Domain.ToLower()
+
+    $extraPackages = @(
+        'realmd',
+        'sssd',
+        'sssd-tools',
+        'adcli',
+        'krb5-user',
+        'packagekit',
+        'samba-common-bin',
+        'oddjob',
+        'oddjob-mkhomedir',
+        'libnss-sss',
+        'libpam-sss'
+    )
+
+    # Quoting hell avoidance: build the join script as bash source, then
+    # base64-encode it and emit a single runcmd line:
+    #   echo <b64> | base64 -d > /root/join.sh && bash /root/join.sh
+    # The script body is opaque to PowerShell here-string parsing, YAML, and
+    # bash -c " " word splitting, so no escaping of $/`/"/' is needed inside.
+    $joinScript = @"
+#!/bin/bash
+set -uo pipefail
+DOMAIN='$domainLower'
+DC_IP='$dcIp'
+ADMIN_USER='$adminUser'
+ADMIN_PWD='$pwBashSingle'
+# Point resolver at the DC so realm discover can find AD SRV records.
+/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
+# Wait up to 20 minutes for the DC's A record to resolve (DC DSC may
+# still be coming up when cloud-init runs).
+for i in {1..80}; do
+  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
+  echo "memlabs-realm-join: waiting for DNS on `$DOMAIN (attempt `$i/80)"
+  sleep 15
+done
+realm discover "`$DOMAIN" || true
+# Retry the join up to 5 times in case the DC accepts auth but hasn't
+# fully replicated.
+for i in {1..5}; do
+  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
+    JOINED=1
+    break
+  fi
+  echo "memlabs-realm-join: join attempt `$i failed, retrying in 30s"
+  sleep 30
+done
+if [ "`${JOINED:-0}" != "1" ]; then
+  echo "memlabs-realm-join: ERROR - all join attempts failed"
+  exit 1
+fi
+# Allow login as plain "user" (not "user@domain") and auto-create home dirs.
+realm permit --realm "`$DOMAIN" --all || true
+sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
+sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
+pam-auth-update --enable mkhomedir || true
+systemctl restart sssd || true
+# Domain Admins -> sudo NOPASSWD.
+echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
+chmod 0440 /etc/sudoers.d/memlabs-domain-admins
+"@
+
+    # Base64-encode the script (UTF-8 LF line endings) so it survives the
+    # YAML/bash quoting layers untouched.
+    $scriptLf = $joinScript -replace "`r`n", "`n"
+    $scriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptLf))
+
+    $extraRunCmd = @(
+        "bash -c 'echo $scriptB64 | base64 -d > /root/memlabs-realm-join.sh && chmod 0700 /root/memlabs-realm-join.sh && /root/memlabs-realm-join.sh; shred -u /root/memlabs-realm-join.sh 2>/dev/null || true'"
+    )
+
+    return [pscustomobject]@{
+        ExtraPackages = $extraPackages
+        ExtraRunCmd   = $extraRunCmd
+        DcIp          = $dcIp
+        AdminUser     = $adminUser
+    }
+}
+
 function New-LinuxVirtualMachine {
     <#
     .SYNOPSIS
@@ -621,6 +764,24 @@ function New-LinuxVirtualMachine {
                     'install -d -m 0755 /etc/xdg',
                     "bash -c `"cat > /etc/xdg/mimeapps.list <<'EOF'`n[Default Applications]`nx-scheme-handler/http=firefox.desktop`nx-scheme-handler/https=firefox.desktop`ntext/html=firefox.desktop`nEOF`""
                 )
+            }
+
+            # joinDomain toggle (currently exposed on the LinuxServer VM in
+            # genconfig). When true, cloud-init installs realmd/SSSD packages
+            # and runs `realm join` against the lab AD domain after waiting
+            # for DC DNS to come up. Credentials come from $Common.LocalAdmin
+            # (same password used everywhere else in the lab) and
+            # $DeployConfig.vmOptions.adminName for the user.
+            if ($thisVm -and $thisVm.PSObject.Properties.Name -contains 'joinDomain' -and [bool]$thisVm.joinDomain) {
+                $joinExtra = Get-LinuxDomainJoinSeedArgs -DeployConfig $DeployConfig -ThisVm $thisVm -Domain $Domain
+                if ($joinExtra) {
+                    Write-Log "$VmName`: joinDomain=true; cloud-init will realm-join '$Domain' as user '$($joinExtra.AdminUser)' (DC IP $($joinExtra.DcIp))"
+                    $seedArgs.ExtraPackages = @($seedArgs.ExtraPackages) + $joinExtra.ExtraPackages | Where-Object { $_ } | Select-Object -Unique
+                    $seedArgs.ExtraRunCmd = @($seedArgs.ExtraRunCmd) + $joinExtra.ExtraRunCmd | Where-Object { $_ }
+                }
+                else {
+                    Write-Log "$VmName`: joinDomain=true but domain-join args could not be resolved (missing DC, network, or admin creds); skipping join" -Warning
+                }
             }
         }
         $null = New-LinuxSeedIso @seedArgs

@@ -175,6 +175,10 @@ function Add-NewVMForRole {
             # Proxy is always Linux (Ubuntu) -- no OS choice.
             $OperatingSystem = "Ubuntu Server 24.04 LTS"
         }
+        elseif ($role -eq "LinuxServer") {
+            # Generic Linux server: same base image as Proxy, DHCP networking.
+            $OperatingSystem = "Ubuntu Server 24.04 LTS"
+        }
         elseif ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             if (-not $OSList -or $OSList.Count -eq 0) {
@@ -282,10 +286,28 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
     }
 
+    if ($role -eq "LinuxServer") {
+        # Generic Linux VM: no TPM, DHCP networking (default in New-LinuxSeedIso),
+        # slightly larger footprint than Proxy since it's a general-purpose box.
+        # osFamily=Linux makes Test-VmIsLinux short-circuit the Windows create/
+        # validation paths the same way it does for Proxy.
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "2GB"
+        $virtualMachine.virtualProcs = 2
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional xrdp + xfce4 desktop (same toggle as Proxy).
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
+        # Optional realmd/SSSD join to the lab AD domain on first boot.
+        # When true, New-LinuxVirtualMachine adds realmd packages + a
+        # `realm join` runcmd to the cloud-init seed ISO. Default false
+        # so the VM stands alone unless the user opts in.
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
+    }
+
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "LinuxServer")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
