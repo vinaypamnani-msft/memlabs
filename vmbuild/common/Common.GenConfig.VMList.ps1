@@ -83,6 +83,12 @@ function Select-Options {
                 continue
 
             }
+            # additionalDisks is rendered/edited via the dedicated "Manage Disks"
+            # entry (M) below; suppress the auto-generated property row so the
+            # user doesn't see a confusing PSCustomObject dump.
+            if ($isVM -and $item -eq "AdditionalDisks") {
+                continue
+            }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
                 $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
@@ -737,19 +743,12 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
+                        $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
                         $customOptions = [ordered]@{ 
                             "*B1" = ""
                             "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
-                            "A"   = "Add Additional Disk"
-                            "HA"  = "Add an additional VHDX to this VMs configuration"
-                        }
-                        if ($null -eq $virtualMachine.additionalDisks) {
-                        }
-                        else {
-                            $customOptions += [ordered]@{
-                                "R"  = "Remove Last Additional Disk"
-                                "HR" = "The last disk added to this configuration will be removed"
-                            }
+                            "M"   = "Manage Disks  ($diskSummary)"
+                            "HM"  = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
                         }
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
                             $customOptions += [ordered]@{
@@ -971,102 +970,9 @@ function Select-VirtualMachines {
                             }
                             $newName = Rename-VirtualMachine -vm $virtualMachine
                         }
-                        if ($newValue -eq "A") {
-                            if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "400GB" }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
-                            }
-                            else {
-                                $letters = 69
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $letters++
-                                }
-                                if ($letters -lt 90) {
-                                    $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB" -force
-                                }
-                            }
-                        }
-                        if ($newValue -eq "R") {
-                            $diskscount = 0
-                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                $diskscount++
-                            }
-                            if ($virtualMachine.Role -eq "FileServer") {
-                                if ($diskscount -le 2) {
-                                    write-host
-                                    write-redx "FileServers must have at least 2 disks"
-                                    Continue VMLoop
-                                }
-                            }
-                            if ($virtualMachine.SqlInstanceDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "SQL is configured to install to the disk we are trying to remove. Cannot remove"
-                                    Continue VMLoop
-                                }
-                            }
-
-                            if ($virtualMachine.cmInstallDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.cmInstallDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.cmInstallDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.cmInstallDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Cannot remove"
-                                    Continue VMLoop
-                                }
-                            }
-
-                            if ($virtualMachine.wsusContentDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.wsusContentDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.wsusContentDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.wsusContentDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "WSUS is configured to use the disk we are trying to remove. Cannot remove"
-                                    Continue VMLoop
-                                }
-                            }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
-                            }
-                            else {
-                                $i = 0
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $i = $i + 1
-                                    if ($i -eq $diskscount) {
-                                        $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
-                                    }
-                                }
-                            }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
-                            }
+                        if ($newValue -eq "M") {
+                            Select-VMDisksMenu -VirtualMachine $virtualMachine
+                            $newValue = "Start"
                         }
                         if (-not ($newValue -eq "Z")) {
                             Get-TestResult -SuccessOnError | out-null

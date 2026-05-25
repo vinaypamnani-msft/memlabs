@@ -4991,6 +4991,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.GenConfig.Validation.ps1
 . $PSScriptRoot\common\Common.GenConfig.AddVM.ps1
 . $PSScriptRoot\common\Common.GenConfig.VMList.ps1
+. $PSScriptRoot\common\Common.GenConfig.DiskMenu.ps1
 . $PSScriptRoot\common\Common.GenConfig.Help.ps1
 . $PSScriptRoot\common\Common.Health.ps1
 . $PSScriptRoot\common\Common.Layout.ps1
