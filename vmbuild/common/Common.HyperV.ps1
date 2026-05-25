@@ -1287,7 +1287,6 @@ function Set-VmProxyEnforcementForAllLabs {
         Write-Log "[Proxy] Reconcile: no lab subnets known; skipping (would be wide-open deny)" -Warning
         return $false
     }
-    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
 
     try {
         $allVms = @(Get-List -Type VM)
@@ -1301,6 +1300,26 @@ function Set-VmProxyEnforcementForAllLabs {
         Write-Log "[Proxy] Reconcile: no memlabs VMs found on host; nothing to do"
         return $true
     }
+
+    # Cache-race guard: fold every enumerated VM's own subnet into the union
+    # BEFORE we start stamping. Get-NetworkList reads cached VM Notes; if a
+    # parallel deploy in another domain is mid-flight (Notes not yet written,
+    # or our cache is stale), Get-NetworkList can return a partial view that
+    # OMITS that domain's subnet. Without this guard we'd then re-stamp the
+    # other domain's VMs with an allow-list missing their OWN subnet,
+    # blocking their intra-lab AD / SQL / SMB / CM traffic the moment we
+    # finished applying ACLs.
+    #
+    # The Get-List -Type VM call above iterates the same VM objects we're
+    # about to touch, so any subnet we could harm by omission is right
+    # here for us to add.
+    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($s in $labSubnets) { if ($s) { [void]$subnetSet.Add($s) } }
+    foreach ($vm in $allVms) {
+        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
+    }
+    $labSubnets = @($subnetSet)
+    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
 
     # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
     # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
@@ -1323,6 +1342,16 @@ function Set-VmProxyEnforcementForAllLabs {
 
         try {
             if ($optedIn) {
+                # Safety net: never stamp a VM whose own subnet isn't in the
+                # final allow list -- doing so would deny its intra-lab AD /
+                # SQL / SMB traffic. Should never fire after the union-fold
+                # guard above, but is cheap insurance against a regression
+                # or a VM with a missing/blank .network property.
+                if ($vm.network -and ($labSubnets -notcontains $vm.network)) {
+                    Write-Log "[Proxy] Reconcile: $($vm.vmName): own subnet '$($vm.network)' not in union ($($labSubnets -join ', ')); refusing to stamp (would break intra-lab traffic)" -Warning
+                    $failed++
+                    continue
+                }
                 if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
                     $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
                     if ($r) { $applied++ } else { $failed++ }
