@@ -24,6 +24,9 @@ _fileList_develop.json
 /vmbuild/azureFiles
 /vmbuild/cache
 
+# Local cache written by Check-FilelistUpdates.ps1 (per-environment state)
+/vmbuild/.lastResolvedFilename.json
+
 # Ignore everything inside config, except samples
 /vmbuild/config/*
 !/vmbuild/config/samples
