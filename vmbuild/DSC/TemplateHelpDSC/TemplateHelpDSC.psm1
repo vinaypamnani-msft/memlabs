@@ -142,11 +142,61 @@ function Install-MSIPackage {
     $exit = $proc.ExitCode
 
     if ($SuccessExitCodes -notcontains $exit) {
+        # MSI 1603 ("fatal error during installation") never tells you the
+        # cause in the tail of the log -- the tail is always MSI cleanup
+        # noise (MainEngineThread returning, RESTART MANAGER closing, etc).
+        # The real failure trigger lives upstream and is signalled by one
+        # of a small set of markers. Grep for those, take 5 lines of
+        # context before/after each match, dedupe, cap, and surface that
+        # instead of (or in addition to) the dumb tail.
+        $diag = ""
+        if (Test-Path -Path $LogPath) {
+            try {
+                $all = Get-Content -Path $LogPath -ErrorAction SilentlyContinue
+                if ($all) {
+                    # Patterns that bracket the real 1603 root cause:
+                    #   Return value 3.                  -> last custom action that failed
+                    #   CustomAction .* returned actual error code
+                    #   Error 1[0-9]{3}                  -> MSI numeric errors (1402 ACL, 1603 fatal, 1719 service, 1935 assembly)
+                    #   Note: 1: 27[0-9]{2}              -> internal MSI errors
+                    #   Product .* Installation failed
+                    #   Action ended .* Return value 3   -> redundant with above but catches some logs
+                    #   Failed to .*                     -> generic CA failure text
+                    $rx = '(Return value 3\.|returned actual error code|Error 1[0-9]{3}\b|Note: 1: 27[0-9]{2}|Installation failed\.|Action ended .* Return value 3|Failed to (?!find resource))'
+                    $hits = New-Object 'System.Collections.Generic.HashSet[int]'
+                    for ($i = 0; $i -lt $all.Count; $i++) {
+                        if ($all[$i] -match $rx) {
+                            for ($k = [math]::Max(0, $i - 5); $k -le [math]::Min($all.Count - 1, $i + 5); $k++) {
+                                [void]$hits.Add($k)
+                            }
+                        }
+                    }
+                    if ($hits.Count -gt 0) {
+                        $ordered = $hits | Sort-Object
+                        $sb = New-Object System.Text.StringBuilder
+                        $prev = -2
+                        foreach ($idx in $ordered) {
+                            if ($sb.Length -ge 4000) { break }
+                            if ($prev -ge 0 -and $idx -ne ($prev + 1)) { [void]$sb.AppendLine("  ...") }
+                            [void]$sb.AppendLine(("  L{0}: {1}" -f ($idx + 1), $all[$idx]))
+                            $prev = $idx
+                        }
+                        $diag = $sb.ToString().TrimEnd()
+                    }
+                }
+            } catch {}
+        }
+        # Also keep the tail as fallback context (helps if our patterns
+        # missed the actual trigger -- the tail at least shows the
+        # final state).
         $tail = ""
         if (Test-Path -Path $LogPath) {
-            try { $tail = (Get-Content -Path $LogPath -Tail 25 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+            try { $tail = (Get-Content -Path $LogPath -Tail 10 -ErrorAction SilentlyContinue) -join "`n" } catch {}
         }
-        Write-Status "msiexec for $DisplayName exited with $exit. Log tail (last 25 lines of ${LogPath}):`n$tail"
+        $msg = "msiexec for $DisplayName exited with $exit. Log: $LogPath"
+        if ($diag) { $msg += "`nFailure context (matched lines + 5 before/after, deduped):`n$diag" }
+        if ($tail) { $msg += "`nLog tail (last 10):`n$tail" }
+        Write-Status $msg
         throw "$DisplayName install failed (msiexec exit $exit). Log: $LogPath"
     }
 
