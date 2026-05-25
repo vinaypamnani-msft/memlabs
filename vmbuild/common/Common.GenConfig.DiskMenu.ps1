@@ -286,8 +286,12 @@ function Invoke-RemoveDisk {
     )
     $reason = Test-DiskRemovable -VirtualMachine $VirtualMachine -Letter $Letter
     if ($reason) {
-        Write-Host
-        Write-RedX $reason
+        # Surface the rejection inline on the disk row in the VM Properties
+        # menu (consumed by the disk-row builder on next redraw), matching
+        # how property edits show validation errors. Use a stable
+        # property key per VM+letter so multiple VMs don't collide.
+        $diskErrKey = "disk:$($VirtualMachine.vmName):$Letter"
+        Add-ErrorMessage -property $diskErrKey -message $reason
         return $false
     }
     $VirtualMachine.additionalDisks.PSObject.Properties.Remove($Letter)

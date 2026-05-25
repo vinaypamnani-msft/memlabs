@@ -781,7 +781,25 @@ function Select-VirtualMachines {
                             $dsize = $virtualMachine.additionalDisks.$dl
                             $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
                             $key = [string]$diskNum
-                            $customOptions["-D$key"] = "$($dl):  $dsize".PadRight(20) + "($dusage)%DarkSeaGreen"
+                            $rowText = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                            $rowColor = "DarkSeaGreen"
+                            # If a prior Invoke-RemoveDisk rejected this disk
+                            # (e.g. in use by SQL / ConfigMgr install dir),
+                            # surface that reason inline on the row and
+                            # consume the error so it doesn't also show in
+                            # the top banner. Mirrors Get-DataString's
+                            # [x] <message> pattern for property edits.
+                            $diskErrKey = "disk:$($virtualMachine.vmName):$dl"
+                            $diskErr = $null
+                            if ($global:GenConfigErrorMessages) {
+                                $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
+                            }
+                            if ($diskErr) {
+                                $rowText = $rowText.PadRight(34) + "[x] $($diskErr.Message)"
+                                $rowColor = "Salmon"
+                                $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
+                            }
+                            $customOptions["-D$key"] = "$rowText%$rowColor"
                             $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
                             $diskNumToLetter[$key] = $dl
                             $diskNum++
