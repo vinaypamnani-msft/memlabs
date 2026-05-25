@@ -318,63 +318,135 @@ class InstallADK {
             return $code
         }
 
+        # Layout-based install helper. Some ADK versions (notably 24H2 web
+        # installer) intermittently fail child-package downloads during
+        # /quiet install with "HttpSendRequest 0x80004005". /layout
+        # downloads every package to a local folder first (so retries
+        # don't restart already-cached files), after which we install
+        # from the local layout -- which uses zero network and can't
+        # fail on transient CDN errors.
+        #
+        # Falls back gracefully on ADK versions that don't support /layout:
+        # the call returns $null and the caller stays on direct install.
+        $invokeAdkLayout = {
+            param($exe, [string[]]$features, $label, $layoutDir)
+
+            # Detect /layout support: ADK has supported /layout since the
+            # Windows 10 1809 wave, but be defensive. If a layout attempt
+            # exits with "unknown command line argument" (logged by Burn),
+            # the caller will mark layout as unsupported and skip future
+            # layout attempts for this run.
+            if (!(Test-Path $layoutDir)) {
+                New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+            }
+
+            $layoutArgs = @('/quiet','/layout',$layoutDir,'/features') + $features
+            $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
+            if ($layoutExit -ne 0) {
+                # Probe the log for "unknown command-line" / unsupported-switch
+                # markers so the caller can disable layout for this run.
+                $logFile = Join-Path $env:TEMP ("adksetup-" + (("$label-layout") -replace '\W','_') + ".log")
+                $unsupported = $false
+                if (Test-Path $logFile) {
+                    try {
+                        $supText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
+                        if ($supText -match 'unknown command[- ]line|unrecognized.*command|Invalid command line|/layout.*(unknown|invalid)') {
+                            $unsupported = $true
+                        }
+                    } catch { }
+                }
+                return @{ Exit = $layoutExit; LayoutDir = $layoutDir; Unsupported = $unsupported }
+            }
+
+            # Layout succeeded; install from it. The layout dir contains
+            # its own adksetup.exe that knows to install from local files.
+            $localExe = Join-Path $layoutDir (Split-Path $exe -Leaf)
+            if (!(Test-Path $localExe)) {
+                # Some layouts only drop adksetup.exe regardless of source name.
+                $localExe = Join-Path $layoutDir 'adksetup.exe'
+            }
+            if (!(Test-Path $localExe)) {
+                Write-Status "Layout succeeded but no installer found in $layoutDir; treating as failure."
+                return @{ Exit = 1; LayoutDir = $layoutDir; Unsupported = $false }
+            }
+
+            $installArgs = @('/quiet','/features') + $features
+            $installExit = & $invokeAdk $localExe $installArgs ("$label-offline")
+            return @{ Exit = $installExit; LayoutDir = $layoutDir; Unsupported = $false }
+        }
+
+        # Unified install routine: prefer layout+offline (reliable on the
+        # default 24H2 ADK, whose web installer chronically fails child-MSI
+        # downloads under /quiet). If layout is reported unsupported on the
+        # ADK build in use (very old / non-Burn installers), fall through
+        # to direct install for all remaining attempts. $directOnly forces
+        # pure direct mode for callers that don't want the layout path.
+        $runAdkInstall = {
+            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, $directOnly)
+
+            $localLayoutUnsupported = [bool]$directOnly
+            $attempt = 0
+            $lastExit = -1
+            while ($attempt -lt $maxAttempts) {
+                $attempt++
+                # Layout is the preferred path; direct only on layout-unsupported builds.
+                $useLayout = (-not $localLayoutUnsupported)
+                $modeLabel = if ($useLayout) { "layout+offline" } else { "direct" }
+                Write-Status "ADK $label install... (attempt $attempt/$maxAttempts, mode=$modeLabel)"
+                try {
+                    if ($useLayout) {
+                        $result = & $invokeAdkLayout $exe $features $label $layoutDir
+                        $lastExit = $result.Exit
+                        if ($result.Unsupported) {
+                            Write-Status "ADK $label : /layout reported unsupported on this build; falling back to direct install (this attempt + remaining)."
+                            $localLayoutUnsupported = $true
+                            # Don't burn this attempt slot on the layout probe -- retry
+                            # the same attempt number as a direct install immediately.
+                            $directArgs = @('/Features') + $features + @('/q')
+                            $lastExit = & $invokeAdk $exe $directArgs $label
+                        }
+                    } else {
+                        $directArgs = @('/Features') + $features + @('/q')
+                        $lastExit = & $invokeAdk $exe $directArgs $label
+                    }
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
+                    throw "Failed to launch ADK $label setup: $ErrorMessage"
+                }
+                if ($lastExit -eq 0) { return 0 }
+                Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
+                Start-Sleep -Seconds 5
+            }
+            return $lastExit
+        }
+
         $maxAttempts = 4
 
         #Install DeploymentTools and UserStateMigrationTool in a single call
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
         $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
         Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool"
-        $attempt = 0
-        $lastExit = -1
-        while (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
-            $attempt++
-            if ($attempt -gt $maxAttempts) {
-                throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts attempts (last exit code $lastExit). Paths missing: " +
-                       (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
-            }
-            Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool... (attempt $attempt/$maxAttempts)"
-            try {
-                $lastExit = & $invokeAdk $_adkpath @('/Features','OptionId.DeploymentTools','OptionId.UserStateMigrationTool','/q') "adk-deptools"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to launch ADK setup: $ErrorMessage"
-                throw "Failed to launch ADK setup: $ErrorMessage"
-            }
-            if ($lastExit -eq 0) {
-                Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
-            } else {
-                Write-Status "adksetup exited $lastExit; will retry after backoff."
-            }
-            Start-Sleep -Seconds 5
+        $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
+        $deptoolsLayout = 'C:\temp\adk-layout-deptools'
+        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts $false
+        if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
+            throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts attempts (last exit code $lastExit). Paths missing: " +
+                   (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
+        Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
 
         #Install WindowsPreinstallationEnvironment
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
         Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
-        $attempt = 0
-        $lastExit = -1
-        while (!(Test-Path $adkinstallpath)) {
-            $attempt++
-            if ($attempt -gt $maxAttempts) {
-                throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts attempts (last exit code $lastExit). Path missing: $adkinstallpath"
-            }
-            Write-Status "Installing WindowsPreinstallationEnvironment for ADK... (attempt $attempt/$maxAttempts)"
-            try {
-                $lastExit = & $invokeAdk $_adkWinPEpath @('/Features','OptionId.WindowsPreinstallationEnvironment','/q') "adk-winpe"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to launch WinPE ADK setup: $ErrorMessage"
-                throw "Failed to launch WinPE ADK setup: $ErrorMessage"
-            }
-            if ($lastExit -eq 0) {
-                Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
-            } else {
-                Write-Status "adkwinpesetup exited $lastExit; will retry after backoff."
-            }
-            Start-Sleep -Seconds 5
+        $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
+        $winpeLayout = 'C:\temp\adk-layout-winpe'
+        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts $false
+        if (!(Test-Path $adkinstallpath)) {
+            throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts attempts (last exit code $lastExit). Path missing: $adkinstallpath"
         }
+        Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
     }
 
     [bool] Test() {
