@@ -100,6 +100,30 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
+# On re-entry (Phase 8 re-run after a killed/crashed prior attempt) treat 'Running'
+# the same as 'NotStart' -- the original runner that wrote 'Running' is gone and
+# nothing has updated it to 'Completed', so the install was never finished. The
+# only authoritative "skip the install" signal is the HKLM:\SOFTWARE\Microsoft\
+# SMS\Identification\Site Code registry value, which setup.exe writes only after
+# a successful install. If that key is present, skip; otherwise re-run setupdl
+# + setup.exe end-to-end (both are idempotent: setupdl only re-downloads missing
+# payload, setup.exe sees an existing site and no-ops or recovers).
+$siteCodeRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\Identification'
+$existingSiteCode = $null
+try {
+    if (Test-Path $siteCodeRegPath) {
+        $existingSiteCode = (Get-ItemProperty -Path $siteCodeRegPath -Name 'Site Code' -ErrorAction SilentlyContinue).'Site Code'
+    }
+}
+catch { }
+
+if ($Configuration.InstallSCCM.Status -eq 'Running' -and -not $existingSiteCode) {
+    Write-DscStatus "InstallSCCM.Status is 'Running' but Site Code registry key is missing -- prior install attempt did not finish. Resetting to 'NotStart' and re-running setupdl + setup.exe."
+    $Configuration.InstallSCCM.Status = 'NotStart'
+    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+}
+
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
     # Set Install action as Running
