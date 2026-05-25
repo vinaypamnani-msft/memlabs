@@ -555,6 +555,40 @@ function New-LinuxVirtualMachine {
                     Write-Log "$VmName`: Proxy role but network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
                 }
             }
+            # enableRDP toggle (currently exposed on the Proxy VM in genconfig).
+            # When set, install xrdp + a lightweight XFCE desktop and wire the
+            # console user into an X session so RDP logins land on a real GUI.
+            # The matching RDCMan entry (Common.RdcMan.ps1) supplies vmbuildadmin
+            # + the LocalAdmin password for automatic sign-in.
+            if ($thisVm -and $thisVm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$thisVm.enableRDP) {
+                Write-Log "$VmName`: enableRDP=true; cloud-init will install xrdp + xfce4 and open TCP/3389"
+                $seedArgs.ExtraPackages = @(
+                    'xrdp',
+                    'xorgxrdp',
+                    'xfce4',
+                    'xfce4-goodies',
+                    'dbus-x11',
+                    'xorg'
+                )
+                $seedArgs.ExtraRunCmd = @(
+                    # xrdp drops privileges to the 'xrdp' user; that user must
+                    # be able to read /etc/ssl/private/ssl-cert-snakeoil.key
+                    # to terminate TLS for the RDP handshake.
+                    'adduser xrdp ssl-cert || true',
+                    # Default session for vmbuildadmin when xrdp's startwm.sh
+                    # execs ~/.xsession. xfce4-session pulls in the rest.
+                    "install -d -o vmbuildadmin -g vmbuildadmin -m 0755 /home/vmbuildadmin",
+                    "bash -c `"echo 'xfce4-session' > /home/vmbuildadmin/.xsession`"",
+                    'chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession',
+                    'chmod 0644 /home/vmbuildadmin/.xsession',
+                    # Same default for root in case someone RDPs as root.
+                    "bash -c `"echo 'xfce4-session' > /root/.xsession`"",
+                    'chmod 0644 /root/.xsession',
+                    'ufw allow 3389/tcp || true',
+                    'systemctl enable --now xrdp || true',
+                    'systemctl enable --now xrdp-sesman || true'
+                )
+            }
         }
         $null = New-LinuxSeedIso @seedArgs
         Add-VMDvdDrive -VMName $VmName -Path $seedIsoPath | Out-Null

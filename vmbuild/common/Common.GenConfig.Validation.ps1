@@ -204,6 +204,29 @@ function Get-AdditionalValidations {
             }
         }
 
+        "enableRDP" {
+            # Proxy VM defaults are 1GB/1vCPU which is fine for headless Squid
+            # but anaemic for an xfce4 + xrdp session. Bump to 4GB/2 when the
+            # user opts in; leave alone if they've already raised the values.
+            # Linux VMs are pinned to static memory in New-LinuxVirtualMachine
+            # (Hyper-V Dynamic Memory on Linux is historically flaky), so
+            # bumping dynamicMinRam wouldn't change runtime RAM -- we have to
+            # raise the static 'memory' value itself.
+            if ($value -eq $true) {
+                if ($property.memory) {
+                    $memBytes = 0
+                    try { $memBytes = [int64]($property.memory / 1) } catch {}
+                    if ($memBytes -gt 0 -and $memBytes -lt 4GB) {
+                        $property.memory = "4GB"
+                        Add-ErrorMessage -property $name -Warning "Raised memory to 4GB for xrdp + xfce4 session."
+                    }
+                }
+                if ($property.virtualProcs -and [int]$property.virtualProcs -lt 2) {
+                    $property.virtualProcs = 2
+                    Add-ErrorMessage -property $name -Warning "Raised virtualProcs to 2 for xrdp + xfce4 session."
+                }
+            }
+        }
         "vmGeneration" {
             if ($value -notin ("1", "2")) {
                 $property.$name = "2"

@@ -261,6 +261,11 @@ function Add-NewVMForRole {
         $virtualMachine.memory = "1GB"
         $virtualMachine.virtualProcs = 1
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional xrdp + lightweight desktop for graphical login. When true,
+        # New-LinuxVirtualMachine installs xrdp/xfce4 via cloud-init and the
+        # RDCMan file includes an entry that auto-logs in as vmbuildadmin
+        # using the same LocalAdmin password as the rest of the lab.
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
     }
 
     if ($network) {

@@ -61,6 +61,7 @@ function Get-GenericHelp {
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
         "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
+        "enableRDP" { "Install xrdp + a lightweight XFCE desktop on this Linux VM via cloud-init, open TCP/3389 in ufw, and add an RDCMan entry that auto-logs in as vmbuildadmin using the lab's LocalAdmin password. Use this when you need a GUI on the Proxy VM (browser, file manager, etc.)." }
         "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients (client OS), PushCMClientToServers (server OS DomainMembers), or PushCMClientToSiteSystems (site system roles)." }
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
