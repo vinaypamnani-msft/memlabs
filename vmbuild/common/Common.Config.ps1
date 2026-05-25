@@ -1319,7 +1319,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary", "Proxy")]
         [string]$Role
     )
 

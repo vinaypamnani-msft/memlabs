@@ -1165,7 +1165,15 @@ function Set-VmProxyEnforcementForConfig {
 
     if (-not $clients) { return $true }
     if (-not $proxyVm) {
-        Write-Log "[Proxy] $($clients.Count) VM(s) opted-in but no Proxy VM in config; skipping enforcement" -Warning
+        # Add-to-existing case: Proxy lives in the existing hierarchy.
+        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        if ($existingProxyName) {
+            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+            Write-Log "[Proxy] Using existing Proxy VM '$existingProxyName' from domain '$($deployConfig.vmOptions.domainName)' for enforcement"
+        }
+    }
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($clients.Count) VM(s) opted-in but no Proxy VM in config or domain; skipping enforcement" -Warning
         return $false
     }
 

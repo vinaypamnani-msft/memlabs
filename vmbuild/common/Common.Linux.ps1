@@ -1729,7 +1729,17 @@ function Set-WindowsClientProxyForConfig {
     if (-not $clients) { return $true }
 
     if (-not $proxyVm) {
-        Write-Log "[Proxy] $($clients.Count) VM(s) have useProxy=true but no Proxy VM is in the config; skipping client config" -Warning
+        # Add-to-existing case: Proxy lives in the existing hierarchy, not
+        # in the new VM set. Look it up from the running domain inventory.
+        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        if ($existingProxyName) {
+            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+            Write-Log "[Proxy] Using existing Proxy VM '$existingProxyName' from domain '$($deployConfig.vmOptions.domainName)' for client config"
+        }
+    }
+
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($clients.Count) VM(s) have useProxy=true but no Proxy VM is in the config or domain; skipping client config" -Warning
         return $false
     }
 
@@ -1881,6 +1891,13 @@ function Set-ProxyAdminAccessForConfig {
     )
 
     $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    if (-not $proxyVm) {
+        # Add-to-existing case: Proxy may live in the existing hierarchy.
+        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        if ($existingProxyName) {
+            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+        }
+    }
     if (-not $proxyVm) { return $true }
 
     $adminRoles = @('DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite')
