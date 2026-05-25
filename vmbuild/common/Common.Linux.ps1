@@ -235,7 +235,17 @@ chpasswd:
         # answers. Restart so the dropin in write_files is picked up before
         # cloud-init's package_update tries to resolve archive.ubuntu.com.
         'systemctl restart systemd-resolved || true'
-    ) + $ExtraRunCmd
+    ) + $ExtraRunCmd + @(
+        # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
+        # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
+        # readable by Windows via Mount-VHD without ext4 support; that lets the
+        # host extract cloud-init.log post-mortem when SSH/console didn't come up.
+        # Best-effort: if any of these fail (cloud-init died early, ESP full, ...)
+        # we still want runcmd to continue.
+        'systemctl daemon-reload || true',
+        'systemctl enable memlabs-loggrab.service || true',
+        'systemctl start memlabs-loggrab.service || true'
+    )
     $runcmdYaml = ($runcmd | ForEach-Object { "  - $_" }) -join "`n"
 
     # meta-data: NoCloud requires instance-id; local-hostname is a fallback.
@@ -354,6 +364,44 @@ write_files:
       netplan apply
       systemctl restart systemd-resolved || true
       echo "DNS now: `$(resolvectl dns | grep -v '^`$')"
+  # Diagnostic loggrab: copies cloud-init / system logs to the EFI System
+  # Partition (FAT32 at /boot/efi) so the Windows host can read them by
+  # mounting the VHDX -- no ext4/WSL/GRUB-console gymnastics required.
+  # Runs every boot via memlabs-loggrab.service below; one-shot, fire-and-
+  # forget, never fails the boot.
+  - path: /usr/local/sbin/memlabs-loggrab
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set +e
+      DEST=/boot/efi/memlabs
+      mkdir -p "`$DEST"
+      for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/syslog /var/log/auth.log /var/log/kern.log; do
+        [ -r "`$f" ] && cp -f "`$f" "`$DEST/`$(basename `$f)" 2>/dev/null
+      done
+      {
+        echo "host: `$(hostname 2>/dev/null)"
+        echo "date: `$(date -Is 2>/dev/null)"
+        echo "uptime: `$(cat /proc/uptime 2>/dev/null)"
+        echo "kernel: `$(uname -a 2>/dev/null)"
+        echo "cloud-init-status:"
+        cloud-init status --long 2>/dev/null
+      } > "`$DEST/state.txt" 2>/dev/null
+      systemctl --no-pager --failed > "`$DEST/failed-units.txt" 2>/dev/null
+      sync
+      exit 0
+  - path: /etc/systemd/system/memlabs-loggrab.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Copy cloud-init and system logs to ESP for host-side debug
+      After=cloud-init.target boot-efi.mount
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/memlabs-loggrab
+      RemainAfterExit=no
+      [Install]
+      WantedBy=multi-user.target
 
 package_update: true
 package_upgrade: false
@@ -663,6 +711,22 @@ function New-LinuxVirtualMachine {
         }
 
         Enable-VMIntegrationService -VMName $VmName -Name "Guest Service Interface" -ErrorAction SilentlyContinue | Out-Null
+
+        # Wire COM1 to a named pipe so the host can capture the kernel +
+        # cloud-init console stream live. Ubuntu cloud images already have
+        # `console=ttyS0` on the kernel cmdline, so everything from GRUB
+        # onward streams here. The pipe is server-side (we own the path);
+        # attach with `vmbuild\Get-LinuxSerialTap.ps1 -VmName <name>` from
+        # another pwsh tab BEFORE Start-VM to capture the full boot. If no
+        # one is listening, Hyper-V drops bytes silently -- no guest hang.
+        $serialPipe = "\\.\pipe\memlabs-$VmName-com1"
+        try {
+            Set-VMComPort -VMName $VmName -Number 1 -Path $serialPipe -ErrorAction Stop
+            Write-Log "$VmName`: COM1 -> $serialPipe (attach with Get-LinuxSerialTap.ps1)"
+        }
+        catch {
+            Write-Log "$VmName`: Set-VMComPort failed: $_" -Warning
+        }
 
         # Disable Secure Boot. Ubuntu cloud images do ship a Microsoft-signed
         # shim and work under -SecureBootTemplate "MicrosoftUEFICertificateAuthority",
