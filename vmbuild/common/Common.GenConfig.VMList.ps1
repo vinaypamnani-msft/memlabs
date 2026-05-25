@@ -777,6 +777,27 @@ function Select-VirtualMachines {
                         $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
                         $diskNumToLetter = @{}
                         $diskNum = 90
+                        # Suppress inline disk rows when the terminal is too
+                        # short to fit them without pushing [M] Manage Disks
+                        # (and the ConfigMgr/VM Management sections) onto a
+                        # second page. The user can still edit/remove disks
+                        # via [M]. Heuristic: count properties + disks +
+                        # fixed overhead for headers, dividers, optional
+                        # sections, and the Done-with-changes footer.
+                        $showInlineDisks = $true
+                        if ($diskLettersInline -and $diskLettersInline.Count -gt 0) {
+                            $propCount = @(Get-SortedProperties $virtualMachine).Count
+                            $windowHeight = try { $host.UI.RawUI.WindowSize.Height } catch { 50 }
+                            # Overhead: ~16 lines covers Disks header, [M]
+                            # row, ConfigMgr section (B+header+S+H), VM
+                            # Management section (B+header+Z), bottom
+                            # divider+blank+Done, prompt + PgDn indicator.
+                            $estimatedHeight = $propCount + $diskLettersInline.Count + 16
+                            if ($estimatedHeight -gt $windowHeight) {
+                                $showInlineDisks = $false
+                            }
+                        }
+                        if ($showInlineDisks) {
                         foreach ($dl in $diskLettersInline) {
                             $dsize = $virtualMachine.additionalDisks.$dl
                             $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
@@ -806,6 +827,7 @@ function Select-VirtualMachines {
                             $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
                             $diskNumToLetter[$key] = $dl
                             $diskNum++
+                        }
                         }
                         $customOptions["M"]  = "Manage Disks  ($diskSummary)"
                         $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
