@@ -36,6 +36,43 @@ REM ============================================================
 @ECHO ON
 git config --global --add safe.directory E:\Memlabs
 git config --global --add safe.directory E:/memlabs
+@ECHO OFF
+
+REM ------------------------------------------------------------
+REM Detect if the current branch has been deleted from origin
+REM (e.g. a feature branch that was merged + pruned). If so,
+REM switch back to develop before pulling.
+REM ------------------------------------------------------------
+git fetch --prune origin 2>NUL
+FOR /F "tokens=*" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>NUL') DO SET CURBRANCH=%%B
+IF NOT "%CURBRANCH%"=="" (
+    IF /I NOT "%CURBRANCH%"=="develop" (
+        IF /I NOT "%CURBRANCH%"=="main" (
+            IF /I NOT "%CURBRANCH%"=="master" (
+                git ls-remote --exit-code --heads origin "%CURBRANCH%" >NUL 2>&1
+                IF ERRORLEVEL 1 (
+                    ECHO.
+                    ECHO ============================================================
+                    ECHO  Branch "%CURBRANCH%" no longer exists on origin.
+                    ECHO  Switching back to develop...
+                    ECHO ============================================================
+                    @ECHO ON
+                    git checkout develop
+                    @ECHO OFF
+                    IF ERRORLEVEL 1 (
+                        ECHO.
+                        ECHO WARNING: Failed to checkout develop. You may have uncommitted
+                        ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
+                        ECHO Press any key to continue with current branch...
+                        PAUSE > NUL
+                    )
+                )
+            )
+        )
+    )
+)
+
+@ECHO ON
 git pull
 @ECHO OFF
 IF ERRORLEVEL 1 (
