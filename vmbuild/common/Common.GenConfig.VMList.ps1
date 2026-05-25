@@ -795,7 +795,10 @@ function Select-VirtualMachines {
                                 $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
                             }
                             if ($diskErr) {
-                                $rowText = $rowText.PadRight(34) + "[x] $($diskErr.Message)"
+                                # Pad to ~50 so [x] lines up roughly with the
+                                # extras column on property rows (where things
+                                # like "(CON-PS1SITE)" appear next to vmName).
+                                $rowText = $rowText.PadRight(50) + "[x] $($diskErr.Message)"
                                 $rowColor = "Salmon"
                                 $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
                             }
