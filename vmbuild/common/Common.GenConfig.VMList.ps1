@@ -85,8 +85,10 @@ function Select-Options {
             }
             # additionalDisks is rendered/edited via the dedicated "Manage Disks"
             # entry (M) below; suppress the auto-generated property row so the
-            # user doesn't see a confusing PSCustomObject dump.
-            if ($isVM -and $item -eq "AdditionalDisks") {
+            # user doesn't see a confusing PSCustomObject dump. ($isVM is
+            # cleared for DC role earlier, so don't gate this on $isVM -- the
+            # Manage Disks entry is shown for all VMs.)
+            if ($item -eq "AdditionalDisks") {
                 continue
             }
             if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
