@@ -814,6 +814,25 @@ try {
                     else {
                         Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
                     }
+
+                    # Cross-lab proxy ACL reconciliation. Runs here (post-
+                    # Phase 11 success) rather than in Phase 2 because:
+                    #   - This deploy's VMs are now fully built, verified,
+                    #     and their subnets/useProxy values are populated
+                    #     in Get-NetworkList cache.
+                    #   - Parallel deploys in other domains may have been
+                    #     mid-flight during our Phase 2, which made the
+                    #     global subnet union unreliable.
+                    # Per-VM safety net inside Set-VmProxyEnforcementForAllLabs
+                    # refuses to stamp any VM whose own subnet isn't in the
+                    # final union, so even with concurrent labs we never
+                    # shrink a VM's allow-list below its own subnet.
+                    try {
+                        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+                    }
+                    catch {
+                        Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
+                    }
                 }
             }
         }

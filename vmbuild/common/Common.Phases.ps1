@@ -141,10 +141,14 @@ function Start-Phase {
         # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
         # in deployConfig (VM Notes not yet written on first-run cases).
         Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
-        # Cross-lab reconciliation: re-stamps every other lab's opted-in VMs
-        # with the now-updated global subnet union, so adding/removing a lab
-        # or subnet here doesn't leave neighbouring labs with stale ACLs.
-        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+        # NOTE: Cross-lab reconciliation (Set-VmProxyEnforcementForAllLabs)
+        # used to run here, but Phase 2 is too early -- parallel deploys in
+        # other domains may be mid-flight with stale VM Notes, so the global
+        # subnet union read from Get-NetworkList can be incomplete and we'd
+        # potentially re-stamp other labs with a too-narrow allow-list.
+        # Reconcile now runs from New-Lab.ps1 after Phase 11 succeeds, when
+        # this deploy's own VMs are fully built + verified and their subnets
+        # are visible in the cache.
 
         # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
         # site-server desktops, and stamp matching shortcuts on the host
