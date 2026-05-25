@@ -1087,14 +1087,29 @@ function Set-VmProxyEnforcement {
     }
 
     try {
-        # --- High-priority ALLOW rules (weight 5099) ---
+        # --- High-priority ALLOW rules (weight band 5090-5099) ---
         # Allow all traffic both directions to/from any known lab subnet.
         # Catches intra-subnet AD/SMB/SQL/CM, cross-subnet hierarchy traffic
         # (CAS<->Primary across separate networks), and the Linux proxy +
         # DCs which always live in one of these subnets.
-        foreach ($cidr in $cidrs) {
-            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = 5099 }
-            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = 5099 }
+        #
+        # Each (subnet, direction) gets a unique weight: Hyper-V's
+        # extended-ACL identity is (Direction + Weight + Protocol) and does
+        # NOT include RemoteIPAddress, so multiple Allow rules sharing
+        # Direction+Weight+Protocol collide -- only the first lands and the
+        # rest are silently dropped (would block cross-subnet traffic).
+        # Band 5090-5099 keeps us inside the 5000-5099 cleanup window;
+        # cap at 5 subnets per direction (10 rules), which is well past
+        # anything memlabs currently builds.
+        $maxSubnets = 5
+        if ($cidrs.Count -gt $maxSubnets) {
+            Write-Log "[Proxy] $VmName`: $($cidrs.Count) lab subnets exceeds cap ($maxSubnets); only first $maxSubnets will be allowed" -Warning
+        }
+        $w = 5099
+        foreach ($cidr in ($cidrs | Select-Object -First $maxSubnets)) {
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = $w }
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = $w - 1 }
+            $w -= 2
         }
 
         # --- Low-priority DENY rules (weights 5000-5003, one per rule) ---
