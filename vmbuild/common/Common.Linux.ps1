@@ -991,30 +991,51 @@ function Wait-LinuxVmReady {
         if ($ip) {
             if ($ip -ne $lastReportedIp) {
                 Write-Log "$VmName`: got guest IP $ip (source=$ipSource); probing SSH (elapsed ${elapsed}s)"
-                write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip ($ipSource), probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
                 $lastReportedIp = $ip
             }
+            # Cheap TCP/22 probe each iteration so the progress text reflects
+            # whether sshd is even listening yet. Avoids the appearance of
+            # "stuck at elapsed 0s" while ssh.exe is internally retrying.
+            $tcpProbeOk = $false
+            try {
+                $tc = [System.Net.Sockets.TcpClient]::new()
+                $iar = $tc.BeginConnect($ip, 22, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(1000, $false)) {
+                    $tc.EndConnect($iar) | Out-Null
+                    $tcpProbeOk = $tc.Connected
+                }
+                $tc.Close()
+            }
+            catch { }
+            $tcpLabel = if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' }
+            write-progress2 "Wait for Linux VM" -Status "$VmName`: IP $ip ($ipSource), $tcpLabel, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
 
             # One-time per IP: scrub any stale known_hosts entries for this
             # IP. A stale entry from a prior deploy (different host keys)
             # silently breaks ssh.exe even with -o StrictHostKeyChecking=no
             # for the user running ssh interactively. Internal ops bypass
             # known_hosts entirely (UserKnownHostsFile=NUL), but cleaning
-            # the cached file helps anyone who later runs ssh by hand.
+            # the cached files helps anyone who later runs ssh by hand.
+            # We scrub BOTH the memlabs-private known_hosts (next to the
+            # shared key) AND the host user's default ~/.ssh/known_hosts
+            # (which is what `ssh vmbuildadmin@<ip>` actually consults).
             if ($ip -ne $loggedKnownHostsForIp) {
                 $loggedKnownHostsForIp = $ip
-                if (Test-Path $knownHostsPath) {
-                    $khEntries = @(Select-String -Path $knownHostsPath -Pattern "^[^ ]*\b$([regex]::Escape($ip))\b" -ErrorAction SilentlyContinue)
-                    if ($khEntries.Count -gt 0) {
-                        Write-Log "$VmName`: scrubbing $($khEntries.Count) stale known_hosts entry/entries for $ip" -LogOnly
-                        try {
-                            $allLines = Get-Content -LiteralPath $knownHostsPath -ErrorAction Stop
-                            $keep = $allLines | Where-Object { $_ -notmatch "^[^ ]*\b$([regex]::Escape($ip))\b" }
-                            Set-Content -LiteralPath $knownHostsPath -Value $keep -Encoding ASCII -NoNewline:$false
+                $userKnownHosts = Join-Path $env:USERPROFILE '.ssh\known_hosts'
+                $scrubTargets = @($knownHostsPath, $userKnownHosts) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+                foreach ($kh in $scrubTargets) {
+                    try {
+                        $pattern = "^[^ ]*\b$([regex]::Escape($ip))\b"
+                        $khEntries = @(Select-String -Path $kh -Pattern $pattern -ErrorAction SilentlyContinue)
+                        if ($khEntries.Count -gt 0) {
+                            Write-Log "$VmName`: scrubbing $($khEntries.Count) stale known_hosts entry/entries for $ip in $kh" -LogOnly
+                            $allLines = Get-Content -LiteralPath $kh -ErrorAction Stop
+                            $keep = $allLines | Where-Object { $_ -notmatch $pattern }
+                            Set-Content -LiteralPath $kh -Value $keep -Encoding ASCII -NoNewline:$false
                         }
-                        catch {
-                            Write-Log "$VmName`: failed to scrub known_hosts: $($_.Exception.Message)" -Warning
-                        }
+                    }
+                    catch {
+                        Write-Log "$VmName`: failed to scrub $kh`: $($_.Exception.Message)" -Warning
                     }
                 }
             }
@@ -1050,19 +1071,7 @@ function Wait-LinuxVmReady {
                 $lastSshErrLogSec = $elapsed
                 $errText = ($sshErr | Out-String).Trim()
                 if (-not $errText) { $errText = '(no stderr output)' }
-                # Also test TCP/22 so we know if sshd is even listening.
-                $tcpOk = $false
-                try {
-                    $tc = [System.Net.Sockets.TcpClient]::new()
-                    $iar = $tc.BeginConnect($ip, 22, $null, $null)
-                    if ($iar.AsyncWaitHandle.WaitOne(2000, $false)) {
-                        $tc.EndConnect($iar) | Out-Null
-                        $tcpOk = $tc.Connected
-                    }
-                    $tc.Close()
-                }
-                catch { }
-                Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$LASTEXITCODE, tcp/22=$tcpOk): $errText" -LogOnly
+                Write-Log "$VmName`: SSH probe failed (elapsed ${elapsed}s, exit=$LASTEXITCODE, tcp/22=$tcpProbeOk): $errText" -LogOnly
             }
         }
         else {
