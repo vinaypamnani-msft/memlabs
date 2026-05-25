@@ -101,15 +101,31 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
 }
 
 # On re-entry, Status='Running' means the prior runner was killed mid-install
-# (the script never reached the 'Completed' write). We can't safely auto-retry:
-# setup.exe doesn't handle mid-install re-entry well, and the supported recovery
-# path is to restore the Phase 8 checkpoint and re-run. Fail loudly with a clear
-# message rather than falling through to the install gate (which would skip the
-# install on Status='Running' and then emit a misleading "Site Code not found"
-# error from the registry read further down).
+# (the script never reached the 'Completed' write). What's safe to do next
+# depends on *which* sub-step was running when it got killed:
+#
+#   * setupdl.exe (the pre-req downloader) is idempotent -- it has its own
+#     two-successes-in-a-row verification loop and will quickly re-verify
+#     already-downloaded files. Safe to re-run.
+#   * setup.exe (the actual site installer) does NOT handle re-entry well
+#     against a partial install; the supported recovery is to restore the
+#     Phase 8 checkpoint on this VM.
+#
+# We distinguish the two with a breadcrumb file written immediately before
+# we launch setup.exe (see $setupExeStartedFlag below). Missing breadcrumb
+# means we never got past setupdl, so we reset 'Running' -> 'NotStart' and
+# let the install block re-run. Present breadcrumb means setup.exe was at
+# least started -- fail loudly and demand the checkpoint restore.
+$setupExeStartedFlag = 'C:\staging\DSC\InstallSCCM.setupexe.started'
 if ($Configuration.InstallSCCM.Status -eq 'Running') {
-    Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry -- prior ConfigMgr install attempt was killed mid-flight. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got." -Failure
-    return
+    if (Test-Path $setupExeStartedFlag) {
+        Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry and setup.exe breadcrumb is present ($setupExeStartedFlag) -- prior setup.exe attempt was killed mid-flight. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got." -Failure
+        return
+    }
+    Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry but setup.exe breadcrumb is absent -- prior attempt was killed before setup.exe launched (still in setupdl or earlier). Resetting to 'NotStart' so setupdl + setup.exe re-run from a clean state."
+    $Configuration.InstallSCCM.Status = 'NotStart'
+    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
@@ -450,6 +466,19 @@ CurrentBranch=1
     start-sleep -seconds 2
 
     Write-DscStatusSetup
+
+    # Drop a breadcrumb so a future re-entry can tell whether the prior
+    # 'Running' state was killed during setupdl (safe to retry) or during
+    # setup.exe (must restore Phase 8 checkpoint). See the Status='Running'
+    # gate near the top of this script for the consuming side.
+    try {
+        $flagDir = Split-Path -Parent $setupExeStartedFlag
+        if (-not (Test-Path $flagDir)) { New-Item -ItemType Directory -Path $flagDir -Force | Out-Null }
+        Set-Content -Path $setupExeStartedFlag -Value (Get-Date -Format 'o') -Force
+    }
+    catch {
+        Write-DscStatus "Warning: failed to write setup.exe breadcrumb at $setupExeStartedFlag : $($_.Exception.Message). Re-entry recovery may be less precise."
+    }
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
