@@ -24,11 +24,17 @@ function Start-Maintenance {
     $countWorked = $countFailed = $countSkipped = 0
     # Filter in-progress. Also exclude offline StandaloneRootCA VMs - they are
     # intentionally powered off after issuing sub-CA certs and should not be
-    # offered for maintenance or auto-started.
+    # offered for maintenance or auto-started. Also exclude Linux VMs
+    # (role=Proxy / osFamily=Linux / Ubuntu|Debian OS) which have no
+    # Windows-side maintenance pipeline and would just be skipped downstream.
     $vmsNeedingMaintenance = $vmsNeedingMaintenance | Where-Object {
         $_.inProgress -ne $true -and
         -not ($_.Role -in @("OSDClient", "AADClient")) -and
-        -not ($_.Role -eq "StandaloneRootCA" -and $_.State -ne "Running")
+        -not ($_.Role -eq "StandaloneRootCA" -and $_.State -ne "Running") -and
+        -not ($_.Role -eq "Proxy") -and
+        -not ($_.osFamily -eq "Linux") -and
+        -not ($_.operatingSystem -like "Ubuntu*" -or $_.operatingSystem -like "Debian*" -or $_.operatingSystem -like "Linux*") -and
+        -not ($_.deployedOS -like "Ubuntu*" -or $_.deployedOS -like "Debian*" -or $_.deployedOS -like "Linux*")
     }
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
