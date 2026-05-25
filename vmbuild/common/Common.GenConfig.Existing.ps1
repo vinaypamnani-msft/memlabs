@@ -374,10 +374,68 @@ function Select-RolesForExisting {
     else {
         $existingRoles2 = $existingRoles
     }
-    $existingRoles2 = Format-Roles $existingRoles2
+
+    # Group roles into sections so the picker has visual headers. Order within
+    # each group is preserved from $existingRoles2 (case-insensitive match).
+    $roleGroups = @(
+        @{ Name = "Domain Members"        ; Roles = @("DomainMember (Client)", "DomainMember (Server)") }
+        @{ Name = "SQL Servers"           ; Roles = @("SqlServer", "SQLAO") }
+        @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient") }
+        @{ Name = "Configuration Manager" ; Roles = @("CAS", "CAS and Primary", "Primary", "Secondary", "SiteSystem") }
+        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy") }
+    )
+
+    # Build an ordered list of roles bucketed by group, plus an "Other" bucket
+    # for anything not explicitly classified (defensive against new roles).
+    $orderedRoles = @()
+    $orderedGroupForRole = @{}
+    $remaining = [System.Collections.ArrayList]@($existingRoles2)
+    foreach ($group in $roleGroups) {
+        foreach ($role in $group.Roles) {
+            $match = $remaining | Where-Object { $_ -ieq $role } | Select-Object -First 1
+            if ($match) {
+                $orderedRoles += $match
+                $orderedGroupForRole[$match] = $group.Name
+                $remaining.Remove($match) | Out-Null
+            }
+        }
+    }
+    foreach ($leftover in $remaining) {
+        $orderedRoles += $leftover
+        $orderedGroupForRole[$leftover] = "Other"
+    }
+
+    # Format role labels (adds the [description] suffix used by Get-Menu2).
+    $orderedRolesFormatted = Format-Roles $orderedRoles
+
+    # Pre-build menuItems with *B header rows interleaved between groups.
+    $menuItems = [System.Collections.ArrayList]@()
+    $currentGroup = $null
+    $headerIndex = 0
+    for ($i = 0; $i -lt $orderedRoles.Count; $i++) {
+        $role = $orderedRoles[$i]
+        $formatted = $orderedRolesFormatted[$i]
+        $group = $orderedGroupForRole[$role]
+        if ($group -ne $currentGroup) {
+            $headerIndex++
+            $null = New-MenuItem -MenuItems ([ref]$menuItems) -ItemName "*B$headerIndex" `
+                -Text "$group%$($Global:Common.Colors.GenConfigHeader)"
+            $currentGroup = $group
+        }
+        $itemNumber = $i + 1
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -ItemName "$itemNumber" `
+            -Text $formatted -Selectable `
+            -Color1 $Global:Common.Colors.GenConfigNormal `
+            -Color2 $Global:Common.Colors.GenConfigDefaultNumber
+    }
+
+    # Default selection: first selectable item (matches prior behavior, since
+    # CurrentValue="DomainMember" never matched the "(Client)/(Server)" labels).
+    $firstSelectable = $menuItems | Where-Object { $_.Selectable } | Select-Object -First 1
+    if ($firstSelectable) { $firstSelectable.Selected = $true }
 
     $OptionArray = @{ "H" = $ha_Text }
-    $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
+    $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($orderedRolesFormatted) -menuItems $menuItems -additionalOptions $OptionArray -test:$false
 
     if ($role -eq "ESCAPE") {
         return
