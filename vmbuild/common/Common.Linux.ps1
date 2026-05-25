@@ -683,33 +683,42 @@ function Wait-LinuxVmReady {
                 $lastReportedIp = $ip
             }
 
-            # One-time diagnostic per IP: log any pre-existing known_hosts
-            # entry for this IP. A stale entry from a prior deploy will
-            # cause StrictHostKeyChecking to silently reject the new VM's
-            # host key (accept-new only writes a NEW entry; mismatched keys
-            # always fail). Logged once per distinct IP seen.
+            # One-time per IP: scrub any stale known_hosts entries for this
+            # IP. A stale entry from a prior deploy (different host keys)
+            # silently breaks ssh.exe even with -o StrictHostKeyChecking=no
+            # for the user running ssh interactively. Internal ops bypass
+            # known_hosts entirely (UserKnownHostsFile=NUL), but cleaning
+            # the cached file helps anyone who later runs ssh by hand.
             if ($ip -ne $loggedKnownHostsForIp) {
                 $loggedKnownHostsForIp = $ip
                 if (Test-Path $knownHostsPath) {
                     $khEntries = @(Select-String -Path $knownHostsPath -Pattern "^[^ ]*\b$([regex]::Escape($ip))\b" -ErrorAction SilentlyContinue)
                     if ($khEntries.Count -gt 0) {
-                        Write-Log "$VmName`: pre-existing known_hosts entries for ${ip}: $($khEntries.Count) match(es)" -Warning
-                        foreach ($e in $khEntries) {
-                            $line = $e.Line
-                            if ($line.Length -gt 100) { $line = $line.Substring(0, 100) + '...' }
-                            Write-Log "$VmName`:   known_hosts> $line" -LogOnly
+                        Write-Log "$VmName`: scrubbing $($khEntries.Count) stale known_hosts entry/entries for $ip" -LogOnly
+                        try {
+                            $allLines = Get-Content -LiteralPath $knownHostsPath -ErrorAction Stop
+                            $keep = $allLines | Where-Object { $_ -notmatch "^[^ ]*\b$([regex]::Escape($ip))\b" }
+                            Set-Content -LiteralPath $knownHostsPath -Value $keep -Encoding ASCII -NoNewline:$false
                         }
-                    }
-                    else {
-                        Write-Log "$VmName`: no pre-existing known_hosts entries for $ip (good)" -LogOnly
+                        catch {
+                            Write-Log "$VmName`: failed to scrub known_hosts: $($_.Exception.Message)" -Warning
+                        }
                     }
                 }
             }
 
+            # NOTE: We deliberately ignore host-key verification for internal
+            # probes. Every deploy regenerates the VM's host keys, and a stale
+            # entry in known_hosts for this IP from a prior ada-proxy1 will
+            # cause ssh.exe to silently abort the handshake (RST [preauth]
+            # in sshd's log) even with accept-new (accept-new only writes
+            # NEW entries; it rejects mismatches). UserKnownHostsFile=NUL
+            # + StrictHostKeyChecking=no bypasses both. Lab vSwitch traffic
+            # never leaves the host, so MITM risk is nil.
             $sshArgs = @(
                 '-i', $keyPair.PrivateKeyPath,
-                '-o', 'StrictHostKeyChecking=accept-new',
-                '-o', "UserKnownHostsFile=$knownHostsPath",
+                '-o', 'StrictHostKeyChecking=no',
+                '-o', 'UserKnownHostsFile=NUL',
                 '-o', 'BatchMode=yes',
                 '-o', 'ConnectTimeout=5',
                 '-o', 'LogLevel=ERROR',
@@ -793,8 +802,8 @@ function Wait-LinuxVmReady {
 
         $verboseSshArgs = @(
             '-i', $keyPair.PrivateKeyPath,
-            '-o', 'StrictHostKeyChecking=accept-new',
-            '-o', "UserKnownHostsFile=$knownHostsPath",
+            '-o', 'StrictHostKeyChecking=no',
+            '-o', 'UserKnownHostsFile=NUL',
             '-o', 'BatchMode=yes',
             '-o', 'ConnectTimeout=10',
             '-o', 'LogLevel=DEBUG1',
@@ -904,10 +913,13 @@ function Invoke-LinuxVmCommand {
     # mismatches; remote `bash -s` reads the entire script from stdin.
     $remoteShell = if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' }
 
+    # See Wait-LinuxVmReady probe comment: ignore host keys for internal SSH.
+    # Stale known_hosts from a prior deploy with the same IP silently breaks
+    # all subsequent ops; lab vSwitch traffic is host-only so MITM risk is nil.
     $sshArgs = @(
         '-i', $keyPair.PrivateKeyPath,
-        '-o', 'StrictHostKeyChecking=accept-new',
-        '-o', "UserKnownHostsFile=$knownHostsPath",
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=NUL',
         '-o', 'BatchMode=yes',
         '-o', 'ConnectTimeout=10',
         '-o', "ServerAliveInterval=$([Math]::Max(15, [int]($TimeoutSeconds / 4)))",
