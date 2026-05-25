@@ -158,41 +158,12 @@ function Select-Options {
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction
 
-        # Exact-fit pruning: if the fully assembled menu would overflow the
-        # window, drop items whose ItemName matches $DroppableItemPattern
-        # (lowest priority -- inline disk rows on the VM Properties menu)
-        # until it fits. Uses the same Get-MenuMetrics line count + cursor
-        # position + window height as Get-Menu2's own pagination so the
-        # decision is exact rather than estimated.
-        if ($DroppableItemPattern) {
-            try {
-                $live = Get-LiveWindowSize
-                $winW = if ($live) { $live.Width }  else { $host.UI.RawUI.WindowSize.Width }
-                $winH = if ($live) { $live.Height } else { $host.UI.RawUI.WindowSize.Height }
-                # Show-Menu calls "`e[2J`e[H" to clear+home before laying out,
-                # then writes the activity title (1 line) + blank (1 line)
-                # before menu items. So available rows == WindowHeight minus
-                # those 2 chrome lines minus BottomReserve (4).
-                # Get-RoomLeftFromCurrentPosition here would return the wrong
-                # value because cursor is still wherever Select-Options left
-                # it (often near the bottom of the previous render).
-                $room = $winH - 6
-                $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
-                if ($metrics.TotalLineCount -gt $room) {
-                    $droppable = @($MenuItems | Where-Object { [string]$_.itemName -match $DroppableItemPattern })
-                    foreach ($d in $droppable) {
-                        $null = $MenuItems.Remove($d)
-                        $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
-                        if ($metrics.TotalLineCount -le $room) { break }
-                    }
-                }
-            }
-            catch {
-                Write-Log -Verbose "Select-Options droppable prune failed: $_"
-            }
-        }
-
-        $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false -AcceptsDelete
+        # Droppable-item pruning lives inside Show-Menu now (forwarded via
+        # Get-Menu2's -DroppableItemPattern). It runs every render iteration
+        # so items reappear when the window grows and disappear when it
+        # shrinks. Doing it here would only fire once, before the first
+        # render, and would never react to resizes.
+        $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false -AcceptsDelete -DroppableItemPattern $DroppableItemPattern
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
             return "ESCAPE"

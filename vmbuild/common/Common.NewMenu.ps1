@@ -526,7 +526,12 @@ function Get-Menu2 {
         [switch] $NoClear,
         [switch] $MultiSelect,
         [switch] $AllSelected,
-        [switch] $AcceptsDelete
+        [switch] $AcceptsDelete,
+        # Regex matched against $menuItem.itemName. Items whose name matches
+        # are dropped entirely (not just hidden by shrink) when the rendered
+        # menu would overflow the viewport. Re-evaluated on every render so
+        # items reappear when the window grows. Forwarded to Show-Menu.
+        [string] $DroppableItemPattern = $null
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -556,7 +561,7 @@ function Get-Menu2 {
         #foreach ($menuItem in $menuItems) {
         #    write-host "[Get-Menu2] Item: $menuItem"
         #}
-        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect
+        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern
         if ($response -is [array] -or $response.MultiSelected) {
             $ReturnValue = @()
             foreach ($item in $response) {
@@ -1034,20 +1039,62 @@ function Show-Menu {
         [AllowEmptyCollection()]
         [System.Collections.ArrayList][ref]$menuItems, # The array of menu items
         [Switch]$NoClear = $false,
-        [Switch]$MultiSelect = $false
-
+        [Switch]$MultiSelect = $false,
+        # Regex matched against $menuItem.itemName. Items whose name matches
+        # are eligible to be DROPPED ENTIRELY (not just hidden by shrink) when
+        # the rendered menu would otherwise overflow the viewport. Re-evaluated
+        # on every render iteration so items reappear when the window grows.
+        [string]$DroppableItemPattern = $null
     )
     $LongestBreakLine = 0
     $Operation = ""
     $pageStartIndex = 0
     $pageEndIndex   = -1
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
+
+    # Snapshot the original menu so the per-iteration drop pass can restore the
+    # full set before re-deciding what to drop. Without this, droppable items
+    # removed on a shrink would never come back when the window grows.
+    $_originalItems = $null
+    if ($DroppableItemPattern) {
+        $_originalItems = New-Object System.Collections.ArrayList
+        foreach ($mi in $menuItems) { [void]$_originalItems.Add($mi) }
+    }
+
     While ($true) {
         # Reset per-iteration state. HelpPosition must be cleared each loop:
         # the shrink plan may drop the help banner this iteration even though
         # it was drawn previously, and a stale position would cause Update-Prompt
         # to paint the help box over wherever that old coordinate points.
         $HelpPosition = $null
+
+        # Restore the full menu, then drop droppable items if they won't fit.
+        # Runs every iteration so resize events (which return us to this loop
+        # via Start-Navigation -> null) recompute the drop decision against
+        # the current window size. The shrink plan below handles dropping
+        # *cosmetic* rows (headers/blanks/help); this pass drops *content*
+        # rows that the caller marked as expendable.
+        if ($DroppableItemPattern -and $_originalItems) {
+            $menuItems.Clear()
+            foreach ($mi in $_originalItems) { [void]$menuItems.Add($mi) }
+            # Measure against the post-clear viewport: Show-Menu will clear+home
+            # before drawing, then emit 1 line for the activity title and 1
+            # blank, leaving WindowHeight - 2 - BottomReserve (4) usable rows.
+            $live = Get-LiveWindowSize
+            $winW = if ($live) { $live.Width }  else { $host.UI.RawUI.WindowSize.Width }
+            $winH = if ($live) { $live.Height } else { $host.UI.RawUI.WindowSize.Height }
+            $room = $winH - 6
+            $dropMetrics = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $winW
+            if ($dropMetrics.TotalLineCount -gt $room) {
+                $droppable = @($menuItems | Where-Object { [string]$_.itemName -match $DroppableItemPattern })
+                foreach ($d in $droppable) {
+                    $null = $menuItems.Remove($d)
+                    $dropMetrics = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $winW
+                    if ($dropMetrics.TotalLineCount -le $room) { break }
+                }
+            }
+        }
+
         # PGUP/PGDN bookkeeping: advance the page start index based on the
         # previous render's EndIndex (saved in $pageEndIndex). PgUp always
         # snaps back to the first page (preserves prior behavior).
