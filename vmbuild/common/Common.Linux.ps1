@@ -2353,7 +2353,18 @@ function Invoke-LinuxBaseImageBake {
         [string]$SwitchName = 'Default Switch',
 
         [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 20
+        [int]$TimeoutMinutes = 20,
+
+        # Server: minimal cloud-image + Hyper-V daemons (existing behavior).
+        # Desktop: additionally bake `ubuntu-desktop-minimal` + GDM3 + NetworkManager
+        # + xrdp into the image so the resulting VHDX boots straight into a real
+        # Ubuntu Desktop session for MDM/EDR testing (Intune for Linux, Defender
+        # for Endpoint, etc.). Cloud-init still runs at deploy time to consume
+        # the per-VM seed ISO; the renderer override below makes it emit netplan
+        # configs that NetworkManager owns instead of systemd-networkd.
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Server', 'Desktop')]
+        [string]$Variant = 'Server'
     )
 
     if (-not (Test-Path $VhdxPath)) {
@@ -2409,7 +2420,49 @@ local-hostname: memlabs-bake
     #   - truncate machine-id so each deployed VM regenerates a unique one
     #   - remove cloud-init netplan so deploy seed's network config wins
     #   - power off; the script polls VM state and removes the temp VM
-    $userData = @'
+    #
+    # Desktop variant adds: ubuntu-desktop-minimal + GDM3 + NetworkManager
+    # (real Ubuntu Desktop package surface for MDM/EDR posture checks) and
+    # xrdp/xorgxrdp so a baked image can be RDP'd into without per-deploy
+    # apt traffic. write_files drops cloud.cfg.d/99-network-renderer.cfg so
+    # cloud-init at deploy time generates netplan in NetworkManager-renderer
+    # form (NM owns the interface; systemd-networkd stays disabled). The
+    # final shutdown/cloud-init-clean steps run after this block regardless
+    # of variant, so the published VHDX is always a clean first-boot image.
+    $desktopPackagesYaml = ''
+    $desktopWriteFilesYaml = ''
+    $desktopRuncmdYaml = ''
+    if ($Variant -eq 'Desktop') {
+        $desktopPackagesYaml = @'
+  - ubuntu-desktop-minimal
+  - gdm3
+  - network-manager
+  - xrdp
+  - xorgxrdp
+'@
+
+        $desktopWriteFilesYaml = @'
+
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-network-renderer.cfg
+    content: |
+      system_info:
+        network:
+          renderers: ['NetworkManager']
+'@
+
+        $desktopRuncmdYaml = @'
+  - systemctl set-default graphical.target
+  - systemctl enable gdm3.service || true
+  - systemctl disable systemd-networkd.service || true
+  - systemctl enable NetworkManager.service || true
+  - systemctl enable xrdp.service || true
+  - adduser xrdp ssl-cert || true
+  - ufw allow 3389/tcp || true
+'@
+    }
+
+    $userData = @"
 #cloud-config
 hostname: memlabs-bake
 preserve_hostname: false
@@ -2421,17 +2474,19 @@ packages:
   - linux-cloud-tools-virtual
   - qemu-guest-agent
   - openssh-server
-
+$desktopPackagesYaml
+$desktopWriteFilesYaml
 runcmd:
   - systemctl enable qemu-guest-agent.service || true
   - systemctl enable hv-kvp-daemon.service || true
   - systemctl enable hv-vss-daemon.service || true
+$desktopRuncmdYaml
   - cloud-init clean --logs --seed --machine-id || true
   - truncate -s 0 /etc/machine-id
   - rm -f /var/lib/dbus/machine-id
   - rm -f /etc/netplan/50-cloud-init.yaml
   - shutdown -h +1 "memlabs bake complete"
-'@
+"@
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'user-data'), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
@@ -2448,10 +2503,16 @@ runcmd:
         if (-not (Test-Path $isoPath)) { throw "Bake: IMAPI2FS ISO build failed for $isoPath" }
     }
 
-    Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName'" -Activity
-    $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes 2GB -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
+    Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName' (variant=$Variant)" -Activity
+    # Desktop bake pulls ~1.5GB of packages and runs through dpkg postinst
+    # hooks for the full GNOME stack; 2GB OOMs partway through. 4GB is plenty
+    # for the duration of the bake (the resulting deployed VMs use their own
+    # memory setting from the deploy config, this is just for the bake VM).
+    $bakeMemoryBytes = if ($Variant -eq 'Desktop') { 4GB } else { 2GB }
+    $bakeProcs = if ($Variant -eq 'Desktop') { 4 } else { 2 }
+    $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes $bakeMemoryBytes -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
     try {
-        Set-VM -VM $vm -ProcessorCount 2 -CheckpointType Disabled -ErrorAction Stop
+        Set-VM -VM $vm -ProcessorCount $bakeProcs -CheckpointType Disabled -ErrorAction Stop
         Set-VMFirmware -VM $vm -EnableSecureBoot Off -ErrorAction Stop
         Add-VMDvdDrive -VM $vm -Path $isoPath -ErrorAction Stop
         $hdd = Get-VMHardDiskDrive -VM $vm

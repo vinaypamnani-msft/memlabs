@@ -311,6 +311,7 @@ function Format-Roles {
             "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding))`t[Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
             "Proxy" { $newRoles += "$($role.PadRight($padding))`t[Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
             "LinuxServer" { $newRoles += "$($role.PadRight($padding))`t[Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
+            "LinuxClient" { $newRoles += "$($role.PadRight($padding))`t[Ubuntu Desktop 24.04 workstation for MDM/EDR testing (GNOME, xrdp, optional domain join)]" }
             default { $newRoles += $role }
         }
     }
@@ -381,7 +382,7 @@ function Select-RolesForExisting {
     $roleGroups = @(
         @{ Name = "Domain Members"        ; Roles = @("DomainMember (Client)", "DomainMember (Server)") }
         @{ Name = "SQL Servers"           ; Roles = @("SqlServer", "SQLAO") }
-        @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient") }
+        @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient", "LinuxClient") }
         @{ Name = "Configuration Manager" ; Roles = @("CAS", "CAS and Primary", "Primary", "Secondary", "SiteSystem") }
         @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy", "LinuxServer") }
     )

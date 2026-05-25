@@ -304,10 +304,28 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
     }
 
+    if ($role -eq "LinuxClient") {
+        # Ubuntu Desktop workstation: real GNOME/GDM3/NetworkManager image
+        # (UbuntuDesktop2404.vhdx) targeted at MDM/EDR testing (Intune for
+        # Linux, Defender for Endpoint, Landscape, etc.). Heavier footprint
+        # than LinuxServer since GNOME wants ~3GB to be usable, and the
+        # baked-in xrdp/xorgxrdp service means RDP into a real Ubuntu
+        # session works out of the box (no enableRDP cloud-init toggle
+        # needed -- the existing toggle installs xfce4 which would clash
+        # with GNOME on this image).
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "4GB"
+        $virtualMachine.virtualProcs = 4
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional realmd/SSSD join to the lab AD domain on first boot
+        # (same helper as LinuxServer).
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
+    }
+
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "LinuxServer")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "LinuxServer", "LinuxClient")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force

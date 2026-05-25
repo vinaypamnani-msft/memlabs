@@ -8,6 +8,14 @@
 # Re-run safe: skips download / convert when artefacts already exist.
 # Pass -ForceDownload or -ForceNewVhdx to rebuild.
 #
+# -Desktop: switch builds a SECOND VHDX (UbuntuDesktop2404.vhdx) that
+# additionally bakes in `ubuntu-desktop-minimal` + GDM3 + NetworkManager
+# + xrdp on top of the same Ubuntu cloud image. Used by the LinuxClient
+# role to provision a true Ubuntu Desktop workstation suitable for MDM /
+# EDR testing (Intune for Linux, Defender for Endpoint, etc.). Server and
+# Desktop VHDX outputs coexist; pick which one(s) to build by running this
+# script once per variant.
+#
 # Required tooling: qemu-img.exe. Looked up in this order:
 #   1. $Common.AzureToolsPath\qemu\qemu-img.exe          (vendored)
 #   2. qemu-img.exe on PATH
@@ -19,12 +27,15 @@ param (
     [ValidateSet("noble")]
     [string]$Release = "noble",
 
-    [Parameter(Mandatory = $false, HelpMessage = "Output VHDX filename, written to azureFiles\os.")]
-    [string]$VhdxFileName = "UbuntuServer2404.vhdx",
+    [Parameter(Mandatory = $false, HelpMessage = "Build the Ubuntu Desktop variant (UbuntuDesktop2404.vhdx). Overrides -VhdxFileName and bumps -DiskSizeGB / -BakeTimeoutMinutes defaults if those weren't explicitly set.")]
+    [switch]$Desktop,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Final size of the output VHDX in GB.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Output VHDX filename, written to azureFiles\os. Defaults to UbuntuServer2404.vhdx, or UbuntuDesktop2404.vhdx when -Desktop is set.")]
+    [string]$VhdxFileName,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Final size of the output VHDX in GB. Defaults to 30 (Server) / 50 (Desktop).")]
     [ValidateRange(8, 256)]
-    [int]$DiskSizeGB = 30,
+    [int]$DiskSizeGB,
 
     [Parameter(Mandatory = $false, HelpMessage = "Force re-download of the upstream qcow2 source image.")]
     [switch]$ForceDownload,
@@ -44,10 +55,23 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Hyper-V switch name for the bake VM. Must have outbound internet.")]
     [string]$BakeSwitchName = 'Default Switch',
 
-    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM.")]
-    [ValidateRange(5, 120)]
-    [int]$BakeTimeoutMinutes = 20
+    [Parameter(Mandatory = $false, HelpMessage = "Wall-clock timeout for the bake VM. Defaults to 20 min (Server) / 60 min (Desktop, since apt-installing ubuntu-desktop-minimal over NAT can take 30+ min).")]
+    [ValidateRange(5, 240)]
+    [int]$BakeTimeoutMinutes
 )
+
+# Apply Desktop-variant defaults for any parameters the caller didn't explicitly
+# set. Done in code (rather than as Param defaults) so explicit values still win.
+$bakeVariant = if ($Desktop.IsPresent) { 'Desktop' } else { 'Server' }
+if (-not $PSBoundParameters.ContainsKey('VhdxFileName')) {
+    $VhdxFileName = if ($Desktop.IsPresent) { 'UbuntuDesktop2404.vhdx' } else { 'UbuntuServer2404.vhdx' }
+}
+if (-not $PSBoundParameters.ContainsKey('DiskSizeGB') -or $DiskSizeGB -eq 0) {
+    $DiskSizeGB = if ($Desktop.IsPresent) { 50 } else { 30 }
+}
+if (-not $PSBoundParameters.ContainsKey('BakeTimeoutMinutes') -or $BakeTimeoutMinutes -eq 0) {
+    $BakeTimeoutMinutes = if ($Desktop.IsPresent) { 60 } else { 20 }
+}
 
 # Check for admin rights (qemu-img doesn't strictly require it, but Hyper-V mounts later will)
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -85,7 +109,7 @@ $releaseInfo = switch ($Release) {
 $qcow2Url = "$($releaseInfo.BaseUrl)/$($releaseInfo.ImageFileName)"
 $sha256Url = "$($releaseInfo.BaseUrl)/SHA256SUMS"
 
-Write-Log "### START Linux base image build ($($releaseInfo.Codename) / $($releaseInfo.Version))." -Success
+Write-Log "### START Linux base image build ($($releaseInfo.Codename) / $($releaseInfo.Version) / variant=$bakeVariant -> $VhdxFileName)." -Success
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # ---------------------------------------------------------------------------
@@ -348,9 +372,9 @@ catch {
 #    when Linux VMs are created in phase 1), so apt at deploy time fails.
 # ---------------------------------------------------------------------------
 if (-not $SkipBake) {
-    Write-Log "Baking $tempVhdx via temp VM on switch '$BakeSwitchName' (timeout ${BakeTimeoutMinutes}m)..." -Activity
+    Write-Log "Baking $tempVhdx via temp VM on switch '$BakeSwitchName' (variant=$bakeVariant, timeout ${BakeTimeoutMinutes}m)..." -Activity
     try {
-        Invoke-LinuxBaseImageBake -VhdxPath $tempVhdx -SwitchName $BakeSwitchName -TimeoutMinutes $BakeTimeoutMinutes | Out-Null
+        Invoke-LinuxBaseImageBake -VhdxPath $tempVhdx -SwitchName $BakeSwitchName -TimeoutMinutes $BakeTimeoutMinutes -Variant $bakeVariant | Out-Null
     }
     catch {
         Write-Log "Bake failed: $_" -Failure

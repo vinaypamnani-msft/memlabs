@@ -365,10 +365,23 @@ $global:VM_Create = {
                 # Server 24.04 LTS in file list" on any environment whose
                 # _fileList.json doesn't carry the Ubuntu entry.
                 if (Test-VmIsLinux -Vm $currentItem) {
-                    $linuxVhdxName = 'UbuntuServer2404.vhdx'
+                    # Pick the per-role base VHDX. LinuxClient uses the Desktop
+                    # variant (ubuntu-desktop-minimal + GDM3 + NetworkManager +
+                    # xrdp, built by baseimagestaging\New-LinuxBaseImage.ps1
+                    # -Desktop). Everything else Linux (Proxy, LinuxServer)
+                    # uses the smaller server cloud image.
+                    $linuxVhdxName = switch ($currentItem.role) {
+                        'LinuxClient' { 'UbuntuDesktop2404.vhdx' }
+                        default       { 'UbuntuServer2404.vhdx' }
+                    }
                     $vhdxPath = Join-Path $Common.AzureImagePath $linuxVhdxName
                     if (-not (Test-Path $vhdxPath)) {
-                        throw "Linux base image $vhdxPath not found. Run baseimagestaging\New-LinuxBaseImage.ps1 first."
+                        $buildHint = if ($linuxVhdxName -eq 'UbuntuDesktop2404.vhdx') {
+                            "baseimagestaging\New-LinuxBaseImage.ps1 -Desktop"
+                        } else {
+                            "baseimagestaging\New-LinuxBaseImage.ps1"
+                        }
+                        throw "Linux base image $vhdxPath not found. Run $buildHint first."
                     }
                 }
                 else {

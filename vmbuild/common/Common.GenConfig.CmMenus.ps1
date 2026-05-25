@@ -103,6 +103,7 @@ Function Get-SupportedOperatingSystemsForRole {
         "PassiveSite" { return $ServerList }
         "Proxy" { return @("Ubuntu Server 24.04 LTS") }
         "LinuxServer" { return @("Ubuntu Server 24.04 LTS") }
+        "LinuxClient" { return @("Ubuntu Desktop 24.04 LTS") }
         "DomainMember" {
             if ($vm -and $vm.SqlVersion) {
                 return $ServerList

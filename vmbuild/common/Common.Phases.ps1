@@ -872,8 +872,8 @@ function Get-Phase3ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines and Linux (Proxy/LinuxServer) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy", "LinuxServer") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -919,8 +919,8 @@ function Get-Phase4ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -1045,8 +1045,8 @@ function Get-Phase6ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -1097,8 +1097,8 @@ function Get-Phase7ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines and Linux (Proxy) -- no DSC for Linux.
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
