@@ -1593,6 +1593,21 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
 
+            # 4) HKU\.DEFAULT IE settings -- this is what SYSTEM context reads.
+            #    .NET WebClient / HttpWebRequest (used by DSC scripts running as
+            #    LocalSystem) resolves its default proxy via
+            #    WinHttpGetIEProxyConfigForCurrentUser, which for SYSTEM returns
+            #    HKU\.DEFAULT, NOT the HKLM keys above (ProxySettingsPerUser=0
+            #    only affects WinINet, not .NET's resolver). Without this,
+            #    DSC downloads (e.g. InstallODBCDriver fetching msodbcsql.msi
+            #    via WebClient) bypass the proxy entirely and hit the ACL
+            #    deny rule with "Unable to connect to the remote server".
+            $defaultUserKey = 'Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (-not (Test-Path $defaultUserKey)) { New-Item -Path $defaultUserKey -Force | Out-Null }
+            New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
+            New-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+
             # Show resulting WinHTTP state for the log
             $current = & netsh winhttp show proxy
             return @{ Ok = $true; WinHttp = ($current -join "`n") }
