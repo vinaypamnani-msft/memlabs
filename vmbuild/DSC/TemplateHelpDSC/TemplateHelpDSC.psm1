@@ -216,6 +216,30 @@ class InstallADK {
             param($exe, [string[]]$argv, $label)
             $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
             if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+
+            # WiX Burn uses WinHTTP (not WinINET / .NET) for child-package
+            # downloads. On a proxied lab, WinHTTP system proxy MUST be
+            # configured before adksetup runs or it tries a direct connect
+            # and times out at 21s with HttpSendRequest 0x80004005. The
+            # proxy is normally stamped by Set-WindowsClientProxyForConfig
+            # after Phase 2, but if that didn't run (hidden VM, useProxy
+            # false at the time, race, etc.) we self-heal here by importing
+            # from IE settings -- Set-WindowsClientProxy always writes
+            # HKU\.DEFAULT IE keys, so `import proxy source=ie` picks them
+            # up under SYSTEM context. Harmless on direct-internet labs
+            # (import is a no-op when IE has no proxy).
+            try {
+                $current = (& netsh winhttp show proxy 2>$null) -join "`n"
+                if ($current -match 'Direct access') {
+                    Write-Status "WinHTTP proxy is Direct; attempting import from IE settings."
+                    & netsh winhttp import proxy source=ie | Out-Null
+                    $after = (& netsh winhttp show proxy 2>$null) -join "`n"
+                    if ($after -notmatch 'Direct access') {
+                        Write-Status "WinHTTP proxy imported from IE."
+                    }
+                }
+            } catch { Write-Status "WinHTTP proxy check failed (non-fatal): $($_.Exception.Message)" }
+
             $full = @($argv) + @('/log', $logFile)
             Write-Status ("Running adksetup: {0} {1}" -f $exe, ($full -join ' '))
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
