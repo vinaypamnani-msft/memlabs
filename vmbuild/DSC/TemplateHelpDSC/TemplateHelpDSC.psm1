@@ -102,6 +102,71 @@ function Invoke-DownloadFile {
 
 }
 
+# Hardened MSI installer. Several DSC resources previously called `& msiexec /i ...`
+# directly -- but msiexec.exe is a launcher stub that returns immediately while the
+# real install runs async under the msiexec /V service. That made callers print
+# "Installed Successfully!" before the MSI had done anything, and never inspect
+# $LASTEXITCODE. Use Start-Process -Wait -PassThru so we actually block on
+# completion and can inspect ExitCode, capture a verbose log, and optionally
+# verify a registry marker proving the install registered.
+function Install-MSIPackage {
+    param(
+        [Parameter(Mandatory)][string] $MsiPath,
+        [Parameter(Mandatory)][string] $DisplayName,
+        [string[]] $AdditionalArguments = @(),
+        [string] $LogPath,
+        [string] $VerifyRegistryPath,
+        [string] $VerifyRegistryValueName,
+        [int[]]  $SuccessExitCodes = @(0, 3010)  # 3010 = success, reboot required
+    )
+
+    if (-not (Test-Path -Path $MsiPath)) {
+        throw "$DisplayName install failed: MSI not found at $MsiPath"
+    }
+
+    if (-not $LogPath) {
+        $base = [IO.Path]::GetFileNameWithoutExtension($MsiPath)
+        $LogPath = "C:\temp\$base.install.log"
+    }
+    $logDir = Split-Path -Path $LogPath -Parent
+    if ($logDir -and -not (Test-Path -Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+
+    $msiArgs = @("/i", "`"$MsiPath`"", "/qn", "/norestart") + $AdditionalArguments + @("/l*v", "`"$LogPath`"")
+
+    Write-Status "Installing $DisplayName from $MsiPath ..."
+    Write-Verbose ("Commandline: msiexec.exe $($msiArgs -join ' ')")
+
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+    $exit = $proc.ExitCode
+
+    if ($SuccessExitCodes -notcontains $exit) {
+        $tail = ""
+        if (Test-Path -Path $LogPath) {
+            try { $tail = (Get-Content -Path $LogPath -Tail 25 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+        }
+        Write-Status "msiexec for $DisplayName exited with $exit. Log tail (last 25 lines of ${LogPath}):`n$tail"
+        throw "$DisplayName install failed (msiexec exit $exit). Log: $LogPath"
+    }
+
+    if ($VerifyRegistryPath) {
+        if (-not (Test-Path -Path $VerifyRegistryPath)) {
+            throw "$DisplayName msiexec exit was $exit but registry path $VerifyRegistryPath is missing -- install did not register"
+        }
+        if ($VerifyRegistryValueName) {
+            $val = (Get-ItemProperty -Path $VerifyRegistryPath -Name $VerifyRegistryValueName -ErrorAction SilentlyContinue).$VerifyRegistryValueName
+            if (-not $val) {
+                throw "$DisplayName msiexec exit was $exit but $VerifyRegistryPath\$VerifyRegistryValueName is empty -- install did not register"
+            }
+            Write-Status "$DisplayName installed successfully ($VerifyRegistryValueName=$val, exit $exit)"
+            return
+        }
+    }
+
+    Write-Status "$DisplayName installed successfully (exit $exit)"
+}
+
 [DscResource()]
 class InstallADK {
     [DscProperty(Key)]
@@ -419,27 +484,11 @@ class InstallReportBuilder {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_Path
-       
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_Path
-        #$arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        $arg5 = "/l*v"
-        $arg6 = "c:\temp\reportbuilder.log"
 
-        try {
-            Write-Status "Installing Report Builder..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg4 $arg5 $arg6")
-            & $cmd $arg1 $arg2 $arg4 $arg5 $arg6
-            Write-Status "Report Builder was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Report Builder with error: $ErrorMessage"
-            throw "Failed to install Report Builder with error: $ErrorMessage"
-        }
+        Install-MSIPackage `
+            -MsiPath $_Path `
+            -DisplayName "Report Builder" `
+            -LogPath "C:\temp\reportbuilder.log"
     }
 
     [bool] Test() {
@@ -490,26 +539,14 @@ class InstallODBCDriver {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_odbcpath
-       
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_odbcpath
-        $arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
-        try {
-            Write-Status "Installing Microsoft ODBC Driver 18 for SQL Server..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
-            Write-Status "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-            throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-        }
+        Install-MSIPackage `
+            -MsiPath $_odbcpath `
+            -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
+            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES") `
+            -LogPath "C:\temp\odbcinstallation.log" `
+            -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
@@ -570,27 +607,14 @@ class InstallOleDbDriver {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_msipath
-       
-        $packageName = "Microsoft OLEDB Driver 19"
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_msipath
-        $arg3 = "IACCEPTMSOLEDBSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
-        try {
-            Write-Status "Installing $packageName..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
-            Write-Status "$packageName was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install $packageName with error: $ErrorMessage"
-            throw "Failed to install $packageName with error: $ErrorMessage"
-        }
+        Install-MSIPackage `
+            -MsiPath $_msipath `
+            -DisplayName "Microsoft OLEDB Driver 19" `
+            -AdditionalArguments @("IACCEPTMSOLEDBSQLLICENSETERMS=YES") `
+            -LogPath "C:\temp\msoledbsql.install.log" `
+            -VerifyRegistryPath "HKLM:\SOFTWARE\Microsoft\MSOLEDBSQL19" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
@@ -650,26 +674,13 @@ class InstallSqlClient {
         $_URL = $this.URL
         Invoke-DownloadFile $_URL $_path
 
-        # Install
-        #VC_redist.x64.exe /install /passive /quiet
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_path
-        $arg3 = "IACCEPTSQLNCLILICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
-
-        try {
-            Write-Status "Installing Sql Client..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 #$arg5
-            Write-Status "SQL Client was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Sql Client with error: $ErrorMessage"
-            throw "Failed to install Sql Client with error: $ErrorMessage"
-        }
+        Install-MSIPackage `
+            -MsiPath $_path `
+            -DisplayName "SQL Server Native Client 11" `
+            -AdditionalArguments @("IACCEPTSQLNCLILICENSETERMS=YES") `
+            -LogPath "C:\temp\sqlncli.install.log" `
+            -VerifyRegistryPath "HKLM:\SOFTWARE\Microsoft\SQLNCLI11" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
@@ -832,25 +843,11 @@ class InstallPMPC {
 
         $Name = "Patch my PC"
         Invoke-DownloadFile $_URL $_path
-       
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_Path
-        $arg3 = "/qn"
-        $arg4 = "/l*v"
-        $arg5 = "c:\temp\pmpc.log"
-       
-        try {
-            Write-Status "Installing $Name  $_path..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
-            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
-            Write-Status "$Name  $_path was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install $Name  with error: $ErrorMessage"
-            throw "Failed to install $Name  with error: $ErrorMessage"
-        }
+
+        Install-MSIPackage `
+            -MsiPath $_Path `
+            -DisplayName $Name `
+            -LogPath "C:\temp\pmpc.log"
 
         $SettingsXML = Get-Content "C:\Staging\DSC\Phases\PMPC.Settings.Template" -Raw
         $SettingsXML = $SettingsXML.Replace("TEMPLATESITECODE", $this.SiteCode)
