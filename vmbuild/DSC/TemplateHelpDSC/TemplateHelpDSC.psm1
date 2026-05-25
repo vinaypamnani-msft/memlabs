@@ -136,52 +136,84 @@ class InstallADK {
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
+        # Local helper: invoke adksetup with a dedicated log file, check
+        # exit code, and tail the log on failure so we never silently loop
+        # claiming success when the install actually bailed out.
+        $invokeAdk = {
+            param($exe, [string[]]$argv, $label)
+            $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+            if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+            $full = @($argv) + @('/log', $logFile)
+            Write-Status ("Running adksetup: {0} {1}" -f $exe, ($full -join ' '))
+            $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
+            $code = $proc.ExitCode
+            Write-Status ("adksetup ({0}) exit code: {1}" -f $label, $code)
+            if ($code -ne 0) {
+                $tail = ''
+                if (Test-Path $logFile) {
+                    try { $tail = (Get-Content -LiteralPath $logFile -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } catch { }
+                }
+                Write-Status ("adksetup ({0}) failed. Log {1}. Tail:`n{2}" -f $label, $logFile, $tail)
+            }
+            return $code
+        }
+
+        $maxAttempts = 4
+
         #Install DeploymentTools and UserStateMigrationTool in a single call
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
         $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
         Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool"
+        $attempt = 0
+        $lastExit = -1
         while (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
-            $cmd = $_adkpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.DeploymentTools"
-            $arg3 = "OptionId.UserStateMigrationTool"
-            $arg4 = "/q"
-
+            $attempt++
+            if ($attempt -gt $maxAttempts) {
+                throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts attempts (last exit code $lastExit). Paths missing: " +
+                       (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
+            }
+            Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool... (attempt $attempt/$maxAttempts)"
             try {
-                Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool..."
-                & $cmd $arg1 $arg2 $arg3 $arg4 | out-null
-                Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
+                $lastExit = & $invokeAdk $_adkpath @('/Features','OptionId.DeploymentTools','OptionId.UserStateMigrationTool','/q') "adk-deptools"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install ADK DeploymentTools/UserStateMigrationTool with below error: $ErrorMessage"
-                throw "Failed to install ADK DeploymentTools/UserStateMigrationTool with below error: $ErrorMessage"
+                Write-Status "Failed to launch ADK setup: $ErrorMessage"
+                throw "Failed to launch ADK setup: $ErrorMessage"
             }
-
-            Start-Sleep -Seconds 2
+            if ($lastExit -eq 0) {
+                Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
+            } else {
+                Write-Status "adksetup exited $lastExit; will retry after backoff."
+            }
+            Start-Sleep -Seconds 5
         }
 
         #Install WindowsPreinstallationEnvironment
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
         Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
+        $attempt = 0
+        $lastExit = -1
         while (!(Test-Path $adkinstallpath)) {
-            $cmd = $_adkWinPEpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.WindowsPreinstallationEnvironment"
-            $arg3 = "/q"
-
+            $attempt++
+            if ($attempt -gt $maxAttempts) {
+                throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts attempts (last exit code $lastExit). Path missing: $adkinstallpath"
+            }
+            Write-Status "Installing WindowsPreinstallationEnvironment for ADK... (attempt $attempt/$maxAttempts)"
             try {
-                Write-Status "Installing WindowsPreinstallationEnvironment for ADK..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
+                $lastExit = & $invokeAdk $_adkWinPEpath @('/Features','OptionId.WindowsPreinstallationEnvironment','/q') "adk-winpe"
             }
             catch {
                 $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
-                throw "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
+                Write-Status "Failed to launch WinPE ADK setup: $ErrorMessage"
+                throw "Failed to launch WinPE ADK setup: $ErrorMessage"
             }
-
-            Start-Sleep -Seconds 2
+            if ($lastExit -eq 0) {
+                Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
+            } else {
+                Write-Status "adkwinpesetup exited $lastExit; will retry after backoff."
+            }
+            Start-Sleep -Seconds 5
         }
     }
 
