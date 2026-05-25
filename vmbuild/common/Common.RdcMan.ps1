@@ -437,9 +437,39 @@ function New-RDCManFileFromHyperV {
             $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
         }
 
+        $hasLinuxRdp = $false
         foreach ($vm in $vmListFull) {
             if (Test-VmIsLinux -Vm $vm) {
-                Write-Verbose "Skipping Linux VM $($vm.VmName) (RDCMan is RDP-only)"
+                $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
+                if (-not $rdpOn) {
+                    Write-Verbose "Skipping Linux VM $($vm.VmName) (enableRDP not set)"
+                    continue
+                }
+                # Linux VM with xrdp enabled. Add as a regular server entry in the
+                # domain group (zAllVirtualMachines) with Comment="Linux" so the
+                # per-domain "Linux" smartGroup picks it up via rule match. Per-server
+                # logonCredentials uses vmbuildadmin + LocalAdmin password (matches
+                # cloud-init chpasswd).
+                $hasLinuxRdp = $true
+                $linuxName = $vm.VmName
+                if ([string]::IsNullOrWhiteSpace($linuxName) -and $vm.LastKnownIP) {
+                    $linuxName = $vm.LastKnownIP
+                }
+                $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+                if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
+                $cLinux = [PsCustomObject]@{}
+                foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
+                    $cLinux | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -Force
+                }
+                # Comment="Linux" is what the smartGroup rule matches against
+                $cLinux | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Linux" -Force
+                $linuxComment = ($cLinux | ConvertTo-Json -Depth 4 -Compress)
+                if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                        -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing `
+                        -comment $linuxComment -ForceOverwrite:$true `
+                        -domain '' -username 'vmbuildadmin') -eq $True) {
+                    $shouldSave = $true
+                }
                 continue
             }
             Write-Verbose "Adding VM $($vm.VmName)"
@@ -688,6 +718,12 @@ function New-RDCManFileFromHyperV {
         #    $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
         #    #    $findgroup.AppendChild($clonedSG)
         #}
+        if ($hasLinuxRdp) {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Linux"
+            $clonedSG.ruleGroup.rule.value = "Linux"
+            [void]$findgroup.AppendChild($clonedSG)
+        }
         # Add new group
         [void]$file.AppendChild($findgroup)
 
