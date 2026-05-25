@@ -875,7 +875,54 @@ class InstallVCRedist {
                 }
                 throw "VC Redist $_path failed (exit $exit). Log: $logFile`nTail:`n$logTail"
             }
-            Write-Status "VC Redist $_path installed (exit $exit)."
+            Write-Status "VC Redist $_path bootstrapper exited (exit $exit). Waiting for install to settle..."
+
+            # The WiX Burn bootstrapper for vc_redist detaches an elevated
+            # worker and returns from the parent process almost immediately
+            # (observed: parent exits in ~1.3s while child MSIs run for
+            # another 8-10s -- vcRuntimeMinimum then vcRuntimeAdditional).
+            # Start-Process -Wait only waits for the launched process, not
+            # its detached children. If we move on now, the next DSC
+            # resource (e.g. InstallOleDbDriver) starts and its
+            # VCRedistCheck CA reads a stale/in-flight registry state and
+            # fails with "requires VS2022 redist 14.34+".
+            #
+            # Wait for both the bundle's Package Cache uninstall key to
+            # appear AND for one of the child MSI logs (whichever the
+            # bundle writes) to contain a "Shutting down, exit code"
+            # line. Poll up to 120s; that covers slow disks and AV
+            # scanning the cached MSIs.
+            $bundleKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+            $childLogPattern = if ($_path -like "*x64*") {
+                "c:\temp\vc_redistx64_*_vcRuntime*_x64.log"
+            } else {
+                "c:\temp\vc_redistx86_*_vcRuntime*_x86.log"
+            }
+            $deadline = (Get-Date).AddSeconds(120)
+            $settled = $false
+            while ((Get-Date) -lt $deadline) {
+                # Look for any vcRuntime child MSI log whose tail shows
+                # MainEngineThread returning (msiexec completed).
+                $childLogs = @(Get-ChildItem -Path $childLogPattern -ErrorAction SilentlyContinue)
+                if ($childLogs.Count -ge 1) {
+                    $allDone = $true
+                    foreach ($cl in $childLogs) {
+                        $tail = $null
+                        try { $tail = (Get-Content -LiteralPath $cl.FullName -Tail 5 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+                        if (-not $tail -or $tail -notmatch 'MainEngineThread is returning|=== Verbose logging stopped') {
+                            $allDone = $false
+                            break
+                        }
+                    }
+                    if ($allDone) { $settled = $true; break }
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $settled) {
+                Write-Status "VC Redist $_path: child MSI logs did not settle within 120s; proceeding anyway (registry will be re-checked next)."
+            } else {
+                Write-Status "VC Redist $_path: child MSI install completed."
+            }
         }
         catch {
             $ErrorMessage = $_.Exception.Message
@@ -896,8 +943,17 @@ class InstallVCRedist {
         if (-not (Test-Path $regPath)) {
             throw "VC Redist install reported success but registry $regPath is missing."
         }
-        $v = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
-        $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+        # Bld DWORD updates after the child MSI commits; if we read it
+        # right when the bundle exits, it can still show the old value.
+        # Poll up to 30s.
+        $deadline2 = (Get-Date).AddSeconds(30)
+        $major = 0; $minor = 0; $bld = 0; $v = $null
+        while ((Get-Date) -lt $deadline2) {
+            $v = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+            $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+            if ($major -ge 14 -and (($minor -gt 34) -or ($minor -eq 34 -and $bld -ge 33135))) { break }
+            Start-Sleep -Milliseconds 500
+        }
         Write-Status ("VC Redist registered: Major={0} Minor={1} Bld={2} Installed={3} InstalledVersion={4} ({5})" -f $major, $minor, $bld, $v.Installed, $v.Version, $regPath)
         if ($major -lt 14 -or ($major -eq 14 -and $minor -lt 34) -or ($major -eq 14 -and $minor -eq 34 -and $bld -lt 33135)) {
             throw "VC Redist install reported success but $regPath shows Major=$major Minor=$minor Bld=$bld (need >= 14.34, Bld >= 33135 for OLE DB Driver 19)."
