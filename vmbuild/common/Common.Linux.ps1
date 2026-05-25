@@ -2196,15 +2196,30 @@ function Set-ProxyAdminAccessOnVm {
             [System.IO.File]::WriteAllText($privPath, ($privKey -replace "`r`n", "`n"))
             [System.IO.File]::WriteAllText($pubPath, ($pubKey -replace "`r`n", "`n"))
 
-            # Lock private key down: SYSTEM + Administrators full, no inherit
-            $acl = New-Object System.Security.AccessControl.FileSecurity
+            # Lock private key down so OpenSSH on Windows will use it:
+            #   - Owner must be one of {current user, Administrators, SYSTEM}
+            #     or ssh.exe rejects with 'bad permissions / too open'.
+            #   - Only owner/SYSTEM/Administrators may appear in the ACL.
+            #   - No inherited ACEs (otherwise Authenticated Users etc. leak
+            #     in from C:\ProgramData and OpenSSH refuses the key).
+            # The shortcuts live in C:\Users\Public\Desktop, so the launcher
+            # could be ANY local admin / domain admin. Setting owner to
+            # BUILTIN\Administrators is the one choice OpenSSH accepts for
+            # all of them.
+            #
+            # NOTE: starting from `New-Object FileSecurity` (empty descriptor)
+            # leaves owner unset, which OpenSSH treats as untrusted and
+            # rejects the key. Always start from Get-Acl and mutate.
+            $acl = Get-Acl -Path $privPath
             $acl.SetAccessRuleProtection($true, $false)
-            $sys = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                'NT AUTHORITY\SYSTEM', 'FullControl', 'Allow')
-            $adm = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                'BUILTIN\Administrators', 'FullControl', 'Allow')
-            $acl.AddAccessRule($sys)
-            $acl.AddAccessRule($adm)
+            foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
+            $sysSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'           # NT AUTHORITY\SYSTEM
+            $admSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'      # BUILTIN\Administrators
+            $acl.SetOwner($admSid)
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $sysSid, 'FullControl', 'Allow')))
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $admSid, 'FullControl', 'Allow')))
             Set-Acl -Path $privPath -AclObject $acl
 
             # Locate ssh.exe (built-in OpenSSH client; present on all current
@@ -2384,12 +2399,18 @@ function New-HostProxyShortcuts {
             [System.IO.File]::WriteAllText($userPub,  ($memlabsPub  -replace "`r`n", "`n"))
 
             # OpenSSH refuses to use the key if perms are too loose: only the
-            # current user should have access. Strip inheritance, grant just
-            # the current user FullControl.
+            # current user should have access, AND the file must have an
+            # owner OpenSSH recognises (current user, Administrators, SYSTEM).
+            # Starting from `New-Object FileSecurity` leaves owner unset and
+            # ssh.exe rejects the key with 'bad permissions'. Mutate the
+            # existing ACL instead.
             try {
-                $acl = New-Object System.Security.AccessControl.FileSecurity
+                $acl = Get-Acl -Path $userKey
                 $acl.SetAccessRuleProtection($true, $false)
+                foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
                 $me = "$env:USERDOMAIN\$env:USERNAME"
+                $meAccount = New-Object System.Security.Principal.NTAccount $me
+                $acl.SetOwner($meAccount)
                 $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
                     $me, 'FullControl', 'Allow')
                 $acl.AddAccessRule($rule)
