@@ -419,9 +419,11 @@ $global:VM_Create = {
                 }
 
                 $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
-                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
+                    $waitMin = [int]($waitTimeout / 60)
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within ${waitMin}min." -Failure -OutputStream
                     return
                 }
 
@@ -543,9 +545,11 @@ $global:VM_Create = {
             # to Invoke-VmCommand. Probe over SSH instead.
             if (Test-VmIsLinux -Vm $currentItem) {
                 $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
-                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
+                    $waitMin = [int]($waitTimeout / 60)
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within ${waitMin}min." -Failure -OutputStream
                     return
                 }
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success

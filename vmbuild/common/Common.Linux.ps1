@@ -767,21 +767,16 @@ function New-LinuxVirtualMachine {
             }
 
             # joinDomain toggle (currently exposed on the LinuxServer VM in
-            # genconfig). When true, cloud-init installs realmd/SSSD packages
-            # and runs `realm join` against the lab AD domain after waiting
-            # for DC DNS to come up. Credentials come from $Common.LocalAdmin
-            # (same password used everywhere else in the lab) and
-            # $DeployConfig.vmOptions.adminName for the user.
+            # genconfig). The realm-join CANNOT happen in cloud-init during
+            # Phase 1 (VM_Create) because the DC doesn't get promoted until
+            # Phase 2 DSC. Baking the join into runcmd just makes cloud-init
+            # block on its 20-min getent-loop waiting for DC DNS that won't
+            # exist yet. Defer to a post-Phase-2 step that SSHs into the
+            # Linux VM and runs the realm-join script (Phase 1d/1e work).
+            # Keep Get-LinuxDomainJoinSeedArgs around -- it's the right
+            # script body, just needs a different trigger.
             if ($thisVm -and $thisVm.PSObject.Properties.Name -contains 'joinDomain' -and [bool]$thisVm.joinDomain) {
-                $joinExtra = Get-LinuxDomainJoinSeedArgs -DeployConfig $DeployConfig -ThisVm $thisVm -Domain $Domain
-                if ($joinExtra) {
-                    Write-Log "$VmName`: joinDomain=true; cloud-init will realm-join '$Domain' as user '$($joinExtra.AdminUser)' (DC IP $($joinExtra.DcIp))"
-                    $seedArgs.ExtraPackages = @($seedArgs.ExtraPackages) + $joinExtra.ExtraPackages | Where-Object { $_ } | Select-Object -Unique
-                    $seedArgs.ExtraRunCmd = @($seedArgs.ExtraRunCmd) + $joinExtra.ExtraRunCmd | Where-Object { $_ }
-                }
-                else {
-                    Write-Log "$VmName`: joinDomain=true but domain-join args could not be resolved (missing DC, network, or admin creds); skipping join" -Warning
-                }
+                Write-Log "$VmName`: joinDomain=true noted; deferred to post-DC phase (DC isn't online during VM_Create)"
             }
         }
         $null = New-LinuxSeedIso @seedArgs
@@ -860,6 +855,36 @@ function Get-LinuxVmExpectedStaticIP {
         return "$($Matches[1]).2"
     }
     return $null
+}
+
+function Get-LinuxVmWaitTimeout {
+    <#
+    .SYNOPSIS
+        Return the SSH-ready timeout (in seconds) for a Linux VM.
+
+    .DESCRIPTION
+        Returns a flat 900s (15 min). SSH-ready means sshd is listening
+        and the IP is published via KVP (or matches the expected static
+        IP for the role). sshd starts in cloud-init's `config` stage,
+        which is long before `final`/runcmd runs the slow add-on installs
+        (xfce4 + xrdp + Firefox for enableRDP, realmd stack for
+        joinDomain). So those add-ons should NOT push past the base
+        budget for the SSH-ready check itself.
+
+        Historical context: a 900s timeout was observed on ADA-PROXY1.
+        Root cause was the Hyper-V KVP daemon failing to publish a guest
+        IP, not a slow apt install. Wait-LinuxVmReady now falls back to
+        the role's expected static IP (see Get-LinuxVmExpectedStaticIP)
+        when KVP is silent, so that failure mode no longer needs a
+        budget bump.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [psobject]$VmObject
+    )
+
+    return 900
 }
 
 function Get-LinuxVmIPAddress {
@@ -1679,7 +1704,8 @@ function Install-LinuxProxyServer {
 
     # Make sure the VM is up and SSH-reachable before doing anything.
     $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM
+    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[Proxy] $vmName`: VM not reachable over SSH; cannot install Squid" -Failure
         return $false
