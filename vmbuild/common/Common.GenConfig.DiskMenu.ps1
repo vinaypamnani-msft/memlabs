@@ -377,8 +377,8 @@ function Select-VMDisksMenu {
                 -selectable $false -Color1 "DarkGray"
         }
         if ($letters.Count -gt 0) {
-            $null = Add-MenuItem -MenuName $menuName -MenuItems ([ref]$MenuItems) `
-                -ItemName "E" -ItemText "Edit a disk size" -selectable $true
+            # Edit-size is reached by picking the disk row directly; no
+            # separate [E] action needed.
             $null = Add-MenuItem -MenuName $menuName -MenuItems ([ref]$MenuItems) `
                 -ItemName "R" -ItemText "Remove a disk" -selectable $true
         }
@@ -415,14 +415,6 @@ function Select-VMDisksMenu {
             '^A$' {
                 $null = Invoke-AddDisk -VirtualMachine $VirtualMachine
                 Get-TestResult -SuccessOnError | Out-Null
-                break
-            }
-            '^E$' {
-                $letter = Select-DiskLetterPrompt -VirtualMachine $VirtualMachine -Action "edit"
-                if ($letter) {
-                    $null = Invoke-EditDiskSize -VirtualMachine $VirtualMachine -Letter $letter
-                    Get-TestResult -SuccessOnError | Out-Null
-                }
                 break
             }
             '^R$' {
