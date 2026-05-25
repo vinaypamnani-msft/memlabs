@@ -352,6 +352,19 @@ function Select-VMDisksMenu {
                 if ($usage -ne "free") {
                     $color = $Global:Common.Colors.GenConfigNonDefault
                 }
+                # Surface any pending rejection from Invoke-RemoveDisk inline
+                # on the row (matches inline disk rows in VM Properties menu).
+                # Without this the Delete key on an in-use disk silently
+                # bounced the user with no feedback.
+                $diskErrKey = "disk:$($VirtualMachine.vmName):$l"
+                if ($global:GenConfigErrorMessages) {
+                    $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
+                    if ($diskErr) {
+                        $text = $text.PadRight(34) + "[x] $($diskErr.Message)"
+                        $color = "Salmon"
+                        $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
+                    }
+                }
                 $indexToLetter[[string]$idx] = $l
                 $null = Add-MenuItem -MenuName $menuName -MenuItems ([ref]$MenuItems) `
                     -ItemName ([string]$idx) -ItemText $text -selectable $true `
