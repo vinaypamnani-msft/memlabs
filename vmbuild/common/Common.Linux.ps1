@@ -1645,6 +1645,8 @@ function Set-WindowsClientProxy {
                 $proxyEl = $xml.CreateElement('proxy')
                 $proxyEl.SetAttribute('proxyaddress', "http://$proxyServer")
                 $proxyEl.SetAttribute('bypassonlocal', 'true')
+                $proxyEl.SetAttribute('autoDetect', 'false')
+                $proxyEl.SetAttribute('usesystemdefault', 'false')
                 [void]$defProxy.AppendChild($proxyEl)
                 if ($bypassRegexes.Count -gt 0) {
                     $bypassEl = $xml.CreateElement('bypasslist')
