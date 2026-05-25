@@ -100,16 +100,16 @@ if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
-# On re-entry, treat 'Running' the same as 'NotStart'. 'Running' is a transient
-# state with no owner once the original runner exits, so seeing it means the
-# prior attempt died mid-install. Re-running is safe: setupdl is idempotent
-# (its own 2-successes-in-a-row loop verifies already-downloaded files quickly)
-# and setup.exe handles re-entry against an existing/partial site install.
+# On re-entry, Status='Running' means the prior runner was killed mid-install
+# (the script never reached the 'Completed' write). We can't safely auto-retry:
+# setup.exe doesn't handle mid-install re-entry well, and the supported recovery
+# path is to restore the Phase 8 checkpoint and re-run. Fail loudly with a clear
+# message rather than falling through to the install gate (which would skip the
+# install on Status='Running' and then emit a misleading "Site Code not found"
+# error from the registry read further down).
 if ($Configuration.InstallSCCM.Status -eq 'Running') {
-    Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry -- prior attempt did not reach 'Completed'. Resetting to 'NotStart' to re-run setupdl + setup.exe."
-    $Configuration.InstallSCCM.Status = 'NotStart'
-    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    Write-DscStatus "InstallSCCM.Status is 'Running' on re-entry -- prior ConfigMgr install attempt was killed mid-flight. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got." -Failure
+    return
 }
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
