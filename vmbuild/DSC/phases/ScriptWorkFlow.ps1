@@ -7,6 +7,50 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+# Banner: emit a clearly-delimited start-of-run marker into InstallCMLog.log
+# so multiple ScriptWorkflow invocations on the same VM (reruns, retries,
+# DSC re-applies) are easy to tell apart when scrolling the log.
+try {
+    $bannerPid    = $PID
+    $bannerHost   = $env:COMPUTERNAME
+    $bannerUser   = "$($env:USERDOMAIN)\$($env:USERNAME)"
+    $bannerPSVer  = $PSVersionTable.PSVersion.ToString()
+    $bannerOS     = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { '<unknown>' }
+    $bannerStart  = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $bannerCwd    = (Get-Location).Path
+    $bannerScript = $MyInvocation.MyCommand.Path
+    try {
+        $bannerCmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).CommandLine
+    } catch { $bannerCmdLine = '<unavailable>' }
+    try {
+        $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+        $parent    = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction Stop
+        $bannerParent = "$($parent.Name) (PID $parentPid)"
+    } catch { $bannerParent = '<unavailable>' }
+
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ' ScriptWorkflow.ps1 - START'                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Started      : $bannerStart"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PID          : $bannerPid"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Parent       : $bannerParent"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Host         : $bannerHost"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  User         : $bannerUser"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  OS           : $bannerOS"                                               | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PowerShell   : $bannerPSVer"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Script       : $bannerScript"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Cwd          : $bannerCwd"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  CommandLine  : $bannerCmdLine"                                          | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  ConfigFile   : $ConfigFilePath"                                         | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  LogPath      : $LogPath"                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+}
+catch {
+    # Don't let banner failure stop the workflow
+    "ScriptWorkflow banner failed: $_" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 2
+}
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
 
