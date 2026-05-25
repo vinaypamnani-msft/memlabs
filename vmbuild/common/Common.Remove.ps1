@@ -11,7 +11,13 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $Force,
         [Parameter()]
-        [bool] $Migrate = $false
+        [bool] $Migrate = $false,
+        # Optional: caller-supplied VM list record (from a prior Get-List).
+        # When provided, skip the inline Get-List -SmartUpdate call -- saves
+        # ~1s per VM in parallel-removal scenarios where every worker would
+        # otherwise re-enumerate the entire host VM inventory.
+        [Parameter()]
+        [object] $VmRecord
     )
 
     # Helper: retry Remove-Item with configurable attempts and delay
@@ -77,7 +83,12 @@ function Remove-VirtualMachine {
 
     # ── Main logic ────────────────────────────────────────────────────────────
 
-    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    if ($VmRecord -and $VmRecord.vmName -eq $VmName) {
+        $vmFromList = $VmRecord
+    }
+    else {
+        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
     if ($vmFromList.vmBuild -eq $false) {
         if (-not ($Force.IsPresent)) {
             Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
@@ -430,12 +441,19 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+            # StartupProfile Fast skips Initialize-Storage (the main remaining
+            # cost in -InJob mode) plus the 4 InJob-already-skipped probes.
+            # Remove-VirtualMachine only needs Get-List / Get-VM2 / DHCP cmdlets
+            # / $Common.CachePath -- none of which depend on storage init,
+            # supported-options, hotfix lookup, or env detection.
+            . $rootPath\Common.ps1 -InJob -StartupProfile Fast -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase
             $vm = $currentItem
-            Remove-VirtualMachine -VmName $vm.VmName
+            # Pass the already-resolved VM record so the worker doesn't
+            # re-enumerate every VM on the host (~1s/worker saved).
+            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
@@ -445,7 +463,10 @@ function Remove-Domain {
 
 
     if ($vmsToDelete) {        
-        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove"
+        # PreferThreadJob: removes share parent's Hyper-V/DhcpServer modules
+        # and skip a fresh powershell.exe process per VM -- each worker's
+        # init drops from ~10s to ~1-2s when combined with StartupProfile Fast.
+        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove" -PreferThreadJob
 
         $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
         

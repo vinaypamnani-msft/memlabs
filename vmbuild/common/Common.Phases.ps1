@@ -167,8 +167,22 @@ function Start-NormalJobs {
         [object]$phase,
         [Object]$argument1,
         [Object]$argument2,
-        [Object]$argument3
+        [Object]$argument3,
+        # When set and Start-ThreadJob is available (PS7+ with ThreadJob
+        # module), spawn ThreadJobs instead of Start-Job. ThreadJobs share
+        # the parent process and its already-loaded modules/assemblies, so
+        # each worker skips powershell.exe startup (~1s) and Hyper-V /
+        # DhcpServer module imports (~2-3s). Falls back to Start-Job when
+        # ThreadJob isn't available. Throttle limit is set generously since
+        # ThreadJobs are cheap; caller-controlled via -ThreadJobThrottle.
+        [switch]$PreferThreadJob,
+        [int]$ThreadJobThrottle = 16
     )
+
+    $useThreadJob = $PreferThreadJob.IsPresent -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
+    if ($PreferThreadJob.IsPresent -and -not $useThreadJob) {
+        Write-Log "Start-NormalJobs: ThreadJob requested but not available; using Start-Job." -LogOnly
+    }
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -194,9 +208,17 @@ function Start-NormalJobs {
         }
 
         Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
-        if ($argument1) {
+        if ($useThreadJob) {
+            if ($argument1) {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+            }
+            else {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err
+            }
+        }
+        elseif ($argument1) {
             $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
-        } 
+        }
         else {
             $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }

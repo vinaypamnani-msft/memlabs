@@ -106,7 +106,11 @@ function Start-Maintenance {
         }
     }
 
-    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false
+    # PreferThreadJob: per-VM workers share parent's loaded Hyper-V /
+    # DhcpServer / module set and skip a fresh powershell.exe per VM.
+    # Phase10Job still dot-sources Common.ps1 -InJob -GetLatestHotfixVersion
+    # internally; ThreadJob cuts the per-worker init cost meaningfully.
+    $start = Start-NormalJobs -machines $newVmsNeedingMaintenance -ScriptBlock $global:Phase10Job -Phase "Maintenance" -argument1 '' -argument2 $false -PreferThreadJob
 
     $result = Wait-Phase -Phase "Maintenance" -Jobs $start.Jobs -AdditionalData $start.AdditionalData
 
