@@ -568,7 +568,16 @@ function New-LinuxVirtualMachine {
                     'xfce4',
                     'xfce4-goodies',
                     'dbus-x11',
-                    'xorg'
+                    'xorg',
+                    # xfce4 ships only a browser *launcher* (xfce4-web-browser),
+                    # not an actual browser, so clicking the globe icon throws
+                    # "Failed to execute default Web Browser. Input/output error".
+                    # apt-transport-https + the gnupg/wget pair below are
+                    # prereqs for adding the Mozilla apt repo in runcmd.
+                    'apt-transport-https',
+                    'ca-certificates',
+                    'gnupg',
+                    'wget'
                 )
                 $seedArgs.ExtraRunCmd = @(
                     # xrdp drops privileges to the 'xrdp' user; that user must
@@ -586,7 +595,31 @@ function New-LinuxVirtualMachine {
                     'chmod 0644 /root/.xsession',
                     'ufw allow 3389/tcp || true',
                     'systemctl enable --now xrdp || true',
-                    'systemctl enable --now xrdp-sesman || true'
+                    'systemctl enable --now xrdp-sesman || true',
+                    # Install Firefox from Mozilla's official apt repo. The
+                    # default Ubuntu 'firefox' package is a snap shim that
+                    # takes 30s+ to first-launch and pulls in snapd. The
+                    # Mozilla deb is a real .deb, launches instantly, and
+                    # auto-updates via apt. Pin the repo so apt prefers it
+                    # over the transitional Ubuntu package.
+                    'install -d -m 0755 /etc/apt/keyrings',
+                    'bash -c "wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null"',
+                    'bash -c "echo ''deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main'' > /etc/apt/sources.list.d/mozilla.list"',
+                    'bash -c "printf ''Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n'' > /etc/apt/preferences.d/mozilla"',
+                    'apt-get update',
+                    'DEBIAN_FRONTEND=noninteractive apt-get install -y firefox',
+                    # Make Firefox the system-wide default x-www-browser /
+                    # gnome-www-browser so xfce4-web-browser launcher resolves
+                    # it (the launcher uses xdg-open -> x-www-browser).
+                    'update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true',
+                    'update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true',
+                    'update-alternatives --set x-www-browser /usr/bin/firefox || true',
+                    'update-alternatives --set gnome-www-browser /usr/bin/firefox || true',
+                    # Tell XDG (used by xfce4-web-browser) that firefox is the
+                    # default handler for http/https/text-html. Applied
+                    # system-wide via /etc/xdg so it picks up for every user.
+                    'install -d -m 0755 /etc/xdg',
+                    "bash -c `"cat > /etc/xdg/mimeapps.list <<'EOF'`n[Default Applications]`nx-scheme-handler/http=firefox.desktop`nx-scheme-handler/https=firefox.desktop`ntext/html=firefox.desktop`nEOF`""
                 )
             }
         }
