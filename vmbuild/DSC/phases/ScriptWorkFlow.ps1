@@ -200,6 +200,15 @@ if (-not $Configuration.InstallSUP) {
     $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item -force
 }
 
+if (-not $Configuration.ConfigureCMProxy) {
+    $item = [PSCustomObject]@{
+        Status    = 'NotStart'
+        StartTime = ''
+        EndTime   = ''
+    }
+    $Configuration | Add-Member -MemberType NoteProperty -Name "ConfigureCMProxy" -Value $item -Force
+}
+
 $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
@@ -283,6 +292,16 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
     }
 
+    if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
+    }
+
     #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
@@ -309,6 +328,16 @@ if ($scenario -eq "Hierarchy") {
         }
         else {
             Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
+
+        if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
         }
 
     }
@@ -363,6 +392,16 @@ if ($scenario -eq "Hierarchy") {
         }
         else {
             Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
+
+        if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
         }
 
          #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected

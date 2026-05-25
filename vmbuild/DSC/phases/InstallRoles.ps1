@@ -323,58 +323,6 @@ $Configuration.InstallSUP.Status = 'Completed'
 $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# --- CM site role proxy (Phase 5) ---------------------------------------
-# Apply ConfigMgr proxy settings to any site system / SUP whose VM is opted
-# into useProxy. The Linux Squid Proxy VM lives in deployConfig.virtualMachines
-# with role=Proxy; if absent or no opted-in VMs are present this is a no-op.
-try {
-    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-    $proxyClients = @($deployConfig.virtualMachines | Where-Object {
-        $_.useProxy -eq $true -and $_.role -ne 'Proxy'
-    })
-
-    if ($proxyVm -and $proxyClients.Count -gt 0) {
-        $proxyFqdn = "$($proxyVm.vmName).$DomainFullName"
-        $proxyPort = 3128
-        Write-DscStatus "Applying CM proxy ($proxyFqdn`:$proxyPort) to $($proxyClients.Count) opted-in VM(s)"
-
-        $siteSystemRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
-        foreach ($cvm in $proxyClients) {
-            if ($cvm.role -notin $siteSystemRoles -and -not ($cvm.installSUP -eq $true)) { continue }
-
-            $fqdn = "$($cvm.vmName).$DomainFullName"
-            $ss = Get-CMSiteSystemServer -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
-            if (-not $ss) {
-                Write-DscStatus "$fqdn`: not a CM site system (yet); skipping proxy config"
-                continue
-            }
-
-            try {
-                Set-CMSiteSystemServer -SiteSystemServerName $fqdn -UseProxy $true `
-                    -ProxyServerName $proxyFqdn -ProxyServerPort $proxyPort `
-                    -ErrorAction Stop *>&1 | Out-File $global:StatusLog -Append
-                Write-DscStatus "$fqdn`: site system proxy set -> $proxyFqdn`:$proxyPort"
-            }
-            catch {
-                Write-DscStatus "$fqdn`: Set-CMSiteSystemServer -UseProxy failed: $_"
-            }
-
-            if ($cvm.installSUP -eq $true) {
-                $sup = Get-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -ErrorAction SilentlyContinue
-                if ($sup) {
-                    try {
-                        Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -UseProxy $true `
-                            -ErrorAction Stop *>&1 | Out-File $global:StatusLog -Append
-                        Write-DscStatus "$fqdn`: SUP UseProxy enabled"
-                    }
-                    catch {
-                        Write-DscStatus "$fqdn`: Set-CMSoftwareUpdatePoint -UseProxy failed: $_"
-                    }
-                }
-            }
-        }
-    }
-}
-catch {
-    Write-DscStatus "CM proxy configuration block failed: $_"
-}
+# CM site-role proxy is now applied by phases/ConfigureCMProxy.ps1, invoked
+# directly from ScriptWorkflow.ps1 so it runs even when this script returns
+# early (e.g. no SUP configured).
