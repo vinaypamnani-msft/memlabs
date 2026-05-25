@@ -236,7 +236,9 @@ function Get-SortedProperties {
         'UseOfflineRoot'
         'SubordinateCA'
         '_autoAddedByOfflineRootCA'
+        '_autoAddedByProxy'
         'pushClientToDomainMembers'
+        'osFamily'
     )
 
     $memberNames = @($property | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
