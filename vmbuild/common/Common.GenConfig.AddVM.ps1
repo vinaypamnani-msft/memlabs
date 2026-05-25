@@ -900,21 +900,17 @@ function Remove-OfflineRootCAVMIfAutoAdded {
 }
 
 function Test-ConfigNeedsProxy {
-    # Returns $true if anything in the in-memory config opts into the Squid
-    # proxy: domainDefaults.UseProxyForClients / UseProxyForCM (or the legacy
-    # single UseProxy key), or any non-hidden VM with useProxy=$true.
+    # Returns $true iff any non-hidden VM in the config has useProxy=$true.
+    # domainDefaults.UseProxyFor* are seed-only hints used by Add-NewVMForRole
+    # to populate the per-VM useProxy at creation time; they are NOT consulted
+    # here. If every VM has useProxy=$false, the config does not need a proxy,
+    # regardless of what the domain default says.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [object] $ConfigToModify
     )
 
-    $dd = $ConfigToModify.domainDefaults
-    if ($dd) {
-        if ($dd.UseProxyForClients) { return $true }
-        if ($dd.UseProxyForCM) { return $true }
-        if ($null -ne $dd.UseProxy -and [bool]$dd.UseProxy) { return $true }
-    }
     foreach ($vm in @($ConfigToModify.virtualMachines)) {
         if ($vm.hidden) { continue }
         if ($vm.PSObject.Properties.Name -contains 'useProxy' -and [bool]$vm.useProxy) {
