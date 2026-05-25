@@ -23,7 +23,9 @@ function Select-Options {
         [bool] $Test = $true,
         [string] $HelpFunction = $null,
         [Parameter(Mandatory = $false, HelpMessage = "Hashtable mapping property name -> section header text. A non-selectable divider with the header is rendered immediately before that property.")]
-        [hashtable] $Sections = $null
+        [hashtable] $Sections = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Regex matched against menu item ItemName. If the assembled menu would overflow the current window, items whose ItemName matches are removed (lowest priority first) until it fits. Used for optional inline rows that should hide rather than push other items onto a second page.")]
+        [string] $DroppableItemPattern = $null
     )
 
     $property = $null
@@ -155,6 +157,36 @@ function Select-Options {
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction
+
+        # Exact-fit pruning: if the fully assembled menu would overflow the
+        # window, drop items whose ItemName matches $DroppableItemPattern
+        # (lowest priority -- inline disk rows on the VM Properties menu)
+        # until it fits. Uses the same Get-MenuMetrics line count + cursor
+        # position + window height as Get-Menu2's own pagination so the
+        # decision is exact rather than estimated.
+        if ($DroppableItemPattern) {
+            try {
+                $live = Get-LiveWindowSize
+                $winW = if ($live) { $live.Width }  else { $host.UI.RawUI.WindowSize.Width }
+                $winH = if ($live) { $live.Height } else { $host.UI.RawUI.WindowSize.Height }
+                $cursorY = [Console]::CursorTop
+                # Match Get-RoomLeftFromCurrentPosition's BottomReserve = 4.
+                $room = $winH - $cursorY - 4
+                $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
+                if ($metrics.TotalLineCount -gt $room) {
+                    $droppable = @($MenuItems | Where-Object { [string]$_.itemName -match $DroppableItemPattern })
+                    foreach ($d in $droppable) {
+                        $null = $MenuItems.Remove($d)
+                        $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
+                        if ($metrics.TotalLineCount -le $room) { break }
+                    }
+                }
+            }
+            catch {
+                Write-Log -Verbose "Select-Options droppable prune failed: $_"
+            }
+        }
+
         $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false -AcceptsDelete
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
@@ -777,27 +809,6 @@ function Select-VirtualMachines {
                         $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
                         $diskNumToLetter = @{}
                         $diskNum = 90
-                        # Suppress inline disk rows when the terminal is too
-                        # short to fit them without pushing [M] Manage Disks
-                        # (and the ConfigMgr/VM Management sections) onto a
-                        # second page. The user can still edit/remove disks
-                        # via [M]. Heuristic: count properties + disks +
-                        # fixed overhead for headers, dividers, optional
-                        # sections, and the Done-with-changes footer.
-                        $showInlineDisks = $true
-                        if ($diskLettersInline -and $diskLettersInline.Count -gt 0) {
-                            $propCount = @(Get-SortedProperties $virtualMachine).Count
-                            $windowHeight = try { $host.UI.RawUI.WindowSize.Height } catch { 50 }
-                            # Overhead: ~16 lines covers Disks header, [M]
-                            # row, ConfigMgr section (B+header+S+H), VM
-                            # Management section (B+header+Z), bottom
-                            # divider+blank+Done, prompt + PgDn indicator.
-                            $estimatedHeight = $propCount + $diskLettersInline.Count + 16
-                            if ($estimatedHeight -gt $windowHeight) {
-                                $showInlineDisks = $false
-                            }
-                        }
-                        if ($showInlineDisks) {
                         foreach ($dl in $diskLettersInline) {
                             $dsize = $virtualMachine.additionalDisks.$dl
                             $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
@@ -827,7 +838,6 @@ function Select-VirtualMachines {
                             $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
                             $diskNumToLetter[$key] = $dl
                             $diskNum++
-                        }
                         }
                         $customOptions["M"]  = "Manage Disks  ($diskSummary)"
                         $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
@@ -942,7 +952,7 @@ function Select-VirtualMachines {
                             "HZ"  = "Deletes this VM from the current configuration"
                         }
                         if ([String]::IsNullOrEmpty($result)) {
-                            $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
+                            $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp" -DroppableItemPattern '^9\d$'
                         }
                         else {
                             $newValue = $result
