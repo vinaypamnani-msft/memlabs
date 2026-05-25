@@ -1662,6 +1662,19 @@ function Set-WindowsClientProxy {
                 }
                 [void]$sysNet.AppendChild($defProxy)
                 $xml.Save($mcPath)
+
+                # Verify the write actually persisted (PS XML adapter has
+                # bitten us before — see DocumentElement fix). Re-read from
+                # disk and confirm <proxy proxyaddress=...> matches.
+                $verifyXml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                $verifyProxy = $verifyXml.DocumentElement.SelectSingleNode('system.net/defaultProxy/proxy')
+                if (-not $verifyProxy) {
+                    throw "machine.config write verification failed: <defaultProxy/proxy> not present after save in $mcPath"
+                }
+                $expectedAddr = "http://$proxyServer"
+                if ($verifyProxy.GetAttribute('proxyaddress') -ne $expectedAddr) {
+                    throw "machine.config proxyaddress mismatch in $mcPath (got '$($verifyProxy.GetAttribute('proxyaddress'))', expected '$expectedAddr')"
+                }
             }
 
             # Show resulting WinHTTP state for the log
