@@ -228,8 +228,17 @@ chpasswd:
     $runcmd = @(
         'systemctl enable --now qemu-guest-agent || true',
         'systemctl enable --now ssh || true',
-        'systemctl enable --now hv-kvp-daemon.service || true',
-        'systemctl enable --now hv-vss-daemon.service || true',
+        # linux-cloud-tools-virtual / linux-tools-virtual are kernel-FLAVOR
+        # metapackages (virtual). Ubuntu cloud images run linux-image-generic
+        # (or -azure), so the -virtual metas resolve to stubs that never
+        # install the hv_kvp_daemon binary matching $(uname -r). Without
+        # the matching binary the systemd unit comes up but the daemon
+        # exits immediately and KVP stays empty. Install the kernel-exact
+        # tools packages here at runtime when $(uname -r) is known.
+        'apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" || true',
+        'systemctl daemon-reload || true',
+        'systemctl restart hv-kvp-daemon.service || systemctl enable --now hv-kvp-daemon.service || true',
+        'systemctl restart hv-vss-daemon.service || systemctl enable --now hv-vss-daemon.service || true',
         'ufw allow OpenSSH || true',
         # systemd-resolved consults FallbackDNS only when no DHCP/static DNS
         # answers. Restart so the dropin in write_files is picked up before
@@ -1910,7 +1919,7 @@ ss -ltn 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128
 echo PROXY_READY
 "@
 
-    $result = Invoke-LinuxVmCommand -VmName $vmName -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
+    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
         Write-Log "[Proxy] $vmName`: Squid install failed (ExitCode=$($result.ExitCode))`n$($result.ScriptBlockOutput)" -Failure
         return $false
