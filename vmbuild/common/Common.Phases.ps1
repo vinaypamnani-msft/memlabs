@@ -1,4 +1,15 @@
 
+# ThreadJob (PS7+) exposes its data streams directly on the job object and
+# has an empty ChildJobs collection, whereas Start-Job wraps the work in a
+# child PSRemotingChildJob whose streams hold the data. Return whichever
+# object actually carries Output/Error/Progress for a given job.
+function Get-JobStreamSource {
+    param($Job)
+    if (-not $Job) { return $null }
+    if ($Job.ChildJobs -and $Job.ChildJobs.Count -gt 0) { return $Job.ChildJobs[0] }
+    return $Job
+}
+
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
@@ -8,13 +19,13 @@ function Write-JobProgress {
         }
         $latestActivity = $null
         $latestStatus = $null
-        #Make sure the first child job exists
-        $childJobs = $Job.ChildJobs
-        if ($null -ne $job -and $null -ne $childJobs -and $null -ne $childJobs.Progress) {
+        # ThreadJob has no ChildJobs -- streams live directly on the job.
+        $streamSource = Get-JobStreamSource -Job $Job
+        if ($null -ne $job -and $null -ne $streamSource -and $null -ne $streamSource.Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
-            $lastProgress = $childJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            $lastProgress = $streamSource.Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -573,7 +584,8 @@ function Wait-Phase {
                 $FailRetry = $FailRetry + 1
                 if ($FailRetry -gt 30) {
                     try {
-                        $childJobs = $job | Select-Object -ExpandProperty childjobs
+                        # ThreadJob has no ChildJobs -- read state/error from the job itself.
+                        $streamSource = Get-JobStreamSource -Job $job
                         if ($job.Name) {
                             $jobOutput = $job.Name
                             $jobOutput += " "
@@ -581,24 +593,24 @@ function Wait-Phase {
                         else {
                             $jobOutput = ""
                         }
-                        $joberror = $childJobs | Select-Object -ExpandProperty Error
+                        $joberror = $streamSource | Select-Object -ExpandProperty Error
                         if ($joberror -is [string]) {
                             $jobOutput += $joberror
                             $jobOutput += " "
                         }
                    
-                        if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception) {
-                            if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
-                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message
+                        if ($streamSource.JobStateInfo.Reason.ErrorRecord.Exception) {
+                            if ($streamSource.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
+                                $jobOutput += $streamSource.JobStateInfo.Reason.ErrorRecord.Exception.Message
                                 $jobOutput += " "
                             }
                             else {
-                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception
+                                $jobOutput += $streamSource.JobStateInfo.Reason.ErrorRecord.Exception
                                 $jobOutput += " "
                             }
                         }
-                        if ($childJobs.JobStateInfo.Message) {
-                            $jobOutput += $childJobs.JobStateInfo.Message
+                        if ($streamSource.JobStateInfo.Message) {
+                            $jobOutput += $streamSource.JobStateInfo.Message
                             $jobOutput += " "
                         }
                     }
@@ -620,9 +632,11 @@ function Wait-Phase {
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name
-                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+                # ThreadJob has no ChildJobs -- streams live directly on the job.
+                $streamSource = Get-JobStreamSource -Job $job
+                $jobOutput = $streamSource | Select-Object -ExpandProperty Output
                 if (-not $jobOutput) {
-                    $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    $jobError = $streamSource | Select-Object -ExpandProperty Error
 
                     if ($jobError) {
                         Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
