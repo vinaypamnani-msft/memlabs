@@ -2703,8 +2703,10 @@ function Test-WindowsProxyConfig {
             $results.Details.Add("FAIL: netsh winhttp show proxy threw: $($_.Exception.Message)")
         }
 
-        # IE / WinINET per-machine
-        $ieKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+        # IE / WinINET per-machine. Set-WindowsClientProxy writes ProxyServer
+        # to the regular IE key (HKLM:\SOFTWARE\Microsoft\...) and writes
+        # ProxySettingsPerUser to the Policies key. Read from the right place.
+        $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
         try {
             if (Test-Path $ieKey) {
                 $ieProxy = (Get-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
@@ -2781,7 +2783,31 @@ function Test-InternetBlocked {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -DisplayName "Phase11-ProxyBlock-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
+    $formatted = Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result
+
+    # If the guest reports the connect succeeded, the host-side enforcement
+    # ACLs aren't in effect. Dump the current ACL state for the VM so the
+    # log shows exactly what's (not) applied -- no second round-trip needed.
+    if (-not $formatted) {
+        try {
+            $acls = @(Get-VMNetworkAdapterExtendedAcl -VMName $VMName -ErrorAction Stop)
+            if (-not $acls -or $acls.Count -eq 0) {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: DIAG: NO extended ACLs on vNIC -- Set-VmProxyEnforcement didn't run for this VM" -Warning -LogOnly
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: DIAG: $($acls.Count) extended ACL(s) on vNIC:" -Warning -LogOnly
+                foreach ($a in ($acls | Sort-Object Weight -Descending)) {
+                    $line = "  W=$($a.Weight) $($a.Action) $($a.Direction) Proto=$($a.Protocol) Port=$($a.RemotePort) RemoteIP=$($a.RemoteIPAddress)"
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: DIAG:$line" -Warning -LogOnly
+                }
+            }
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: DIAG: Get-VMNetworkAdapterExtendedAcl threw: $($_.Exception.Message)" -Warning -LogOnly
+        }
+    }
+
+    return $formatted
 }
 
 function Test-CMSiteRoleProxy {
