@@ -835,69 +835,107 @@ class InstallVCRedist {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_path
-       
+
+        # Sanity-check the downloaded bootstrapper -- vc_redist.{x64,x86}.exe
+        # is ~25MB / ~14MB respectively. If WebClient/BITS handed us a tiny
+        # redirect body, an HTML error page from a misbehaving proxy, etc.,
+        # the "install" will exit in milliseconds and we'll happily move on
+        # to OLE DB which then fails its VCRedistCheck CA. Catch that here.
+        $minBytes = if ($_path -like "*x64*") { 20MB } else { 10MB }
+        $fi = Get-Item -LiteralPath $_path -ErrorAction SilentlyContinue
+        if (-not $fi -or $fi.Length -lt $minBytes) {
+            $sz = if ($fi) { $fi.Length } else { 0 }
+            throw "VC Redist download is suspect: $_path is $sz bytes (need >= $minBytes). URL=$_URL"
+        }
+
         # Install
         #VC_redist.x64.exe /install /passive /quiet
         $cmd = $_path
-        $arg1 = "/install"
-        $arg2 = "/quiet"
-        $arg3 = "/norestart"
-        $arg4 = "/l"
-        if ($_path -like "*x64*") {
-            $arg5 = "c:\temp\vc_redistx64.log"
-        }
-        else {
-            $arg5 = "c:\temp\vc_redistx86.log"
-        }
-
+        $logFile = if ($_path -like "*x64*") { "c:\temp\vc_redistx64.log" } else { "c:\temp\vc_redistx86.log" }
+        $argList = @('/install', '/quiet', '/norestart', '/log', $logFile)
 
         try {
             Write-Status "Installing VC Redist $_path..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
-            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
-            Write-Status "VC Redist $_path was Installed Successfully!"
+            Write-Verbose ("Commandline: $cmd $($argList -join ' ')")
+            # Use Start-Process so we actually capture the exit code.
+            # VC Redist bootstrapper exit codes:
+            #   0     success
+            #   1638  newer version already installed (treat as success)
+            #   3010  success, reboot required (treat as success)
+            #   1602  user canceled
+            #   1603  fatal install error
+            #   5100  prereq check failed
+            $proc = Start-Process -FilePath $cmd -ArgumentList $argList -Wait -PassThru -NoNewWindow
+            $exit = $proc.ExitCode
+            $ok = @(0, 1638, 3010)
+            if ($ok -notcontains $exit) {
+                $logTail = ""
+                if (Test-Path $logFile) {
+                    try { $logTail = (Get-Content -LiteralPath $logFile -Tail 30 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+                }
+                throw "VC Redist $_path failed (exit $exit). Log: $logFile`nTail:`n$logTail"
+            }
+            Write-Status "VC Redist $_path installed (exit $exit)."
         }
         catch {
             $ErrorMessage = $_.Exception.Message
             Write-Status "Failed to install VC Redist with error: $ErrorMessage"
             throw "Failed to install VC Redist with error: $ErrorMessage"
         }
+
+        # Verify post-install -- not just that the key exists, but that the
+        # Bld DWORD is high enough. OLE DB Driver 19's VCRedistCheck custom
+        # action reads Bld and compares to 14.34 (build 33135). If our Set
+        # ran but registry still shows older Bld, fail loudly here rather
+        # than letting OLE DB blow up downstream.
+        $regPath = if ($_path -like "*x64*") {
+            "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+        } else {
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
+        }
+        if (-not (Test-Path $regPath)) {
+            throw "VC Redist install reported success but registry $regPath is missing."
+        }
+        $v = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+        $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+        Write-Status ("VC Redist registered: Major={0} Minor={1} Bld={2} Installed={3} InstalledVersion={4} ({5})" -f $major, $minor, $bld, $v.Installed, $v.Version, $regPath)
+        if ($major -lt 14 -or ($major -eq 14 -and $minor -lt 34) -or ($major -eq 14 -and $minor -eq 34 -and $bld -lt 33135)) {
+            throw "VC Redist install reported success but $regPath shows Major=$major Minor=$minor Bld=$bld (need >= 14.34, Bld >= 33135 for OLE DB Driver 19)."
+        }
     }
 
     [bool] Test() {
         Write-Status "DSC Test- Checking deployment status"
         try {
-            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            # OLE DB Driver 19's VCRedistCheck CA reads Bld DWORD; require
+            # at least 14.34 (Bld 33135). Major.Minor alone isn't enough --
+            # an old runtime can register Major=14, Minor=34, Bld=0.
             if ($this.Path -like "*x64*") {
                 $RegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
             }
             else {
-                $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
+                $RegistryPath = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
             }
 
-            if (Test-Path -Path $RegistryPath) {
-                try {
-                    # Get the InstalledVersion only if the path exists
-                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    Write-Verbose "VC Redist Error $($ErrorMessage)!"
+            if (-not (Test-Path -Path $RegistryPath)) { return $false }
 
-                    return $false
-                }
-            }
-            else {
-                return $false
-            }
+            $v = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
+            if (-not $v) { return $false }
+            $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+            Write-Verbose "VC Redist registry: Major=$major Minor=$minor Bld=$bld at $RegistryPath"
 
-            $installed = [version]"$($Version.Major).$($Version.Minor)"
-            $required  = [version]"14.42"
-            If ($installed -ge $required) {
-                Write-Host "VC Redist $required or greater $($Version.InstalledVersion) is installed"
-                return $true
-            }
-            return $false
+            # Require Major.Minor >= 14.42 OR (>= 14.34 with Bld set). We
+            # bump our floor to 14.42 (current aka.ms/vs/17 release) so a
+            # baseimage with an ancient stub doesn't satisfy Test() and
+            # silently leave OLE DB to discover the gap later.
+            if ($major -lt 14) { return $false }
+            if ($major -eq 14 -and $minor -lt 42) { return $false }
+            # Defense in depth: even at 14.42, require Bld DWORD present
+            # and non-trivial. Real installs always set Bld; absent means
+            # half-installed or hand-poked.
+            if ($bld -lt 33135) { return $false }
+            Write-Host "VC Redist 14.42+ (Bld $bld) is installed at $RegistryPath"
+            return $true
         }
         catch {
             return $false
