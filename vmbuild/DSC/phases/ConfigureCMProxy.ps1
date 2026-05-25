@@ -68,13 +68,16 @@ try {
             }
 
             try {
-                Set-CMSiteSystemServer -SiteSystemServerName $fqdn -UseProxy $true `
+                # Note: parameter is -EnableProxy on Set-CMSiteSystemServer
+                # (the underlying WMI property surfaced by validation is "UseProxy",
+                # but the cmdlet exposes it as -EnableProxy).
+                Set-CMSiteSystemServer -SiteSystemServerName $fqdn -EnableProxy $true `
                     -ProxyServerName $proxyFqdn -ProxyServerPort $proxyPort `
                     -ErrorAction Stop *>&1 | Write-StatusLogEntry
                 Write-DscStatus "$fqdn`: site system proxy set -> $proxyFqdn`:$proxyPort"
             }
             catch {
-                Write-DscStatus "$fqdn`: Set-CMSiteSystemServer -UseProxy failed: $_"
+                Write-DscStatus "$fqdn`: Set-CMSiteSystemServer -EnableProxy failed: $_"
             }
 
             if ($cvm.installSUP -eq $true) {
