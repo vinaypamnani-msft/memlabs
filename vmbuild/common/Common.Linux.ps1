@@ -1608,6 +1608,57 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
 
+            # 5) .NET Framework machine.config <defaultProxy>. This is the only
+            #    proxy source that SYSTEM-context System.Net.WebClient honors
+            #    on Win11 24H2: WinHttpGetIEProxyConfigForCurrentUser returns
+            #    empty for SYSTEM regardless of HKLM / HKU\.DEFAULT registry
+            #    state, so .NET falls back to direct (which the lab ACL then
+            #    blocks as "Unable to connect to the remote server").
+            #    Writing <defaultProxy> here fixes ALL DSC downloads in one
+            #    shot (InstallODBCDriver, etc.) with no per-script changes.
+            $bypassRegexes = @()
+            foreach ($e in ($bypassList -split ';')) {
+                $e = $e.Trim()
+                if (-not $e -or $e -eq '<local>') { continue }  # <local> handled by bypassonlocal attr
+                # Convert wildcard pattern to anchored regex: escape dots, *->.*
+                $rx = '^' + ([Regex]::Escape($e) -replace '\\\*', '.*') + '$'
+                $bypassRegexes += $rx
+            }
+            $machineConfigPaths = @(
+                "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config",
+                "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\Config\machine.config"
+            )
+            foreach ($mcPath in $machineConfigPaths) {
+                if (-not (Test-Path $mcPath)) { continue }
+                $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                $configNode = $xml.configuration
+                $sysNet = $configNode.SelectSingleNode('system.net')
+                if (-not $sysNet) {
+                    $sysNet = $xml.CreateElement('system.net')
+                    [void]$configNode.AppendChild($sysNet)
+                }
+                $existing = $sysNet.SelectSingleNode('defaultProxy')
+                if ($existing) { [void]$sysNet.RemoveChild($existing) }
+                $defProxy = $xml.CreateElement('defaultProxy')
+                $defProxy.SetAttribute('enabled', 'true')
+                $defProxy.SetAttribute('useDefaultCredentials', 'true')
+                $proxyEl = $xml.CreateElement('proxy')
+                $proxyEl.SetAttribute('proxyaddress', "http://$proxyServer")
+                $proxyEl.SetAttribute('bypassonlocal', 'true')
+                [void]$defProxy.AppendChild($proxyEl)
+                if ($bypassRegexes.Count -gt 0) {
+                    $bypassEl = $xml.CreateElement('bypasslist')
+                    foreach ($rx in $bypassRegexes) {
+                        $addEl = $xml.CreateElement('add')
+                        $addEl.SetAttribute('address', $rx)
+                        [void]$bypassEl.AppendChild($addEl)
+                    }
+                    [void]$defProxy.AppendChild($bypassEl)
+                }
+                [void]$sysNet.AppendChild($defProxy)
+                $xml.Save($mcPath)
+            }
+
             # Show resulting WinHTTP state for the log
             $current = & netsh winhttp show proxy
             return @{ Ok = $true; WinHttp = ($current -join "`n") }
