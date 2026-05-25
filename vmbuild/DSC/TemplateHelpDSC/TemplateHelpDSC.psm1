@@ -267,29 +267,6 @@ class InstallADK {
             $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
             if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
 
-            # WiX Burn uses WinHTTP (not WinINET / .NET) for child-package
-            # downloads. On a proxied lab, WinHTTP system proxy MUST be
-            # configured before adksetup runs or it tries a direct connect
-            # and times out at 21s with HttpSendRequest 0x80004005. The
-            # proxy is normally stamped by Set-WindowsClientProxyForConfig
-            # after Phase 2, but if that didn't run (hidden VM, useProxy
-            # false at the time, race, etc.) we self-heal here by importing
-            # from IE settings -- Set-WindowsClientProxy always writes
-            # HKU\.DEFAULT IE keys, so `import proxy source=ie` picks them
-            # up under SYSTEM context. Harmless on direct-internet labs
-            # (import is a no-op when IE has no proxy).
-            try {
-                $current = (& netsh winhttp show proxy 2>$null) -join "`n"
-                if ($current -match 'Direct access') {
-                    Write-Status "WinHTTP proxy is Direct; attempting import from IE settings."
-                    & netsh winhttp import proxy source=ie | Out-Null
-                    $after = (& netsh winhttp show proxy 2>$null) -join "`n"
-                    if ($after -notmatch 'Direct access') {
-                        Write-Status "WinHTTP proxy imported from IE."
-                    }
-                }
-            } catch { Write-Status "WinHTTP proxy check failed (non-fatal): $($_.Exception.Message)" }
-
             $full = @($argv) + @('/log', $logFile)
             Write-Status ("Running adksetup: {0} {1}" -f $exe, ($full -join ' '))
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
@@ -299,116 +276,128 @@ class InstallADK {
                 $errLines = @()
                 if (Test-Path $logFile) {
                     try {
-                        # Pull all e###/f###/w### lines + any line containing
-                        # 'Error', 'failed', 'returned exit code', or 'cancel'
-                        # (case-insensitive). Also grab "Applying ..." lines
-                        # right before failures so we know which package blew up.
                         $all = Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue
                         $pattern = '^\s*\[[^\]]+\]\s*[efw]\d{3}:|Error\s+\d|failed|returned\s+(error|exit code)|cancel|Applying execute package'
                         $errLines = $all | Where-Object { $_ -match $pattern } | Select-Object -Last 40
                     } catch { }
                 }
                 if (-not $errLines -or $errLines.Count -eq 0) {
-                    # Fallback to plain tail if our regex matched nothing
                     try { $errLines = Get-Content -LiteralPath $logFile -Tail 25 -ErrorAction SilentlyContinue } catch { }
                 }
                 $diag = ($errLines -join "`n")
                 Write-Status ("adksetup ({0}) failed. Log {1}. Diagnostic lines:`n{2}" -f $label, $logFile, $diag)
+
+                # Extract any download URLs Burn complained about (fwlinks,
+                # direct CDN urls, etc.) and probe each one. A dead/retired
+                # fwlink is the #1 cause of mystery 0x80070642 acquisition
+                # failures and the bundle's own log doesn't say "404 from
+                # microsoft" -- it just says HttpSendRequest failed. Probing
+                # here surfaces the actual HTTP status in the DSC log so
+                # the next reader knows immediately whether to blame the
+                # network, the proxy, or a retired link.
+                try {
+                    if (Test-Path $logFile) {
+                        $logText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
+                        $urlMatches = [regex]::Matches($logText, 'https?://[^\s''"<>)]+')
+                        $urls = $urlMatches | ForEach-Object { $_.Value.TrimEnd('.',',',';',':') } |
+                                Where-Object { $_ -match 'go\.microsoft\.com/fwlink|download\.microsoft\.com|\.cab(\?|$)|\.msi(\?|$)|\.exe(\?|$)' } |
+                                Sort-Object -Unique
+                        if ($urls) {
+                            Write-Status ("adksetup ({0}) referenced {1} download URL(s); probing each for dead-link detection." -f $label, $urls.Count)
+                            $deadHits = @()
+                            foreach ($u in $urls) {
+                                $probeMsg = $null
+                                $resolved = $null
+                                $status   = $null
+                                $isDead   = $false
+                                try {
+                                    $req = [System.Net.HttpWebRequest]::Create($u)
+                                    $req.Method = 'HEAD'
+                                    $req.Timeout = 15000
+                                    $req.AllowAutoRedirect = $true
+                                    $req.MaximumAutomaticRedirections = 10
+                                    $req.UserAgent = 'MemLabs-AdkProbe/1.0'
+                                    $resp = $req.GetResponse()
+                                    $status = [int]$resp.StatusCode
+                                    $resolved = $resp.ResponseUri.AbsoluteUri
+                                    $resp.Close()
+                                    if ($status -ge 400) {
+                                        $probeMsg = "DEAD (HTTP $status) -> $resolved"
+                                        $isDead = $true
+                                    } else {
+                                        $probeMsg = "ok  (HTTP $status) -> $resolved"
+                                    }
+                                } catch [System.Net.WebException] {
+                                    $we = $_.Exception
+                                    if ($we.Response) {
+                                        try { $status = [int]$we.Response.StatusCode } catch {}
+                                        try { $resolved = $we.Response.ResponseUri.AbsoluteUri } catch {}
+                                    }
+                                    if ($status -in 404,410) {
+                                        $probeMsg = "DEAD (HTTP $status, link retired by publisher)"
+                                        if ($resolved) { $probeMsg += " -> $resolved" }
+                                        $isDead = $true
+                                    } elseif ($status) {
+                                        $probeMsg = "DEAD (HTTP $status) -> $resolved"
+                                        $isDead = $true
+                                    } else {
+                                        $probeMsg = "probe failed: $($we.Message)"
+                                    }
+                                } catch {
+                                    $probeMsg = "probe error: $($_.Exception.Message)"
+                                }
+                                # Pull linkid out of fwlink URLs for at-a-glance correlation.
+                                $linkid = $null
+                                if ($u -match 'linkid=(\d+)') { $linkid = $Matches[1] }
+                                $tag = if ($linkid) { "fwlink linkid=$linkid" } else { 'url' }
+                                Write-Status ("  adksetup-link {0,-22} {1} : {2}" -f $tag, $u, $probeMsg)
+                                if ($isDead) {
+                                    $deadHits += [pscustomobject]@{ Url=$u; LinkId=$linkid; Status=$status }
+                                }
+                            }
+                            # Bubble a punchy summary status line so the host
+                            # monitor (which shows the most recent Write-Status)
+                            # surfaces the headline finding instead of just
+                            # "adksetup exit code 1603".
+                            if ($deadHits.Count -gt 0) {
+                                $summary = $deadHits | ForEach-Object {
+                                    if ($_.LinkId) { "fwlink $($_.LinkId) (HTTP $($_.Status))" }
+                                    else { "$($_.Url) (HTTP $($_.Status))" }
+                                }
+                                Write-Status ("ADK $label : DEAD LINK DETECTED -- {0} retired/unreachable download(s): {1}. See log {2} for full URL list." -f $deadHits.Count, ($summary -join '; '), $logFile)
+                            }
+                        }
+                    }
+                } catch {
+                    Write-Status ("adksetup ({0}) link probe threw: {1}" -f $label, $_.Exception.Message)
+                }
             }
             return $code
         }
 
-        # Layout-based install helper. Some ADK versions (notably 24H2 web
-        # installer) intermittently fail child-package downloads during
-        # /quiet install with "HttpSendRequest 0x80004005". /layout
-        # downloads every package to a local folder first (so retries
-        # don't restart already-cached files), after which we install
-        # from the local layout -- which uses zero network and can't
-        # fail on transient CDN errors.
+        # Install routine: prefer direct /quiet /features (only fetches
+        # the packages the selected features need -- skips optional/dead
+        # children entirely). Falls back to /layout + offline install as
+        # a last resort if every direct attempt fails: layout caches the
+        # whole bundle locally and installs from there, which can rescue
+        # cases where Burn's child-package fetch is racing a flaky CDN.
         #
-        # Falls back gracefully on ADK versions that don't support /layout:
-        # the call returns $null and the caller stays on direct install.
-        $invokeAdkLayout = {
-            param($exe, [string[]]$features, $label, $layoutDir)
-
-            # Detect /layout support: ADK has supported /layout since the
-            # Windows 10 1809 wave, but be defensive. If a layout attempt
-            # exits with "unknown command line argument" (logged by Burn),
-            # the caller will mark layout as unsupported and skip future
-            # layout attempts for this run.
-            if (!(Test-Path $layoutDir)) {
-                New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
-            }
-
-            $layoutArgs = @('/quiet','/layout',$layoutDir,'/features') + $features
-            $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
-            if ($layoutExit -ne 0) {
-                # Probe the log for "unknown command-line" / unsupported-switch
-                # markers so the caller can disable layout for this run.
-                $logFile = Join-Path $env:TEMP ("adksetup-" + (("$label-layout") -replace '\W','_') + ".log")
-                $unsupported = $false
-                if (Test-Path $logFile) {
-                    try {
-                        $supText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
-                        if ($supText -match 'unknown command[- ]line|unrecognized.*command|Invalid command line|/layout.*(unknown|invalid)') {
-                            $unsupported = $true
-                        }
-                    } catch { }
-                }
-                return @{ Exit = $layoutExit; LayoutDir = $layoutDir; Unsupported = $unsupported }
-            }
-
-            # Layout succeeded; install from it. The layout dir contains
-            # its own adksetup.exe that knows to install from local files.
-            $localExe = Join-Path $layoutDir (Split-Path $exe -Leaf)
-            if (!(Test-Path $localExe)) {
-                # Some layouts only drop adksetup.exe regardless of source name.
-                $localExe = Join-Path $layoutDir 'adksetup.exe'
-            }
-            if (!(Test-Path $localExe)) {
-                Write-Status "Layout succeeded but no installer found in $layoutDir; treating as failure."
-                return @{ Exit = 1; LayoutDir = $layoutDir; Unsupported = $false }
-            }
-
-            $installArgs = @('/quiet','/features') + $features
-            $installExit = & $invokeAdk $localExe $installArgs ("$label-offline")
-            return @{ Exit = $installExit; LayoutDir = $layoutDir; Unsupported = $false }
-        }
-
-        # Unified install routine: prefer layout+offline (reliable on the
-        # default 24H2 ADK, whose web installer chronically fails child-MSI
-        # downloads under /quiet). If layout is reported unsupported on the
-        # ADK build in use (very old / non-Burn installers), fall through
-        # to direct install for all remaining attempts. $directOnly forces
-        # pure direct mode for callers that don't want the layout path.
+        # Note: /layout downloads EVERY package in the bundle regardless
+        # of /features, so it's vulnerable to baked-in dead child fwlinks
+        # (the 24H2 Dec-2024 bundle's linkid=2290227 / Toolkit
+        # Documentation MSI was a known casualty -- retired by MS without
+        # a corresponding bundle refresh). That's why direct goes first.
         $runAdkInstall = {
-            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, $directOnly)
+            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts)
 
-            $localLayoutUnsupported = [bool]$directOnly
             $attempt = 0
             $lastExit = -1
             while ($attempt -lt $maxAttempts) {
                 $attempt++
-                # Layout is the preferred path; direct only on layout-unsupported builds.
-                $useLayout = (-not $localLayoutUnsupported)
-                $modeLabel = if ($useLayout) { "layout+offline" } else { "direct" }
-                Write-Status "ADK $label install... (attempt $attempt/$maxAttempts, mode=$modeLabel)"
+                Write-Status "ADK $label install... (attempt $attempt/$maxAttempts, mode=direct)"
                 try {
-                    if ($useLayout) {
-                        $result = & $invokeAdkLayout $exe $features $label $layoutDir
-                        $lastExit = $result.Exit
-                        if ($result.Unsupported) {
-                            Write-Status "ADK $label : /layout reported unsupported on this build; falling back to direct install (this attempt + remaining)."
-                            $localLayoutUnsupported = $true
-                            # Don't burn this attempt slot on the layout probe -- retry
-                            # the same attempt number as a direct install immediately.
-                            $directArgs = @('/Features') + $features + @('/q')
-                            $lastExit = & $invokeAdk $exe $directArgs $label
-                        }
-                    } else {
-                        $directArgs = @('/Features') + $features + @('/q')
-                        $lastExit = & $invokeAdk $exe $directArgs $label
-                    }
+                    $directArgs = @('/quiet','/features') + $features
+                    $lastExit = & $invokeAdk $exe $directArgs $label
                 }
                 catch {
                     $ErrorMessage = $_.Exception.Message
@@ -419,7 +408,35 @@ class InstallADK {
                 Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
                 Start-Sleep -Seconds 5
             }
-            return $lastExit
+
+            # Direct path exhausted. Last-resort: try /layout + offline install.
+            Write-Status "ADK $label : all $maxAttempts direct attempts failed (last exit $lastExit). Falling back to /layout + offline install."
+            try {
+                if (!(Test-Path $layoutDir)) {
+                    New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+                }
+                $layoutArgs = @('/quiet','/layout',$layoutDir)
+                $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
+                if ($layoutExit -ne 0) {
+                    Write-Status "ADK $label : /layout fallback failed with exit $layoutExit. Giving up."
+                    return $layoutExit
+                }
+                $localExe = Join-Path $layoutDir 'adksetup.exe'
+                if (!(Test-Path $localExe)) {
+                    $localExe = Join-Path $layoutDir (Split-Path $exe -Leaf)
+                }
+                if (!(Test-Path $localExe)) {
+                    Write-Status "ADK $label : /layout succeeded but no installer found in $layoutDir. Giving up."
+                    return 1
+                }
+                $offlineArgs = @('/quiet','/features') + $features
+                $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
+                return $offlineExit
+            }
+            catch {
+                Write-Status "ADK $label : /layout fallback threw: $($_.Exception.Message)"
+                return $lastExit
+            }
         }
 
         $maxAttempts = 4
@@ -430,9 +447,9 @@ class InstallADK {
         Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool"
         $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
         $deptoolsLayout = 'C:\temp\adk-layout-deptools'
-        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts $false
+        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts
         if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
-            throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts attempts (last exit code $lastExit). Paths missing: " +
+            throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Paths missing: " +
                    (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
         Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
@@ -442,9 +459,9 @@ class InstallADK {
         Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
         $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
         $winpeLayout = 'C:\temp\adk-layout-winpe'
-        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts $false
+        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts
         if (!(Test-Path $adkinstallpath)) {
-            throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts attempts (last exit code $lastExit). Path missing: $adkinstallpath"
+            throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Path missing: $adkinstallpath"
         }
         Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
     }

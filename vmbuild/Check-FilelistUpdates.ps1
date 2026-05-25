@@ -95,6 +95,78 @@ function Write-Drift {
 function Write-Ok    { param([string]$m) Write-Host "  [ ok ] $m" -ForegroundColor DarkGreen }
 function Write-Info  { param([string]$m) Write-Host "  [info] $m" -ForegroundColor DarkCyan }
 function Write-Warn2 { param([string]$m) Write-Host "  [warn] $m" -ForegroundColor DarkYellow }
+function Write-Dead  {
+    param([string]$Component, [string]$Url, [string]$Reason, [string]$Source)
+    Write-Host ("  [DEAD ] {0,-30} {1}" -f $Component, $Reason) -ForegroundColor Red
+    Write-Host ("          url   : {0}" -f $Url) -ForegroundColor DarkGray
+    if ($Source) { Write-Host ("          source: {0}" -f $Source) -ForegroundColor DarkGray }
+    $script:DeadLinks += [pscustomobject]@{ Component=$Component; Url=$Url; Reason=$Reason }
+}
+$script:DeadLinks = @()
+
+# Resolve a URL via HEAD, then sanity-check with a 1-byte ranged GET.
+# Returns @{ Ok=$true/$false; Filename; ResolvedUrl; StatusCode; Reason }.
+function Resolve-DownloadUrl {
+    param([string]$Url, [int]$TimeoutSec = 30)
+    $result = [ordered]@{ Ok=$false; Filename=$null; ResolvedUrl=$null; StatusCode=$null; Reason=$null }
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -MaximumRedirection 10 -TimeoutSec $TimeoutSec
+        $result.StatusCode  = [int]$resp.StatusCode
+        $result.ResolvedUrl = $resp.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+        $result.Filename    = [System.IO.Path]::GetFileName(([uri]$result.ResolvedUrl).LocalPath)
+    } catch {
+        $we = $_.Exception
+        $status = $null
+        if ($we.Response) { try { $status = [int]$we.Response.StatusCode } catch {} }
+        $result.StatusCode = $status
+        if ($status -in 404,410) {
+            $result.Reason = "HTTP $status (link retired by publisher)"
+        } elseif ($status) {
+            $result.Reason = "HTTP $status on HEAD"
+        } else {
+            $result.Reason = "HEAD failed: $($we.Message)"
+        }
+        return $result
+    }
+
+    # HEAD succeeded. Some CDNs (notably go.microsoft.com/fwlink) 302 to a
+    # final URL that itself 404s on real fetch -- HEAD against the landing
+    # page can still return 200. Confirm with a 1-byte ranged GET.
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($result.ResolvedUrl)
+        $req.Method = 'GET'
+        $req.Timeout = $TimeoutSec * 1000
+        $req.AddRange(0, 0)
+        $req.AllowAutoRedirect = $true
+        $verify = $req.GetResponse()
+        $verifyStatus = [int]$verify.StatusCode
+        $verify.Close()
+        if ($verifyStatus -ge 400) {
+            $result.Reason = "Ranged GET returned HTTP $verifyStatus"
+            return $result
+        }
+    } catch {
+        $we = $_.Exception
+        $status = $null
+        if ($we.Response) { try { $status = [int]$we.Response.StatusCode } catch {} }
+        if ($status -in 404,410) {
+            $result.Reason = "Ranged GET HTTP $status (HEAD lied; content gone)"
+            return $result
+        }
+        # Network blip on the verification probe -- don't fail loudly,
+        # HEAD already succeeded so call it good.
+    }
+
+    # Heuristic: a download fwlink that lands on a docs/learn page is
+    # almost always a retired link Microsoft redirected to an article.
+    if ($result.ResolvedUrl -match '://(learn|docs)\.microsoft\.com/') {
+        $result.Reason = "Redirected to docs page: $($result.ResolvedUrl) (likely retired)"
+        return $result
+    }
+
+    $result.Ok = $true
+    return $result
+}
 
 # -------------------------------------------------------------------------
 # Microsoft Update Catalog helper - resolves a KB number to download URLs.
@@ -224,14 +296,12 @@ function Test-UrlsMetaSection {
             Write-Info ("{0,-15} rollingLatest=true (intentional, no drift check)" -f $name)
             continue
         }
-        try {
-            $resp = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 30
-            $resolved = $resp.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
-            $filename = [System.IO.Path]::GetFileName(([uri]$resolved).LocalPath)
-        } catch {
-            Write-Warn2 "${name}: HEAD request failed: $($_.Exception.Message)"
+        $probe = Resolve-DownloadUrl -Url $url
+        if (-not $probe.Ok) {
+            Write-Dead -Component $name -Url $url -Reason $probe.Reason -Source $meta.releaseNotes
             continue
         }
+        $filename = $probe.Filename
 
         $cachedFilename = $cache[$name]
         if (-not $cachedFilename) {
@@ -442,4 +512,17 @@ if ($Update) {
     Write-Host "`nCache written to $cachePath" -ForegroundColor Green
 } elseif (Test-Path $cachePath) {
     Write-Host "`nCache untouched (read-only). Re-run with -Update to refresh." -ForegroundColor DarkGray
+}
+
+if ($script:DeadLinks.Count -gt 0) {
+    Write-Host "`n=== DEAD LINKS ($($script:DeadLinks.Count)) ===" -ForegroundColor Red
+    foreach ($d in $script:DeadLinks) {
+        Write-Host ("  {0,-25} {1}" -f $d.Component, $d.Reason) -ForegroundColor Red
+        Write-Host ("  {0,-25} {1}" -f '', $d.Url) -ForegroundColor DarkGray
+    }
+    Write-Host "`nFix: locate the publisher's current download page, grab the new fwlink/URL," -ForegroundColor Yellow
+    Write-Host "     and update Urls + UrlsMeta entries in $FilelistPath." -ForegroundColor Yellow
+    $global:LASTEXITCODE = 2
+} else {
+    Write-Host "`nAll probed URLs reachable." -ForegroundColor DarkGreen
 }
