@@ -2385,7 +2385,10 @@ function Invoke-LinuxBaseImageBake {
             Write-Log "Bake: found $($existing.Count) switches named '$createName'; removing all and recreating." -Warning
             foreach ($dup in $existing) {
                 try {
-                    Remove-VMSwitch -Id $dup.Id -Force -ErrorAction Stop
+                    # Remove-VMSwitch has no -Id; pipe the switch object so we
+                    # disambiguate by identity rather than name (both dups share
+                    # the same name).
+                    $dup | Remove-VMSwitch -Force -ErrorAction Stop
                     Write-Log "Bake: removed duplicate switch '$createName' (Id $($dup.Id))." -Success
                 }
                 catch {
