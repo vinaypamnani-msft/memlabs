@@ -418,7 +418,8 @@ $global:VM_Create = {
                     return
                 }
 
-                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
                     return
@@ -541,7 +542,8 @@ $global:VM_Create = {
             # Wait-ForVM -PathToVerify "C:\Users" would just time out trying
             # to Invoke-VmCommand. Probe over SSH instead.
             if (Test-VmIsLinux -Vm $currentItem) {
-                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
                     return

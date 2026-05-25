@@ -828,6 +828,40 @@ function Get-LinuxSshExePath {
     throw "ssh.exe not found. Install the Windows OpenSSH client (Settings > Apps > Optional features > OpenSSH Client)."
 }
 
+function Get-LinuxVmExpectedStaticIP {
+    <#
+    .SYNOPSIS
+        Return the IP a Linux VM is expected to claim, or $null if it uses DHCP.
+
+    .DESCRIPTION
+        Mirrors the role-specific static-IP logic in New-LinuxVirtualMachine
+        (Proxy -> <network>.2). DHCP-only roles (LinuxServer today, future
+        LinuxDesktop) return $null so callers can skip the KVP-independent
+        fallback probe -- a DHCP guest's IP isn't predictable from config.
+
+        Keeping this in one place means Wait-LinuxVmReady callers and the
+        seed-ISO emitter agree on which VMs have a known IP.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [psobject]$VmObject,
+
+        [Parameter(Mandatory = $false)]
+        [psobject]$DeployConfig
+    )
+
+    if (-not $VmObject) { return $null }
+    if ($VmObject.role -ne 'Proxy') { return $null }
+
+    $netBase = $VmObject.network
+    if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
+    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+        return "$($Matches[1]).2"
+    }
+    return $null
+}
+
 function Get-LinuxVmIPAddress {
     <#
     .SYNOPSIS
@@ -883,7 +917,16 @@ function Wait-LinuxVmReady {
         [int]$TimeoutSeconds = 900,
 
         [Parameter(Mandatory = $false)]
-        [int]$PollIntervalSeconds = 10
+        [int]$PollIntervalSeconds = 10,
+
+        # Optional fallback IP to probe alongside KVP. For role-pinned static
+        # VMs (e.g. Proxy at <network>.2) we already know the address the
+        # guest is supposed to claim; probing it directly lets us succeed
+        # even when the guest's KVP daemon (hv_kvp_daemon) failed to start
+        # or the Hyper-V Data Exchange service is unhappy. Without this,
+        # a fully-up VM with broken KVP looks identical to a dead VM.
+        [Parameter(Mandatory = $false)]
+        [string]$ExpectedIPAddress
     )
 
     $sshExe = Get-LinuxSshExePath
@@ -894,6 +937,9 @@ function Wait-LinuxVmReady {
     $startedAt = Get-Date
     Write-Log "$VmName`: Waiting for Linux VM to become SSH-ready (timeout ${TimeoutSeconds}s)"
     Write-Log "$VmName`: SSH probe details: exe=$sshExe key=$($keyPair.PrivateKeyPath) known_hosts=$knownHostsPath" -LogOnly
+    if ($ExpectedIPAddress) {
+        Write-Log "$VmName`: Will also probe expected static IP $ExpectedIPAddress as a KVP-independent fallback." -LogOnly
+    }
     write-progress2 "Wait for Linux VM" -Status "$VmName`: cloud-init running, waiting for IP..." -force
 
     $lastReportedIp = $null
@@ -905,10 +951,22 @@ function Wait-LinuxVmReady {
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
+        # If KVP hasn't reported yet but the caller told us where the guest
+        # is supposed to claim a static IP (Proxy role pins .2, etc.), fall
+        # through to that address. We still capture which source paid out
+        # so the autopsy log makes the path clear.
+        $ipSource = $null
+        if ($ip) {
+            $ipSource = 'kvp'
+        }
+        elseif ($ExpectedIPAddress) {
+            $ip = $ExpectedIPAddress
+            $ipSource = 'expected-static'
+        }
         if ($ip) {
             if ($ip -ne $lastReportedIp) {
-                Write-Log "$VmName`: got guest IP $ip; probing SSH (elapsed ${elapsed}s)"
-                write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
+                Write-Log "$VmName`: got guest IP $ip (source=$ipSource); probing SSH (elapsed ${elapsed}s)"
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: got IP $ip ($ipSource), probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
                 $lastReportedIp = $ip
             }
 
@@ -1050,6 +1108,87 @@ function Wait-LinuxVmReady {
     }
     else {
         Write-Log "$VmName`: No guest IP was ever reported via KVP; cloud-init/DHCP likely failed inside guest." -LogOnly
+
+        # Expanded autopsy for the no-KVP-IP case. Without this the operator
+        # is left guessing whether the VM never booted, booted but couldn't
+        # get on the network, or booted+networked but has a broken
+        # hv_kvp_daemon. Each of these wants a different fix.
+        try {
+            $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+            if ($vm) {
+                $uptime = if ($vm.Uptime) { [int]$vm.Uptime.TotalSeconds } else { 0 }
+                Write-Log "$VmName`:   VM state: $($vm.State); uptime ${uptime}s; heartbeat: $($vm.Heartbeat); status: $($vm.Status)" -LogOnly
+            }
+            else {
+                Write-Log "$VmName`:   Get-VM returned nothing -- VM may have been removed mid-deploy." -LogOnly
+            }
+
+            $adapters = Get-VMNetworkAdapter -VMName $VmName -ErrorAction SilentlyContinue
+            if ($adapters) {
+                foreach ($a in $adapters) {
+                    $ipsRaw = ($a.IPAddresses -join ', ')
+                    if (-not $ipsRaw) { $ipsRaw = '(empty)' }
+                    Write-Log "$VmName`:   Adapter '$($a.Name)' switch=$($a.SwitchName) connected=$($a.Connected) mac=$($a.MacAddress) ips=$ipsRaw" -LogOnly
+                }
+            }
+            else {
+                Write-Log "$VmName`:   Get-VMNetworkAdapter returned no adapters." -LogOnly
+            }
+
+            # Raw KVP exchange items. If this is empty, hv_kvp_daemon never
+            # talked to the host (kernel module or userspace daemon missing).
+            # If it has FullyQualifiedDomainName etc. but no NetworkAddress*,
+            # the daemon is up but networking inside the guest is broken.
+            try {
+                $vmObj = Get-WmiObject -Namespace 'root\virtualization\v2' -Class 'Msvm_ComputerSystem' `
+                    -Filter "ElementName='$VmName'" -ErrorAction Stop
+                if ($vmObj) {
+                    $kvpSvc = Get-WmiObject -Namespace 'root\virtualization\v2' -Query `
+                        "Associators of {$vmObj} Where AssocClass=Msvm_SystemDevice ResultClass=Msvm_KvpExchangeComponent" `
+                        -ErrorAction Stop
+                    if ($kvpSvc -and $kvpSvc.GuestIntrinsicExchangeItems) {
+                        $intrinsicCount = $kvpSvc.GuestIntrinsicExchangeItems.Count
+                        Write-Log "$VmName`:   KVP intrinsic items reported: $intrinsicCount (>0 means hv_kvp_daemon is running)" -LogOnly
+                        # Pull a few useful keys (OSName, NetworkAddressIPv4, FullyQualifiedDomainName) without dumping all XML.
+                        foreach ($itemXml in $kvpSvc.GuestIntrinsicExchangeItems) {
+                            try {
+                                $x = [xml]$itemXml
+                                $name = ($x.INSTANCE.PROPERTY | Where-Object { $_.NAME -eq 'Name' }).VALUE
+                                if ($name -in @('OSName', 'NetworkAddressIPv4', 'NetworkAddressIPv6', 'FullyQualifiedDomainName', 'IntegrationServicesVersion')) {
+                                    $val = ($x.INSTANCE.PROPERTY | Where-Object { $_.NAME -eq 'Data' }).VALUE
+                                    Write-Log "$VmName`:     KVP $name = $val" -LogOnly
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    else {
+                        Write-Log "$VmName`:   No KVP intrinsic items -- hv_kvp_daemon never ran (missing linux-cloud-tools-virtual?) or VM didn't reach userspace." -LogOnly
+                    }
+                }
+            }
+            catch { Write-Log "$VmName`:   KVP enumeration error: $($_.Exception.Message)" -LogOnly }
+
+            # If the caller told us where the guest *should* be, probe it
+            # one last time. A successful TCP/22 here while KVP is empty
+            # means the guest is fine and only KVP is broken -- worth
+            # noting so the next deploy doesn't chase the wrong tail.
+            if ($ExpectedIPAddress) {
+                try {
+                    $tc = [System.Net.Sockets.TcpClient]::new()
+                    $iar = $tc.BeginConnect($ExpectedIPAddress, 22, $null, $null)
+                    $open = $false
+                    if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                        $tc.EndConnect($iar) | Out-Null
+                        $open = $tc.Connected
+                    }
+                    $tc.Close()
+                    Write-Log "$VmName`:   Final probe of expected static IP ${ExpectedIPAddress}: TCP/22 open=$open" -LogOnly
+                }
+                catch { Write-Log "$VmName`:   Final expected-IP probe error: $($_.Exception.Message)" -LogOnly }
+            }
+        }
+        catch { Write-Log "$VmName`:   Autopsy error: $($_.Exception.Message)" -LogOnly }
     }
 
     write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
@@ -1539,7 +1678,8 @@ function Install-LinuxProxyServer {
     Write-Log "[Proxy] $vmName`: Installing Squid forward proxy"
 
     # Make sure the VM is up and SSH-reachable before doing anything.
-    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds 900
+    $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
+    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds 900 -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[Proxy] $vmName`: VM not reachable over SSH; cannot install Squid" -Failure
         return $false
