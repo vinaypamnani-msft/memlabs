@@ -1832,11 +1832,12 @@ function Set-ProxyAdminAccessOnVm {
             # can see error messages.
             $sshArgsBase = "-i `"$privPath`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
 
-            # Interactive SSH shell
+            # Interactive SSH shell. cmd.exe /k strips outermost quotes when
+            # there are 2+ quoted tokens, so wrap with an extra outer pair.
             $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
             $sc1 = $shell.CreateShortcut($lnk1)
             $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc1.Arguments = "/k `"$sshExe`" $sshArgsBase"
+            $sc1.Arguments = "/k `"`"$sshExe`" $sshArgsBase`""
             $sc1.WorkingDirectory = 'C:\'
             $sc1.IconLocation = "$sshExe,0"
             $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
@@ -1846,7 +1847,7 @@ function Set-ProxyAdminAccessOnVm {
             $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
             $sc2 = $shell.CreateShortcut($lnk2)
             $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc2.Arguments = "/k `"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log"
+            $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log`""
             $sc2.WorkingDirectory = 'C:\'
             $sc2.IconLocation = "$sshExe,0"
             $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
@@ -2015,10 +2016,14 @@ function New-HostProxyShortcuts {
         $shell = New-Object -ComObject WScript.Shell
         $sshArgsBase = "-i `"$($key.PrivateKeyPath)`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
 
+        # cmd.exe /k strips the OUTERMOST pair of quotes when its argument
+        # contains 2+ quoted tokens, which would mangle "ssh.exe" "keypath"
+        # into ssh.exe" "keypath. Wrap the whole command in an extra outer
+        # pair so the inner quotes survive.
         $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
         $sc1 = $shell.CreateShortcut($lnk1)
         $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
-        $sc1.Arguments = "/k `"$sshExe`" $sshArgsBase"
+        $sc1.Arguments = "/k `"`"$sshExe`" $sshArgsBase`""
         $sc1.WorkingDirectory = 'C:\'
         $sc1.IconLocation = "$sshExe,0"
         $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
@@ -2028,7 +2033,7 @@ function New-HostProxyShortcuts {
         $lnk2 = Join-Path $desktop "Squid Access Log - $proxyFqdn.lnk"
         $sc2 = $shell.CreateShortcut($lnk2)
         $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-        $sc2.Arguments = "/k `"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log"
+        $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log`""
         $sc2.WorkingDirectory = 'C:\'
         $sc2.IconLocation = "$sshExe,0"
         $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
