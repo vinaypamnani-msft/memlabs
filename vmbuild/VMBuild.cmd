@@ -115,6 +115,14 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
+REM Prune logs / temp / cache older than 7 days
+REM ============================================================
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Clean-OldLogs.ps1"
+IF ERRORLEVEL 1 (
+    ECHO WARNING: Clean-OldLogs reported an error.
+)
+
+REM ============================================================
 REM Determine launch prerequisites after maintenance
 REM ============================================================
 
