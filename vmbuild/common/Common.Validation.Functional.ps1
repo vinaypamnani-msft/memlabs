@@ -60,13 +60,23 @@ function Test-VmFunctionality {
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC -DeployConfig $DeployConfig
         }
         'CAS' {
-            $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            if (-not $CurrentItem.remoteSQLVM) {
+                $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
+            }
             if ($testsPassed) {
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
         }
         'Primary' {
-            $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            if (-not $CurrentItem.remoteSQLVM) {
+                $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
+            }
             if ($testsPassed) {
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
