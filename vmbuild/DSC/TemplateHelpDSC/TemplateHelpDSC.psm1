@@ -919,9 +919,9 @@ class InstallVCRedist {
                 Start-Sleep -Milliseconds 500
             }
             if (-not $settled) {
-                Write-Status "VC Redist $_path: child MSI logs did not settle within 120s; proceeding anyway (registry will be re-checked next)."
+                Write-Status ("VC Redist {0}: child MSI logs did not settle within 120s; proceeding anyway (registry will be re-checked next)." -f $_path)
             } else {
-                Write-Status "VC Redist $_path: child MSI install completed."
+                Write-Status ("VC Redist {0}: child MSI install completed." -f $_path)
             }
         }
         catch {
