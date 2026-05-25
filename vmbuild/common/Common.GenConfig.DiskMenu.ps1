@@ -325,13 +325,21 @@ function Select-VMDisksMenu {
 
         $letters = Get-VMDiskLetters -VirtualMachine $VirtualMachine
 
+        # Map numeric itemName -> disk letter. Menu engine's Write-Option
+        # caps itemName width at ~4 chars (PadRight(4 - len) goes negative
+        # otherwise), so we use 1-based indices for disk rows and translate
+        # back here.
+        $indexToLetter = @{}
+
         if ($letters.Count -eq 0) {
             $null = Add-MenuItem -MenuName $menuName -MenuItems ([ref]$MenuItems) `
                 -ItemName "*I" -ItemText "   (no additional disks configured)" `
                 -selectable $false -Color1 "DarkGray"
         }
         else {
+            $idx = 0
             foreach ($l in $letters) {
+                $idx++
                 $size  = $VirtualMachine.additionalDisks.$l
                 $usage = Get-VMDiskUsage -VirtualMachine $VirtualMachine -Letter $l
                 $sizePadded = $size.PadRight(8)
@@ -340,8 +348,9 @@ function Select-VMDisksMenu {
                 if ($usage -ne "free") {
                     $color = $Global:Common.Colors.GenConfigNonDefault
                 }
+                $indexToLetter[[string]$idx] = $l
                 $null = Add-MenuItem -MenuName $menuName -MenuItems ([ref]$MenuItems) `
-                    -ItemName "disk_$l" -ItemText $text -selectable $true `
+                    -ItemName ([string]$idx) -ItemText $text -selectable $true `
                     -Deletable $true -Color1 $color
             }
         }
@@ -381,10 +390,19 @@ function Select-VMDisksMenu {
             return
         }
 
-        # Delete key on a disk row: "-Ddisk_E"
-        if ($response -is [string] -and $response.StartsWith("-Ddisk_")) {
-            $letter = $response.Substring("-Ddisk_".Length)
-            $null = Invoke-RemoveDisk -VirtualMachine $VirtualMachine -Letter $letter
+        # Delete key on a disk row: "-D<index>"
+        if ($response -is [string] -and $response.StartsWith("-D")) {
+            $key = $response.Substring(2)
+            if ($indexToLetter.ContainsKey($key)) {
+                $null = Invoke-RemoveDisk -VirtualMachine $VirtualMachine -Letter $indexToLetter[$key]
+                Get-TestResult -SuccessOnError | Out-Null
+            }
+            continue
+        }
+
+        # Numeric pick on a disk row = edit its size.
+        if ($indexToLetter.ContainsKey($response)) {
+            $null = Invoke-EditDiskSize -VirtualMachine $VirtualMachine -Letter $indexToLetter[$response]
             Get-TestResult -SuccessOnError | Out-Null
             continue
         }
@@ -409,13 +427,6 @@ function Select-VMDisksMenu {
                     $null = Invoke-RemoveDisk -VirtualMachine $VirtualMachine -Letter $letter
                     Get-TestResult -SuccessOnError | Out-Null
                 }
-                break
-            }
-            '^disk_[A-Z]$' {
-                # Clicking a disk row = edit its size (Delete key handled above).
-                $letter = $response.Substring("disk_".Length)
-                $null = Invoke-EditDiskSize -VirtualMachine $VirtualMachine -Letter $letter
-                Get-TestResult -SuccessOnError | Out-Null
                 break
             }
             default {
