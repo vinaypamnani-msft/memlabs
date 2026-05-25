@@ -168,10 +168,15 @@ function Select-Options {
             try {
                 $live = Get-LiveWindowSize
                 $winW = if ($live) { $live.Width }  else { $host.UI.RawUI.WindowSize.Width }
-                # Use the existing helper so we count the cursor's viewport-
-                # relative row (handles scrollback) plus the standard
-                # BottomReserve of 4 used by the rest of the menu engine.
-                $room = Get-RoomLeftFromCurrentPosition
+                $winH = if ($live) { $live.Height } else { $host.UI.RawUI.WindowSize.Height }
+                # Show-Menu calls "`e[2J`e[H" to clear+home before laying out,
+                # then writes the activity title (1 line) + blank (1 line)
+                # before menu items. So available rows == WindowHeight minus
+                # those 2 chrome lines minus BottomReserve (4).
+                # Get-RoomLeftFromCurrentPosition here would return the wrong
+                # value because cursor is still wherever Select-Options left
+                # it (often near the bottom of the previous render).
+                $room = $winH - 6
                 $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
                 if ($metrics.TotalLineCount -gt $room) {
                     $droppable = @($MenuItems | Where-Object { [string]$_.itemName -match $DroppableItemPattern })
