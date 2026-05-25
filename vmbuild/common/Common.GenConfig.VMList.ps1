@@ -746,12 +746,26 @@ function Select-VirtualMachines {
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
                         $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
-                        $customOptions = [ordered]@{ 
+                        $customOptions = [ordered]@{
                             "*B1" = ""
                             "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
-                            "M"   = "Manage Disks  ($diskSummary)"
-                            "HM"  = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
                         }
+                        # Inline one row per existing disk (when present). itemName
+                        # is "d<letter>" -- 2 chars keeps Write-Option's
+                        # PadRight(4 - len) happy. "-D" prefix marks the row
+                        # deletable; Delete key returns "-Dd<letter>".
+                        # Picking a row (uppercased to "D<letter>" by dispatch)
+                        # edits the size. Letter-collision with single-letter
+                        # actions (M/S/U/H/X/Z) is avoided by the "d" prefix.
+                        $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
+                        foreach ($dl in $diskLettersInline) {
+                            $dsize = $virtualMachine.additionalDisks.$dl
+                            $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
+                            $customOptions["-Dd$dl"] = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                            $customOptions["Hd$dl"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
+                        }
+                        $customOptions["M"]  = "Manage Disks  ($diskSummary)"
+                        $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
                             $customOptions += [ordered]@{
                                 "*B2" = ""
@@ -974,6 +988,17 @@ function Select-VirtualMachines {
                         }
                         if ($newValue -eq "M") {
                             Select-VMDisksMenu -VirtualMachine $virtualMachine
+                            $newValue = "Start"
+                        }
+                        # Inline disk rows: itemName "d<letter>" -> uppercased to
+                        # "D<letter>" in dispatch. Edit size on pick; Delete key
+                        # returns "-DD<letter>" -> remove.
+                        if ($newValue -match '^-DD([E-Y])$') {
+                            $null = Invoke-RemoveDisk -VirtualMachine $virtualMachine -Letter $matches[1]
+                            $newValue = "Start"
+                        }
+                        elseif ($newValue -match '^D([E-Y])$') {
+                            $null = Invoke-EditDiskSize -VirtualMachine $virtualMachine -Letter $matches[1]
                             $newValue = "Start"
                         }
                         if (-not ($newValue -eq "Z")) {
