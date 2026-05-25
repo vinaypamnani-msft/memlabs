@@ -1098,10 +1098,11 @@ function Set-VmProxyEnforcement {
         # NOT include RemoteIPAddress, so multiple Allow rules sharing
         # Direction+Weight+Protocol collide -- only the first lands and the
         # rest are silently dropped (would block cross-subnet traffic).
-        # Band 5090-5099 keeps us inside the 5000-5099 cleanup window;
-        # cap at 5 subnets per direction (10 rules), which is well past
-        # anything memlabs currently builds.
-        $maxSubnets = 5
+        # Band 5020-5099 keeps us inside the 5000-5099 cleanup window
+        # (deny rules occupy 5000-5003); 80 slots = 40 (subnet, direction)
+        # pairs = 40 subnets per direction. Memlabs host-wide subnet union
+        # is rarely more than a handful, so warn well before we'd overflow.
+        $maxSubnets = 40
         if ($cidrs.Count -gt $maxSubnets) {
             Write-Log "[Proxy] $VmName`: $($cidrs.Count) lab subnets exceeds cap ($maxSubnets); only first $maxSubnets will be allowed" -Warning
         }
