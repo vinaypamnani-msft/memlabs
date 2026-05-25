@@ -263,7 +263,30 @@ $global:VM_Create = {
             $memory = ($currentItem.Memory / 1)            
             $currentMemory = $vm.MemoryStartup
 
-            if ($memory -ne $currentMemory) {
+            # Linux VMs get static memory; no balloon driver gymnastics.
+            # If memory amount changed, stop, set static, restart. Otherwise
+            # just ensure dynamic is off (cheap, no-op if already off).
+            $isLinux = Test-VmIsLinux -Vm $currentItem
+
+            if ($isLinux) {
+                if ($memory -ne $currentMemory) {
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping Linux VM."
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+                elseif ($vm.DynamicMemoryEnabled) {
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disabling dynamic memory on Linux VM (requires stop)."
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+            }
+            elseif ($memory -ne $currentMemory) {
                
                 if ($vm.State -eq "Running") {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping VM."

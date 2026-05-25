@@ -888,8 +888,9 @@ function Restore-DynamicMemory {
 
     $domain = $DeployConfig.vmOptions.domainName
 
+    # Linux VMs are pinned static (no balloon driver dependency); skip them.
     $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
-        $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1))
+        $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1)) -and -not (Test-VmIsLinux -Vm $_)
     })
 
     if ($vmsToRestore.Count -eq 0) {

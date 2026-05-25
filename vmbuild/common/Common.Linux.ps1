@@ -496,13 +496,14 @@ function New-LinuxVirtualMachine {
         $vm = New-VM -Name $VmName -Path $VmPath -Generation 2 `
             -MemoryStartupBytes ($Memory / 1) -SwitchName $SwitchName -ErrorAction Stop
 
-        # Dynamic memory mirror of New-VirtualMachine, simpler defaults.
-        if ($dynamicMinRam -and ($dynamicMinRam / 1) -gt 40MB -and ($dynamicMinRam / 1) -lt ($Memory / 1)) {
-            $vm | Set-VMMemory -DynamicMemoryEnabled $true `
-                -MinimumBytes ($dynamicMinRam / 1) `
-                -MaximumBytes ($Memory / 1) `
-                -StartupBytes ($Memory / 1) -ErrorAction Stop
-        }
+        # Linux guests get static memory. Hyper-V Dynamic Memory on Linux
+        # depends on hv_balloon and is historically the flakiest LIS component:
+        # it requires a swap partition (cloud images use swapfiles), can fail
+        # to balloon up under load, and reports 0 pressure in Hyper-V Manager.
+        # The lab Linux VMs (Squid Proxy etc.) are small enough that pinning
+        # is fine, and it sidesteps the whole class of issues. Force static
+        # regardless of dynamicMinRam.
+        $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes ($Memory / 1) -ErrorAction Stop
 
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
