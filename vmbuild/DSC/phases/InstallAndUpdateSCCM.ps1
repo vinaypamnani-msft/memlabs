@@ -289,11 +289,55 @@ CurrentBranch=1
     Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
 
     $maxTries = 20
+    # Per-attempt timeout for setupdl.exe. Historically we called
+    # Start-Process -Wait with no cap; if setupdl wedged on a single
+    # CDN fetch we'd hang for hours with no progress in the DSC status
+    # stream. Now we cap each attempt at $setupDlTimeoutSec, surface
+    # the tail of ConfigMgrSetup.log every $setupDlPollSec while it
+    # runs, and kill+retry if the cap is hit.
+    $setupDlTimeoutSec = 1800   # 30 min hard cap per attempt
+    $setupDlPollSec = 30        # status cadence while running
+    $lastReportedTail = ''
+
     # We require 2 success entries in a row
     while ($success -le 1) {
 
-        #Start Setupdl.exe, and wait for it to exit
-        Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist ) -wait
+        #Start Setupdl.exe asynchronously so we can poll its log for
+        #progress and enforce a per-attempt timeout.
+        $dlProc = Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist) -PassThru
+        $dlStart = Get-Date
+        $dlTimedOut = $false
+        while (-not $dlProc.HasExited) {
+            Start-Sleep -Seconds $setupDlPollSec
+            $elapsedSec = [int]((Get-Date) - $dlStart).TotalSeconds
+
+            # Tail the setup log and surface the latest activity so the
+            # operator can see whether setupdl is making progress or
+            # stuck on a specific file.
+            $tail = $null
+            try { $tail = Get-Content -Path $CMLog -Tail 1 -ErrorAction SilentlyContinue } catch { }
+            if ($tail -and $tail -ne $lastReportedTail) {
+                $lastReportedTail = $tail
+                Write-DscStatus ("Pre-Req download in progress ({0}s elapsed): {1}" -f $elapsedSec, $tail.Trim())
+            }
+            elseif ($tail) {
+                Write-DscStatus ("Pre-Req download still running ({0}s elapsed, no new log activity): {1}" -f $elapsedSec, $tail.Trim())
+            }
+            else {
+                Write-DscStatus ("Pre-Req download still running ({0}s elapsed; setup log not yet readable)" -f $elapsedSec)
+            }
+
+            if ($elapsedSec -ge $setupDlTimeoutSec) {
+                $dlTimedOut = $true
+                Write-DscStatus ("Pre-Req download exceeded {0}s; killing setupdl.exe (PID {1}) and retrying" -f $setupDlTimeoutSec, $dlProc.Id)
+                try { Stop-Process -Id $dlProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+                # Also kill any straggler setupdl/Setupdl children spawned by the bootstrap copy
+                Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dlProc.Id } | ForEach-Object {
+                    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { }
+                }
+                break
+            }
+        }
 
         #Just to make sure the log is flushed.
         start-sleep -seconds 5
@@ -301,8 +345,13 @@ CurrentBranch=1
         #Get the last line of the log.  Assumption: No other components are writing to the log at this time.
         $LogLine = Get-Content -Path $CMLog -Tail 1
 
+        if ($dlTimedOut) {
+            # Treat as a failed attempt and let the retry/fail counter logic below handle it.
+            $LogLine = "TIMEOUT: setupdl exceeded $setupDlTimeoutSec seconds. Last log line: $LogLine"
+        }
+
         #Check for success indicator.
-        if ($LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
+        if (-not $dlTimedOut -and $LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
             $success++
             Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
         }
