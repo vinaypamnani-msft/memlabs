@@ -331,7 +331,7 @@ if ($false) {
         }
         if ($success) {
             Write-DscStatus "Pushing client to $client."
-            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 5
         }
     }

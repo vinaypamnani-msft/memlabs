@@ -188,7 +188,7 @@ else {
             }
         }
 
-        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Out-File $global:StatusLog -Append
+        Set-CMSite -SiteCode $SiteCode -UseSmsGeneratedCert $true -Verbose | Write-StatusLogEntry
         Start-Sleep 10
         $prop = Get-CMSiteComponent -SiteCode $siteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
         $enabled = ($prop.Value -band 1024) -eq 1024

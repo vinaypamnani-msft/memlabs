@@ -2,11 +2,91 @@
 $global:StatusFile = "C:\staging\DSC\DSC_Status.txt"
 $global:StatusLog = "C:\staging\DSC\InstallCMLog.log"
 
+function Write-StatusLogEntry {
+    # Pipeline-friendly writer that emits CMTrace-format entries to $global:StatusLog.
+    # Drop-in replacement for `Write-StatusLogEntry` so the log can
+    # be opened cleanly in CMTrace / OneTrace / the memlabs log viewer.
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true)]
+        [object]$InputObject,
+        [string]$Component,
+        [int]$Type = 1,   # 1=Info, 2=Warning, 3=Error
+        [switch]$AllowBlank  # emit blank CMTrace entries instead of filtering them out
+    )
+    begin {
+        if (-not $Component) {
+            try {
+                $cs = Get-PSCallStack
+                $cmd = $cs[1].Command
+                if ($cmd -and $cmd -like '*.ps1') { $cmd = $cmd -replace '\.ps1$', '' }
+                if (-not $cmd -or $cmd -eq '<ScriptBlock>') { $cmd = '<Script>' }
+                $Component = $cmd
+            }
+            catch { $Component = '<Script>' }
+        }
+        $date = Get-Date -Format 'MM-dd-yyyy'
+        $buffer = New-Object System.Collections.Generic.List[string]
+    }
+    process {
+        if ($null -eq $InputObject) {
+            if (-not $AllowBlank) { return }
+            $text = ''
+        }
+        else {
+            $text = if ($InputObject -is [string]) { $InputObject } else { ($InputObject | Out-String) }
+            $text = $text.TrimEnd("`r", "`n")
+        }
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            if (-not $AllowBlank) { return }
+            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+            $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
+            return
+        }
+        $tid = [System.Threading.Thread]::CurrentThread.ManagedThreadId
+        foreach ($line in ($text -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                if ($AllowBlank) {
+                    $time = Get-Date -Format 'HH:mm:ss.fff'
+                    $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
+                }
+                continue
+            }
+            $clean = [System.Text.RegularExpressions.Regex]::Replace($line, '[^\x09\x20-\x7E]', '')
+            $clean = [System.Text.RegularExpressions.Regex]::Replace($clean, '\?{2,}', '')
+            $clean = $clean.TrimEnd()
+            if ([string]::IsNullOrWhiteSpace($clean)) {
+                if ($AllowBlank) {
+                    $time = Get-Date -Format 'HH:mm:ss.fff'
+                    $buffer.Add("<![LOG[]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
+                }
+                continue
+            }
+            $time = Get-Date -Format 'HH:mm:ss.fff'
+            $buffer.Add("<![LOG[$clean]LOG]!><time=`"$time`" date=`"$date`" component=`"$Component`" context=`"`" type=`"$Type`" thread=`"$tid`" file=`"`">")
+        }
+    }
+    end {
+        if ($buffer.Count -gt 0) {
+            try {
+                Add-Content -Path $global:StatusLog -Value $buffer -Encoding utf8 -ErrorAction Stop
+            }
+            catch {
+                # Best-effort: retry once. Concurrent writers from parallel DSC scripts
+                # can briefly collide; one retry is plenty in practice.
+                Start-Sleep -Milliseconds 50
+                try { Add-Content -Path $global:StatusLog -Value $buffer -Encoding utf8 -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+    }
+}
+
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
     $StatusPrefix | Out-File $global:StatusFile -Force
     start-sleep -seconds 5
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $StatusPrefix" | Out-File -Append $global:StatusLog
+    $StatusPrefix | Write-StatusLogEntry -Component 'Write-DscStatusSetup'
 }
 
 function Write-DscStatus {
@@ -55,7 +135,8 @@ function Write-DscStatus {
     }
 
     if (-not $NoLog.IsPresent) {
-        "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] $status" | Out-File -Append $global:StatusLog
+        $logType = if ($Failure.IsPresent) { 3 } else { 1 }
+        $status | Write-StatusLogEntry -Component 'Write-DscStatus' -Type $logType
     }
 
     write-host $Status
@@ -166,7 +247,7 @@ function Install-DP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
@@ -177,28 +258,28 @@ function Install-DP {
         if (-not $dpinstalled) {
             Write-DscStatus "DP Role not detected on $DPFQDN. Adding Distribution Point role."
             $Date = [DateTime]::Now.AddYears(30)
-            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date *>&1 | Out-File $global:StatusLog -Append
+            #Add-CMDistributionPoint -InputObject $SystemServer -CertificateExpirationTimeUtc $Date *>&1 | Write-StatusLogEntry
             if ($usePKI) {
                 $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
                 if (Test-Path $CertPath) {
                     $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
                     if (Test-Path $CertAuth) {
                         $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
-                        "Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force" *>&1 | Out-File $global:StatusLog -Append
-                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Out-File $global:StatusLog -Append
+                        "Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force" *>&1 | Write-StatusLogEntry
+                        Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificatePath $CertPath -CertificatePassword $certPass -EnableSSL -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Write-StatusLogEntry
                     }
                     else {
-                        "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        "Could Not find $CertAuth" *>&1 | Write-StatusLogEntry
                         $installFailure = $true
                     }
                 }
                 else {
-                    "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    "Could Not find $CertPath" *>&1 | Write-StatusLogEntry
                     $installFailure = $true
                 }
             }
             else {
-                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Out-File $global:StatusLog -Append
+                Add-CMDistributionPoint -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode -CertificateExpirationTimeUtc $Date -EnablePxe -EnableNonWdsPxe -AllowPxeResponse -EnableUnknownComputerSupport -Force *>&1 | Write-StatusLogEntry
             }
             Start-Sleep -Seconds 60
         }
@@ -252,7 +333,7 @@ function Install-PullDP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $DPFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $DPFQDN -SiteCode $ServerSiteCode
         }
@@ -269,20 +350,20 @@ function Install-PullDP {
                     $CertAuth = "$env:windir\temp\ProvisionScript\certauth.txt"
                     if (Test-Path $CertAuth) {
                         $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
-                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Out-File $global:StatusLog -Append
+                        Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificatePath $CertPath -CertificatePassword $certPass -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Write-StatusLogEntry
                     }
                     else {
-                        "Could Not find $CertAuth" *>&1 | Out-File $global:StatusLog -Append
+                        "Could Not find $CertAuth" *>&1 | Write-StatusLogEntry
                         $installFailure = $true
                     }
                 }
                 else {
-                    "Could Not find $CertPath" *>&1 | Out-File $global:StatusLog -Append
+                    "Could Not find $CertPath" *>&1 | Write-StatusLogEntry
                     $installFailure = $true
                 }
             }
             else {
-                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Out-File $global:StatusLog -Append
+                Add-CMDistributionPoint -SiteCode $ServerSiteCode -SiteSystemServerName $DPFQDN -CertificateExpirationTimeUtc $Date -EnablePullDP -SourceDistributionPoint $SourceDPFQDN -Force *>&1 | Write-StatusLogEntry
 
             }
             Start-Sleep -Seconds 60
@@ -324,7 +405,7 @@ function Install-MP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $MPFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $MPFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $MPFQDN
         }
@@ -333,10 +414,10 @@ function Install-MP {
         if (-not $mpinstalled) {
             Write-DscStatus "MP Role not detected on $MPFQDN. Adding Management Point role."
             if ($UsePKI) {
-                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Https -EnableSSL *>&1 | Out-File $global:StatusLog -Append
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Https -EnableSSL *>&1 | Write-StatusLogEntry
             }
             else {
-                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Out-File $global:StatusLog -Append
+                Add-CMManagementPoint -InputObject $SystemServer -CommunicationType Http *>&1 | Write-StatusLogEntry
             }
             Start-Sleep -Seconds 60
         }
@@ -378,7 +459,7 @@ function Install-SUP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode *>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
@@ -386,7 +467,7 @@ function Install-SUP {
         $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
-            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 -WsusSSL:$usePKI *>&1 | Out-File $global:StatusLog -Append
+            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 -WsusSSL:$usePKI *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 60
         }
         else {
@@ -465,7 +546,7 @@ function Install-SRP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode  *>&1 | Out-File $global:StatusLog -Append
+            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode  *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
@@ -473,7 +554,7 @@ function Install-SRP {
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
-            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" *>&1 | Out-File $global:StatusLog -Append
+            Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 30
         }
         else {
@@ -550,7 +631,7 @@ function Get-UpdatePack {
         Write-DscStatus "No update found. Running Invoke-CMSiteUpdateCheck and waiting for 2 mins..." -NoStatus
         $getupdateretrycount++
 
-        Invoke-CMSiteUpdateCheck -ErrorAction Ignore *>&1 | Out-File $global:StatusLog -Append
+        Invoke-CMSiteUpdateCheck -ErrorAction Ignore *>&1 | Write-StatusLogEntry
         Start-Sleep 120
 
         $updatepacklist = Get-CMSiteUpdate | Where-Object { $_.State -ne 196612 -and $_.Name -eq "Configuration Manager $UpdateVersion" } # filter hotfixes

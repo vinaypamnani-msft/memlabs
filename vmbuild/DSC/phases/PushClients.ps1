@@ -89,7 +89,7 @@ if ($CurrentRole -ne "CAS") {
                     Write-DscStatus "[ClientPush][Retry $retries] Running: New-CMAccount -Name $cm_svc -Password <secure> -SiteCode $SiteCode"
                     Write-DscStatus "[ClientPush] Adding cm_svc domain account as CM account"
                     Start-Sleep -Seconds 5
-                    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+                    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Write-StatusLogEntry
                 } catch {
                     Write-DscStatus "[ClientPush][Retry $retries] Failed to add cm_svc as CM account: $_. Exception: $($_.Exception.Message)"
                 }
@@ -110,7 +110,7 @@ if ($CurrentRole -ne "CAS") {
                 try {
                     Write-DscStatus "[ClientPush][Retry $retries] Running: Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc"
                     Write-DscStatus "[ClientPush][Retry $retries] Setting the Client Push Account"
-                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
                     Start-Sleep -Seconds 5
                     if ($retries -gt 5) {
                         Write-DscStatus "[ClientPush][Retry $retries] Running: Restart-Service -DisplayName 'SMS_Executive'"
@@ -162,7 +162,7 @@ if ($CurrentRole -ne "CAS") {
 # When PKI/HTTPS is enabled, ccmsetup must be told to use the PKI cert to reach the HTTPS-only MP
 if ($usePKI -and $CurrentRole -ne "CAS") {
     Write-DscStatus "[ClientPush] PKI is enabled. Setting /UsePKICert installation property for client push."
-    Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Out-File $global:StatusLog -Append
+    Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Write-StatusLogEntry
 }
 
 Write-DscStatus "Client push candidates are '$ClientNames'"
@@ -286,7 +286,7 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
         Start-Sleep -Seconds 5
     }
 }

@@ -70,7 +70,7 @@ try {
             try {
                 Set-CMSiteSystemServer -SiteSystemServerName $fqdn -UseProxy $true `
                     -ProxyServerName $proxyFqdn -ProxyServerPort $proxyPort `
-                    -ErrorAction Stop *>&1 | Out-File $global:StatusLog -Append
+                    -ErrorAction Stop *>&1 | Write-StatusLogEntry
                 Write-DscStatus "$fqdn`: site system proxy set -> $proxyFqdn`:$proxyPort"
             }
             catch {
@@ -82,7 +82,7 @@ try {
                 if ($sup) {
                     try {
                         Set-CMSoftwareUpdatePoint -SiteSystemServerName $fqdn -UseProxy $true `
-                            -ErrorAction Stop *>&1 | Out-File $global:StatusLog -Append
+                            -ErrorAction Stop *>&1 | Write-StatusLogEntry
                         Write-DscStatus "$fqdn`: SUP UseProxy enabled"
                     }
                     catch {

@@ -175,7 +175,7 @@ $Install_Secondary = {
                             $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                             New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                 -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Write-StatusLogEntry
                         }
                     }
                 }
@@ -183,13 +183,13 @@ $Install_Secondary = {
                     Write-DscStatus "Adding secondary site server on $secondaryFQDN Without PKI" -NoStatus
                     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                         -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Write-StatusLogEntry
                 }
                 Start-Sleep -Seconds 15
             }
             catch {
                 try {
-                    $_ | Out-File $global:StatusLog -Append
+                    $_ | Write-StatusLogEntry
                     Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once." -MachineName $SecondaryName
                     Start-Sleep -Seconds 300
                     if ($usePki) {
@@ -200,18 +200,18 @@ $Install_Secondary = {
                                 $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                                 New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                     -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                    -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                    -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Write-StatusLogEntry
                             }
                         }
                     }
                     else {
                         New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                             -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                            -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                            -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Write-StatusLogEntry
                     }
                 }
                 catch {
-                    $_ | Out-File $global:StatusLog -Append
+                    $_ | Write-StatusLogEntry
                     Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure -MachineName $SecondaryName
                     $installFailure = $true
                     continue
