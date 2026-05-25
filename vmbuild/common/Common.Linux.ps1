@@ -2378,7 +2378,26 @@ function Invoke-LinuxBaseImageBake {
         # so we can branch on reuse vs. create without try/catch noise.
         $existing = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $createName })
         if ($existing.Count -gt 1) {
-            throw "Bake: found $($existing.Count) Hyper-V switches named '$createName'; remove the duplicates and re-run."
+            # Duplicate-name switches confuse Hyper-V cmdlets (LINQ Single() throws
+            # 'Sequence contains more than one element' from New-VM). Wipe them all
+            # and recreate fresh; bake VMs are ephemeral so nothing of value is
+            # attached to these switches.
+            Write-Log "Bake: found $($existing.Count) switches named '$createName'; removing all and recreating." -Warning
+            foreach ($dup in $existing) {
+                try {
+                    Remove-VMSwitch -Id $dup.Id -Force -ErrorAction Stop
+                    Write-Log "Bake: removed duplicate switch '$createName' (Id $($dup.Id))." -Success
+                }
+                catch {
+                    throw "Bake: failed to remove duplicate switch '$createName' (Id $($dup.Id)): $($_.Exception.Message)"
+                }
+            }
+            # Also drop the matching NetNat -- it's name-scoped, not switch-scoped,
+            # so a stale one survives switch removal and would clash on re-add.
+            if (Get-NetNat -Name "${createName}Nat" -ErrorAction SilentlyContinue) {
+                Remove-NetNat -Name "${createName}Nat" -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            $existing = @()
         }
         if ($existing.Count -eq 1) {
             Write-Log "Bake: reusing existing NAT switch '$createName' (host IP / NetNat will be topped up if missing)." -Activity
