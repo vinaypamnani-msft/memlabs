@@ -37,9 +37,16 @@ try {
         $_.useProxy -eq $true -and $_.role -ne 'Proxy'
     })
 
+    # If there's no Proxy VM or no opted-in clients in this snapshot of
+    # deployConfig, don't mark Completed -- otherwise a deploy that ran
+    # before the Proxy was hydrated into deployConfig (or before the user
+    # toggled useProxy on a SiteSystem) latches Completed forever and the
+    # next deploy that DOES have the Proxy never gets the proxy applied.
+    # Leave Status='NotStart' so the ScriptWorkflow gate re-runs us.
     if (-not $proxyVm -or $proxyClients.Count -eq 0) {
         $proxyState = if ($proxyVm) { "Proxy=$($proxyVm.vmName)" } else { "Proxy=<none>" }
         Write-DscStatus "ConfigureCMProxy: nothing to do. $proxyState; opted-in clients=$($proxyClients.Count); total VMs in deployConfig=$(@($deployConfig.virtualMachines).Count)"
+        $Configuration.ConfigureCMProxy.Status = 'NotStart'
     }
     else {
         # Connect to the CM site PS drive (sets $SiteCode and cd's into <SiteCode>:\)
@@ -84,9 +91,9 @@ try {
                 }
             }
         }
-    }
 
-    $Configuration.ConfigureCMProxy.Status = 'Completed'
+        $Configuration.ConfigureCMProxy.Status = 'Completed'
+    }
 }
 catch {
     Write-DscStatus "ConfigureCMProxy failed: $_"
