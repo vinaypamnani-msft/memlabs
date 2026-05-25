@@ -336,15 +336,14 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
     }
 
-    if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
-        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
-    }
-    else {
-        Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
-    }
+    # ConfigureCMProxy is cheap and idempotent; always run it so latched
+    # Completed state from a deploy that ran before the Proxy was hydrated
+    # into deployConfig can self-heal on the next pass. The script itself
+    # short-circuits when there's no Proxy or no opted-in clients.
+    Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
 
     #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
@@ -374,15 +373,11 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
         }
 
-        if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
-            Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
-            Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
-        }
-        else {
-            Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
-        }
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
     }
     elseif ($CurrentRole -eq "Primary") {
@@ -438,15 +433,11 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
         }
 
-        if ($Configuration.ConfigureCMProxy.Status -ne "Completed") {
-            Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
-            Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
-        }
-        else {
-            Write-DscStatus "$scenario Skipping ConfigureCMProxy.ps1 (already completed)"
-        }
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
          #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
         Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
