@@ -781,7 +781,7 @@ function Select-VirtualMachines {
                             $dsize = $virtualMachine.additionalDisks.$dl
                             $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
                             $key = [string]$diskNum
-                            $customOptions["-D$key"] = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                            $customOptions["-D$key"] = "$($dl):  $dsize".PadRight(20) + "($dusage)%DarkSeaGreen"
                             $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
                             $diskNumToLetter[$key] = $dl
                             $diskNum++
