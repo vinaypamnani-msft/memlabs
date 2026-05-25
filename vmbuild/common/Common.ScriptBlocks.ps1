@@ -499,6 +499,19 @@ $global:VM_Create = {
                 }
             }
 
+            # Linux VMs (Proxy etc.) have no Windows PSDirect surface, so
+            # Wait-ForVM -PathToVerify "C:\Users" would just time out trying
+            # to Invoke-VmCommand. Probe over SSH instead.
+            if (Test-VmIsLinux -Vm $currentItem) {
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds 900
+                if (-not $linuxIP) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within 15min." -Failure -OutputStream
+                    return
+                }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
+                return
+            }
+
             # Check if RDP is enabled on DC. We saw an issue where RDP was enabled on DC, but didn't take effect until reboot.
             if ($currentItem.role -eq "DC") {
                 $testNet = Test-NetConnection -ComputerName $currentItem.vmName -Port 3389
