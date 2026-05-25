@@ -659,13 +659,17 @@ function Add-NewVMForRole {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name "useProxy" -Value $useProxyDefault -Force
     }
 
-    if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
-        # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
-        $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $defaultMin -force
-    }
-    else {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
+    # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux is
+    # flaky), so dynamicMinRam is meaningless for them -- don't add it.
+    if (-not (Test-VmIsLinux -Vm $virtualMachine)) {
+        if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
+            # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
+            $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $defaultMin -force
+        }
+        else {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
+        }
     }
 
     # Before adding, check if a VM with this name already exists

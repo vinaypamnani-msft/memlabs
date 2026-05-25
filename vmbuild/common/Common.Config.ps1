@@ -306,6 +306,13 @@ function Get-UserConfiguration {
 
         foreach ($vm in $config.VirtualMachines) {
 
+            # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux
+            # is flaky), so dynamicMinRam is meaningless. Strip it from configs
+            # that picked it up before the AddVM guard was in place.
+            if ($vm.osFamily -eq 'Linux' -and $vm.PSObject.Properties['dynamicMinRam']) {
+                $vm.PsObject.properties.Remove('dynamicMinRam')
+            }
+
             if ($null -ne $vm.SQLInstanceName) {
                 if ($null -eq $vm.sqlPort) {
                     if ($vm.SQLInstanceName -eq "MSSQLSERVER") {
