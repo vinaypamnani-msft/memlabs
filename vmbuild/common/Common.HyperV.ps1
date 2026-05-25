@@ -1072,7 +1072,14 @@ function Set-VmProxyEnforcement {
         }
         catch {
             if ($_.Exception.Message -match '0x800700B7|already exists') {
-                Write-Log "[Proxy] $VmName`: rule already present, treating as success ($($params | Out-String))" -LogOnly
+                # Don't swallow silently -- if this fires it means a previous
+                # rule with the same (Direction + Weight + Protocol) key is
+                # still on the vNIC. Hyper-V's extended-ACL identity does
+                # NOT include RemotePort, so two deny rules at the same
+                # weight/direction/protocol but different ports will collide
+                # and the second silently lose. Warn loudly so the next
+                # diagnostic round-trip catches it.
+                Write-Log "[Proxy] $VmName`: ACL add returned 'already exists' -- prior rule at same Weight+Direction+Protocol survived clear, NEW RULE LOST: $($params | Out-String)" -Warning
                 return
             }
             throw
@@ -1090,16 +1097,23 @@ function Set-VmProxyEnforcement {
             & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = 5099 }
         }
 
-        # --- Low-priority DENY rules (weight 5000-5001) ---
+        # --- Low-priority DENY rules (weights 5000-5003, one per rule) ---
         # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
         # The proxy itself reaches the Internet via the host NAT, so clients
         # MUST go through the proxy for any web traffic.
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5001 }
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5001 }
+        #
+        # Each rule gets a unique weight: Hyper-V's extended-ACL identity
+        # key is (Direction + Weight + Protocol), NOT including RemotePort.
+        # If two rules share weight+direction+protocol, the second add fires
+        # 0x800700B7 ("already exists") which our addAcl helper benignly
+        # swallows -- and you end up with only the FIRST port enforced
+        # (e.g. TCP/80 deny lands, TCP/443 deny silently lost).
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5003 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5002 }
 
         # Block outbound DNS to non-lab resolvers (lab DCs are covered by
         # the lab-subnet allow above).
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5000 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5001 }
         & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
 
         Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
