@@ -299,6 +299,9 @@ function Get-AdditionalInformationColor {
         "ParentSiteCode" {
             $color = $Global:Common.Colors.GenConfigSiteCode
         }
+        "cmInstallDir" {
+            $color = $Global:Common.Colors.GenConfigSiteCode
+        }
         "SqlVersion" {
             $color = $Global:Common.Colors.GenConfigSQLProp
         }

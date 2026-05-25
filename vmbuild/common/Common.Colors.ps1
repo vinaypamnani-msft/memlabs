@@ -187,7 +187,7 @@ function Get-Colors {
         GenConfigVMRemoteServer    = "DodgerBlue"
 
         GenConfigSQLProp           = "LightSeaGreen"
-        GenConfigSiteCode          = "LightCoral"
+        GenConfigSiteCode          = "DarkOrange"
         GenConfigTrue              = "LightGreen"
         GenConfigFalse             = "FireBrick"
 
