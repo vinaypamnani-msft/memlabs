@@ -3906,8 +3906,9 @@ function Install-Tools {
         $ToolName = $ToolName | ForEach-Object { $_ }
         $TotalCount = $ToolName.Count
         $success = $true
-        if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
-        if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+        # Benign skips: not a failure of injection, just nothing to do for this VM.
+        if ($vm.role -eq "OSDClient") { return $true } # no injecting inside OSD client
+        if ($vm.vmbuild -eq $false) { return $true } # don't touch VM's we didn't create
 
         $vmName = $vm.vmName
         Write-Log "$vmName`: Injecting Tools $($ToolName -join ",") to C:\tools directory inside the VM" -Activity
@@ -3915,16 +3916,21 @@ function Install-Tools {
         # Get VM Session
         if ($vm.State -ne "Running") {
             Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
-            continue
+            return $false
         }
 
         $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
         if (-not $ps) {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
-            continue
+            return $false
         }
         if (-not $Force) {
             $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        }
+        if (-not ($Force -or $out.ScriptBlockOutput -ne $true)) {
+            # Tools already present and -Force not specified: nothing to do, this is success.
+            Write-Log "$vmName`: Tools already present (Fix-PostInstall.ps1 exists). Skipping inject." -Verbose
+            return $true
         }
         if ($Force -or $out.ScriptBlockOutput -ne $true) {
             $i = 0
