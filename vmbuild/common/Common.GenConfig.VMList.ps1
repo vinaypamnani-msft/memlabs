@@ -168,10 +168,10 @@ function Select-Options {
             try {
                 $live = Get-LiveWindowSize
                 $winW = if ($live) { $live.Width }  else { $host.UI.RawUI.WindowSize.Width }
-                $winH = if ($live) { $live.Height } else { $host.UI.RawUI.WindowSize.Height }
-                $cursorY = [Console]::CursorTop
-                # Match Get-RoomLeftFromCurrentPosition's BottomReserve = 4.
-                $room = $winH - $cursorY - 4
+                # Use the existing helper so we count the cursor's viewport-
+                # relative row (handles scrollback) plus the standard
+                # BottomReserve of 4 used by the rest of the menu engine.
+                $room = Get-RoomLeftFromCurrentPosition
                 $metrics = Get-MenuMetrics -MenuItems $MenuItems -WindowWidth $winW
                 if ($metrics.TotalLineCount -gt $room) {
                     $droppable = @($MenuItems | Where-Object { [string]$_.itemName -match $DroppableItemPattern })
