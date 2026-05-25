@@ -1094,27 +1094,56 @@ function Show-Menu {
 
         # Decide which tiers of non-selectable content to drop so the menu fits.
         # Tiers (dropped first to last): Summary -> Header -> Blank -> Help.
+        # PgDn is a LAST resort -- if a layout pass still wouldn't fit, we
+        # escalate the shrink plan one tier at a time and re-layout before
+        # giving up and paginating.
         $helpBannerCost = if ($HelpNeeded) { $script:MenuLayout.HelpBannerLines } else { 0 }
         $shrink    = Resolve-ShrinkPlan -Tiers $metrics.Tiers -HelpBannerCost $helpBannerCost -TotalLineCount $TotalLineCount -RoomLeft $RoomLeft
         $Maxshrink = $shrink.Max
 
+        # Compute the rows actually available for menu items. The help banner
+        # (when drawn) advances the cursor by HelpBannerLines BEFORE rendering
+        # starts, so we model that here instead of sampling cursor position
+        # after the banner draws. This keeps shrink and layout consistent so
+        # the same numbers drive both decisions.
+        $wrapAt = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
+        $bannerWillDraw = (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help)
+        $availableRows  = [Math]::Max(1, $RoomLeft - $(if ($bannerWillDraw) { $helpBannerCost } else { 0 }))
+        $layout = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
+                        -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
+
+        # If pagination would still be needed but we haven't exhausted the
+        # shrink tiers, drop the next tier and re-layout. Only escalate when
+        # starting from the first page -- mid-pagination, the user has already
+        # committed to scrolling.
+        $tierOrder = @('Summary','Header','Blank','Help')
+        while ($layout.PgDnNeeded -and -not $Maxshrink -and $pageStartIndex -eq 0) {
+            $advanced = $false
+            foreach ($tier in $tierOrder) {
+                if (-not $shrink[$tier]) {
+                    $shrink[$tier] = $true
+                    $advanced = $true
+                    break
+                }
+            }
+            if (-not $advanced) {
+                # All four tiers already dropped -- escalate to Max (hide every
+                # non-selectable row) as the final non-paginating attempt.
+                $shrink.Max = $true
+                $Maxshrink = $true
+            }
+            $bannerWillDraw = (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help)
+            $availableRows  = [Math]::Max(1, $RoomLeft - $(if ($bannerWillDraw) { $helpBannerCost } else { 0 }))
+            $layout = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
+                            -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
+        }
+
+        # Now that the shrink plan is final, draw the help banner if it survived.
         if (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help) {
             $HelpPosition = Get-CursorPosition
             Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText "" -Color None -wait:$false
         }
 
-        # Lookahead: pre-compute which slice of $menuItems fits this page given
-        # the active shrink plan. Replaces the legacy "render until RoomLeft -le 2"
-        # reactive bailout with a deterministic up-front layout decision.
-        # AvailableRows uses Get-RoomLeftFromCurrentPosition directly: its
-        # BottomReserve=4 already covers the trailing blank, PgDn indicator,
-        # prompt, and a cursor breathing row. Using the same value Resolve-ShrinkPlan
-        # sees prevents the "shrink says fits / layout says paginate" mismatch
-        # that left a 2-row gap above the indicator.
-        $wrapAt        = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
-        $availableRows = [Math]::Max(1, (Get-RoomLeftFromCurrentPosition))
-        $layout        = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `
-                            -WrapAt $wrapAt -AvailableRows $availableRows -StartIndex $pageStartIndex
         $pageStartIndex = $layout.StartIndex
         $pageEndIndex   = $layout.EndIndex
         $PgUpAvailable  = ($pageStartIndex -gt 0)
