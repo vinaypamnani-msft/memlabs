@@ -186,7 +186,7 @@ if (-not $NoWindowResize.IsPresent) {
             }
         }
         $targetCols = [Math]::Max($minCols, $longestHelp + $helpOverhead)
-        $targetRows = 60
+        $targetRows = 65
 
         $screenW = $screen.Bounds.Width
         $screenH = $screen.Bounds.Height

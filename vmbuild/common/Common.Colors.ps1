@@ -47,7 +47,40 @@ function Set-BackgroundImage {
 
         $a = Get-Content $SettingsJson | ConvertFrom-Json   
         $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
-    
+        $a | Add-Member -MemberType NoteProperty -Name "initialRows" -Value 40 -Force
+        $a | Add-Member -MemberType NoteProperty -Name "initialCols" -Value 140 -Force
+
+        # --- Active-tab highlight theme -------------------------------------------------
+        # Make the focused tab visually distinct from inactive tabs/tab-row.
+        # tab.background  = active tab (lighter)
+        # tab.unfocusedBackground / tabRow.* = inactive tabs + bar (darker)
+        $themeName = "MemLabsActiveTab"
+        $tabTheme = [PSCustomObject]@{
+            name      = $themeName
+            tab       = [PSCustomObject]@{
+                background            = "#264F78FF"   # active tab (VS Code accent blue)
+                unfocusedBackground   = "#1F1F1FFF"   # inactive tabs
+                showCloseButton       = "always"
+            }
+            tabRow    = [PSCustomObject]@{
+                background            = "#0C0C0CFF"   # tab strip
+                unfocusedBackground   = "#0C0C0CFF"
+            }
+            window    = [PSCustomObject]@{
+                applicationTheme = "dark"
+            }
+        }
+
+        if (-not $a.PSObject.Properties.Match('themes').Count) {
+            $a | Add-Member -MemberType NoteProperty -Name "themes" -Value @($tabTheme) -Force
+        }
+        else {
+            $existing = @($a.themes | Where-Object { $_.name -ne $themeName })
+            $a.themes = @($existing + $tabTheme)
+        }
+        $a | Add-Member -MemberType NoteProperty -Name "theme" -Value $themeName -Force
+        # --------------------------------------------------------------------------------
+
         if (-not $a.profiles.defaults) {
             $defaults = [PSCustomObject]@{
                 backgroundImage            = $file
@@ -55,6 +88,7 @@ function Set-BackgroundImage {
                 backgroundImageOpacity     = ($opacityPercent / 100)
                 backgroundImageStretchMode = $stretchMode
                 antialiasingMode           = "cleartype"
+                historySize                = 32768
             }
             $a.profiles | Add-Member -MemberType NoteProperty -Name "defaults" -Value $defaults -Force
         }
@@ -64,6 +98,7 @@ function Set-BackgroundImage {
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageOpacity" -Value ($opacityPercent / 100) -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageStretchMode" -Value $stretchMode -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "antialiasingMode" -Value "cleartype" -Force
+            $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "historySize" -Value 32768 -Force
     
         }
     
