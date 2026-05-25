@@ -168,10 +168,26 @@ function Select-Options {
         }
         $return = $null
         if ($null -ne $additionalOptions) {
+            # Response can be either the itemName (pick) or "-D<itemName>" (Delete
+            # key on a deletable row). additionalOptions keys may carry a "-D"
+            # prefix to mark the row deletable -- New-MenuItem strips that
+            # prefix before display. Match on the stripped form for picks and
+            # on the original (prefixed) form for deletes. Caller-side dispatch
+            # tells the two apart by the leading "-D" in the returned string.
+            $responseLower = if ($response) { $response.ToLowerInvariant() } else { $null }
+            $responseIsDelete = ($responseLower -and $responseLower.StartsWith("-d"))
+            $responseStripped = if ($responseIsDelete) { $response.Substring(2) } else { $response }
+            $responseStrippedLower = if ($responseStripped) { $responseStripped.ToLowerInvariant() } else { $null }
             foreach ($item in $($additionalOptions.keys)) {
-                if (($response -and $item) -and ($response.ToLowerInvariant() -eq $item.ToLowerInvariant())) {
-                    # Return fails here for some reason. If the values were the same, let the user escape, as no changes were made.
-                    $return = $item
+                $itemStripped = $item
+                if ($itemStripped.StartsWith("-D") -and $itemStripped.Length -gt 2) {
+                    $itemStripped = $itemStripped.Substring(2)
+                }
+                if (-not $item -or -not $itemStripped) { continue }
+                if ($responseStrippedLower -eq $itemStripped.ToLowerInvariant()) {
+                    # Preserve the "-D" prefix in the returned value when the
+                    # response was a delete so callers can route accordingly.
+                    $return = if ($responseIsDelete) { "-D" + $itemStripped } else { $itemStripped }
                 }
             }
         }
