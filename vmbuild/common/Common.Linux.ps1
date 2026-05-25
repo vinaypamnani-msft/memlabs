@@ -2370,33 +2370,64 @@ function Invoke-LinuxBaseImageBake {
     if (-not (Test-Path $VhdxPath)) {
         throw "Bake: VHDX '$VhdxPath' not found."
     }
-    $switch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-    if (-not $switch) {
-        # Matches the proven NAT switch recipe in New-BaseImage.ps1:
-        # Internal vSwitch + host IP at 172.16.200.1/24 + NetNat for outbound.
-        # Only auto-create for the canonical 'MemLabsNAT' / 'Default Switch'
-        # names; if the user picked something exotic, fail clearly.
-        if ($SwitchName -in @('MemLabsNAT', 'Default Switch')) {
-            $createName = 'MemLabsNAT'
-            Write-Log "Bake: switch '$SwitchName' not found; creating internal NAT switch '$createName' (172.16.200.0/24)..." -Activity
+    # Auto-manage only the canonical 'MemLabsNAT' / 'Default Switch' names; for
+    # anything exotic, require the caller to have it set up already.
+    if ($SwitchName -in @('MemLabsNAT', 'Default Switch')) {
+        $createName = 'MemLabsNAT'
+        # Get-VMSwitch with -Name throws if no match; use the safe filter form
+        # so we can branch on reuse vs. create without try/catch noise.
+        $existing = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $createName })
+        if ($existing.Count -gt 1) {
+            throw "Bake: found $($existing.Count) Hyper-V switches named '$createName'; remove the duplicates and re-run."
+        }
+        if ($existing.Count -eq 1) {
+            Write-Log "Bake: reusing existing NAT switch '$createName' (host IP / NetNat will be topped up if missing)." -Activity
+        }
+        else {
+            Write-Log "Bake: creating internal NAT switch '$createName' (172.16.200.0/24)..." -Activity
             try {
                 New-VMSwitch -SwitchName $createName -SwitchType Internal -ErrorAction Stop | Out-Null
-                $natAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$createName*" } | Select-Object -First 1
-                if (-not $natAdapter) { throw "Bake: created switch '$createName' but no matching host vNIC appeared." }
-                # Idempotent: ignore "already exists" on the host IP / NAT.
-                New-NetIPAddress -IPAddress 172.16.200.1 -PrefixLength 24 -InterfaceIndex $natAdapter.ifIndex -ErrorAction SilentlyContinue | Out-Null
-                if (-not (Get-NetNat -Name "${createName}Nat" -ErrorAction SilentlyContinue)) {
-                    New-NetNat -Name "${createName}Nat" -InternalIPInterfaceAddressPrefix 172.16.200.0/24 -ErrorAction Stop | Out-Null
-                }
-                $SwitchName = $createName
                 Write-Log "Bake: created NAT switch '$createName'." -Success
             }
             catch {
                 throw "Bake: failed to create NAT switch '$createName': $($_.Exception.Message). Available switches: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')"
             }
         }
-        else {
+
+        # Top up the NAT plumbing whether the switch is new or reused; both
+        # New-NetIPAddress and New-NetNat are no-ops if their target already
+        # exists at the desired values.
+        try {
+            $natAdapter = @(Get-NetAdapter | Where-Object { $_.Name -like "*$createName*" })
+            if ($natAdapter.Count -eq 0) {
+                throw "Bake: switch '$createName' exists but no matching host vNIC ('vEthernet ($createName)') appeared."
+            }
+            if ($natAdapter.Count -gt 1) {
+                Write-Log "Bake: found $($natAdapter.Count) host vNICs matching '*$createName*'; using ifIndex $($natAdapter[0].ifIndex)." -Warning
+            }
+            $ifIndex = $natAdapter[0].ifIndex
+            $existingIp = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -eq '172.16.200.1' }
+            if (-not $existingIp) {
+                New-NetIPAddress -IPAddress 172.16.200.1 -PrefixLength 24 -InterfaceIndex $ifIndex -ErrorAction Stop | Out-Null
+            }
+            if (-not (Get-NetNat -Name "${createName}Nat" -ErrorAction SilentlyContinue)) {
+                New-NetNat -Name "${createName}Nat" -InternalIPInterfaceAddressPrefix 172.16.200.0/24 -ErrorAction Stop | Out-Null
+            }
+            $SwitchName = $createName
+        }
+        catch {
+            throw "Bake: failed to configure NAT plumbing on '$createName': $($_.Exception.Message)"
+        }
+    }
+    else {
+        # Caller picked a custom switch (e.g. 'External' on host that already has internet); just verify it exists.
+        $switch = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $SwitchName })
+        if ($switch.Count -eq 0) {
             throw "Bake: Hyper-V switch '$SwitchName' not found. Pick a switch with outbound internet (-BakeSwitchName), or use 'MemLabsNAT' to auto-create one. Available: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')"
+        }
+        if ($switch.Count -gt 1) {
+            throw "Bake: found $($switch.Count) Hyper-V switches named '$SwitchName'; remove the duplicates and re-run."
         }
     }
 
