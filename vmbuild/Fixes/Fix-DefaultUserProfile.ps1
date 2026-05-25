@@ -12,7 +12,7 @@ $Fix_DefaultProfile = {
     foreach ($p in $paths) {
         if (Test-Path $p) {
             try {
-                Remove-Item -Path $p -Force -Recurse -ProgressAction SilentlyContinue -ErrorAction Stop | Out-Null
+                Remove-Item -Path $p -Force -Recurse -ErrorAction Stop | Out-Null
                 $removed++
             }
             catch {
