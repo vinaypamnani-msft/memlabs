@@ -127,6 +127,15 @@ function Remove-VirtualMachine {
         Remove-DHCPReservation -mac $adapter.MacAddress -vmName $VmName   # fixed: was $currentItem.vmName
     }
 
+    # -- Linux: capture IPs before stopping (KVP dies with the VM) --
+    $linuxIPs = @()
+    $isLinux = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
+    if ($isLinux) {
+        $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
+            Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
+            Select-Object -Unique)
+    }
+
     # -- Ensure VM is stopped before touching files --
     $stopped = Wait-VMStopped -VM $vmTest -WhatIf:$WhatIf
     if (-not $stopped -and -not $WhatIf) {
@@ -199,6 +208,35 @@ function Remove-VirtualMachine {
     if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
         if (Get-Command -Name Remove-HostProxyShortcuts -ErrorAction SilentlyContinue) {
             Remove-HostProxyShortcuts -ProxyFqdn "$VmName.$($vmFromList.domain)"
+        }
+    }
+
+    # -- Linux: scrub stale known_hosts entries for the removed VM's IP --
+    # A stale host-key entry causes ssh.exe to reject connections to a
+    # future VM that reuses the same IP (different host keys after rebuild).
+    # Scrub both the memlabs-private known_hosts (next to the shared key)
+    # and the user's default ~/.ssh/known_hosts.
+    if (-not $WhatIf -and $linuxIPs.Count -gt 0) {
+        try {
+            $keyPair = Get-LinuxAdminSshKeyPair
+            $memlabsKH = Join-Path (Split-Path $keyPair.PrivateKeyPath) 'known_hosts'
+            $userKH = Join-Path $env:USERPROFILE '.ssh\known_hosts'
+            $scrubTargets = @($memlabsKH, $userKH) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+            foreach ($ip in $linuxIPs) {
+                $pattern = "^[^ ]*\b$([regex]::Escape($ip))\b"
+                foreach ($kh in $scrubTargets) {
+                    $hits = @(Select-String -Path $kh -Pattern $pattern -ErrorAction SilentlyContinue)
+                    if ($hits.Count -gt 0) {
+                        $allLines = Get-Content -LiteralPath $kh -ErrorAction Stop
+                        $keep = $allLines | Where-Object { $_ -notmatch $pattern }
+                        Set-Content -LiteralPath $kh -Value $keep -Encoding ASCII -NoNewline:$false
+                        Write-Log "$VmName`: Scrubbed $($hits.Count) known_hosts entry/entries for $ip from $kh" -SubActivity
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "$VmName`: Failed to scrub known_hosts: $($_.Exception.Message)" -Warning
         }
     }
 }
