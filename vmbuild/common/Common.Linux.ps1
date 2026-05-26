@@ -3472,6 +3472,23 @@ instance-id: $instanceId
 local-hostname: memlabs-bake
 "@
 
+    # Static network config for the MemLabsNAT switch (172.16.200.0/24).
+    # The NAT switch has NO DHCP server, so without this the bake VM gets
+    # no IP, no internet, and apt silently fails to install packages.
+    # cloud-init reads 'network-config' from the NoCloud seed alongside
+    # meta-data and user-data.
+    $networkConfig = @"
+version: 2
+ethernets:
+  eth0:
+    addresses: [172.16.200.10/24]
+    routes:
+      - to: 0.0.0.0/0
+        via: 172.16.200.1
+    nameservers:
+      addresses: [8.8.8.8, 1.1.1.1]
+"@
+
     # cloud-init bake recipe:
     #   - install KVP/VSS daemons (Hyper-V integration), qemu-guest-agent,
     #     openssh-server (already present but be explicit)
@@ -3532,6 +3549,7 @@ write_files:
   - systemctl enable xrdp.service || true
   - adduser xrdp ssl-cert || true
   - ufw allow 3389/tcp || true
+  - dpkg -l ubuntu-desktop-minimal xrdp xorgxrdp | grep -c '^ii' | grep -q '^3$' || { echo "BAKE FAILED: desktop packages not installed"; shutdown -c; poweroff; }
 '@
     }
 
@@ -3563,6 +3581,7 @@ $desktopRuncmdYaml
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'user-data'), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $stageDir 'network-config'), ($networkConfig -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
     $oscdimg = Get-OscdimgPath
     if ($oscdimg) {
