@@ -893,7 +893,12 @@ function Write-MenuItem {
         [Parameter(Mandatory)][hashtable]$Shrink,
         [Parameter(Mandatory)][bool]$MaxShrink,
         [Parameter(Mandatory)][int]$LongestBreakLine,
-        [switch]$MultiSelect
+        [switch]$MultiSelect,
+        # When set, *F Summary rows render a cheap "refreshing..." placeholder
+        # padded to the row's reserved LineCount instead of invoking the slow
+        # summary function. Used to make resize redraws feel instantaneous;
+        # Show-Menu schedules a follow-up full redraw to fill the placeholder.
+        [switch]$UsePlaceholder
     )
     $result = @{ Drawn = $false; HelpPosition = $null }
     $kind = Get-MenuItemKind -MenuItem $MenuItem
@@ -901,7 +906,15 @@ function Write-MenuItem {
     switch ($kind) {
         'Summary' {
             if ($Shrink.Summary) { return $result }
-            Invoke-Expression -Command $MenuItem.Function
+            if ($UsePlaceholder) {
+                $lc = [int]$MenuItem.LineCount
+                if ($lc -lt 1) { $lc = 1 }
+                Write-Host '  (refreshing...)' -ForegroundColor DarkGray
+                for ($__p = 1; $__p -lt $lc; $__p++) { Write-Host '' }
+            }
+            else {
+                Invoke-Expression -Command $MenuItem.Function
+            }
             $result.Drawn = $true
         }
         'Selectable' {
@@ -1086,6 +1099,9 @@ function Show-Menu {
     $pageStartIndex = 0
     $pageEndIndex   = -1
     $script:_lastHelpText = $null  # Reset help-text cache for new menu display
+    # Reset cross-menu resize-fast-draw state so a stale flag from a prior
+    # Show-Menu invocation can't suppress the first real render of this one.
+    $script:_showMenuPendingFastDraw = $false
 
     # Snapshot the original menu so the per-iteration drop pass can restore the
     # full set before re-deciding what to drop. Without this, droppable items
@@ -1152,6 +1168,13 @@ function Show-Menu {
         # the old window until they press a key.
         $drawWidth  = $liveWidth
         $drawHeight = if ($liveSize) { [int]$liveSize.Height } else { $host.UI.RawUI.WindowSize.Height }
+        # Resize-fast-draw: when the previous iteration's post-draw recheck
+        # detected a window resize, render this iteration with placeholders
+        # for slow *F Summary rows so the new layout appears immediately.
+        # Show-Menu schedules a follow-up full-draw iteration below (after
+        # size stabilizes) to fill the placeholders with real content.
+        $usePlaceholder = $script:_showMenuPendingFastDraw -eq $true
+        $script:_showMenuPendingFastDraw = $false
         $metrics          = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $liveWidth
         $TotalLineCount   = $metrics.TotalLineCount
         $LongestBreakLine = $metrics.LongestBreakLine
@@ -1276,7 +1299,7 @@ function Show-Menu {
                 Set-CursorPosition -x 0 -y $CurrentPosition.Y
 
                 # Per-item render dispatched in Write-MenuItem (kind-based switch).
-                $itemResult = Write-MenuItem -MenuItem $menuItem -Shrink $shrink -MaxShrink $Maxshrink -LongestBreakLine $LongestBreakLine -MultiSelect:$MultiSelect
+                $itemResult = Write-MenuItem -MenuItem $menuItem -Shrink $shrink -MaxShrink $Maxshrink -LongestBreakLine $LongestBreakLine -MultiSelect:$MultiSelect -UsePlaceholder:$usePlaceholder
                 if ($itemResult.Drawn)        { $menuItem.Displayed = $true }
                 if ($itemResult.HelpPosition) { $HelpPosition = $itemResult.HelpPosition }
             }
@@ -1317,8 +1340,17 @@ function Show-Menu {
         if ($postDrawSize) {
             if ([int]$postDrawSize.Width -ne $drawWidth -or [int]$postDrawSize.Height -ne $drawHeight) {
                 Write-Log -Verbose "Show-Menu: window resized during draw ($drawWidth x $drawHeight -> $($postDrawSize.Width) x $($postDrawSize.Height)); redrawing"
+                # Mark the next iteration as a fast/placeholder redraw so the
+                # user sees the new layout immediately instead of waiting for
+                # slow *F Summary rows to recompute against the new size.
+                $script:_showMenuPendingFastDraw = $true
                 continue
             }
+        }
+        # If this iteration was a placeholder draw and the size held steady,
+        # loop one more time to render the real Summary content in place.
+        if ($usePlaceholder) {
+            continue
         }
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
