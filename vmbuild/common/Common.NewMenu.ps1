@@ -746,6 +746,28 @@ $script:MenuLayout = @{
     TextWidthSlack  = 9    # Columns reserved for arrow/indent in wrap detection
 }
 
+# Regex matching ANSI CSI escape sequences (\e[...m, \e[...K, etc.). Used by
+# the wrap-aware line-count helpers below to measure *visible* text length
+# rather than raw .Length (which over-counts ANSI-colored rows).
+$script:AnsiCsiPattern = [regex]('\x1b\[[0-9;?]*[A-Za-z]')
+
+# Visible character count for a string that may contain ANSI escapes.
+function Get-MenuVisibleLength {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return 0 }
+    if ($Text.IndexOf([char]27) -lt 0) { return $Text.Length }
+    return $script:AnsiCsiPattern.Replace($Text, '').Length
+}
+
+# Number of extra rows a row of $VisibleLen visible chars consumes when the
+# usable width is $WrapAt. Returns 0 when it fits on one row, 1 when it wraps
+# once, 2 when twice, etc.
+function Get-MenuWrapExtraLines {
+    param([int]$VisibleLen, [int]$WrapAt)
+    if ($WrapAt -le 0 -or $VisibleLen -le $WrapAt) { return 0 }
+    return [int]([Math]::Ceiling($VisibleLen / [double]$WrapAt)) - 1
+}
+
 # Classify a non-selectable menu item into a shrink tier so the same rule is
 # used by both the line-count scan and the render loop. Returns one of
 # 'Summary' | 'Header' | 'Blank' | 'Help', or $null when the item is selectable.
@@ -780,8 +802,8 @@ function Get-MenuMetrics {
 
     foreach ($mi in $MenuItems) {
         $totalLineCount += $mi.LineCount
-        $len = $mi.Text.Length
-        if ($len -gt $wrapAt) { $totalLineCount += 1 }
+        $len = Get-MenuVisibleLength -Text $mi.Text
+        $totalLineCount += (Get-MenuWrapExtraLines -VisibleLen $len -WrapAt $wrapAt)
         $name = [string]$mi.itemName
         if ($name.StartsWith('*B') -and $len -gt $longestBreak) {
             $longestBreak = $len
@@ -919,7 +941,10 @@ function Get-MenuItemLineCost {
     switch ($kind) {
         'Selectable' {
             $cost = 1
-            if ($MenuItem.Text -and $MenuItem.Text.Length -gt $WrapAt) { $cost += 1 }
+            if ($MenuItem.Text) {
+                $vis = Get-MenuVisibleLength -Text $MenuItem.Text
+                $cost += (Get-MenuWrapExtraLines -VisibleLen $vis -WrapAt $WrapAt)
+            }
             return $cost
         }
         'Summary' {

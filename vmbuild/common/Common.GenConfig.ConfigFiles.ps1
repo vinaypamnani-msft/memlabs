@@ -72,8 +72,7 @@ function Select-Config {
         $i = 0
         $currentVMs = Get-List -type VM
         $maxLength = 40
-        $MaxWidth = ($host.UI.RawUI.WindowSize.Width - $maxLength - 12)
-        
+
         foreach ($file in $files) {
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
             $len = $filename.Length
@@ -82,6 +81,12 @@ function Select-Config {
                 $maxLength = $len
             }
         }
+
+        # Budget for the entire rendered row. Get-Menu2 prepends menu chrome
+        # (arrow + "[NN] " + brackets/padding) -- reserve ~10 cols for that
+        # plus a small safety slack so we never wrap onto a second line.
+        $rowMaxWidth = $host.UI.RawUI.WindowSize.Width - 11
+        if ($rowMaxWidth -lt ($maxLength + 10)) { $rowMaxWidth = $maxLength + 10 }
         foreach ($file in $files) {
             $i = $i + 1
             $savedConfigJson = $null
@@ -126,14 +131,13 @@ function Select-Config {
                 }
                 $savedNotes += "[Deployed: $($Found.ToString().PadRight(2))] [Missing: $($notFound.ToString().PadRight(2))] "
                 $savedNotes += "$($savedConfigJson.virtualMachines.VmName -join ", ")"
-                
-                if ($savedNotes.Length -ge $MaxWidth) {
-                    $savedNotes = $savedNotes.Substring(0, $MaxWidth - 3) + "..."
-                }
-               
             }
             $filename = [System.Io.Path]::GetFileNameWithoutExtension($file.Name)
-            $optionArray += $($filename.PadRight($maxLength) + " " + $savedNotes) + "%$color"
+            $rowText = $filename.PadRight($maxLength) + " " + $savedNotes
+            if ($rowText.Length -gt $rowMaxWidth) {
+                $rowText = $rowText.Substring(0, $rowMaxWidth - 3) + "..."
+            }
+            $optionArray += $rowText + "%$color"
 
         }
         $preOptionsArray = [ordered]@{"*F5" = "Show-ConfigLegend" }

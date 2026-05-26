@@ -57,11 +57,17 @@ function Write-Option {
     $termWidth = [Console]::WindowWidth
     if (-not $termWidth) { $termWidth = $host.UI.RawUI.WindowSize.Width }
     $availWidth = $termWidth - $prefixLen - 1
-    if ($availWidth -gt 0 -and $text -and $text.Contains([char]27)) {
-        $ansiPat = [char]27 + '\[[0-9;]*m'
-        $plainText = [regex]::Replace($text, $ansiPat, '')
-        if ($plainText.Length -gt $availWidth) {
-            # Walk the ANSI string counting visible chars, cut at limit
+    if ($availWidth -gt 0 -and $text) {
+        $hasAnsi = $text.Contains([char]27)
+        if ($hasAnsi) {
+            $ansiPat = [char]27 + '\[[0-9;]*m'
+            $plainLen = [regex]::Replace($text, $ansiPat, '').Length
+        }
+        else {
+            $plainLen = $text.Length
+        }
+        if ($plainLen -gt $availWidth) {
+            # Walk the string counting visible chars (skipping ANSI), cut at limit
             $visCount = 0
             $cutIdx = $text.Length
             $inEsc = $false
@@ -72,12 +78,13 @@ function Write-Option {
                     continue
                 }
                 $visCount++
-                if ($visCount -ge $availWidth) {
+                if ($visCount -ge $availWidth - 3) {
                     $cutIdx = $ci + 1
                     break
                 }
             }
-            $text = $text.Substring(0, $cutIdx) + "$([char]27)[0m"
+            $suffix = if ($hasAnsi) { "...$([char]27)[0m" } else { "..." }
+            $text = $text.Substring(0, $cutIdx) + $suffix
         }
     }
 
