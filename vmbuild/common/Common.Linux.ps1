@@ -125,6 +125,111 @@ public class MemlabsIsoFile {
     }
 }
 
+function Test-LinuxUserDataYaml {
+    <#
+    .SYNOPSIS
+        Validate a generated cloud-init user-data blob parses as YAML.
+
+    .DESCRIPTION
+        Cloud-init's PyYAML loader silently discards a multipart cloud-config
+        part whose body fails to parse, taking users / ssh_authorized_keys /
+        runcmd with it. The VM then boots without vmbuildadmin and SSH fails
+        with 'Permission denied (publickey)' with no host-side breadcrumb.
+
+        Validation strategy (best available wins):
+          1. If the `powershell-yaml` module is loadable, use ConvertFrom-Yaml.
+             This catches every YAML error the guest would hit.
+          2. Otherwise, fall back to a heuristic that targets the known bug
+             class for this codebase: an unquoted runcmd item with a `: `
+             followed by a YAML indicator char (`*`, `&`, `[`, `{`). PyYAML
+             interprets that as a mapping where the value begins with an
+             alias / flow indicator, and rejects the whole part.
+
+        Throws (so the deploy fails fast) on any detected issue; the message
+        names the line so the next git commit can fix it surgically.
+
+    .OUTPUTS
+        None. Returns silently on success.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$UserData,
+
+        [Parameter(Mandatory = $false)]
+        [string]$VmName = '(seed)'
+    )
+
+    # Try the real YAML parser first.
+    $haveYamlModule = $false
+    if (Get-Command -Name ConvertFrom-Yaml -ErrorAction SilentlyContinue) {
+        $haveYamlModule = $true
+    }
+    else {
+        try {
+            Import-Module powershell-yaml -ErrorAction Stop -Verbose:$false | Out-Null
+            $haveYamlModule = $true
+        }
+        catch { $haveYamlModule = $false }
+    }
+
+    if ($haveYamlModule) {
+        try {
+            $null = ConvertFrom-Yaml -Yaml $UserData
+            Write-Log "$VmName`: user-data YAML validates (powershell-yaml)" -LogOnly
+            return
+        }
+        catch {
+            throw "Generated user-data for $VmName is not valid YAML: $($_.Exception.Message)"
+        }
+    }
+
+    # Fallback heuristic: scan runcmd items for the `: <indicator>` bug class.
+    # We only inspect lines that look like `  - ...` (sequence items at the
+    # canonical two-space indent New-LinuxSeedIso emits). This catches the
+    # bug we just shipped (`printf 'Package: *\n...`) without needing a
+    # YAML dependency on every dev box.
+    $lines = $UserData -split "`n"
+    $inRunCmd = $false
+    $lineNo = 0
+    foreach ($rawLine in $lines) {
+        $lineNo++
+        $line = $rawLine.TrimEnd("`r")
+
+        # Track which top-level section we're in. Indented keys don't reset.
+        if ($line -match '^[A-Za-z_][A-Za-z0-9_]*\s*:') {
+            $inRunCmd = ($line -match '^runcmd\s*:')
+            continue
+        }
+
+        if (-not $inRunCmd) { continue }
+        if ($line -notmatch '^\s*-\s+') { continue }
+
+        # Strip the leading `  - ` sequence marker, then look for a
+        # `: <indicator>` pair anywhere in the value. YAML treats those as
+        # mapping-key boundaries with the value starting with an alias /
+        # flow node, which PyYAML rejects.
+        $itemValue = $line -replace '^\s*-\s+', ''
+
+        # Skip items that are already wrapped in YAML quotes (the emitter
+        # may eventually do this; we want the check to stay correct).
+        if ($itemValue.StartsWith('"') -or $itemValue.StartsWith("'")) { continue }
+
+        if ($itemValue -match ':\s+([*&\[\{])') {
+            $offender = $Matches[1]
+            throw "Generated user-data for $VmName has a runcmd line that PyYAML will reject (line $lineNo): '$itemValue' contains ': $offender' which is parsed as a mapping with a YAML alias/flow node value. Quote the runcmd item, base64-encode the script, or move the file content into write_files."
+        }
+
+        # Also catch a sequence item whose value itself starts with a YAML
+        # indicator (e.g. `- *something` -> alias reference).
+        if ($itemValue -match '^[*&]') {
+            throw "Generated user-data for $VmName has a runcmd line that starts with a YAML indicator (line $lineNo): '$itemValue'. YAML-quote it or base64-encode."
+        }
+    }
+
+    Write-Log "$VmName`: user-data passed heuristic YAML check (powershell-yaml not installed; install for full validation)" -LogOnly
+}
+
 function New-LinuxSeedIso {
     <#
     .SYNOPSIS
@@ -276,7 +381,29 @@ chpasswd:
         'systemctl enable memlabs-loggrab.service || true',
         'systemctl start memlabs-loggrab.service || true'
     )
-    $runcmdYaml = ($runcmd | ForEach-Object { "  - $_" }) -join "`n"
+    # Emit each runcmd item as a YAML double-quoted scalar.
+    #
+    # Why: plain (unquoted) YAML scalars are parsed greedily. A runcmd line
+    # like `bash -c "printf 'Package: *\n...' > /etc/apt/preferences.d/mozilla"`
+    # contains `: ` followed by `*`, which PyYAML happily parses as a mapping
+    # key (`...Package`) with an alias-reference value (`*\n...`). The whole
+    # part-001 of user-data then fails to load with
+    #     "while scanning an alias ... expected alphabetic or numeric character"
+    # and cloud-init silently discards users / ssh_authorized_keys / runcmd
+    # so the VM comes up without vmbuildadmin and without our SSH key.
+    #
+    # Double-quoting sidesteps all of this: inside a YAML "..." scalar only
+    # `\` and `"` need escaping, and `: ` / `*` / `&` / `[` / `{` are inert.
+    # We escape `\` first (so the second pass doesn't double-escape the
+    # backslash we just inserted before `"`). Note that literal `\n` in shell
+    # commands (e.g. printf format strings) must become `\\n` in YAML so the
+    # parser hands `\n` back to bash verbatim. We also escape embedded LF/CR
+    # bytes (a runcmd item built with PowerShell `"..."`n"..."` will contain a
+    # real LF) as `\n` / `\r` so the value stays on one YAML line.
+    $runcmdYaml = ($runcmd | ForEach-Object {
+            $escaped = $_ -replace '\\', '\\' -replace '"', '\"' -replace "`r", '\r' -replace "`n", '\n'
+            "  - `"$escaped`""
+        }) -join "`n"
 
     # meta-data: NoCloud requires instance-id; local-hostname is a fallback.
     $metaData = @"
@@ -536,10 +663,22 @@ power_state:
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
+    # Pre-flight: validate user-data parses as YAML before we write it to the
+    # ISO. Cloud-init's PyYAML loader silently discards a part whose body
+    # fails to parse, dropping users / ssh_authorized_keys / runcmd along
+    # with it -- the VM then boots without vmbuildadmin and SSH fails with
+    # 'Permission denied (publickey)' with NO host-side breadcrumb. We've
+    # been bitten by this twice (most recently: a printf runcmd containing
+    # `Package: *\n` parsed as a YAML alias reference). Catching it here
+    # turns a multi-hour WSL-mount-the-ext4-rootfs debug session into a
+    # one-line build failure.
+    $userDataLf = $userData -replace "`r`n", "`n"
+    Test-LinuxUserDataYaml -UserData $userDataLf -VmName $VmName
+
     # cloud-init expects LF line endings; .NET WriteAllText defaults to whatever
     # was in the string. Force LF by replacing CRLF before write.
     [System.IO.File]::WriteAllText((Join-Path $stage "meta-data"), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText((Join-Path $stage "user-data"), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $stage "user-data"), $userDataLf, [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText((Join-Path $stage "network-config"), ($networkConfig -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
 
     # Ensure output dir exists.
@@ -918,72 +1057,15 @@ function New-LinuxVirtualMachine {
                     Write-Log "$VmName`: Proxy role but network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
                 }
             }
-            # enableRDP toggle (currently exposed on the Proxy VM in genconfig).
-            # When set, install xrdp + a lightweight XFCE desktop and wire the
-            # console user into an X session so RDP logins land on a real GUI.
-            # The matching RDCMan entry (Common.RdcMan.ps1) supplies vmbuildadmin
-            # + the LocalAdmin password for automatic sign-in.
+            # enableRDP toggle: previously installed xrdp+xfce4+Firefox via
+            # cloud-init runcmd. That path was fragile (PyYAML aliased the
+            # Mozilla "Package: *" pin line and dropped the whole user-data
+            # part) and bloated cloud-init by ~3-5 minutes of apt installs.
+            # Now deferred to Phase 3 ($global:Linux_Configure ->
+            # Invoke-LinuxRoleConfiguration) which ships one base64-encoded
+            # bash script over SSH and runs in parallel with Windows DSC jobs.
             if ($thisVm -and $thisVm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$thisVm.enableRDP) {
-                Write-Log "$VmName`: enableRDP=true; cloud-init will install xrdp + xfce4 and open TCP/3389"
-                $seedArgs.ExtraPackages = @(
-                    'xrdp',
-                    'xorgxrdp',
-                    'xfce4',
-                    'xfce4-goodies',
-                    'dbus-x11',
-                    'xorg',
-                    # xfce4 ships only a browser *launcher* (xfce4-web-browser),
-                    # not an actual browser, so clicking the globe icon throws
-                    # "Failed to execute default Web Browser. Input/output error".
-                    # apt-transport-https + the gnupg/wget pair below are
-                    # prereqs for adding the Mozilla apt repo in runcmd.
-                    'apt-transport-https',
-                    'ca-certificates',
-                    'gnupg',
-                    'wget'
-                )
-                $seedArgs.ExtraRunCmd = @(
-                    # xrdp drops privileges to the 'xrdp' user; that user must
-                    # be able to read /etc/ssl/private/ssl-cert-snakeoil.key
-                    # to terminate TLS for the RDP handshake.
-                    'adduser xrdp ssl-cert || true',
-                    # Default session for vmbuildadmin when xrdp's startwm.sh
-                    # execs ~/.xsession. xfce4-session pulls in the rest.
-                    "install -d -o vmbuildadmin -g vmbuildadmin -m 0755 /home/vmbuildadmin",
-                    "bash -c `"echo 'xfce4-session' > /home/vmbuildadmin/.xsession`"",
-                    'chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession',
-                    'chmod 0644 /home/vmbuildadmin/.xsession',
-                    # Same default for root in case someone RDPs as root.
-                    "bash -c `"echo 'xfce4-session' > /root/.xsession`"",
-                    'chmod 0644 /root/.xsession',
-                    'ufw allow 3389/tcp || true',
-                    'systemctl enable --now xrdp || true',
-                    'systemctl enable --now xrdp-sesman || true',
-                    # Install Firefox from Mozilla's official apt repo. The
-                    # default Ubuntu 'firefox' package is a snap shim that
-                    # takes 30s+ to first-launch and pulls in snapd. The
-                    # Mozilla deb is a real .deb, launches instantly, and
-                    # auto-updates via apt. Pin the repo so apt prefers it
-                    # over the transitional Ubuntu package.
-                    'install -d -m 0755 /etc/apt/keyrings',
-                    'bash -c "wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null"',
-                    'bash -c "echo ''deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main'' > /etc/apt/sources.list.d/mozilla.list"',
-                    'bash -c "printf ''Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n'' > /etc/apt/preferences.d/mozilla"',
-                    'apt-get update',
-                    'DEBIAN_FRONTEND=noninteractive apt-get install -y firefox',
-                    # Make Firefox the system-wide default x-www-browser /
-                    # gnome-www-browser so xfce4-web-browser launcher resolves
-                    # it (the launcher uses xdg-open -> x-www-browser).
-                    'update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true',
-                    'update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true',
-                    'update-alternatives --set x-www-browser /usr/bin/firefox || true',
-                    'update-alternatives --set gnome-www-browser /usr/bin/firefox || true',
-                    # Tell XDG (used by xfce4-web-browser) that firefox is the
-                    # default handler for http/https/text-html. Applied
-                    # system-wide via /etc/xdg so it picks up for every user.
-                    'install -d -m 0755 /etc/xdg',
-                    "bash -c `"cat > /etc/xdg/mimeapps.list <<'EOF'`n[Default Applications]`nx-scheme-handler/http=firefox.desktop`nx-scheme-handler/https=firefox.desktop`ntext/html=firefox.desktop`nEOF`""
-                )
+                Write-Log "$VmName`: enableRDP=true noted; xrdp/xfce4/Firefox deferred to Phase 3 Linux_Configure"
             }
 
             # joinDomain toggle (currently exposed on the LinuxServer VM in
@@ -1136,6 +1218,168 @@ function Get-LinuxVmIPAddress {
         }
     }
     return $null
+}
+
+function Save-LinuxAutopsyLogs {
+    <#
+    .SYNOPSIS
+        On SSH-ready timeout, stop the VM, mount its VHDX read-only, and
+        copy cloud-init.log + state.txt off the FAT32 ESP for host-side
+        post-mortem.
+
+    .DESCRIPTION
+        The `memlabs-loggrab` service inside the guest mirrors cloud-init
+        logs to /boot/efi/memlabs on every boot. That partition is FAT32
+        and readable from Windows via Mount-VHD -- no WSL, no ext4 tooling
+        required. This function automates that mount/copy/dismount dance
+        so the operator never has to do it manually.
+
+        Sequence:
+          1. Stop-VM -TurnOff -Force  (Mount-VHD refuses a running VM's disk)
+          2. Mount-VHD -ReadOnly -NoDriveLetter
+          3. For each partition that looks like FAT and contains \memlabs\,
+             copy cloud-init.log, cloud-init-output.log, state.txt,
+             failed-units.txt to <LogsDir>\linux-autopsy\<VmName>\
+          4. Tail cloud-init.log (last 80 lines) into the deploy log so the
+             cause shows up in VMBuild.log alongside the timeout message.
+          5. Dismount-VHD (always, in finally).
+
+        Best-effort: any failure is logged but does not throw. The VM is
+        left stopped so the operator can mount the VHDX themselves if
+        more digging is needed.
+
+    .OUTPUTS
+        $true on success, $false on any failure (logged but not thrown).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VmName
+    )
+
+    try {
+        $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+        if (-not $vm) {
+            Write-Log "$VmName`: autopsy: VM not found, skipping ESP log dump" -LogOnly
+            return $false
+        }
+        $vhdx = ($vm.HardDrives | Select-Object -First 1).Path
+        if (-not $vhdx -or -not (Test-Path -LiteralPath $vhdx)) {
+            Write-Log "$VmName`: autopsy: VHDX path not resolvable ($vhdx), skipping ESP log dump" -LogOnly
+            return $false
+        }
+
+        # Mount-VHD needs the disk file unlocked. Stop the VM forcefully --
+        # at this point we've already declared SSH timeout, so the VM is
+        # going to be rebuilt or manually fixed; no harm in turning it off.
+        if ($vm.State -ne 'Off') {
+            Write-Log "$VmName`: autopsy: stopping VM (TurnOff) so VHDX can be mounted for log extraction" -LogOnly
+            try { Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop }
+            catch {
+                Write-Log "$VmName`: autopsy: Stop-VM failed: $($_.Exception.Message)" -LogOnly
+                return $false
+            }
+            # Hyper-V occasionally takes a beat to release the disk handle.
+            Start-Sleep -Seconds 2
+        }
+
+        $logsDir = if ($Common -and $Common.LogPath) { Split-Path -Parent $Common.LogPath } else { $env:TEMP }
+        $destDir = Join-Path $logsDir "linux-autopsy\$VmName"
+        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+
+        $mounted = $null
+        try {
+            $mounted = Mount-VHD -Path $vhdx -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$VmName`: autopsy: Mount-VHD '$vhdx' failed: $($_.Exception.Message)" -LogOnly
+            return $false
+        }
+
+        $copiedAny = $false
+        try {
+            $disk = $mounted | Get-Disk -ErrorAction Stop
+            $parts = $disk | Get-Partition -ErrorAction SilentlyContinue
+            foreach ($p in $parts) {
+                # The ESP on an Ubuntu image is a small FAT32 partition.
+                # Drive-letterless mounts surface via Get-Volume off the
+                # partition, with FileSystem='FAT32' (or sometimes 'FAT').
+                $vol = $null
+                try { $vol = $p | Get-Volume -ErrorAction Stop } catch { $vol = $null }
+                if (-not $vol) { continue }
+                if ($vol.FileSystem -notmatch '^(FAT|FAT32|exFAT)$') { continue }
+
+                # Assign a temporary mount-point folder so we can read it.
+                $mountPoint = Join-Path $env:TEMP ("memlabs-esp-{0}-{1}" -f $VmName, [guid]::NewGuid().ToString('N').Substring(0, 8))
+                New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
+                try {
+                    Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop
+                }
+                catch {
+                    Write-Log "$VmName`: autopsy: cannot assign access path to partition $($p.PartitionNumber): $($_.Exception.Message)" -LogOnly
+                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+
+                try {
+                    $memlabsDir = Join-Path $mountPoint 'memlabs'
+                    if (Test-Path -LiteralPath $memlabsDir) {
+                        Write-Log "$VmName`: autopsy: found ESP\memlabs on partition $($p.PartitionNumber); copying logs to $destDir" -LogOnly
+                        Get-ChildItem -LiteralPath $memlabsDir -File -ErrorAction SilentlyContinue | ForEach-Object {
+                            try {
+                                Copy-Item -LiteralPath $_.FullName -Destination $destDir -Force -ErrorAction Stop
+                                $copiedAny = $true
+                            }
+                            catch { Write-Log "$VmName`: autopsy: copy $($_.Name) failed: $($_.Exception.Message)" -LogOnly }
+                        }
+
+                        # Tail cloud-init.log into VMBuild.log so the cause
+                        # shows up next to the SSH timeout message and the
+                        # operator doesn't have to know about $destDir at all.
+                        $ciLog = Join-Path $destDir 'cloud-init.log'
+                        if (Test-Path -LiteralPath $ciLog) {
+                            $tail = Get-Content -LiteralPath $ciLog -Tail 80 -ErrorAction SilentlyContinue
+                            if ($tail) {
+                                Write-Log "$VmName`: autopsy: ---- cloud-init.log (last 80 lines) ----" -LogOnly
+                                foreach ($t in $tail) { Write-Log "$VmName`: ci> $t" -LogOnly }
+                                Write-Log "$VmName`: autopsy: ---- end cloud-init.log tail ----" -LogOnly
+                            }
+                        }
+
+                        # state.txt has a one-glance summary cloud-init status
+                        # + uptime + failed units; surface it on-screen too.
+                        $stateTxt = Join-Path $destDir 'state.txt'
+                        if (Test-Path -LiteralPath $stateTxt) {
+                            $stateLines = Get-Content -LiteralPath $stateTxt -ErrorAction SilentlyContinue
+                            foreach ($s in $stateLines) { Write-Log "$VmName`: state> $s" -LogOnly }
+                        }
+                    }
+                }
+                finally {
+                    try { Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop }
+                    catch { Write-Log "$VmName`: autopsy: Remove-PartitionAccessPath failed: $($_.Exception.Message)" -LogOnly }
+                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        finally {
+            try { Dismount-VHD -Path $vhdx -ErrorAction Stop }
+            catch { Write-Log "$VmName`: autopsy: Dismount-VHD failed: $($_.Exception.Message)" -LogOnly }
+        }
+
+        if ($copiedAny) {
+            Write-Log "$VmName`: autopsy: ESP logs saved to $destDir" -OutputStream
+            return $true
+        }
+        else {
+            Write-Log "$VmName`: autopsy: no \memlabs\ directory found on any FAT partition (memlabs-loggrab may not have run yet)" -LogOnly
+            return $false
+        }
+    }
+    catch {
+        Write-Log "$VmName`: autopsy: unexpected error: $($_.Exception.Message)" -LogOnly
+        return $false
+    }
 }
 
 function Wait-LinuxVmReady {
@@ -1446,6 +1690,14 @@ function Wait-LinuxVmReady {
     }
 
     write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
+
+    # Last-resort autopsy: the guest's memlabs-loggrab service copies
+    # cloud-init.log to the FAT32 ESP on every boot. Mount the VHDX
+    # read-only and pull those logs to the host so the next iteration of
+    # this debug cycle doesn't require WSL + ext4 + ssh-agent gymnastics.
+    # Stops the VM (it's already declared dead) so Mount-VHD can attach.
+    try { Save-LinuxAutopsyLogs -VmName $VmName | Out-Null } catch { Write-Log "$VmName`: Save-LinuxAutopsyLogs threw: $($_.Exception.Message)" -LogOnly }
+
     return $null
 }
 
@@ -2088,6 +2340,262 @@ echo PROXY_READY
     }
 
     return $true
+}
+
+function Get-LinuxXrdpBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that installs xrdp + xfce4 + Firefox (Mozilla deb) and wires
+        the default session. Idempotent: re-running after success is fast.
+
+    .DESCRIPTION
+        This used to live in the cloud-init seed ISO as a fragile sequence of
+        YAML runcmd strings (each had to survive PS / YAML / bash quoting and
+        a `Package: *` line tripped PyYAML's alias parser). Moved out of
+        cloud-init into a Phase 3 SSH-driven step (Invoke-LinuxRoleConfiguration)
+        so we can ship the whole thing as one base64-encoded bash file and stop
+        fighting four nested quoting layers.
+
+        Returns: [string] bash source. Assumes it will be run as root.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    return @'
+echo "[memlabs-rdp] start: $(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y \
+    xrdp xorgxrdp xfce4 xfce4-goodies dbus-x11 xorg \
+    apt-transport-https ca-certificates gnupg wget
+
+# xrdp drops privs to 'xrdp'; it needs to read the snakeoil key to TLS the handshake.
+adduser xrdp ssl-cert || true
+
+# Default XDG session for vmbuildadmin and root.
+install -d -o vmbuildadmin -g vmbuildadmin -m 0755 /home/vmbuildadmin
+echo 'xfce4-session' > /home/vmbuildadmin/.xsession
+chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession
+chmod 0644 /home/vmbuildadmin/.xsession
+echo 'xfce4-session' > /root/.xsession
+chmod 0644 /root/.xsession
+
+ufw allow 3389/tcp || true
+systemctl enable --now xrdp || true
+systemctl enable --now xrdp-sesman || true
+
+# Firefox: the Ubuntu 'firefox' package is a snap shim that takes 30s+ to
+# first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
+# it over the transitional snap stub.
+install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
+    > /etc/apt/sources.list.d/mozilla.list
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+    > /etc/apt/preferences.d/mozilla
+apt-get update
+apt-get install -y firefox
+
+# Wire firefox as the system-wide x-www-browser / gnome-www-browser so
+# xfce4-web-browser (which calls xdg-open -> x-www-browser) opens it.
+update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true
+update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true
+update-alternatives --set x-www-browser /usr/bin/firefox || true
+update-alternatives --set gnome-www-browser /usr/bin/firefox || true
+
+# Tell XDG that firefox handles http/https/text-html system-wide.
+install -d -m 0755 /etc/xdg
+cat > /etc/xdg/mimeapps.list <<'MIMEEOF'
+[Default Applications]
+x-scheme-handler/http=firefox.desktop
+x-scheme-handler/https=firefox.desktop
+text/html=firefox.desktop
+MIMEEOF
+
+echo "[memlabs-rdp] done: $(date -Is)"
+'@
+}
+
+function Get-LinuxRealmJoinBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that installs realmd + sssd stack and joins the lab AD.
+
+    .DESCRIPTION
+        Extracted from Get-LinuxDomainJoinSeedArgs so the same script can run
+        from Phase 3 SSH dispatch instead of cloud-init. Caller supplies
+        $Domain (lowercase), $DcIp, $AdminUser, $AdminPassword. We
+        single-quote-escape the password into bash. Returns [string] bash.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$Domain,
+        [Parameter(Mandatory = $true)][string]$DcIp,
+        [Parameter(Mandatory = $true)][string]$AdminUser,
+        [Parameter(Mandatory = $true)][string]$AdminPassword
+    )
+
+    $pwBashSingle = $AdminPassword -replace "'", "'\''"
+    $domainLower = $Domain.ToLower()
+
+    return @"
+echo "[memlabs-realm-join] start: `$(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y realmd sssd sssd-tools adcli krb5-user packagekit \
+    samba-common-bin oddjob oddjob-mkhomedir libnss-sss libpam-sss
+
+DOMAIN='$domainLower'
+DC_IP='$dcIp'
+ADMIN_USER='$AdminUser'
+ADMIN_PWD='$pwBashSingle'
+
+/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
+
+for i in {1..80}; do
+  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
+  echo "[memlabs-realm-join] waiting for DNS on `$DOMAIN (attempt `$i/80)"
+  sleep 15
+done
+
+realm discover "`$DOMAIN" || true
+
+JOINED=0
+for i in {1..5}; do
+  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
+    JOINED=1
+    break
+  fi
+  echo "[memlabs-realm-join] attempt `$i failed, retry in 30s"
+  sleep 30
+done
+
+if [ "`$JOINED" != "1" ]; then
+  echo "[memlabs-realm-join] ERROR: all join attempts failed"
+  exit 1
+fi
+
+realm permit --realm "`$DOMAIN" --all || true
+sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
+sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
+pam-auth-update --enable mkhomedir || true
+systemctl restart sssd || true
+
+echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
+chmod 0440 /etc/sudoers.d/memlabs-domain-admins
+
+echo "[memlabs-realm-join] done: `$(date -Is)"
+"@
+}
+
+function Invoke-LinuxRoleConfiguration {
+    <#
+    .SYNOPSIS
+        Phase 3 entrypoint for Linux VMs. Applies role-driven post-boot config
+        (xrdp/Firefox/realm-join) over SSH so cloud-init can stay minimal.
+
+    .DESCRIPTION
+        Decides which bash modules apply based on VM flags:
+          - enableRDP=true  -> Get-LinuxXrdpBashScript
+          - joinDomain=true -> Get-LinuxRealmJoinBashScript
+        Concatenates the modules into a single bash script, base64-encodes it,
+        and ships via one Invoke-LinuxVmCommand call. No-op (success) when no
+        modules apply.
+
+        Mirrors Install-LinuxProxyServer's contract: returns [bool]. Best-effort
+        logging on failure; never throws.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][object]$Vm,
+        [Parameter(Mandatory = $true)][object]$DeployConfig
+    )
+
+    $vmName = $Vm.vmName
+    $modules = New-Object System.Collections.Generic.List[string]
+    $applied = New-Object System.Collections.Generic.List[string]
+
+    if ($Vm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$Vm.enableRDP) {
+        $modules.Add((Get-LinuxXrdpBashScript))
+        $applied.Add('enableRDP')
+    }
+
+    if ($Vm.PSObject.Properties.Name -contains 'joinDomain' -and [bool]$Vm.joinDomain) {
+        $netBase = $Vm.network
+        if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+        $adminUser = $DeployConfig.vmOptions.adminName
+        $domain    = $DeployConfig.vmOptions.domainName
+        $adminPwd  = $null
+        if ($Common -and $Common.LocalAdmin) {
+            try { $adminPwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $adminPwd = $null }
+        }
+        if (-not ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$')) {
+            Write-Log "[LinuxConfig] $vmName`: network '$netBase' isn't /24 a.b.c.0 form; skipping realm-join" -Warning
+        }
+        elseif (-not $adminUser -or -not $adminPwd -or -not $domain) {
+            Write-Log "[LinuxConfig] $vmName`: missing adminName/LocalAdmin/domain; skipping realm-join" -Warning
+        }
+        else {
+            $dcIp = "$($Matches[1]).1"
+            $modules.Add((Get-LinuxRealmJoinBashScript -Domain $domain -DcIp $dcIp -AdminUser $adminUser -AdminPassword $adminPwd))
+            $applied.Add('joinDomain')
+        }
+    }
+
+    if ($modules.Count -eq 0) {
+        Write-Log "[LinuxConfig] $vmName`: no role-driven config applies; nothing to do."
+        return $true
+    }
+
+    Write-Log "[LinuxConfig] $vmName`: applying modules: $($applied -join ', ')"
+
+    # Wait for SSH first; the VM may have rebooted between phases.
+    $expectedIp  = Get-LinuxVmExpectedStaticIP -VmObject $Vm -DeployConfig $DeployConfig
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm
+    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+    if (-not $ip) {
+        Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable; cannot apply config." -Failure
+        return $false
+    }
+
+    # Compose: header sets pipefail per-module so a failed apt doesn't silently
+    # roll into the next module. Each module gets a banner so the log on the
+    # guest is searchable.
+    $script = "#!/bin/bash`nset -uo pipefail`n"
+    foreach ($m in $modules) {
+        $script += "`n( set -e`n"
+        $script += $m
+        $script += "`n)`n"
+        $script += "RC=`$?`n"
+        $script += "if [ `$RC -ne 0 ]; then echo `"[memlabs-linux-configure] module failed rc=`$RC`"; exit `$RC; fi`n"
+    }
+
+    $scriptLf = $script -replace "`r`n", "`n"
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptLf))
+
+    # Ship as one opaque base64 blob -- bypasses every quoting layer.
+    $bash = "echo $b64 | base64 -d > /root/memlabs-linux-configure.sh && chmod 0700 /root/memlabs-linux-configure.sh && /root/memlabs-linux-configure.sh"
+
+    # Phase 3 modules run apt-get install for full desktop stacks; give it
+    # generous time. Mozilla deb + xfce4 typically completes in 2-4 minutes
+    # on a warm apt cache, longer on first boot.
+    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName "memlabs-linux-configure" -TimeoutSeconds 1800
+
+    if ($result -and $result.CommandResult) {
+        Write-Log "[LinuxConfig] $vmName`: configuration complete ($($applied -join ', '))." -Success
+        return $true
+    }
+
+    $tail = $null
+    if ($result -and $result.ScriptBlockOutput) {
+        $lines = ($result.ScriptBlockOutput -split "`n")
+        $tail = ($lines | Select-Object -Last 20) -join "`n"
+    }
+    Write-Log "[LinuxConfig] $vmName`: configuration FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
+    return $false
 }
 
 

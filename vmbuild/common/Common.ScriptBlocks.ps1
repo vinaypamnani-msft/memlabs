@@ -2707,3 +2707,54 @@ $global:Proxy_Install = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
     }
 }
+
+# Per-VM Phase 3 job for Linux VMs. Runs Invoke-LinuxRoleConfiguration which
+# applies role-driven post-boot config (xrdp/xfce4/Firefox for enableRDP,
+# realm-join for joinDomain) over SSH. Sits inside the same Wait-Phase
+# tracking loop as the Windows DSC jobs so progress renders consistently and
+# the long apt-get installs run in parallel with Windows DSC instead of
+# serializing into cloud-init first boot.
+$global:Linux_Configure = {
+    try {
+        $global:ScriptBlockName = "Linux_Configure"
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+
+        $deployConfig = $using:deployConfigCopy
+        $currentItem  = $using:currentItem
+        $Phase        = $using:Phase
+
+        if (-not ($Common.LogPath)) {
+            Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+            return
+        }
+        try { Flush-LogBuffer -All } catch {}
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Applying Linux role configuration" -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Applying Linux role configuration" -OutputStream
+
+        $ok = Invoke-LinuxRoleConfiguration -Vm $currentItem -DeployConfig $deployConfig
+        if (-not $ok) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed." -OutputStream -Failure
+            return
+        }
+
+        try {
+            $note = Get-VMNote -VMName $currentItem.vmName
+            if ($note) {
+                $note.lastPhaseComplete = [Math]::Max([int]$note.lastPhaseComplete, 3)
+                Set-VMNote -VMName $currentItem.vmName -vmNote $note
+            }
+        } catch {}
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Linux configuration complete" -Completed
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux configuration complete." -OutputStream -Success
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+    }
+}

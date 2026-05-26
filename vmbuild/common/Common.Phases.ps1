@@ -384,19 +384,21 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Linux VMs (Proxy) have no Windows DSC config. Phase 2 has a dedicated
-        # dispatch branch below ($global:Proxy_Install). Skip all other phases
-        # so we don't queue a $global:VM_Config job that would hang on
+        # Linux VMs have no Windows DSC config. Phase 2 has a dedicated
+        # dispatch branch ($global:Proxy_Install) and Phase 3 has another
+        # ($global:Linux_Configure) below. Skip every other phase so we
+        # don't queue a $global:VM_Config job that would hang on
         # "Waiting for VM to respond" (Invoke-VmCommand is Windows-only).
-        if ($Phase -ge 3 -and (Test-VmIsLinux -Vm $currentItem)) {
+        if ($Phase -gt 3 -and (Test-VmIsLinux -Vm $currentItem)) {
             Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
             continue
         }
 
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
         # Exception: Linux Proxy in Phase 2 — handled below by $global:Proxy_Install.
+        # Exception: any Linux VM in Phase 3 — handled below by $global:Linux_Configure.
         $vmNamefull = "$($currentItem.vmName).$($currentItem.domain)"
-        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName) -and -not ($Phase -eq 2 -and $currentItem.role -eq 'Proxy')) {
+        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName) -and -not ($Phase -eq 2 -and $currentItem.role -eq 'Proxy') -and -not ($Phase -eq 3 -and (Test-VmIsLinux -Vm $currentItem))) {
             Write-Log -Verbose "Skipping $($currentItem.vmName) because it does not exist in ConfigData"
             continue
         }
@@ -432,6 +434,26 @@ function Start-PhaseJobs {
             }
             else {
                 Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Proxy_Install)" -LogOnly
+                $jobs += $job
+                $job_created_yes++
+            }
+            continue
+        }
+
+        # Linux Phase 3: dispatch a per-VM job that applies role-driven
+        # post-boot config (xrdp/xfce4/Firefox for enableRDP, realm-join for
+        # joinDomain). Mirrors the Phase 2 Proxy_Install branch so Linux VMs
+        # get the same Wait-Phase progress treatment and run in parallel with
+        # the Windows DSC jobs instead of bloating cloud-init first boot.
+        # No-op success (returns true) when the VM has no applicable flags.
+        if ($Phase -eq 3 -and (Test-VmIsLinux -Vm $currentItem)) {
+            $job = Start-Job -ScriptBlock $global:Linux_Configure -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if (-not $job) {
+                Write-Log "[Phase $Phase] Failed to create Linux_Configure job for VM $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
+            else {
+                Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Linux_Configure)" -LogOnly
                 $jobs += $job
                 $job_created_yes++
             }
