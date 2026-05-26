@@ -1146,6 +1146,12 @@ function Show-Menu {
         # width (the .NET console cache can lag a few hundred ms in ConPTY).
         $liveSize = Get-LiveWindowSize
         $liveWidth = if ($liveSize) { [int]$liveSize.Width } else { $host.UI.RawUI.WindowSize.Width }
+        # Snapshot the dimensions this render iteration is laying out against.
+        # We re-read just before blocking on input and restart the loop if the
+        # window changed mid-draw -- otherwise the user sees a layout sized for
+        # the old window until they press a key.
+        $drawWidth  = $liveWidth
+        $drawHeight = if ($liveSize) { [int]$liveSize.Height } else { $host.UI.RawUI.WindowSize.Height }
         $metrics          = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $liveWidth
         $TotalLineCount   = $metrics.TotalLineCount
         $LongestBreakLine = $metrics.LongestBreakLine
@@ -1301,7 +1307,19 @@ function Show-Menu {
             Write-MenuPgIndicator -Operation 'PGDNNEEDED' -PgUpAvailable $false
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
-        $PromptPosition = Get-CursorPosition               
+        $PromptPosition = Get-CursorPosition
+        # Re-check the window size. If it changed while we were drawing this
+        # frame, the layout we just painted is stale (text truncated for the
+        # old width, items positioned for the old height, etc). Restart the
+        # loop to redraw against the new size instead of blocking on input
+        # against a layout the user can no longer trust.
+        $postDrawSize = Get-LiveWindowSize
+        if ($postDrawSize) {
+            if ([int]$postDrawSize.Width -ne $drawWidth -or [int]$postDrawSize.Height -ne $drawHeight) {
+                Write-Log -Verbose "Show-Menu: window resized during draw ($drawWidth x $drawHeight -> $($postDrawSize.Width) x $($postDrawSize.Height)); redrawing"
+                continue
+            }
+        }
         $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
