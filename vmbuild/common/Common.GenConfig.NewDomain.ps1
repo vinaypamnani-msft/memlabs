@@ -197,27 +197,6 @@ function Get-NewMachineName {
         $SkipOne = $true
     }
 
-    # Linux roles: literal "LinuxClient" / "LinuxServer" (11 chars) blows the
-    # 15-char NetBIOS / AD sAMAccountName limit with anything but a 3-char
-    # prefix ("CON-LINUXCLIENT1" = 16). Use short forms; shrink further when
-    # the prefix exceeds 4 chars, mirroring the DomainMember pattern above.
-    if ($Role -eq "LinuxClient") {
-        if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
-            $RoleName = "LCli"
-        }
-        else {
-            $RoleName = "LinCli"
-        }
-    }
-    if ($Role -eq "LinuxServer") {
-        if (($ConfigToCheck.vmOptions.prefix.length) -gt 4) {
-            $RoleName = "LSrv"
-        }
-        else {
-            $RoleName = "LinSrv"
-        }
-    }
-
     [int]$i = 1
     while ($true) {
         if ($SkipOne -and $i -eq 1) {

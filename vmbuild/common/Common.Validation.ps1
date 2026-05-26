@@ -395,7 +395,8 @@ function Test-MachineNameExists {
 function Test-ValidMachineName {
     param (
         [string] $name,
-        [object] $ReturnObject
+        [object] $ReturnObject,
+        [switch] $IsLinux
     )
 
     if (-not $name) {
@@ -405,8 +406,14 @@ function Test-ValidMachineName {
     write-log "Testing $name" -Verbose
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>_') + '\]' + '\"'+'\s')]"
 
-    if ($name.Length -gt 15) {
+    # 15-char limit is a Windows NetBIOS / AD sAMAccountName constraint.
+    # Linux VMs are not subject to it (hostname limit is 64).
+    if (-not $IsLinux -and $name.Length -gt 15) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Windows computer name cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
+    }
+
+    if ($IsLinux -and $name.Length -gt 64) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Linux hostname cannot be more than 64 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
     }
 
     if ($name -match $pattern) {
@@ -464,7 +471,8 @@ function Test-ValidVmSupported {
     if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
-    Test-ValidMachineName $vmName -ReturnObject $ReturnObject
+    $isLinuxVm = Test-VmIsLinux -Vm $VM
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -IsLinux:$isLinuxVm
 
     if ($VM.remoteSQLVM) {
         Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
