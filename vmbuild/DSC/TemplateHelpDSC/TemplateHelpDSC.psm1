@@ -352,7 +352,7 @@ class InstallADK {
                                 $tag = if ($linkid) { "fwlink linkid=$linkid" } else { 'url' }
                                 Write-Status ("  adksetup-link {0,-22} {1} : {2}" -f $tag, $u, $probeMsg)
                                 if ($isDead) {
-                                    $deadHits += [pscustomobject]@{ Url=$u; LinkId=$linkid; Status=$status }
+                                    $deadHits += [pscustomobject]@{ Url=$u; LinkId=$linkid; Status=$status; Resolved=$resolved }
                                 }
                             }
                             # Bubble a punchy summary status line so the host
@@ -365,6 +365,93 @@ class InstallADK {
                                     else { "$($_.Url) (HTTP $($_.Status))" }
                                 }
                                 Write-Status ("ADK $label : DEAD LINK DETECTED -- {0} retired/unreachable download(s): {1}. See log {2} for full URL list." -f $deadHits.Count, ($summary -join '; '), $logFile)
+
+                                # Recovery: try to pre-stage the missing payload(s)
+                                # from the resolved CDN folder of each dead fwlink.
+                                # WiX Burn checks the local source path first; if
+                                # we drop the file there, the next attempt will
+                                # find it and skip the dead download entirely.
+                                #
+                                # This salvages the common Microsoft pattern where
+                                # the fwlink itself redirects to a download.microsoft.com
+                                # folder URL that returns 404 (directory listing
+                                # forbidden / folder removed) but specific files
+                                # UNDER that folder are still hosted. ADK bundles
+                                # have repeatedly shipped with baked-in child
+                                # fwlinks pointing at such retired folder roots
+                                # (e.g. linkid=2290227 in the Dec-2024 26100.2454
+                                # bundle, linkid=2337876 in the Nov-2025 28000.1
+                                # bundle) -- both fixable this way without waiting
+                                # for MS to republish the bootstrapper.
+                                try {
+                                    $expected = New-Object System.Collections.Generic.List[string]
+                                    foreach ($line in $all) {
+                                        if ($line -match 'Failed to resolve source for file:\s*(.+?),\s*error:') {
+                                            $p = $Matches[1].Trim()
+                                            if ($p -and -not $expected.Contains($p)) { $expected.Add($p) }
+                                        }
+                                    }
+                                    if ($expected.Count -gt 0) {
+                                        # Build candidate base URLs from the dead-link
+                                        # resolved URIs. Strip trailing filename if the
+                                        # resolved URL already points at a file (rare
+                                        # for the fwlink-folder case but defensive).
+                                        $candidateBases = New-Object System.Collections.Generic.List[string]
+                                        foreach ($hit in $deadHits) {
+                                            $b = $hit.Resolved
+                                            if (-not $b) { continue }
+                                            if ($b -notmatch '/$') { $b = ($b -replace '/[^/]*$','/') }
+                                            if ($b -and -not $candidateBases.Contains($b)) { $candidateBases.Add($b) }
+                                        }
+                                        if ($candidateBases.Count -gt 0) {
+                                            Write-Status ("ADK $label : attempting to pre-stage {0} missing payload(s) from {1} dead-link CDN base(s)." -f $expected.Count, $candidateBases.Count)
+                                            foreach ($localPath in $expected) {
+                                                if (Test-Path -LiteralPath $localPath) {
+                                                    Write-Status ("  pre-stage: $localPath already present, skipping")
+                                                    continue
+                                                }
+                                                $fname = Split-Path -Path $localPath -Leaf
+                                                $encoded = [uri]::EscapeDataString($fname)
+                                                $localDir = Split-Path -Path $localPath -Parent
+                                                if ($localDir -and -not (Test-Path -LiteralPath $localDir)) {
+                                                    New-Item -ItemType Directory -Path $localDir -Force | Out-Null
+                                                }
+                                                # ADK bundle layout puts every payload
+                                                # under an Installers/ subfolder on the
+                                                # CDN mirror. Try that first; fall back
+                                                # to base + filename for other layouts.
+                                                $relCandidates = @("Installers/$encoded", $encoded)
+                                                $staged = $false
+                                                :baseLoop foreach ($base in $candidateBases) {
+                                                    foreach ($rel in $relCandidates) {
+                                                        $url = $base + $rel
+                                                        try {
+                                                            $wc = New-Object System.Net.WebClient
+                                                            Write-Status ("  pre-stage: downloading $fname from $url")
+                                                            $wc.DownloadFile($url, $localPath)
+                                                            if ((Test-Path -LiteralPath $localPath) -and (Get-Item -LiteralPath $localPath).Length -gt 0) {
+                                                                $sz = (Get-Item -LiteralPath $localPath).Length
+                                                                Write-Status ("  pre-stage: OK ({0:N0} bytes) -> $localPath" -f $sz)
+                                                                $staged = $true
+                                                                break baseLoop
+                                                            }
+                                                        } catch {
+                                                            Write-Status ("  pre-stage: $url -> $($_.Exception.Message)")
+                                                            if (Test-Path -LiteralPath $localPath) {
+                                                                Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if (-not $staged) {
+                                                    Write-Status ("  pre-stage: could not locate $fname under any dead-link base")
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch {
+                                    Write-Status ("ADK $label : pre-stage attempt threw: $($_.Exception.Message)")
+                                }
                             }
                         }
                     }
