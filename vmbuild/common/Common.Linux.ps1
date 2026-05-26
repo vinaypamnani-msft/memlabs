@@ -2514,13 +2514,23 @@ function Invoke-LinuxRoleConfiguration {
         [Parameter(Mandatory = $true)][object]$DeployConfig
     )
 
-    $vmName = $Vm.vmName
-    $modules = New-Object System.Collections.Generic.List[string]
-    $applied = New-Object System.Collections.Generic.List[string]
+    $vmName  = $Vm.vmName
+    $role    = $Vm.role
+    $activity = "$vmName [$role]"
+
+    # Build ordered list of operations. Each entry: Name (short id), Label
+    # (human-readable, surfaced in Phase 3 row), Script (bash), TimeoutSec,
+    # Tag (short DisplayName for the SSH wrapper / guest log).
+    $ops = New-Object System.Collections.Generic.List[object]
 
     if ($Vm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$Vm.enableRDP) {
-        $modules.Add((Get-LinuxXrdpBashScript))
-        $applied.Add('enableRDP')
+        $ops.Add([pscustomobject]@{
+            Name       = 'enableRDP'
+            Label      = 'Installing XRDP + xfce4 + Firefox'
+            Script     = (Get-LinuxXrdpBashScript)
+            TimeoutSec = 1800
+            Tag        = 'memlabs-xrdp'
+        })
     }
 
     if ($Vm.PSObject.Properties.Name -contains 'joinDomain' -and [bool]$Vm.joinDomain) {
@@ -2540,19 +2550,25 @@ function Invoke-LinuxRoleConfiguration {
         }
         else {
             $dcIp = "$($Matches[1]).1"
-            $modules.Add((Get-LinuxRealmJoinBashScript -Domain $domain -DcIp $dcIp -AdminUser $adminUser -AdminPassword $adminPwd))
-            $applied.Add('joinDomain')
+            $ops.Add([pscustomobject]@{
+                Name       = 'joinDomain'
+                Label      = "Joining AD domain $domain"
+                Script     = (Get-LinuxRealmJoinBashScript -Domain $domain -DcIp $dcIp -AdminUser $adminUser -AdminPassword $adminPwd)
+                TimeoutSec = 1800
+                Tag        = 'memlabs-realm-join'
+            })
         }
     }
 
-    if ($modules.Count -eq 0) {
+    if ($ops.Count -eq 0) {
         Write-Log "[LinuxConfig] $vmName`: no role-driven config applies; nothing to do."
         return $true
     }
 
-    Write-Log "[LinuxConfig] $vmName`: applying modules: $($applied -join ', ')"
+    Write-Log "[LinuxConfig] $vmName`: applying $($ops.Count) module(s): $(($ops | ForEach-Object Name) -join ', ')"
 
     # Wait for SSH first; the VM may have rebooted between phases.
+    Write-Progress2 -Activity $activity -Status "Waiting for SSH" -force
     $expectedIp  = Get-LinuxVmExpectedStaticIP -VmObject $Vm -DeployConfig $DeployConfig
     $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
@@ -2561,41 +2577,39 @@ function Invoke-LinuxRoleConfiguration {
         return $false
     }
 
-    # Compose: header sets pipefail per-module so a failed apt doesn't silently
-    # roll into the next module. Each module gets a banner so the log on the
-    # guest is searchable.
-    $script = "#!/bin/bash`nset -uo pipefail`n"
-    foreach ($m in $modules) {
-        $script += "`n( set -e`n"
-        $script += $m
-        $script += "`n)`n"
-        $script += "RC=`$?`n"
-        $script += "if [ `$RC -ne 0 ]; then echo `"[memlabs-linux-configure] module failed rc=`$RC`"; exit `$RC; fi`n"
+    # Run each module as its own SSH invocation so the Phase 3 row reflects
+    # exactly what's running. Fail-fast: a module failure aborts subsequent
+    # modules and returns $false (matches the old single-blob behavior).
+    $i = 0
+    foreach ($op in $ops) {
+        $i++
+        $statusText = "[$i/$($ops.Count)] $($op.Label)"
+        Write-Progress2 -Activity $activity -Status $statusText -force
+        Write-Log "[Phase 3]: $vmName`: $statusText" -OutputStream
+
+        # Wrap in `set -e` so any failed command inside the module aborts the
+        # module (and the whole script) with non-zero exit; mirrors the old
+        # outer-loop pipefail behavior.
+        $script = "#!/bin/bash`nset -euo pipefail`n" + $op.Script + "`n"
+        $scriptLf = $script -replace "`r`n", "`n"
+        $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptLf))
+        $bash = "echo $b64 | base64 -d > /root/$($op.Tag).sh && chmod 0700 /root/$($op.Tag).sh && /root/$($op.Tag).sh"
+
+        $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName $op.Tag -TimeoutSeconds $op.TimeoutSec
+        if (-not ($result -and $result.CommandResult)) {
+            $tail = $null
+            if ($result -and $result.ScriptBlockOutput) {
+                $lines = ($result.ScriptBlockOutput -split "`n")
+                $tail = ($lines | Select-Object -Last 20) -join "`n"
+            }
+            Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
+            return $false
+        }
+        Write-Log "[Phase 3]: $vmName`: $($op.Label) complete." -Success
     }
 
-    $scriptLf = $script -replace "`r`n", "`n"
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scriptLf))
-
-    # Ship as one opaque base64 blob -- bypasses every quoting layer.
-    $bash = "echo $b64 | base64 -d > /root/memlabs-linux-configure.sh && chmod 0700 /root/memlabs-linux-configure.sh && /root/memlabs-linux-configure.sh"
-
-    # Phase 3 modules run apt-get install for full desktop stacks; give it
-    # generous time. Mozilla deb + xfce4 typically completes in 2-4 minutes
-    # on a warm apt cache, longer on first boot.
-    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName "memlabs-linux-configure" -TimeoutSeconds 1800
-
-    if ($result -and $result.CommandResult) {
-        Write-Log "[LinuxConfig] $vmName`: configuration complete ($($applied -join ', '))." -Success
-        return $true
-    }
-
-    $tail = $null
-    if ($result -and $result.ScriptBlockOutput) {
-        $lines = ($result.ScriptBlockOutput -split "`n")
-        $tail = ($lines | Select-Object -Last 20) -join "`n"
-    }
-    Write-Log "[LinuxConfig] $vmName`: configuration FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
-    return $false
+    Write-Log "[LinuxConfig] $vmName`: configuration complete ($(($ops | ForEach-Object Name) -join ', '))." -Success
+    return $true
 }
 
 
