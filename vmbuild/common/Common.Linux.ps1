@@ -3606,11 +3606,13 @@ runcmd:
   - systemctl enable hv-vss-daemon.service || true
 $desktopRuncmdYaml
 $bakeUserCleanupYaml
+  - systemctl stop unattended-upgrades.service 2>/dev/null || true
+  - systemctl disable unattended-upgrades.service 2>/dev/null || true
   - cloud-init clean --logs --seed --machine-id || true
   - truncate -s 0 /etc/machine-id
   - rm -f /var/lib/dbus/machine-id
   - rm -f /etc/netplan/50-cloud-init.yaml
-  - shutdown -h +1 "memlabs bake complete"
+  - shutdown -h now
 "@
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
