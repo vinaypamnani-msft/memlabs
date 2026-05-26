@@ -3395,6 +3395,18 @@ function Invoke-LinuxBaseImageBake {
     # anything exotic, require the caller to have it set up already.
     if ($SwitchName -in @('MemLabsNAT', 'Default Switch')) {
         $SwitchName = 'MemLabsNAT'
+
+        # Migration: earlier bake code created a NAT named 'MemLabsNATNat'
+        # with prefix 172.16.200.0/24.  Test-NetworkNat (called by
+        # Add-SwitchAndDhcp) names NATs by subnet ('172.16.200.0') and will
+        # fail to create a duplicate-prefix NAT.  Remove the legacy name so
+        # the standard pipeline succeeds.
+        $legacyNat = Get-NetNat -Name 'MemLabsNATNat' -ErrorAction SilentlyContinue
+        if ($legacyNat) {
+            Write-Log "Bake: removing legacy NAT 'MemLabsNATNat' (replaced by '172.16.200.0')." -Warning
+            Remove-NetNat -Name 'MemLabsNATNat' -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
         # Reuse the same Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope
         # pipeline that New-Lab uses for domain networks. This creates the
         # internal switch, sets host IP to .200, adds the NetNat, installs

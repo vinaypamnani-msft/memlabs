@@ -1736,15 +1736,23 @@ function Test-NetworkSwitch {
         $interfaceAlias = $adapter.InterfaceAlias
         $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
 
-        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-        if ($currentIp.IPAddress -ne $desiredIp) {
-            Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
-            New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
+        $currentIps = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue)
+        $hasDesired = $currentIps | Where-Object { $_.IPAddress -eq $desiredIp }
+        if (-not $hasDesired) {
+            Write-Log "$interfaceAlias IP is '$($currentIps.IPAddress -join ', ')'. Changing it to $desiredIp."
+            # Remove any existing IPv4 addresses first; New-NetIPAddress cannot
+            # replace an existing address on the same subnet and would either
+            # fail or leave two IPs that confuse later validation.
+            foreach ($staleIp in $currentIps) {
+                Remove-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $staleIp.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Seconds 5 # Sleep to make sure IP changed
         }
 
-        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-        if ($currentIp.IPAddress -ne $desiredIp) {
+        $currentIps = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue)
+        $hasDesired = $currentIps | Where-Object { $_.IPAddress -eq $desiredIp }
+        if (-not $hasDesired) {
             Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
             return $false
         }
