@@ -550,7 +550,6 @@ function Remove-Domain {
     }
 
     Start-Sleep -seconds 3
-    clear-host
 }
 
 function Remove-All {
