@@ -1142,7 +1142,11 @@ function Show-Menu {
         }
 
         # Single pass over the menu collects every layout number we need.
-        $metrics          = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $host.UI.RawUI.WindowSize.Width
+        # Use Get-LiveWindowSize so wrap accounting reflects the post-resize
+        # width (the .NET console cache can lag a few hundred ms in ConPTY).
+        $liveSize = Get-LiveWindowSize
+        $liveWidth = if ($liveSize) { [int]$liveSize.Width } else { $host.UI.RawUI.WindowSize.Width }
+        $metrics          = Get-MenuMetrics -MenuItems $menuItems -WindowWidth $liveWidth
         $TotalLineCount   = $metrics.TotalLineCount
         $LongestBreakLine = $metrics.LongestBreakLine
         $HelpFound        = $metrics.HelpFound
@@ -1188,7 +1192,7 @@ function Show-Menu {
         # starts, so we model that here instead of sampling cursor position
         # after the banner draws. This keeps shrink and layout consistent so
         # the same numbers drive both decisions.
-        $wrapAt = $host.UI.RawUI.WindowSize.Width - $script:MenuLayout.TextWidthSlack
+        $wrapAt = $liveWidth - $script:MenuLayout.TextWidthSlack
         $bannerWillDraw = (-not $HelpFound -and $HelpNeeded -and -not $shrink.Help)
         $availableRows  = [Math]::Max(1, $RoomLeft - $(if ($bannerWillDraw) { $helpBannerCost } else { 0 }))
         $layout = Get-PageLayout -MenuItems $menuItems -Shrink $shrink -MaxShrink $Maxshrink `

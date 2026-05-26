@@ -53,28 +53,52 @@ function Write-Option {
 
     # Truncate text to fit terminal width (accounts for prefix already written).
     # Prefix width: 3 (arrow/spaces) + 1 ([) + option.Length + PadRight(4-len) + already at column ~8.
+    # MultiSelect prepends an extra "[X] " or "    " (4 chars) before the brackets.
     $prefixLen = 3 + 1 + $option.Length + [Math]::Max(0, 4 - $option.Length)
-    $termWidth = [Console]::WindowWidth
+    if ($MultiSelect) { $prefixLen += 4 }
+    # Get-LiveWindowSize (from Common.NewMenu.ps1) reads a fresh CONOUT$ handle
+    # so it reflects post-resize width even when the .NET console cache is stale.
+    # Both [Console]::WindowWidth and $host.UI.RawUI.WindowSize.Width can return
+    # the old size after a resize, causing this truncation to use the wrong
+    # budget and let rows wrap onto the next line.
+    $termWidth = 0
+    try {
+        if (Get-Command Get-LiveWindowSize -ErrorAction Ignore) {
+            $live = Get-LiveWindowSize
+            if ($live) { $termWidth = [int]$live.Width }
+        }
+    } catch { }
+    if (-not $termWidth) { $termWidth = [Console]::WindowWidth }
     if (-not $termWidth) { $termWidth = $host.UI.RawUI.WindowSize.Width }
-    $availWidth = $termWidth - $prefixLen - 1
+    # Subtract 2 (not 1) so we never write to the final column. Writing the
+    # last cell on Windows conhost triggers an automatic newline; the explicit
+    # Write-Host at the end of this function would then add a SECOND newline,
+    # shifting every later menu row down by 1 and breaking arrow positioning.
+    $availWidth = $termWidth - $prefixLen - 2
     if ($availWidth -gt 0 -and $text) {
         $hasAnsi = $text.Contains([char]27)
         if ($hasAnsi) {
-            $ansiPat = [char]27 + '\[[0-9;]*m'
+            $ansiPat = [char]27 + '\[[0-9;]*[A-Za-z]'
             $plainLen = [regex]::Replace($text, $ansiPat, '').Length
         }
         else {
             $plainLen = $text.Length
         }
         if ($plainLen -gt $availWidth) {
-            # Walk the string counting visible chars (skipping ANSI), cut at limit
+            # Walk the string counting visible chars (skipping ANSI), cut at limit.
+            # ANSI CSI sequences end on any letter (A-Z, a-z), not just 'm' --
+            # cursor moves (e.g. ESC[12A) and erases (ESC[2K) would otherwise
+            # leave $inEsc=$true and silently consume all later visible chars.
             $visCount = 0
             $cutIdx = $text.Length
             $inEsc = $false
             for ($ci = 0; $ci -lt $text.Length; $ci++) {
-                if ($text[$ci] -eq [char]27) { $inEsc = $true }
+                if ($text[$ci] -eq [char]27) { $inEsc = $true; continue }
                 if ($inEsc) {
-                    if ($text[$ci] -eq 'm') { $inEsc = $false }
+                    $ch = $text[$ci]
+                    if (($ch -ge 'A' -and $ch -le 'Z') -or ($ch -ge 'a' -and $ch -le 'z')) {
+                        $inEsc = $false
+                    }
                     continue
                 }
                 $visCount++

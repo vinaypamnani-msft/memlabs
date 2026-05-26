@@ -83,9 +83,20 @@ function Select-Config {
         }
 
         # Budget for the entire rendered row. Get-Menu2 prepends menu chrome
-        # (arrow + "[NN] " + brackets/padding) -- reserve ~10 cols for that
+        # (arrow + "[NN] " + brackets/padding) -- reserve ~12 cols for that
         # plus a small safety slack so we never wrap onto a second line.
-        $rowMaxWidth = $host.UI.RawUI.WindowSize.Width - 11
+        # Use Get-LiveWindowSize when available -- $host.UI.RawUI.WindowSize
+        # can return a stale width right after a resize in ConPTY hosts
+        # (Windows Terminal), which would compute the budget for the OLD width.
+        $hostW = 0
+        try {
+            if (Get-Command Get-LiveWindowSize -ErrorAction Ignore) {
+                $live = Get-LiveWindowSize
+                if ($live) { $hostW = [int]$live.Width }
+            }
+        } catch { }
+        if (-not $hostW) { $hostW = $host.UI.RawUI.WindowSize.Width }
+        $rowMaxWidth = $hostW - 12
         if ($rowMaxWidth -lt ($maxLength + 10)) { $rowMaxWidth = $maxLength + 10 }
         foreach ($file in $files) {
             $i = $i + 1
