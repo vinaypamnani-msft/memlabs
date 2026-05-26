@@ -514,7 +514,19 @@ class InstallADK {
                 }
                 if ($lastExit -eq 0) {
                     if (& $verifyInstall) { return 0 }
-                    # 0-exit but install didn't happen -- treat as soft failure, retry.
+                    # 0-exit but install didn't happen -- almost always means
+                    # Burn's dependency-provider registry has a stale entry
+                    # ("WixBundleInstalled = 1" in the log) from a prior run
+                    # whose MSIs got rolled back / cleaned. The bootstrapper
+                    # then no-op's every subsequent install attempt. Force an
+                    # uninstall to clear the stale provider key, then retry.
+                    Write-Status "ADK $label : running /uninstall /quiet to clear stale Burn registration before retry."
+                    try {
+                        $uninstallExit = & $invokeAdk $exe @('/uninstall','/quiet') ("$label-uninstall")
+                        Write-Status "ADK $label : /uninstall returned $uninstallExit."
+                    } catch {
+                        Write-Status "ADK $label : /uninstall threw: $($_.Exception.Message) (continuing to retry install)"
+                    }
                     $lastExit = -2
                 }
                 Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
