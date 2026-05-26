@@ -3555,7 +3555,7 @@ write_files:
   - systemctl enable xrdp.service || true
   - adduser xrdp ssl-cert || true
   - ufw allow 3389/tcp || true
-  - dpkg -l ubuntu-desktop-minimal xrdp xorgxrdp | grep -c '^ii' | grep -q '^3$' || { echo "BAKE FAILED: desktop packages not installed"; shutdown -c; poweroff; }
+  - "dpkg -l ubuntu-desktop-minimal xrdp xorgxrdp | grep -c '^ii' | grep -q '^3$' || { echo 'BAKE FAILED: desktop packages not installed'; shutdown -c; poweroff; }"
 '@
     }
 
