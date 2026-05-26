@@ -3381,74 +3381,18 @@ function Invoke-LinuxBaseImageBake {
     # Auto-manage only the canonical 'MemLabsNAT' / 'Default Switch' names; for
     # anything exotic, require the caller to have it set up already.
     if ($SwitchName -in @('MemLabsNAT', 'Default Switch')) {
-        $createName = 'MemLabsNAT'
-        # Get-VMSwitch with -Name throws if no match; use the safe filter form
-        # so we can branch on reuse vs. create without try/catch noise.
-        $existing = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $createName })
-        if ($existing.Count -gt 1) {
-            # Duplicate-name switches confuse Hyper-V cmdlets (LINQ Single() throws
-            # 'Sequence contains more than one element' from New-VM). Wipe them all
-            # and recreate fresh; bake VMs are ephemeral so nothing of value is
-            # attached to these switches.
-            Write-Log "Bake: found $($existing.Count) switches named '$createName'; removing all and recreating." -Warning
-            foreach ($dup in $existing) {
-                try {
-                    # Remove-VMSwitch has no -Id; pipe the switch object so we
-                    # disambiguate by identity rather than name (both dups share
-                    # the same name).
-                    $dup | Remove-VMSwitch -Force -ErrorAction Stop
-                    Write-Log "Bake: removed duplicate switch '$createName' (Id $($dup.Id))." -Success
-                }
-                catch {
-                    throw "Bake: failed to remove duplicate switch '$createName' (Id $($dup.Id)): $($_.Exception.Message)"
-                }
-            }
-            # Also drop the matching NetNat -- it's name-scoped, not switch-scoped,
-            # so a stale one survives switch removal and would clash on re-add.
-            if (Get-NetNat -Name "${createName}Nat" -ErrorAction SilentlyContinue) {
-                Remove-NetNat -Name "${createName}Nat" -Confirm:$false -ErrorAction SilentlyContinue
-            }
-            $existing = @()
+        $SwitchName = 'MemLabsNAT'
+        # Reuse the same Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope
+        # pipeline that New-Lab uses for domain networks. This creates the
+        # internal switch, sets host IP to .200, adds the NetNat, installs
+        # DHCP if needed, and creates a scope (.20-.199, gateway .200, DNS
+        # 8.8.8.8).  The bake VM will get an address via DHCP; the static
+        # network-config in the seed ISO is a belt-and-suspenders fallback.
+        $switchOk = Add-SwitchAndDhcp -NetworkName $SwitchName -NetworkSubnet '172.16.200.0' -DNSServer '8.8.8.8'
+        if (-not $switchOk) {
+            throw "Bake: failed to create/verify switch + DHCP for '$SwitchName' (172.16.200.0/24)."
         }
-        if ($existing.Count -eq 1) {
-            Write-Log "Bake: reusing existing NAT switch '$createName' (host IP / NetNat will be topped up if missing)." -Activity
-        }
-        else {
-            Write-Log "Bake: creating internal NAT switch '$createName' (172.16.200.0/24)..." -Activity
-            try {
-                New-VMSwitch -SwitchName $createName -SwitchType Internal -ErrorAction Stop | Out-Null
-                Write-Log "Bake: created NAT switch '$createName'." -Success
-            }
-            catch {
-                throw "Bake: failed to create NAT switch '$createName': $($_.Exception.Message). Available switches: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')"
-            }
-        }
-
-        # Top up the NAT plumbing whether the switch is new or reused; both
-        # New-NetIPAddress and New-NetNat are no-ops if their target already
-        # exists at the desired values.
-        try {
-            $natAdapter = @(Get-NetAdapter | Where-Object { $_.Name -like "*$createName*" })
-            if ($natAdapter.Count -eq 0) {
-                throw "Bake: switch '$createName' exists but no matching host vNIC ('vEthernet ($createName)') appeared."
-            }
-            if ($natAdapter.Count -gt 1) {
-                Write-Log "Bake: found $($natAdapter.Count) host vNICs matching '*$createName*'; using ifIndex $($natAdapter[0].ifIndex)." -Warning
-            }
-            $ifIndex = $natAdapter[0].ifIndex
-            $existingIp = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                Where-Object { $_.IPAddress -eq '172.16.200.1' }
-            if (-not $existingIp) {
-                New-NetIPAddress -IPAddress 172.16.200.1 -PrefixLength 24 -InterfaceIndex $ifIndex -ErrorAction Stop | Out-Null
-            }
-            if (-not (Get-NetNat -Name "${createName}Nat" -ErrorAction SilentlyContinue)) {
-                New-NetNat -Name "${createName}Nat" -InternalIPInterfaceAddressPrefix 172.16.200.0/24 -ErrorAction Stop | Out-Null
-            }
-            $SwitchName = $createName
-        }
-        catch {
-            throw "Bake: failed to configure NAT plumbing on '$createName': $($_.Exception.Message)"
-        }
+        $isMemLabsNAT = $true
     }
     else {
         # Caller picked a custom switch (e.g. 'External' on host that already has internet); just verify it exists.
@@ -3473,8 +3417,10 @@ local-hostname: memlabs-bake
 "@
 
     # Static network config for the MemLabsNAT switch (172.16.200.0/24).
-    # The NAT switch has NO DHCP server, so without this the bake VM gets
-    # no IP, no internet, and apt silently fails to install packages.
+    # Belt-and-suspenders with the DHCP scope created by Add-SwitchAndDhcp
+    # above -- if cloud-init reads this file the static config wins; if not,
+    # DHCP provides the address.  Gateway is .200 (the host vNIC IP set by
+    # Test-NetworkSwitch, matching every other memlabs network).
     # cloud-init reads 'network-config' from the NoCloud seed alongside
     # meta-data and user-data.
     $networkConfig = @"
@@ -3484,7 +3430,7 @@ ethernets:
     addresses: [172.16.200.10/24]
     routes:
       - to: 0.0.0.0/0
-        via: 172.16.200.1
+        via: 172.16.200.200
     nameservers:
       addresses: [8.8.8.8, 1.1.1.1]
 "@
@@ -3581,7 +3527,12 @@ $desktopRuncmdYaml
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'user-data'), ($userData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText((Join-Path $stageDir 'network-config'), ($networkConfig -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    # Static network-config only applies to the MemLabsNAT switch (known
+    # 172.16.200.0/24 topology).  Custom switches have their own DHCP/routing
+    # and the hardcoded .10 address would be wrong.
+    if ($isMemLabsNAT) {
+        [System.IO.File]::WriteAllText((Join-Path $stageDir 'network-config'), ($networkConfig -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    }
 
     $oscdimg = Get-OscdimgPath
     if ($oscdimg) {
@@ -3612,7 +3563,31 @@ $desktopRuncmdYaml
         Set-VMFirmware -VM $vm -BootOrder $hdd, $dvd -ErrorAction Stop
 
         Start-VM -VM $vm -ErrorAction Stop
-        Write-Log "Bake: VM started; waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
+        Write-Log "Bake: VM started; waiting up to 90s for an IPv4 address..."
+
+        # Poll for an IP before committing to the long shutdown wait.
+        # KVP daemon (hv-kvp-daemon) ships in the base cloud image, so
+        # Get-VMNetworkAdapter.IPAddresses should populate once cloud-init
+        # applies the network config (static or DHCP).
+        $ipWaitSec = 90
+        $ipElapsed = 0
+        $bakeIp = $null
+        while ($ipElapsed -lt $ipWaitSec) {
+            Start-Sleep -Seconds 5
+            $ipElapsed += 5
+            $ips = @((Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue).IPAddresses |
+                Where-Object { $_ -and $_ -notmatch ':' })
+            if ($ips.Count -gt 0) {
+                $bakeIp = $ips[0]
+                break
+            }
+        }
+        if (-not $bakeIp) {
+            Write-Log "Bake: VM '$vmName' has no IPv4 after ${ipWaitSec}s. Aborting." -Failure
+            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
+            throw "Bake: VM '$vmName' has no IPv4 address after ${ipWaitSec}s. The bake VM needs internet access for apt. Check switch '$SwitchName' NAT/DHCP configuration."
+        }
+        Write-Log "Bake: VM has IP $bakeIp after ${ipElapsed}s; waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
 
         $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
         $clean = $false
