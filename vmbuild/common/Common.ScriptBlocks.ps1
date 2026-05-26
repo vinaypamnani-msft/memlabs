@@ -76,9 +76,13 @@ $global:Phase11Job = {
 
     try {
         $global:ScriptBlockName = "Phase11Job"
-        # Dot source common
+        # Dot source common -- use bare $using:devBranchValue (not
+        # $using:Common.DevBranch) so this scriptblock works under both
+        # Start-Job and Start-ThreadJob. ThreadJob's $using: parser only
+        # supports bare variable names. Start-PhaseJobs and Start-NormalJobs
+        # both define $devBranchValue in their scope.
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
 
         # Get variables from parent scope
         $currentItem = $using:currentItem

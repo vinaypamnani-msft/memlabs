@@ -161,31 +161,90 @@ function Invoke-SnapshotDomain {
         Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
         Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
     }
-    foreach ($vm in $vms) {
-        $complete = $false
+
+    # Per-VM Checkpoint-VM is dominated by VHDX flush + AVHDX creation, mostly
+    # disk I/O on whatever drive backs each VM. Parallelize via ThreadJob with
+    # a modest throttle so we don't queue-storm the storage controller. Falls
+    # back to sequential when ThreadJob isn't available.
+    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+
+    $snapshotWorker = {
+        param($vmName, $snapshotName)
+        $messages = New-Object System.Collections.Generic.List[object]
+        $ok = $false
         $tries = 0
-        While ($complete -ne $true) {
+        while (-not $ok) {
             try {
                 if ($tries -gt 10) {
-                    $failures++
-                    return $failures
+                    return @{ VmName = $vmName; Ok = $false; Messages = $messages }
                 }
-                if (-not $quiet) {
-                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
-                }
-
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
-                $complete = $true
-                if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
-                }
+                # Inline Checkpoint-VM2 equivalent: write notes file then snapshot.
+                # Get-VM2 (cache-aware) isn't available in the ThreadJob runspace.
+                $vm = Get-VM -Name $vmName -ErrorAction Stop
+                $notesFile = Join-Path $vm.Path ($snapshotName + ".json")
+                $vm.notes | Out-File $notesFile
+                Checkpoint-VM -VM $vm -SnapshotName $snapshotName -ErrorAction Stop
+                $ok = $true
             }
             catch {
-                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
-                write-log "Error: $_" -LogOnly
+                $messages.Add("Error: $_")
                 $tries++
-                stop-vm2 -name $vm.VmName
+                try { Stop-VM -Name $vmName -Force -ErrorAction SilentlyContinue } catch {}
                 Start-Sleep 10
+            }
+        }
+        return @{ VmName = $vmName; Ok = $ok; Messages = $messages }
+    }
+
+    if ($useThreadJob) {
+        if (-not $quiet) {
+            Show-StatusEraseLine "Checkpointing $(($vms | Measure-Object).Count) VM(s) to [$snapshot]" -indent
+        }
+        $jobs = foreach ($vm in $vms) {
+            Start-ThreadJob -ScriptBlock $snapshotWorker -ArgumentList $vm.VmName, $snapshot -ThrottleLimit 4
+        }
+        $results = $jobs | Wait-Job | Receive-Job
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        foreach ($r in $results) {
+            foreach ($m in $r.Messages) { Write-Log $m -LogOnly }
+            if ($r.Ok) {
+                if (-not $quiet) {
+                    Write-GreenCheck "Checkpoint $($r.VmName) to [$snapshot] Complete                     "
+                }
+            }
+            else {
+                $failures++
+                Write-RedX "Checkpoint $($r.VmName) to [$snapshot] Failed after retries. See Logs for error."
+            }
+        }
+    }
+    else {
+        foreach ($vm in $vms) {
+            $complete = $false
+            $tries = 0
+            While ($complete -ne $true) {
+                try {
+                    if ($tries -gt 10) {
+                        $failures++
+                        return $failures
+                    }
+                    if (-not $quiet) {
+                        Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
+                    }
+
+                    Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
+                    $complete = $true
+                    if (-not $quiet) {
+                        Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
+                    }
+                }
+                catch {
+                    Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
+                    write-log "Error: $_" -LogOnly
+                    $tries++
+                    stop-vm2 -name $vm.VmName
+                    Start-Sleep 10
+                }
             }
         }
     }

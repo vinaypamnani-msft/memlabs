@@ -916,16 +916,21 @@ function Restore-DynamicMemory {
     Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
     Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
 
-    foreach ($vmConfig in $vmsToRestore) {
+    # Per-VM work is a couple of Hyper-V cmdlet calls (Get-VM, Set-VMMemory).
+    # No Common.ps1 dot-source needed. Just fan out via ThreadJob so 20 VMs
+    # don't take 20*per-call time when called from the finally block. Throttle
+    # at 8 to avoid hammering VMMS with too many concurrent reconfigs.
+    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+
+    $restoreWorker = {
+        param($vmConfig)
         $vmName = $vmConfig.vmName
+        $messages = New-Object System.Collections.Generic.List[object]
         try {
-            $vm = Get-VM2 -Name $vmName -ErrorAction SilentlyContinue
+            $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
             if (-not $vm) {
-                # Expected after a failed/cancelled phase 1: the create path
-                # rolls back and removes the VM, so there's nothing to
-                # restore. Log quietly instead of warning.
-                Write-Log "[Phase 11]   $vmName`: VM not found, skipping (likely rolled back by failed Phase 1)" -LogOnly
-                continue
+                $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: VM not found, skipping (likely rolled back by failed Phase 1)" })
+                return @{ VmName = $vmName; Messages = $messages }
             }
 
             $minBytes = ($vmConfig.dynamicMinRam / 1)
@@ -941,26 +946,54 @@ function Restore-DynamicMemory {
             }
 
             if ($vm.DynamicMemoryEnabled) {
-                # Normal path: dynamic memory already on, just lower the min (works while running)
-                Write-Log "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" -LogOnly
+                $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" })
                 $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
             }
             else {
-                # Legacy/broken state: VM has static memory, must stop to switch to dynamic
                 $wasRunning = $vm.State -eq 'Running'
                 if ($wasRunning) {
-                    Write-Log "[Phase 11]   $vmName`: Stopping VM (static memory, must stop to enable dynamic)" -Warning
+                    $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Stopping VM (static memory, must stop to enable dynamic)" })
                     $vm | Stop-VM -Force -ErrorAction Stop
                 }
                 $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
                 if ($wasRunning) {
                     $vm | Start-VM -ErrorAction Stop
-                    Write-Log "[Phase 11]   $vmName`: Restarted with dynamic memory" -LogOnly
+                    $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Restarted with dynamic memory" })
                 }
             }
         }
         catch {
-            Write-Log "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" -Warning
+            $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" })
+        }
+        return @{ VmName = $vmName; Messages = $messages }
+    }
+
+    if ($useThreadJob) {
+        $jobs = foreach ($vmConfig in $vmsToRestore) {
+            Start-ThreadJob -ScriptBlock $restoreWorker -ArgumentList $vmConfig -ThrottleLimit 8
+        }
+        $results = $jobs | Wait-Job | Receive-Job
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        foreach ($r in $results) {
+            foreach ($m in $r.Messages) {
+                switch ($m.Level) {
+                    'Warning' { Write-Log $m.Text -Warning }
+                    'LogOnly' { Write-Log $m.Text -LogOnly }
+                    default   { Write-Log $m.Text }
+                }
+            }
+        }
+    }
+    else {
+        foreach ($vmConfig in $vmsToRestore) {
+            $r = & $restoreWorker $vmConfig
+            foreach ($m in $r.Messages) {
+                switch ($m.Level) {
+                    'Warning' { Write-Log $m.Text -Warning }
+                    'LogOnly' { Write-Log $m.Text -LogOnly }
+                    default   { Write-Log $m.Text }
+                }
+            }
         }
     }
 

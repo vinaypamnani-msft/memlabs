@@ -305,13 +305,25 @@ function Start-PhaseJobs {
     $job_created_yes = 0
     $job_created_no = 0
 
-    # Phase10Job (and any other scriptblock dispatched from here that uses
-    # the bare-name form) references $using:devBranchValue. The Start-Job
-    # parent must have it in scope or the job-creation call throws
-    # "The value of the using variable '$using:devBranchValue' cannot be
-    # retrieved because it has not been set in the local session."
-    # Mirror the same shim Start-NormalJobs uses so both call sites agree.
+    # Phase10Job/Phase11Job (and any other scriptblock dispatched from here
+    # that uses the bare-name form) reference $using:devBranchValue. The
+    # Start-Job/Start-ThreadJob parent must have it in scope or the job-
+    # creation call throws "The value of the using variable
+    # '$using:devBranchValue' cannot be retrieved because it has not been
+    # set in the local session." Mirror the same shim Start-NormalJobs uses
+    # so both call sites agree.
     $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
+
+    # Phase 10 (Maintenance) and Phase 11 (Functional Validation) per-VM
+    # work is short (~3-10s of PSDirect probes), so the ~10s of fresh
+    # powershell.exe startup + module imports under Start-Job dominates.
+    # When ThreadJob is available, both phases share the parent's already-
+    # loaded Hyper-V module + assemblies and skip that init entirely.
+    # Other phases (VM_Create, VM_Config) stay on Start-Job for now --
+    # their per-VM payload is larger so the relative win is smaller, and
+    # they touch $global:DSC_Copied which would need review for ThreadJob.
+    $usePhaseThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+    $phaseThreadJobThrottle = 16
 
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
@@ -480,7 +492,12 @@ function Start-PhaseJobs {
                 if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
                 }
-                $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                if ($usePhaseThreadJob) {
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase11Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
+                else {
+                    $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                     $job_created_no++
@@ -491,7 +508,12 @@ function Start-PhaseJobs {
                     continue
                 }       
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
-                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                if ($usePhaseThreadJob) {
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
+                else {
+                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                     $job_created_no++
