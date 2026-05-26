@@ -2563,6 +2563,7 @@ if [ -n "$SHELL_VER" ]; then
         wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
         install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
         unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
+        chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
         rm -f /tmp/dash-to-panel.zip
         echo "[memlabs-gnome] dash-to-panel installed from extensions.gnome.org (shell ${SHELL_VER})"
     else
