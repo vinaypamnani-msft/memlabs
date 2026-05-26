@@ -2485,6 +2485,157 @@ echo "[memlabs-rdp] done: $(date -Is)"
 '@
 }
 
+function Get-LinuxClientBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that configures GNOME Desktop for LinuxClient VMs:
+        .xsession for xrdp, Windows-like GNOME layout (Dash to Panel),
+        Firefox, and sensible lab defaults. Idempotent.
+
+    .DESCRIPTION
+        LinuxClient VMs use the UbuntuDesktop2404.vhdx base which has
+        xrdp + GNOME + GDM3 baked in.  This Phase 3 script:
+          1. Creates ~/.xsession so xrdp starts a GNOME session on X11
+          2. Installs gnome-shell-extension-dash-to-panel (Windows taskbar)
+          3. Applies dconf system defaults for a Windows-like layout:
+             - Taskbar at bottom with Windows-style element positions
+             - Minimize / maximize / close buttons on titlebars
+             - Activities hot corner disabled
+             - Screen lock & idle blank disabled (lab VM)
+             - Welcome dialog suppressed
+          4. Installs Firefox from the Mozilla deb repo
+        Returns: [string] bash source.  Assumes it will be run as root.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    return @'
+echo "[memlabs-gnome] start: $(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
+
+# --- .xsession: tell xrdp / Xsession to start GNOME on X11 --------------
+for UHOME in /home/vmbuildadmin /root; do
+    UNAME=$(stat -c '%U' "$UHOME")
+    UGRP=$(stat -c '%G' "$UHOME")
+    cat > "$UHOME/.xsession" << 'XSESSION'
+#!/bin/sh
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+export GNOME_SHELL_SESSION_MODE=ubuntu
+export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+exec gnome-session --session=ubuntu
+XSESSION
+    chown "$UNAME:$UGRP" "$UHOME/.xsession"
+    chmod 0755 "$UHOME/.xsession"
+done
+
+# --- Packages: dash-to-panel + dconf-cli + Firefox prereqs ---------------
+apt-get update
+apt-get install -y \
+    gnome-shell-extension-dash-to-panel \
+    gnome-tweaks \
+    dconf-cli \
+    apt-transport-https ca-certificates gnupg wget
+
+# --- Polkit: allow colord without auth for xrdp sessions ------------------
+# Without this rule xrdp logins trigger a "color managed device" auth dialog.
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/45-allow-colord.rules << 'RULES'
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.color-manager.") == 0) {
+        return polkit.Result.YES;
+    }
+});
+RULES
+
+# --- dconf: Windows-like GNOME defaults (system-wide) --------------------
+# Uses the 'local' system-db which is Ubuntu desktop's default.
+install -d -m 0755 /etc/dconf/profile
+if ! [ -f /etc/dconf/profile/user ] || ! grep -q 'system-db:local' /etc/dconf/profile/user 2>/dev/null; then
+    printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
+fi
+
+install -d -m 0755 /etc/dconf/db/local.d
+cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
+# ── Windows-like GNOME defaults ── memlabs LinuxClient ──
+
+# Minimize + maximize buttons  (left: app-menu │ right: min, max, close)
+[org/gnome/desktop/wm/preferences]
+button-layout='appmenu:minimize,maximize,close'
+
+# Enable extensions
+[org/gnome/shell]
+enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
+welcome-dialog-last-shown-version='99.0'
+
+# Dash-to-panel: taskbar at bottom, Windows 10/11 style
+#   Left:   Show Apps (≈ Start), Left Box
+#   Center: Taskbar (running windows)
+#   Right:  System tray, Date/Time, System Menu, Show Desktop button
+[org/gnome/shell/extensions/dash-to-panel]
+panel-positions='{"0":"BOTTOM"}'
+panel-sizes='{"0":40}'
+panel-element-positions='{"0":[{"element":"showAppsButton","visible":true,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"centerMonitor"},{"element":"centerBox","visible":false,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
+appicon-margin=4
+appicon-padding=4
+animate-appicon-hover=false
+dot-style-focused='DASHES'
+dot-style-unfocused='DOTS'
+trans-use-custom-opacity=false
+hide-overview-on-startup=true
+show-apps-icon-file=''
+
+# Disable Activities hot-corner
+[org/gnome/desktop/interface]
+enable-hot-corners=false
+
+# Desktop icons (Home + Trash)
+[org/gnome/shell/extensions/ding]
+show-home=true
+show-trash=true
+
+# No screen lock / idle blank (lab VM, not production)
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/notifications]
+show-banners=true
+DCONF
+
+dconf update
+
+# --- Firefox: Mozilla deb repo (not the snap shim) -----------------------
+install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
+echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
+    > /etc/apt/sources.list.d/mozilla.list
+printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+    > /etc/apt/preferences.d/mozilla
+apt-get update
+apt-get install -y firefox
+
+# Wire firefox as default browser system-wide.
+update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true
+update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true
+update-alternatives --set x-www-browser /usr/bin/firefox || true
+update-alternatives --set gnome-www-browser /usr/bin/firefox || true
+
+install -d -m 0755 /etc/xdg
+cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
+[Default Applications]
+x-scheme-handler/http=firefox.desktop
+x-scheme-handler/https=firefox.desktop
+text/html=firefox.desktop
+MIMEEOF
+
+echo "[memlabs-gnome] done: $(date -Is)"
+'@
+}
+
 function Get-LinuxRealmJoinBashScript {
     <#
     .SYNOPSIS
@@ -2566,8 +2717,9 @@ function Invoke-LinuxRoleConfiguration {
 
     .DESCRIPTION
         Decides which bash modules apply based on VM flags:
-          - enableRDP=true  -> Get-LinuxXrdpBashScript
-          - joinDomain=true -> Get-LinuxRealmJoinBashScript
+          - enableRDP=true       -> Get-LinuxXrdpBashScript
+          - role='LinuxClient'   -> Get-LinuxClientBashScript
+          - joinDomain=true      -> Get-LinuxRealmJoinBashScript
         Concatenates the modules into a single bash script, base64-encodes it,
         and ships via one Invoke-LinuxVmCommand call. No-op (success) when no
         modules apply.
@@ -2597,6 +2749,19 @@ function Invoke-LinuxRoleConfiguration {
             Script     = (Get-LinuxXrdpBashScript)
             TimeoutSec = 1800
             Tag        = 'memlabs-xrdp'
+        })
+    }
+
+    # LinuxClient: GNOME Desktop with xrdp baked in; needs .xsession +
+    # Windows-like GNOME tweaks + Firefox.  No enableRDP toggle -- xrdp is
+    # always-on for this role (it's the whole point of a Desktop image).
+    if ($role -eq 'LinuxClient') {
+        $ops.Add([pscustomobject]@{
+            Name       = 'gnomeDesktop'
+            Label      = 'Configuring GNOME desktop (Windows-like layout + Firefox)'
+            Script     = (Get-LinuxClientBashScript)
+            TimeoutSec = 1800
+            Tag        = 'memlabs-gnome'
         })
     }
 
