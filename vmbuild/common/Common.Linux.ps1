@@ -2543,17 +2543,34 @@ XSESSIONRC
     chmod 0644 "$UHOME/.xsession"
 done
 
-# --- Packages: dash-to-panel + dconf-cli + Firefox prereqs ---------------
-# dash-to-panel lives in the 'universe' component which ubuntu-desktop-minimal
-# may not enable by default. Ensure it's active before apt-get update.
-add-apt-repository -y universe 2>/dev/null || \
-    sed -i '/^Components:/ { /universe/! s/$/ universe/ }' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+# --- Packages: dconf-cli + gnome-tweaks + Firefox prereqs ----------------
 apt-get update
 apt-get install -y \
-    gnome-shell-extension-dash-to-panel \
     gnome-tweaks \
     dconf-cli \
+    unzip \
     apt-transport-https ca-certificates gnupg wget
+
+# --- dash-to-panel: install from extensions.gnome.org --------------------
+# Not packaged in Ubuntu 24.04 repos (GNOME 46 was too new at Noble freeze).
+# Query the API for the download URL matching the installed GNOME Shell.
+EXT_UUID="dash-to-panel@jderose9.github.com"
+SHELL_VER=$(gnome-shell --version 2>/dev/null | grep -oP '[\d.]+' | cut -d. -f1)
+if [ -n "$SHELL_VER" ]; then
+    DL_URL=$(wget -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
+    if [ -n "$DL_URL" ]; then
+        wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
+        install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
+        unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
+        rm -f /tmp/dash-to-panel.zip
+        echo "[memlabs-gnome] dash-to-panel installed from extensions.gnome.org (shell ${SHELL_VER})"
+    else
+        echo "[memlabs-gnome] WARNING: could not resolve dash-to-panel download URL for GNOME ${SHELL_VER}" >&2
+    fi
+else
+    echo "[memlabs-gnome] WARNING: could not detect GNOME Shell version" >&2
+fi
 
 # --- Polkit: allow colord without auth for xrdp sessions ------------------
 # Without this rule xrdp logins trigger a "color managed device" auth dialog.
