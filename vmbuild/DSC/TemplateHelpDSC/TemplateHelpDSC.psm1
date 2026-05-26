@@ -4198,7 +4198,53 @@ class InstallPBIRS {
 
             write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
-            Start-Process $pbirsSetup $PBIRSargs -Wait
+            # PowerBIReportServer.exe is a WiX/Burn bootstrapper bundle, so it
+            # has the same silent-success failure mode as adksetup: a stale
+            # dependency-provider registration ("WixBundleInstalled = 1") from
+            # a prior failed install makes the bundle exit 0 in a few seconds
+            # without doing real work. Verify the install actually happened by
+            # checking for the SSRS subfolder (the bundle always creates that;
+            # the parent InstallPath was already created by us via New-Item).
+            # If missing, force /uninstall to clear the provider key and retry
+            # once before giving up.
+            $verifyPbirs = Join-Path $this.InstallPath 'SSRS'
+            $pbirsAttempt = 0
+            $pbirsMaxAttempts = 2
+            $pbirsExit = -1
+            while ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                $pbirsAttempt++
+                Write-Status ("PBIRS install attempt $pbirsAttempt/$pbirsMaxAttempts (Start-Process -Wait, may take several minutes)...")
+                $pbirsProc = Start-Process -FilePath $pbirsSetup -ArgumentList $PBIRSargs -Wait -PassThru
+                $pbirsExit = $pbirsProc.ExitCode
+                Write-Status ("PBIRS bootstrapper exit code: $pbirsExit (0x{0:x})" -f $pbirsExit)
+                if ($pbirsExit -eq 0 -and (Test-Path -LiteralPath $verifyPbirs)) {
+                    Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                    break
+                }
+                if ($pbirsExit -eq 0) {
+                    Write-Status "PBIRS bootstrapper reported success but expected install path missing: $verifyPbirs"
+                    if (Test-Path -LiteralPath 'C:\staging\PBI.log') {
+                        try {
+                            $pbirsTail = Get-Content -LiteralPath 'C:\staging\PBI.log' -Tail 15 -ErrorAction SilentlyContinue
+                            if ($pbirsTail) { Write-Status ("PBIRS log tail:`n{0}" -f ($pbirsTail -join "`n")) }
+                        } catch { }
+                    }
+                }
+                if ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                    Write-Status "Running PBIRS /uninstall /quiet to clear stale Burn registration before retry."
+                    try {
+                        $unArgs = "/uninstall /quiet /Log C:\staging\PBI-uninstall.log"
+                        $unProc = Start-Process -FilePath $pbirsSetup -ArgumentList $unArgs -Wait -PassThru
+                        Write-Status ("PBIRS /uninstall returned $($unProc.ExitCode).")
+                    } catch {
+                        Write-Status ("PBIRS /uninstall threw: $($_.Exception.Message) (continuing to retry install)")
+                    }
+                    Start-Sleep -Seconds 5
+                }
+            }
+            if (-not (Test-Path -LiteralPath $verifyPbirs)) {
+                throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+            }
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
