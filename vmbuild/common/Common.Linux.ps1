@@ -393,7 +393,15 @@ chpasswd:
         # poll can't help once systemd has already marked a prior start
         # dependency-failed. The post-cloud-init reboot lets the daemon come
         # up cleanly from the override on next boot.
-        'systemctl daemon-reload || true'
+        'systemctl daemon-reload || true',
+        # Enable the KVP daemon so systemd starts it on the post-cloud-init
+        # reboot. The bake normally enables it, but if the baked image has a
+        # corrupted service file (missing [Install] / WantedBy) the enable
+        # silently fails and the service stays disabled in the VHDX. The
+        # write_files above writes the correct file; re-enabling here
+        # ensures the WantedBy=multi-user.target symlink exists regardless
+        # of bake-era bugs.
+        'systemctl enable hv-kvp-daemon.service || true'
     ) + $ExtraRunCmd + @(
         # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
         # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
