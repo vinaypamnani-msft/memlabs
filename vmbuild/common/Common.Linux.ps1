@@ -2544,6 +2544,10 @@ XSESSIONRC
 done
 
 # --- Packages: dash-to-panel + dconf-cli + Firefox prereqs ---------------
+# dash-to-panel lives in the 'universe' component which ubuntu-desktop-minimal
+# may not enable by default. Ensure it's active before apt-get update.
+add-apt-repository -y universe 2>/dev/null || \
+    sed -i '/^Components:/ { /universe/! s/$/ universe/ }' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
 apt-get update
 apt-get install -y \
     gnome-shell-extension-dash-to-panel \
@@ -3388,11 +3392,12 @@ function Set-ProxyAdminAccessOnVm {
         [Parameter(Mandatory)] [string]$Domain,
         [Parameter(Mandatory)] [string]$ProxyFqdn,
         [Parameter(Mandatory)] [string]$PrivateKeyContent,
-        [Parameter(Mandatory)] [string]$PublicKeyContent
+        [Parameter(Mandatory)] [string]$PublicKeyContent,
+        [Parameter(Mandatory)] [string]$ProxyIP
     )
 
     $scriptBlock = {
-        param($privKey, $pubKey, $proxyFqdn)
+        param($privKey, $pubKey, $proxyFqdn, $proxyIP)
         $ErrorActionPreference = 'Stop'
         try {
             $sshDir = 'C:\ProgramData\memlabs\ssh'
@@ -3479,7 +3484,7 @@ if not exist "%DST%" (
     icacls "%DST%" /grant:r "%USERNAME%:F" >nul 2>&1
     icacls "%DST%" /grant:r "SYSTEM:F" >nul 2>&1
 )
-"$sshExe" -i "%DST%" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn %*
+"$sshExe" -i "%DST%" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyIP %*
 endlocal
 "@
             [System.IO.File]::WriteAllText($wrapperPath, $wrapper)
@@ -3492,7 +3497,7 @@ endlocal
             $sc1.Arguments = "/k `"$wrapperPath`""
             $sc1.WorkingDirectory = 'C:\'
             $sc1.IconLocation = "$sshExe,0"
-            $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
+            $sc1.Description = "SSH to $proxyFqdn ($proxyIP) as vmbuildadmin"
             $sc1.Save()
 
             # Squid access-log tail (pass tail command as wrapper args)
@@ -3502,7 +3507,7 @@ endlocal
             $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -F /var/log/squid/access.log"
             $sc2.WorkingDirectory = 'C:\'
             $sc2.IconLocation = "$sshExe,0"
-            $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
+            $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
             $sc2.Save()
 
             return @{ Ok = $true; SshDir = $sshDir; Shortcuts = @($lnk1, $lnk2) }
@@ -3513,7 +3518,7 @@ endlocal
     }
 
     $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $PrivateKeyContent, $PublicKeyContent, $ProxyFqdn `
+        -ScriptBlock $scriptBlock -ArgumentList $PrivateKeyContent, $PublicKeyContent, $ProxyFqdn, $ProxyIP `
         -DisplayName "Install proxy SSH key + shortcuts"
     if ($result.ScriptBlockFailed) {
         Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
@@ -3524,7 +3529,7 @@ endlocal
         Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm failed: $($payload.Error)" -Failure
         return $false
     }
-    Write-Log "[Proxy] $VmName`: Installed SSH key + Public Desktop shortcuts (-> $ProxyFqdn)"
+    Write-Log "[Proxy] $VmName`: Installed SSH key + Public Desktop shortcuts (-> $ProxyIP)"
     return $true
 }
 
@@ -3568,12 +3573,18 @@ function Set-ProxyAdminAccessForConfig {
     $pubContent  = (Get-Content -Raw -Path $key.PublicKeyPath)
 
     $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+    $proxyIP = Get-LinuxVmExpectedStaticIP -VmObject $proxyVm -DeployConfig $deployConfig
+    if (-not $proxyIP) {
+        Write-Log "[Proxy] Could not determine Proxy IP from network; skipping SSH shortcuts" -Warning
+        return $false
+    }
 
     $ok = $true
     foreach ($vm in $targets) {
-        Write-Log "[Proxy] Installing SSH key + shortcuts on $($vm.vmName) -> $proxyFqdn"
+        Write-Log "[Proxy] Installing SSH key + shortcuts on $($vm.vmName) -> $proxyIP ($proxyFqdn)"
         $r = Set-ProxyAdminAccessOnVm -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
-                -ProxyFqdn $proxyFqdn -PrivateKeyContent $privContent -PublicKeyContent $pubContent
+                -ProxyFqdn $proxyFqdn -PrivateKeyContent $privContent -PublicKeyContent $pubContent `
+                -ProxyIP $proxyIP
         if (-not $r) { $ok = $false }
     }
     return $ok
@@ -3665,6 +3676,12 @@ function New-HostProxyShortcuts {
         }
 
         $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+        $proxyIP = Get-LinuxVmExpectedStaticIP -VmObject $proxyVm -DeployConfig $deployConfig
+        if (-not $proxyIP) {
+            Write-Log "[Proxy] Could not determine Proxy IP from network; skipping host shortcuts" -Warning
+            return $false
+        }
+
         $desktop = [Environment]::GetFolderPath('Desktop')
         if (-not $desktop -or -not (Test-Path $desktop)) {
             Write-Log "[Proxy] Could not resolve host Desktop folder; skipping shortcuts" -Warning
@@ -3672,7 +3689,7 @@ function New-HostProxyShortcuts {
         }
 
         $shell = New-Object -ComObject WScript.Shell
-        $sshArgsBase = "-i `"$($key.PrivateKeyPath)`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
+        $sshArgsBase = "-i `"$($key.PrivateKeyPath)`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyIP"
 
         # cmd.exe /k strips the OUTERMOST pair of quotes when its argument
         # contains 2+ quoted tokens, which would mangle "ssh.exe" "keypath"
@@ -3684,7 +3701,7 @@ function New-HostProxyShortcuts {
         $sc1.Arguments = "/k `"`"$sshExe`" $sshArgsBase`""
         $sc1.WorkingDirectory = 'C:\'
         $sc1.IconLocation = "$sshExe,0"
-        $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
+        $sc1.Description = "SSH to $proxyFqdn ($proxyIP) as vmbuildadmin"
         $sc1.Save()
 
         # Qualify with FQDN on the host so multiple labs/domains don't collide.
@@ -3694,10 +3711,10 @@ function New-HostProxyShortcuts {
         $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log`""
         $sc2.WorkingDirectory = 'C:\'
         $sc2.IconLocation = "$sshExe,0"
-        $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
+        $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
         $sc2.Save()
 
-        Write-Log "[Proxy] Host desktop shortcuts created for $proxyFqdn"
+        Write-Log "[Proxy] Host desktop shortcuts created for $proxyFqdn ($proxyIP)"
         return $true
     }
     catch {
@@ -3738,6 +3755,61 @@ function Remove-HostProxyShortcuts {
     }
     catch {
         Write-Log "[Proxy] Remove-HostProxyShortcuts ($ProxyFqdn) failed: $_" -Warning
+    }
+}
+
+function Remove-ProxyAdminAccessForDomain {
+    <#
+    .SYNOPSIS
+        Remove SSH shortcuts from guest Windows VMs in the domain when a
+        Proxy VM is removed.
+    .DESCRIPTION
+        Enumerates running admin-role VMs (DC, CAS, Primary, etc.) and
+        deletes the Public Desktop SSH/Squid shortcuts via PSDirect.
+        Best-effort: VMs that are off or unreachable are skipped.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)] [string]$DomainName,
+        [Parameter(Mandatory)] [string]$ProxyFqdn
+    )
+
+    $adminRoles = @('DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $allVms = @(Get-List -Type VM -DomainName $DomainName -SmartUpdate)
+    $targets = @($allVms | Where-Object {
+        $_.role -in $adminRoles -and -not (Test-VmIsLinux -Vm $_)
+    })
+    if (-not $targets) { return }
+
+    $scriptBlock = {
+        param($proxyFqdn)
+        $desktop = 'C:\Users\Public\Desktop'
+        $removed = 0
+        foreach ($name in @("SSH to $proxyFqdn.lnk", 'Squid Access Log.lnk')) {
+            $path = Join-Path $desktop $name
+            if (Test-Path $path) {
+                Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
+                $removed++
+            }
+        }
+        return $removed
+    }
+
+    foreach ($vm in $targets) {
+        $vmObj = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+        if (-not $vmObj -or $vmObj.State -ne 'Running') { continue }
+
+        try {
+            $result = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $DomainName `
+                -ScriptBlock $scriptBlock -ArgumentList $ProxyFqdn `
+                -DisplayName "Remove proxy SSH shortcuts"
+            if (-not $result.ScriptBlockFailed -and $result.ScriptBlockOutput -gt 0) {
+                Write-Log "[Proxy] $($vm.vmName): Removed $($result.ScriptBlockOutput) SSH shortcut(s)" -SubActivity
+            }
+        }
+        catch {
+            Write-Log "[Proxy] $($vm.vmName): Failed to remove SSH shortcuts: $_" -Warning
+        }
     }
 }
 
