@@ -268,10 +268,10 @@ class InstallADK {
             if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
 
             $full = @($argv) + @('/log', $logFile)
-            Write-Status ("Running adksetup: {0} {1}" -f $exe, ($full -join ' '))
+            Write-Status ("ADK {0}: running adksetup (downloading + installing, may take several minutes): {1} {2}" -f $label, $exe, ($full -join ' '))
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
-            Write-Status ("adksetup ({0}) exit code: {1} (0x{2:x})" -f $label, $code, $code)
+            Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
             if ($code -ne 0) {
                 $errLines = @()
                 if (Test-Path $logFile) {
@@ -531,7 +531,7 @@ class InstallADK {
         #Install DeploymentTools and UserStateMigrationTool in a single call
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
         $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
-        Write-Status "Installing ADK DeploymentTools and UserStateMigrationTool"
+        Write-Status "ADK [1/2]: installing DeploymentTools + UserStateMigrationTool (first of two adksetup runs)"
         $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
         $deptoolsLayout = 'C:\temp\adk-layout-deptools'
         $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts
@@ -539,18 +539,18 @@ class InstallADK {
             throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Paths missing: " +
                    (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
-        Write-Status "ADK DeploymentTools and UserStateMigrationTool Installed Successfully!"
+        Write-Status "ADK [1/2] DeploymentTools + UserStateMigrationTool installed successfully. Starting [2/2] WinPE addon..."
 
         #Install WindowsPreinstallationEnvironment
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
-        Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
+        Write-Status "ADK [2/2]: installing WinPE addon to $adkinstallpath (separate ~1.5GB download, typically 3-5 min on a healthy link)"
         $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
         $winpeLayout = 'C:\temp\adk-layout-winpe'
         $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts
         if (!(Test-Path $adkinstallpath)) {
-            throw "ADK WindowsPreinstallationEnvironment install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Path missing: $adkinstallpath"
+            throw "ADK WinPE addon install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Path missing: $adkinstallpath"
         }
-        Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
+        Write-Status "ADK [2/2] WinPE addon installed successfully. ADK install complete."
     }
 
     [bool] Test() {
