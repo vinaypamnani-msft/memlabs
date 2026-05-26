@@ -2934,6 +2934,205 @@ function Set-WindowsClientProxy {
 }
 
 
+function Remove-WindowsClientProxy {
+    <#
+    .SYNOPSIS
+        Remove proxy configuration from a Windows VM, restoring direct
+        Internet access.
+
+    .DESCRIPTION
+        Reverse of Set-WindowsClientProxy. Run remotely on the target VM
+        via Invoke-VmCommand. Clears every proxy layer that
+        Set-WindowsClientProxy configures:
+          - WinHTTP system proxy (netsh winhttp reset proxy)
+          - Machine-wide HTTP_PROXY / HTTPS_PROXY / NO_PROXY env vars
+          - HKLM proxy policy (ProxySettingsPerUser)
+          - HKLM IE proxy keys (64-bit + Wow6432Node)
+          - HKU\.DEFAULT IE proxy keys
+          - .NET Framework machine.config <defaultProxy> element
+
+        Idempotent. Safe to call on a VM that was never proxied.
+
+    .PARAMETER VmName
+        Target Windows VM name (PSDirect-reachable).
+
+    .PARAMETER Domain
+        Active Directory domain (used for PSDirect creds).
+
+    .OUTPUTS
+        [bool] $true on success, $false on failure (logged).
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName,
+        [Parameter(Mandatory = $true)] [string]$Domain
+    )
+
+    $scriptBlock = {
+        $ErrorActionPreference = 'Stop'
+        try {
+            # 1) WinHTTP
+            & netsh winhttp reset proxy | Out-Null
+
+            # 2) Machine-wide env vars
+            [Environment]::SetEnvironmentVariable('HTTP_PROXY', $null, 'Machine')
+            [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $null, 'Machine')
+            [Environment]::SetEnvironmentVariable('NO_PROXY', $null, 'Machine')
+
+            # 3) HKLM proxy policy
+            $policyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (Test-Path $policyKey) {
+                Remove-ItemProperty -Path $policyKey -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue
+            }
+
+            # 3a) HKLM IE settings (64-bit)
+            $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+            New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
+            Remove-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $ieKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+
+            # 3b) HKLM Wow6432Node IE settings (32-bit view)
+            $ieKeyWow = 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (Test-Path $ieKeyWow) {
+                New-ItemProperty -Path $ieKeyWow -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
+                Remove-ItemProperty -Path $ieKeyWow -Name 'ProxyServer' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $ieKeyWow -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            }
+
+            # 4) HKU\.DEFAULT IE settings
+            $defaultUserKey = 'Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (Test-Path $defaultUserKey) {
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
+                Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            }
+
+            # 5) .NET Framework machine.config <defaultProxy>
+            $machineConfigPaths = @(
+                "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config",
+                "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\Config\machine.config"
+            )
+            foreach ($mcPath in $machineConfigPaths) {
+                if (-not (Test-Path $mcPath)) { continue }
+                $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                $existing = $xml.DocumentElement.SelectSingleNode('system.net/defaultProxy')
+                if ($existing) {
+                    [void]$existing.ParentNode.RemoveChild($existing)
+                    $xml.Save($mcPath)
+                }
+            }
+
+            # Force WMI provider hosts to reload machine.config
+            try {
+                Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            } catch { }
+
+            $current = & netsh winhttp show proxy
+            return @{ Ok = $true; WinHttp = ($current -join "`n") }
+        }
+        catch {
+            return @{ Ok = $false; Error = $_.ToString() }
+        }
+    }
+
+    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock `
+        -DisplayName "Remove proxy config"
+    if ($result.ScriptBlockFailed) {
+        Write-Log "[Proxy] $VmName`: Remove-WindowsClientProxy ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
+        return $false
+    }
+    $payload = $result.ScriptBlockOutput
+    if (-not $payload -or -not $payload.Ok) {
+        Write-Log "[Proxy] $VmName`: Remove-WindowsClientProxy failed: $($payload.Error)" -Failure
+        return $false
+    }
+    Write-Log "[Proxy] $VmName`: Proxy configuration removed (direct access)"
+    return $true
+}
+
+
+function Remove-WindowsClientProxyForDomain {
+    <#
+    .SYNOPSIS
+        Remove proxy configuration from all opted-in Windows VMs in a
+        domain and clear their Hyper-V enforcement ACLs.
+
+    .DESCRIPTION
+        Enumerates deployed VMs in the domain via Get-List, filters to
+        those with useProxy=true in VM Notes, then for each:
+          1. Calls Remove-WindowsClientProxy (in-guest unconfiguration)
+          2. Calls Clear-VmProxyEnforcement (host-side ACL cleanup)
+          3. Updates the VM Note: useProxy = false
+
+        When -VmName is specified, only that single VM is processed
+        (used for removing proxy from an individual host).
+
+        Skips VMs that are not running (logs a warning, still updates
+        the VM Note and clears ACLs since those are host-side).
+
+    .PARAMETER DomainName
+        The AD domain whose VMs should be unconfigured.
+
+    .PARAMETER VmName
+        Optional. Process only this single VM instead of the full domain.
+
+    .OUTPUTS
+        [bool] $true if all VMs succeeded, $false if any failed.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]  [string]$DomainName,
+        [Parameter(Mandatory = $false)] [string]$VmName
+    )
+
+    $allVms = @(Get-List -Type VM -DomainName $DomainName)
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+
+    $clients = @($allVms | Where-Object {
+        $_.vmName -and
+        $_.role -notin $hardExclude -and
+        (-not (Test-VmIsLinux -Vm $_)) -and
+        $_.PSObject.Properties.Name -contains 'useProxy' -and
+        [bool]$_.useProxy
+    })
+
+    if ($VmName) {
+        $clients = @($clients | Where-Object { $_.vmName -eq $VmName })
+    }
+
+    if (-not $clients -or $clients.Count -eq 0) {
+        Write-Log "[Proxy] No proxy-enabled clients found in '$DomainName'" -Verbose
+        return $true
+    }
+
+    Write-Log "[Proxy] Unconfiguring proxy on $($clients.Count) client(s) in '$DomainName'" -Activity
+
+    $ok = $true
+    foreach ($vm in $clients) {
+        # In-guest unconfiguration (requires running VM + PSDirect)
+        $vmObj = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+        if ($vmObj -and $vmObj.State -eq 'Running') {
+            $r = Remove-WindowsClientProxy -VmName $vm.vmName -Domain $DomainName
+            if (-not $r) { $ok = $false }
+        }
+        else {
+            Write-Log "[Proxy] $($vm.vmName): VM not running; skipping in-guest proxy removal (ACLs + vmNote still updated)" -Warning
+        }
+
+        # Host-side: clear Hyper-V port ACLs (always possible, VM state irrelevant)
+        Clear-VmProxyEnforcement -VmName $vm.vmName
+
+        # Update VM Note so useProxy reflects reality
+        Update-VMNoteProperty -VmName $vm.vmName -PropertyName 'useProxy' -PropertyValue $false
+        Write-Log "[Proxy] $($vm.vmName): useProxy set to false in VM Note"
+    }
+
+    return $ok
+}
+
+
 function Set-WindowsClientProxyForConfig {
     <#
     .SYNOPSIS

@@ -17,7 +17,12 @@ function Remove-VirtualMachine {
         # ~1s per VM in parallel-removal scenarios where every worker would
         # otherwise re-enumerate the entire host VM inventory.
         [Parameter()]
-        [object] $VmRecord
+        [object] $VmRecord,
+        # When true, the caller is tearing down the entire domain (or
+        # removing the DC). Skip expensive per-client proxy
+        # unconfiguration since all VMs are going away anyway.
+        [Parameter()]
+        [switch] $RemovingDomain
     )
 
     # Helper: retry Remove-Item with configurable attempts and delay
@@ -212,10 +217,26 @@ function Remove-VirtualMachine {
         }
     }
 
-    # -- Proxy: clean up host desktop shortcuts pointing at this proxy --
-    # The shared ~/.ssh/id_ed25519 key stays put -- other domains' proxies
-    # (and any future Linux VMs) still depend on it.
+    # -- Proxy: unconfigure clients + clean up host desktop shortcuts --
+    # When removing a Proxy VM (but NOT tearing down the entire domain),
+    # reverse proxy configuration on all opted-in Windows clients in the
+    # domain: clear in-guest settings, remove Hyper-V port ACLs, and set
+    # useProxy=false in VM Notes. Skip when -RemovingDomain since every
+    # VM is going away anyway.
     if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
+        if (-not $RemovingDomain) {
+            if (Get-Command -Name Remove-WindowsClientProxyForDomain -ErrorAction SilentlyContinue) {
+                Remove-WindowsClientProxyForDomain -DomainName $vmFromList.domain
+            }
+            # Reconcile cross-lab ACLs: the proxy's subnet may need to be
+            # removed from allow-lists on VMs in other domains.
+            if (Get-Command -Name Set-VmProxyEnforcementForAllLabs -ErrorAction SilentlyContinue) {
+                Write-Log "$VmName`: Reconciling cross-lab proxy ACLs after Proxy removal"
+                Set-VmProxyEnforcementForAllLabs
+            }
+        }
+        # The shared ~/.ssh/id_ed25519 key stays put -- other domains' proxies
+        # (and any future Linux VMs) still depend on it.
         if (Get-Command -Name Remove-HostProxyShortcuts -ErrorAction SilentlyContinue) {
             Remove-HostProxyShortcuts -ProxyFqdn "$VmName.$($vmFromList.domain)"
         }
@@ -331,6 +352,23 @@ function Remove-Orphaned {
             $response = Read-YesOrNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
+            }
+            Write-Host
+        }
+    }
+
+    Write-Log "Detecting orphaned NAT entries" -Activity
+    $natEntries = Get-NetNat -ErrorAction SilentlyContinue
+    foreach ($nat in $natEntries) {
+        # Memlabs NAT entries are named with the subnet (e.g. 192.168.1.0).
+        # Skip entries whose name doesn't look like a subnet -- they belong
+        # to something else (e.g. Docker, WSL).
+        if ($nat.Name -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+        if ($vmNetworksInUse2 -notcontains $nat.Name) {
+            $response = Read-YesOrNoWithTimeout -Prompt "  NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
+                Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Log "Removed orphaned NAT entry '$($nat.Name)'" -SubActivity
             }
             Write-Host
         }
@@ -481,6 +519,12 @@ function Remove-Domain {
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName
     }
+
+    # When removing the full domain ($all) or the DC, every VM is going
+    # away -- skip the expensive per-client proxy unconfiguration inside
+    # Remove-VirtualMachine.
+    $removingDomain = ($all -or [bool]$DC)
+
     $DeleteVMs = {
     
         try {
@@ -501,7 +545,7 @@ function Remove-Domain {
             $vm = $currentItem
             # Pass the already-resolved VM record so the worker doesn't
             # re-enumerate every VM on the host (~1s/worker saved).
-            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm
+            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -RemovingDomain:$using:removingDomain
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
@@ -532,6 +576,17 @@ function Remove-Domain {
             Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
             foreach ($scope in $scopesToDelete) {
                 Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+            }
+
+            Write-Log "Removing NAT entries for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
+                if ($nat) {
+                    Write-Log "Removing NAT entry '$scope'" -SubActivity
+                    if (-not $WhatIf) {
+                        Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
+                    }
+                }
             }
         }
     }
@@ -565,7 +620,7 @@ function Remove-All {
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
         foreach ($vm in $vmsToDelete) {
-            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
+            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf -RemovingDomain
         }
     }
 
@@ -578,6 +633,17 @@ function Remove-All {
         Write-Log "Removing ALL Hyper-V Switches" -Activity
         foreach ($scope in $scopesToDelete) {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
+        }
+
+        Write-Log "Removing ALL NAT entries" -Activity
+        foreach ($scope in $scopesToDelete) {
+            $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
+            if ($nat) {
+                Write-Log "Removing NAT entry '$scope'" -SubActivity
+                if (-not $WhatIf) {
+                    Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 
