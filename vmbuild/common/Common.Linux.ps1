@@ -2513,20 +2513,34 @@ function Get-LinuxClientBashScript {
 echo "[memlabs-gnome] start: $(date -Is)"
 export DEBIAN_FRONTEND=noninteractive
 
-# --- .xsession: tell xrdp / Xsession to start GNOME on X11 --------------
+# --- .xsessionrc + .xsession: GNOME on X11 over xrdp ---------------------
+# .xsessionrc is sourced by /etc/X11/Xsession BEFORE the session command
+# runs, so env vars are available to gnome-session and all children.
+# .xsession (non-executable, 0644) is read by Xsession's
+# 50x11-common_determine-startup as the session command.
 for UHOME in /home/vmbuildadmin /root; do
     UNAME=$(stat -c '%U' "$UHOME")
     UGRP=$(stat -c '%G' "$UHOME")
-    cat > "$UHOME/.xsession" << 'XSESSION'
-#!/bin/sh
+
+    cat > "$UHOME/.xsessionrc" << 'XSESSIONRC'
+# memlabs: env vars for GNOME over xrdp (no hardware GPU)
 export XDG_SESSION_TYPE=x11
 export GDK_BACKEND=x11
 export GNOME_SHELL_SESSION_MODE=ubuntu
 export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-exec gnome-session --session=ubuntu
-XSESSION
+# Mutter 46 refuses software renderers (llvmpipe) by default.
+# xrdp has no GPU, so we must allow fallback drivers.
+export MUTTER_ALLOW_FALLBACK_DRIVERS=1
+export LIBGL_ALWAYS_SOFTWARE=1
+XSESSIONRC
+    chown "$UNAME:$UGRP" "$UHOME/.xsessionrc"
+    chmod 0644 "$UHOME/.xsessionrc"
+
+    # Session command — bare line, not executable, so Xsession runs it
+    # via 'exec /bin/sh ~/.xsession' after all Xsession.d scripts.
+    echo 'gnome-session --session=ubuntu' > "$UHOME/.xsession"
     chown "$UNAME:$UGRP" "$UHOME/.xsession"
-    chmod 0755 "$UHOME/.xsession"
+    chmod 0644 "$UHOME/.xsession"
 done
 
 # --- Packages: dash-to-panel + dconf-cli + Firefox prereqs ---------------
