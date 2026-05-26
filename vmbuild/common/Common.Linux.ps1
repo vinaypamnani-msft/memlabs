@@ -401,7 +401,11 @@ chpasswd:
         # write_files above writes the correct file; re-enabling here
         # ensures the WantedBy=multi-user.target symlink exists regardless
         # of bake-era bugs.
-        'systemctl enable hv-kvp-daemon.service || true'
+        'systemctl enable hv-kvp-daemon.service || true',
+        # Delete the temporary bake-time console user. The bake runcmd
+        # already runs userdel, but if it failed silently (|| true) the
+        # account ships in the VHDX and every deployed VM inherits it.
+        'userdel -r memlabs 2>/dev/null || true'
     ) + $ExtraRunCmd + @(
         # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
         # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
@@ -2432,6 +2436,17 @@ chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession
 chmod 0644 /home/vmbuildadmin/.xsession
 echo 'xfce4-session' > /root/.xsession
 chmod 0644 /root/.xsession
+
+# Pre-seed default xfce4 panel config so the "Welcome to the first start of
+# the panel" dialog never fires. Over xrdp it renders behind the desktop or
+# auto-dismisses with an empty panel, leaving a blank blue screen.
+if [ -d /etc/xdg/xfce4/panel ]; then
+    for UHOME in /home/vmbuildadmin /root; do
+        install -d -o "$(stat -c '%U' "$UHOME")" -g "$(stat -c '%G' "$UHOME")" -m 0700 "$UHOME/.config"
+        cp -rn /etc/xdg/xfce4 "$UHOME/.config/"
+        chown -R "$(stat -c '%U' "$UHOME"):$(stat -c '%G' "$UHOME")" "$UHOME/.config/xfce4"
+    done
+fi
 
 ufw allow 3389/tcp || true
 systemctl enable --now xrdp || true
