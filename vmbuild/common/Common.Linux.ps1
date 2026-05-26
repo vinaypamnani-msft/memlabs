@@ -3490,8 +3490,43 @@ ethernets:
     #   the two don't race for the lease. NM still owns wifi / dynamic GUI
     #   connections; networkd owns the static lab interface.
     $desktopPackagesYaml = ''
-    $desktopWriteFilesYaml = ''
     $desktopRuncmdYaml = ''
+    # Always bake the hv-kvp-daemon.service override so the deployed VHDX
+    # boots with our race-free unit on disk from the start.  Without this
+    # the upstream unit (BindsTo= + ConditionPathExists= on /dev/vmbus/hv_kvp)
+    # runs before cloud-init's write_files writes the override, fails due
+    # to the ~40s device-registration race, and systemd marks the unit
+    # dependency-failed for the rest of the boot.  KVP stays dark and the
+    # host can't read the guest IP.
+    #
+    # The deploy seed ISO writes the same file via its own write_files
+    # (idempotent overwrite); having it baked in just ensures the very
+    # first systemd pass uses the override.
+    $bakeWriteFilesYaml = @'
+
+write_files:
+  - path: /etc/systemd/system/hv-kvp-daemon.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Hyper-V KVP Protocol Daemon (memlabs override)
+      ConditionVirtualization=microsoft
+      ConditionKernelCommandLine=!snapd_recovery_mode
+      DefaultDependencies=no
+      After=systemd-remount-fs.service systemd-modules-load.service
+      Before=shutdown.target cloud-init-local.service walinuxagent.service
+      Conflicts=shutdown.target
+      RequiresMountsFor=/var/lib/hyperv
+      [Service]
+      TimeoutStartSec=75
+      ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do [ -e /dev/vmbus/hv_kvp ] && exit 0; sleep 1; done; exit 1'
+      ExecStart=/usr/sbin/hv_kvp_daemon -n
+      Restart=on-failure
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+'@
+
     if ($Variant -eq 'Desktop') {
         $desktopPackagesYaml = @'
   - ubuntu-desktop-minimal
@@ -3504,9 +3539,7 @@ ethernets:
         # NetworkManager keyfile config: keep NM running for the GUI, but
         # ignore the lab interface so systemd-networkd's DHCP wins
         # unambiguously on every boot.
-        $desktopWriteFilesYaml = @'
-
-write_files:
+        $bakeWriteFilesYaml += @'
   - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
     content: |
       [keyfile]
@@ -3537,8 +3570,9 @@ packages:
   - qemu-guest-agent
   - openssh-server
 $desktopPackagesYaml
-$desktopWriteFilesYaml
+$bakeWriteFilesYaml
 runcmd:
+  - systemctl daemon-reload || true
   - systemctl enable qemu-guest-agent.service || true
   - systemctl enable hv-kvp-daemon.service || true
   - systemctl enable hv-vss-daemon.service || true
