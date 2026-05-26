@@ -3651,38 +3651,52 @@ $bakeUserCleanupYaml
         Set-VMFirmware -VM $vm -BootOrder $hdd, $dvd -ErrorAction Stop
 
         Start-VM -VM $vm -ErrorAction Stop
-        Write-Log "Bake: VM started; polling for IPv4 (KVP may not be available yet)..."
+        Write-Log "Bake: VM started; monitoring NIC traffic to verify network connectivity..."
 
-        # Best-effort IP check.  The KVP daemon (hv-kvp-daemon, provided by
-        # linux-cloud-tools-virtual) is one of the packages being INSTALLED
-        # during this bake -- it is NOT in the base cloud image.  So
-        # Get-VMNetworkAdapter.IPAddresses will be empty until cloud-init
-        # finishes installing packages and the daemon starts.  For the
-        # Desktop variant that can take 30+ minutes (ubuntu-desktop-minimal
-        # is in the same apt transaction).
-        #
-        # If we see an IP early, great -- log it and move on.  If not, log
-        # a warning and continue to the shutdown wait; the Desktop dpkg
-        # verification step in runcmd is the real safety net.
-        $ipWaitSec = 90
-        $ipElapsed = 0
-        $bakeIp = $null
-        while ($ipElapsed -lt $ipWaitSec) {
-            Start-Sleep -Seconds 5
-            $ipElapsed += 5
-            $ips = @((Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue).IPAddresses |
-                Where-Object { $_ -and $_ -notmatch ':' })
-            if ($ips.Count -gt 0) {
-                $bakeIp = $ips[0]
+        # Enable Hyper-V resource metering so we can read NIC byte counters.
+        # Without metering, Get-VMNetworkAdapter.BytesReceived is always 0.
+        Enable-VMResourceMetering -VM $vm -ErrorAction SilentlyContinue
+
+        # NIC traffic check.  We can't rely on KVP for an IP (the daemon is
+        # being installed during this bake), but we CAN verify the NIC is
+        # sending/receiving traffic.  If the interface name doesn't match the
+        # network-config (e.g. eth0 vs enp1s0), netplan silently ignores the
+        # config and the NIC stays completely dark -- zero bytes in/out.
+        # Catch that within 90s instead of waiting the full bake timeout.
+        $nicWaitSec = 90
+        $nicElapsed = 0
+        $nicOk = $false
+        while ($nicElapsed -lt $nicWaitSec) {
+            Start-Sleep -Seconds 10
+            $nicElapsed += 10
+            $nic = Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue
+            $rxBytes = 0; $txBytes = 0
+            if ($nic) {
+                # Measure-VM aggregates metered traffic; fall back to NIC
+                # counters if metering data isn't available yet.
+                try {
+                    $report = (Measure-VM -VM $vm -ErrorAction SilentlyContinue).NetworkMeteredTrafficReport
+                    if ($report) {
+                        $rxBytes = ($report | Where-Object { $_.Direction -eq 'Inbound' } |
+                            Measure-Object -Property TotalTraffic -Sum).Sum
+                        $txBytes = ($report | Where-Object { $_.Direction -eq 'Outbound' } |
+                            Measure-Object -Property TotalTraffic -Sum).Sum
+                    }
+                }
+                catch { }
+            }
+            if ($rxBytes -gt 0 -or $txBytes -gt 0) {
+                Write-Log "Bake: NIC has traffic after ${nicElapsed}s (rx=${rxBytes}MB tx=${txBytes}MB). Network is up." -Success
+                $nicOk = $true
                 break
             }
         }
-        if (-not $bakeIp) {
-            Write-Log "Bake: no IPv4 visible after ${ipWaitSec}s (KVP daemon not yet installed -- this is expected during bake). Continuing to wait for cloud-init shutdown..." -Warning
+        if (-not $nicOk) {
+            Write-Log "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. Network config likely failed (interface name mismatch?). Aborting." -Failure
+            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
+            throw "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. The guest interface name may not match the network-config. Check 'ip link' in the guest console."
         }
-        else {
-            Write-Log "Bake: VM has IP $bakeIp after ${ipElapsed}s." -Success
-        }
+
         Write-Log "Bake: waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
 
         $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
@@ -3708,6 +3722,7 @@ $bakeUserCleanupYaml
             if ($bakeVM.State -ne 'Off') {
                 Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
             }
+            Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
             # Remove-VM keeps the VHDX file; we only want to drop the VM
             # config and DVD attachment.
             Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
