@@ -235,10 +235,23 @@ chpasswd:
         # the matching binary the systemd unit comes up but the daemon
         # exits immediately and KVP stays empty. Install the kernel-exact
         # tools packages here at runtime when $(uname -r) is known.
-        'apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" || true',
-        'systemctl daemon-reload || true',
-        'systemctl restart hv-kvp-daemon.service || systemctl enable --now hv-kvp-daemon.service || true',
-        'systemctl restart hv-vss-daemon.service || systemctl enable --now hv-vss-daemon.service || true',
+        #
+        # Do NOT restart hv-kvp-daemon.service from runcmd: hv_utils'
+        # in-kernel KVP IC registration (~40s into first boot) creates
+        # /sys/devices/virtual/misc/vmbus!hv_kvp, and the service has
+        # BindsTo= against that device. If we restart while the device
+        # node hasn't appeared yet, systemd marks the unit as
+        # dependency-failed and won't retry until next boot -- which is
+        # exactly the "KVP not reporting" symptom that bit ADA-PROXY1.
+        # The reboot below lets the next boot start the daemon cleanly
+        # in proper ordering after hv_utils has fully registered.
+        # Only fetch kernel-exact tools if the running kernel's tools
+        # package isn't already installed. The base image bakes in the
+        # matching pair at build time, so this is a no-op (skip the apt
+        # round-trip) on the common path. It only kicks in if cloud-init's
+        # package_upgrade bumped the kernel on first boot, leaving the
+        # baked tools one version stale.
+        'dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 || apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)" || true',
         'ufw allow OpenSSH || true',
         # systemd-resolved consults FallbackDNS only when no DHCP/static DNS
         # answers. Restart so the dropin in write_files is picked up before
