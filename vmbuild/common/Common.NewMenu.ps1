@@ -753,10 +753,12 @@ $script:AnsiCsiPattern = [regex]('\x1b\[[0-9;?]*[A-Za-z]')
 
 # Visible character count for a string that may contain ANSI escapes.
 function Get-MenuVisibleLength {
-    param([string]$Text)
-    if ([string]::IsNullOrEmpty($Text)) { return 0 }
-    if ($Text.IndexOf([char]27) -lt 0) { return $Text.Length }
-    return $script:AnsiCsiPattern.Replace($Text, '').Length
+    param($Text)
+    if ($null -eq $Text) { return 0 }
+    $s = [string]$Text
+    if ($s.Length -eq 0) { return 0 }
+    if ($s.IndexOf([char]27) -lt 0) { return $s.Length }
+    return $script:AnsiCsiPattern.Replace($s, '').Length
 }
 
 # Number of extra rows a row of $VisibleLen visible chars consumes when the
