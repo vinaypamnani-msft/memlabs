@@ -791,9 +791,28 @@ function New-LinuxVirtualMachine {
             Get-List -FlushCache | Out-Null
         }
 
+        # Wipe any stale VM directory from a previous deploy. SilentlyContinue
+        # on the first pass swallows transient file locks (Hyper-V Worker still
+        # holding handles after a failed/partial Remove-Lab), so we then
+        # verify and retry loudly. If we don't catch this, the next Get-File
+        # below may copy on top of yesterday's VHDX (BITS is permissive) and
+        # the VM boots stale state with the wrong (or no) vmbuildadmin user,
+        # causing 'Permission denied (publickey)' AND console-login failure
+        # despite the seed ISO being correct.
         $vmSubPath = Join-Path $VmPath $VmName
         if (Test-Path $vmSubPath) {
             Remove-Item -Path $vmSubPath -Force -Recurse -ErrorAction SilentlyContinue
+            if (Test-Path $vmSubPath) {
+                Write-Log "$VmName`: Initial cleanup of $vmSubPath failed; retrying after 5s" -Warning
+                Start-Sleep -Seconds 5
+                try {
+                    Remove-Item -Path $vmSubPath -Force -Recurse -ErrorAction Stop
+                }
+                catch {
+                    Write-Log "$VmName`: Could not remove stale VM dir $vmSubPath`: $($_.Exception.Message). Refusing to deploy on top of a stale OS disk." -Failure -OutputStream
+                    return $false
+                }
+            }
         }
 
         Write-Log "$VmName`: Creating Gen2 Linux VM"
@@ -816,10 +835,34 @@ function New-LinuxVirtualMachine {
         # Copy the base VHDX to the VM dir as its OS disk.
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
+        # Defensive: New-VM (above) just created $vm.Path fresh, so this file
+        # should not exist. If it does, something else left it behind --
+        # refuse rather than risk Get-File/BITS copying on top of a stale
+        # disk (which is what produced the 'Permission denied (publickey)' +
+        # console-login failure symptom described in the commit message).
+        if (Test-Path $osDiskPath) {
+            try {
+                Remove-Item -Path $osDiskPath -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Log "$VmName`: Existing OS disk $osDiskPath could not be removed: $($_.Exception.Message)" -Failure -OutputStream
+                return $false
+            }
+        }
         $worked = Get-File -Source $SourceDiskPath -Destination $osDiskPath `
             -DisplayName "Copying Linux base image to $osDiskPath" -Action "Copying"
         if (-not $worked) {
             Write-Log "$VmName`: Failed to copy $SourceDiskPath -> $osDiskPath." -Failure
+            return $false
+        }
+        # Sanity-check the copy actually produced a fresh disk. If the source
+        # is 3GB and the destination is 0 bytes or radically smaller, BITS
+        # silently no-op'd over a stale file or hit a file-lock; better to
+        # bail now than boot a broken VM and waste 5+ minutes on SSH probes.
+        $srcLen = (Get-Item -LiteralPath $SourceDiskPath).Length
+        $dstLen = (Get-Item -LiteralPath $osDiskPath -ErrorAction SilentlyContinue).Length
+        if (-not $dstLen -or $dstLen -lt ($srcLen * 0.5)) {
+            Write-Log "$VmName`: OS disk copy looks suspect (src=$srcLen dst=$dstLen). Refusing to continue." -Failure -OutputStream
             return $false
         }
 
