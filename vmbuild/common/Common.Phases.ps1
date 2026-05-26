@@ -300,6 +300,14 @@ function Start-PhaseJobs {
     $job_created_yes = 0
     $job_created_no = 0
 
+    # Phase10Job (and any other scriptblock dispatched from here that uses
+    # the bare-name form) references $using:devBranchValue. The Start-Job
+    # parent must have it in scope or the job-creation call throws
+    # "The value of the using variable '$using:devBranchValue' cannot be
+    # retrieved because it has not been set in the local session."
+    # Mirror the same shim Start-NormalJobs uses so both call sites agree.
+    $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
+
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
     $ConfigurationData = $null
