@@ -453,10 +453,11 @@ function New-RDCManFileFromHyperV {
                 # logonCredentials uses vmbuildadmin + LocalAdmin password (matches
                 # cloud-init chpasswd).
                 $hasLinuxRdp = $true
-                $linuxName = $vm.VmName
-                if ([string]::IsNullOrWhiteSpace($linuxName) -and $vm.LastKnownIP) {
-                    $linuxName = $vm.LastKnownIP
-                }
+                # Use IP as the RDCMan connection target. The host resolves
+                # Windows VMs via LLMNR, but Ubuntu doesn't respond to LLMNR
+                # so hostname-based connections fail. Fall back to vmName if
+                # no IP is known yet (e.g. VM not started).
+                $linuxName = if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) { $vm.LastKnownIP } else { $vm.VmName }
                 $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
                 $cLinux = [PsCustomObject]@{}
