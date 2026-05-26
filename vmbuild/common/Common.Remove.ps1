@@ -129,8 +129,8 @@ function Remove-VirtualMachine {
 
     # -- Linux: capture IPs before stopping (KVP dies with the VM) --
     $linuxIPs = @()
-    $isLinux = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
-    if ($isLinux) {
+    $isLinuxVm = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
+    if ($isLinuxVm) {
         # Live adapter IPs (available only while the VM is running)
         $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
             Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
