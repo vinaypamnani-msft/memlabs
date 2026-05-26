@@ -3557,10 +3557,36 @@ write_files:
 '@
     }
 
+    # Temporary console user for bake debugging (vmconnect).  Password comes
+    # from $Common.LocalAdmin so nothing is hardcoded in the repo.  The user
+    # is deleted from /etc/shadow before cloud-init clean so the baked VHDX
+    # ships with no stale credentials.
+    $bakeUserYaml = ''
+    $bakeUserCleanupYaml = ''
+    if ($Common -and $Common.LocalAdmin) {
+        try { $bakePwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $bakePwd = $null }
+        if ($bakePwd) {
+            $bakePwdQuoted = "'" + ($bakePwd -replace "'", "''") + "'"
+            $bakeUserYaml = @"
+
+users:
+  - name: memlabs
+    plain_text_passwd: $bakePwdQuoted
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+
+ssh_pwauth: true
+"@
+            $bakeUserCleanupYaml = '  - userdel -r memlabs 2>/dev/null || true'
+        }
+    }
+
     $userData = @"
 #cloud-config
 hostname: memlabs-bake
 preserve_hostname: false
+$bakeUserYaml
 
 package_update: true
 package_upgrade: false
@@ -3577,6 +3603,7 @@ runcmd:
   - systemctl enable hv-kvp-daemon.service || true
   - systemctl enable hv-vss-daemon.service || true
 $desktopRuncmdYaml
+$bakeUserCleanupYaml
   - cloud-init clean --logs --seed --machine-id || true
   - truncate -s 0 /etc/machine-id
   - rm -f /var/lib/dbus/machine-id
