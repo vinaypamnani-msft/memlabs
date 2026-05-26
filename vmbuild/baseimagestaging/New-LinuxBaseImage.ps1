@@ -321,6 +321,21 @@ else {
 # Resize-VHD requires the file to have a .vhd/.vhdx extension, so we can't
 # append .partial; instead prefix the basename.
 $tempVhdx = Join-Path $linuxStagingDir ("_partial_" + $VhdxFileName)
+
+# Clean up any stale bake VMs from a previous interrupted run.  Ctrl+C can
+# bypass the bake function's finally block, leaving an orphan VM that holds
+# the _partial_ VHDX file lock.  Must happen here (before Remove-Item) rather
+# than inside Invoke-LinuxBaseImageBake, because the lock blocks us before we
+# even reach the bake call.
+$staleVMs = @(Get-VM -Name 'memlabs-bake-*' -ErrorAction SilentlyContinue)
+foreach ($staleVM in $staleVMs) {
+    Write-Log "Removing stale bake VM '$($staleVM.Name)' (state=$($staleVM.State))." -Warning
+    if ($staleVM.State -ne 'Off') {
+        Stop-VM -VM $staleVM -TurnOff -Force -ErrorAction SilentlyContinue
+    }
+    Remove-VM -VM $staleVM -Force -ErrorAction SilentlyContinue
+}
+
 if (Test-Path $tempVhdx) { Remove-Item $tempVhdx -Force }
 
 Write-Log "Converting qcow2 to VHDX (dynamic, subformat=dynamic)..." -Activity
