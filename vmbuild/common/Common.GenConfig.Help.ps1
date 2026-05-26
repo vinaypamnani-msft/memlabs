@@ -63,6 +63,7 @@ function Get-GenericHelp {
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
         "enableRDP" { "Install xrdp + a lightweight XFCE desktop on this Linux VM via cloud-init, open TCP/3389 in ufw, and add an RDCMan entry that auto-logs in as vmbuildadmin using the lab's LocalAdmin password. Use this when you need a GUI on the Proxy VM (browser, file manager, etc.)." }
         "joinDomain" { "On first boot, install realmd/SSSD and join this Linux VM to the lab AD domain using vmOptions.adminName + the host's LocalAdmin password. Waits up to 20min for the DC's DNS to come up, then runs 'realm join'. Domain Admins get sudo NOPASSWD. Leave off for a standalone DHCP-only Linux VM." }
+        "useProxy" { "Route this VM's outbound HTTP/HTTPS through the domain's Squid Proxy VM. CM site systems also get Set-CMSiteSystemServer -UseProxy. Requires a Proxy VM." }
         "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients (client OS), PushCMClientToServers (server OS DomainMembers), or PushCMClientToSiteSystems (site system roles)." }
         "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
