@@ -3588,12 +3588,19 @@ $desktopRuncmdYaml
         Set-VMFirmware -VM $vm -BootOrder $hdd, $dvd -ErrorAction Stop
 
         Start-VM -VM $vm -ErrorAction Stop
-        Write-Log "Bake: VM started; waiting up to 90s for an IPv4 address..."
+        Write-Log "Bake: VM started; polling for IPv4 (KVP may not be available yet)..."
 
-        # Poll for an IP before committing to the long shutdown wait.
-        # KVP daemon (hv-kvp-daemon) ships in the base cloud image, so
-        # Get-VMNetworkAdapter.IPAddresses should populate once cloud-init
-        # applies the network config (static or DHCP).
+        # Best-effort IP check.  The KVP daemon (hv-kvp-daemon, provided by
+        # linux-cloud-tools-virtual) is one of the packages being INSTALLED
+        # during this bake -- it is NOT in the base cloud image.  So
+        # Get-VMNetworkAdapter.IPAddresses will be empty until cloud-init
+        # finishes installing packages and the daemon starts.  For the
+        # Desktop variant that can take 30+ minutes (ubuntu-desktop-minimal
+        # is in the same apt transaction).
+        #
+        # If we see an IP early, great -- log it and move on.  If not, log
+        # a warning and continue to the shutdown wait; the Desktop dpkg
+        # verification step in runcmd is the real safety net.
         $ipWaitSec = 90
         $ipElapsed = 0
         $bakeIp = $null
@@ -3608,11 +3615,12 @@ $desktopRuncmdYaml
             }
         }
         if (-not $bakeIp) {
-            Write-Log "Bake: VM '$vmName' has no IPv4 after ${ipWaitSec}s. Aborting." -Failure
-            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
-            throw "Bake: VM '$vmName' has no IPv4 address after ${ipWaitSec}s. The bake VM needs internet access for apt. Check switch '$SwitchName' NAT/DHCP configuration."
+            Write-Log "Bake: no IPv4 visible after ${ipWaitSec}s (KVP daemon not yet installed -- this is expected during bake). Continuing to wait for cloud-init shutdown..." -Warning
         }
-        Write-Log "Bake: VM has IP $bakeIp after ${ipElapsed}s; waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
+        else {
+            Write-Log "Bake: VM has IP $bakeIp after ${ipElapsed}s." -Success
+        }
+        Write-Log "Bake: waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
 
         $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
         $clean = $false
