@@ -131,9 +131,19 @@ function Remove-VirtualMachine {
     $linuxIPs = @()
     $isLinux = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
     if ($isLinux) {
+        # Live adapter IPs (available only while the VM is running)
         $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
             Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
             Select-Object -Unique)
+
+        # Fallback: LastKnownIP from VM notes (works even if VM is already off)
+        try {
+            $vmNoteObj = Get-VMNote -VMName $VmName
+            if ($vmNoteObj.LastKnownIP -and $vmNoteObj.LastKnownIP -notin $linuxIPs) {
+                $linuxIPs += $vmNoteObj.LastKnownIP
+            }
+        }
+        catch {}
     }
 
     # -- Ensure VM is stopped before touching files --
@@ -495,7 +505,8 @@ function Remove-Domain {
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
-            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM." -OutputStream -Failure
+            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM. $($_.Exception.Message)" -OutputStream -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
         }
     }
 

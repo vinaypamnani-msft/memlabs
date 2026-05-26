@@ -431,9 +431,11 @@ $global:VM_Create = {
                     return
                 }
 
-                # Persist the IP so Remove-Lab can scrub known_hosts even if
-                # the VM is off (KVP is unavailable after power-off).
-                Set-VMNote -vmName $currentItem.vmName -vmNote @{ LastKnownIP = $linuxIP }
+                # Attach the IP to the VM config object so the New-VmNote
+                # call below (which copies all $currentItem.PSObject.Properties)
+                # persists it as LastKnownIP in the VM note. Remove-Lab uses
+                # this to scrub known_hosts even when the VM is off.
+                $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $linuxIP -Force
 
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
@@ -563,7 +565,7 @@ $global:VM_Create = {
 
                 # Persist the IP so Remove-Lab can scrub known_hosts even if
                 # the VM is off (KVP is unavailable after power-off).
-                Set-VMNote -vmName $currentItem.vmName -vmNote @{ LastKnownIP = $linuxIP }
+                Set-VMNote -vmName $currentItem.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $linuxIP })
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
                 return
