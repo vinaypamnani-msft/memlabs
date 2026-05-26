@@ -148,7 +148,12 @@ function Start-Phase {
             $null = Set-LinuxVmsDcDns -DeployConfig $deployConfig
         }
 
-        Set-WindowsClientProxyForConfig -deployConfig $deployConfig | Out-Null
+        # NOTE: Set-WindowsClientProxyForConfig used to run here as a serial
+        # foreach over Windows clients. Per-VM proxy client config now lives in
+        # $global:VM_Config (Phase 2 post-DSC block) so it parallelizes with
+        # every other per-VM Phase 2 job. The function remains callable for
+        # Fix-* scripts and manual reruns.
+
         # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
         # in deployConfig (VM Notes not yet written on first-run cases).
         Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null

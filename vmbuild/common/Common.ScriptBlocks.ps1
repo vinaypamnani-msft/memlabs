@@ -2637,6 +2637,33 @@ $global:VM_Config = {
             else {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
             }
+
+            # Per-VM proxy client config. Runs inside this VM's Phase 2 job so
+            # it parallelizes with every other VM's job instead of serial-looping
+            # in the post-Phase-2 hook. No-op for VMs without useProxy=true and
+            # for hard-excluded roles (handled inside Test-VmUsesProxy).
+            try {
+                if (Test-VmUsesProxy -Vm $currentItem -DeployConfig $deployConfig) {
+                    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+                    if (-not $proxyVm) {
+                        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+                        if ($existingProxyName) {
+                            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+                        }
+                    }
+                    if ($proxyVm) {
+                        $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+                        $null = Set-WindowsClientProxy -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName `
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): useProxy=true but no Proxy VM in config or domain; skipping client config" -Warning
+                    }
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Proxy client config failed: $_" -Warning
+            }
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
