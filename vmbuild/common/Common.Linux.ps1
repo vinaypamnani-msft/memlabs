@@ -3542,6 +3542,13 @@ write_files:
         # NetworkManager keyfile config: keep NM running for the GUI, but
         # ignore the lab interface so systemd-networkd's DHCP wins
         # unambiguously on every boot.
+        # NOTE: "`n" is required because PowerShell here-strings do NOT
+        # include a trailing newline. Without it, the last line of the
+        # previous write_files entry (WantedBy=multi-user.target) runs
+        # into this entry's '- path:' on the same line, producing a
+        # duplicate 'content:' key that makes cloud-init write NM keyfile
+        # config into the KVP service path.
+        $bakeWriteFilesYaml += "`n"
         $bakeWriteFilesYaml += @'
   - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
     content: |
