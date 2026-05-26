@@ -454,7 +454,7 @@ write_files:
       ConditionKernelCommandLine=!snapd_recovery_mode
       DefaultDependencies=no
       After=systemd-remount-fs.service systemd-modules-load.service
-      Before=shutdown.target cloud-init-local.service
+      Before=shutdown.target cloud-init-local.service walinuxagent.service
       Conflicts=shutdown.target
       RequiresMountsFor=/var/lib/hyperv
       [Service]
