@@ -468,6 +468,7 @@ ethernets:
     match:
       name: "e*"
     dhcp4: true
+    optional: true
     dhcp4-overrides:
       use-dns: false
     nameservers:
