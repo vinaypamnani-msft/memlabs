@@ -456,8 +456,15 @@ function New-RDCManFileFromHyperV {
                 # Use IP as the RDCMan connection target. The host resolves
                 # Windows VMs via LLMNR, but Ubuntu doesn't respond to LLMNR
                 # so hostname-based connections fail. Fall back to vmName if
-                # no IP is known yet (e.g. VM not started).
-                $linuxName = if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) { $vm.LastKnownIP } else { $vm.VmName }
+                # no IP is available (VM never started).
+                $linuxIp = $vm.LastKnownIP
+                if ([string]::IsNullOrWhiteSpace($linuxIp)) {
+                    try {
+                        $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
+                            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+                    } catch {}
+                }
+                $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
                 $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
                 $cLinux = [PsCustomObject]@{}
