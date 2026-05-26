@@ -3485,11 +3485,22 @@ local-hostname: memlabs-bake
     # Desktop variant adds: ubuntu-desktop-minimal + GDM3 + NetworkManager
     # (real Ubuntu Desktop package surface for MDM/EDR posture checks) and
     # xrdp/xorgxrdp so a baked image can be RDP'd into without per-deploy
-    # apt traffic. write_files drops cloud.cfg.d/99-network-renderer.cfg so
-    # cloud-init at deploy time generates netplan in NetworkManager-renderer
-    # form (NM owns the interface; systemd-networkd stays disabled). The
-    # final shutdown/cloud-init-clean steps run after this block regardless
-    # of variant, so the published VHDX is always a clean first-boot image.
+    # apt traffic.
+    #
+    # Networking notes:
+    #   Previous bake forced cloud-init's netplan renderer to NetworkManager
+    #   and disabled systemd-networkd. That looked clean but it removed the
+    #   only DHCP mechanism that actually works on first boot:
+    #     - Ubuntu 24.04 dropped isc-dhcp-client entirely (no dhclient
+    #       fallback for anyone).
+    #     - NetworkManager doesn't auto-claim eth0 in the first ~60s after a
+    #       cloud-init reseed, so the deploy's Wait-ForLinuxVm loop times
+    #       out with no IPv4.
+    #   Fix: leave netplan on its default systemd-networkd renderer (same as
+    #   the Server variant, which is proven working), keep NM installed +
+    #   enabled for the GUI session, but tell NM to leave eth* unmanaged so
+    #   the two don't race for the lease. NM still owns wifi / dynamic GUI
+    #   connections; networkd owns the static lab interface.
     $desktopPackagesYaml = ''
     $desktopWriteFilesYaml = ''
     $desktopRuncmdYaml = ''
@@ -3502,20 +3513,21 @@ local-hostname: memlabs-bake
   - xorgxrdp
 '@
 
+        # NetworkManager keyfile config: keep NM running for the GUI, but
+        # ignore the lab interface so systemd-networkd's DHCP wins
+        # unambiguously on every boot.
         $desktopWriteFilesYaml = @'
 
 write_files:
-  - path: /etc/cloud/cloud.cfg.d/99-network-renderer.cfg
+  - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
     content: |
-      system_info:
-        network:
-          renderers: ['NetworkManager']
+      [keyfile]
+      unmanaged-devices=interface-name:eth*
 '@
 
         $desktopRuncmdYaml = @'
   - systemctl set-default graphical.target
   - systemctl enable gdm3.service || true
-  - systemctl disable systemd-networkd.service || true
   - systemctl enable NetworkManager.service || true
   - systemctl enable xrdp.service || true
   - adduser xrdp ssl-cert || true
