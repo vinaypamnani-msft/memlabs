@@ -55,6 +55,30 @@ function Get-LinuxAdminSshKeyPair {
         }
     }
 
+    # Lock private key down so OpenSSH on Windows will actually use it.
+    # Without this, ssh.exe rejects the key ('bad permissions / too open' or
+    # 'Permission denied' when run as a non-owner) and silently falls back
+    # to password auth. The cache lives under ProgramData which inherits
+    # 'Authenticated Users: Read' from the parent -- OpenSSH refuses any key
+    # readable beyond {owner, SYSTEM, Administrators}.
+    # Apply the same ACL story as the in-VM Set-WindowsClientProxy helper:
+    # disable inheritance, owner=BUILTIN\Administrators, only SYSTEM + Admins
+    # have FullControl. That works regardless of which admin account invokes
+    # ssh (interactive elevated user, scheduled task as SYSTEM, etc.).
+    try {
+        $acl = Get-Acl -Path $privateKeyPath
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
+        $sysSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
+        $admSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        $acl.SetOwner($admSid)
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sysSid, 'FullControl', 'Allow')))
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($admSid, 'FullControl', 'Allow')))
+        Set-Acl -Path $privateKeyPath -AclObject $acl
+    } catch {
+        Write-Log "Failed to lock down ACL on $privateKeyPath`: $_" -Warning
+    }
+
     return [pscustomobject]@{
         PrivateKeyPath = $privateKeyPath
         PublicKeyPath  = $publicKeyPath
@@ -2947,16 +2971,24 @@ function Set-ProxyAdminAccessOnVm {
             [System.IO.File]::WriteAllText($privPath, ($privKey -replace "`r`n", "`n"))
             [System.IO.File]::WriteAllText($pubPath, ($pubKey -replace "`r`n", "`n"))
 
-            # Lock private key down so OpenSSH on Windows will use it:
-            #   - Owner must be one of {current user, Administrators, SYSTEM}
-            #     or ssh.exe rejects with 'bad permissions / too open'.
-            #   - Only owner/SYSTEM/Administrators may appear in the ACL.
-            #   - No inherited ACEs (otherwise Authenticated Users etc. leak
-            #     in from C:\ProgramData and OpenSSH refuses the key).
-            # The shortcuts live in C:\Users\Public\Desktop, so the launcher
-            # could be ANY local admin / domain admin. Setting owner to
-            # BUILTIN\Administrators is the one choice OpenSSH accepts for
-            # all of them.
+            # ACL story on the SOURCE key (C:\ProgramData\memlabs\ssh):
+            #   - Owner = BUILTIN\Administrators, FullControl for SYSTEM + Admins.
+            #   - Authenticated Users get READ. Lab-only tradeoff: any logged-in
+            #     domain user can read the private key, but it's the same key
+            #     that's already authorized for vmbuildadmin on every Linux VM
+            #     in the lab, so the exposure is bounded.
+            #
+            # Why allow Authenticated Users read: shortcuts on Public Desktop
+            # are launched by domain admins whose UAC-filtered token does NOT
+            # carry the Administrators SID. With an Admins-only ACL, ssh.exe
+            # under that token can't open() the key and falls back to a
+            # password prompt ('Load key ...: Permission denied').
+            #
+            # The wrapper (memlabs-ssh-proxy.cmd, installed below) copies the
+            # key into the caller's %LOCALAPPDATA% with a user-private ACL,
+            # then runs ssh -i on that copy. OpenSSH's strict-permissions
+            # check then sees a file owned by the current user with no other
+            # principals, which it accepts.
             #
             # NOTE: starting from `New-Object FileSecurity` (empty descriptor)
             # leaves owner unset, which OpenSSH treats as untrusted and
@@ -2964,13 +2996,16 @@ function Set-ProxyAdminAccessOnVm {
             $acl = Get-Acl -Path $privPath
             $acl.SetAccessRuleProtection($true, $false)
             foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
-            $sysSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'           # NT AUTHORITY\SYSTEM
-            $admSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'      # BUILTIN\Administrators
+            $sysSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'         # NT AUTHORITY\SYSTEM
+            $admSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'     # BUILTIN\Administrators
+            $authSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'         # NT AUTHORITY\Authenticated Users
             $acl.SetOwner($admSid)
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
                     $sysSid, 'FullControl', 'Allow')))
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
                     $admSid, 'FullControl', 'Allow')))
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $authSid, 'Read', 'Allow')))
             Set-Acl -Path $privPath -AclObject $acl
 
             # Locate ssh.exe (built-in OpenSSH client; present on all current
@@ -2987,28 +3022,49 @@ function Set-ProxyAdminAccessOnVm {
             $desktop = 'C:\Users\Public\Desktop'
             $shell = New-Object -ComObject WScript.Shell
 
-            # Common ssh args: identity file, batch mode for the tail (no
-            # password prompt), accept unknown host key, suppress known_hosts
-            # churn. cmd.exe /k keeps the window open after exit so the user
-            # can see error messages.
-            $sshArgsBase = "-i `"$privPath`" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn"
+            # Install a wrapper that stages a user-private copy of the key
+            # under %LOCALAPPDATA%\memlabs\ssh on first use. OpenSSH on
+            # Windows requires the key file to be readable ONLY by the caller
+            # (or SYSTEM/Admins) AND owned by one of those -- the source key
+            # in ProgramData allows Authenticated Users read, which OpenSSH
+            # rejects with 'bad permissions'. Per-user copy sidesteps both
+            # the strict check and the UAC token-filtering issue (non-elevated
+            # admins don't carry the Admins SID and can't read an Admins-only
+            # ACL even though they're nominally admins).
+            $wrapperPath = Join-Path $sshDir 'memlabs-ssh-proxy.cmd'
+            $wrapper = @"
+@echo off
+setlocal
+set SRC=$privPath
+set DST=%LOCALAPPDATA%\memlabs\ssh\memlabs_ed25519
+if not exist "%LOCALAPPDATA%\memlabs\ssh" mkdir "%LOCALAPPDATA%\memlabs\ssh" >nul 2>&1
+if not exist "%DST%" (
+    copy /Y "%SRC%" "%DST%" >nul
+    icacls "%DST%" /inheritance:r >nul 2>&1
+    icacls "%DST%" /grant:r "%USERNAME%:F" >nul 2>&1
+    icacls "%DST%" /grant:r "SYSTEM:F" >nul 2>&1
+)
+"$sshExe" -i "%DST%" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyFqdn %*
+endlocal
+"@
+            [System.IO.File]::WriteAllText($wrapperPath, $wrapper)
 
-            # Interactive SSH shell. cmd.exe /k strips outermost quotes when
-            # there are 2+ quoted tokens, so wrap with an extra outer pair.
+            # Interactive SSH shell. cmd.exe /k keeps the window open after
+            # ssh exits so the user can see any messages.
             $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
             $sc1 = $shell.CreateShortcut($lnk1)
             $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc1.Arguments = "/k `"`"$sshExe`" $sshArgsBase`""
+            $sc1.Arguments = "/k `"$wrapperPath`""
             $sc1.WorkingDirectory = 'C:\'
             $sc1.IconLocation = "$sshExe,0"
             $sc1.Description = "Open an SSH session to $proxyFqdn as vmbuildadmin"
             $sc1.Save()
 
-            # Squid access-log tail
+            # Squid access-log tail (pass tail command as wrapper args)
             $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
             $sc2 = $shell.CreateShortcut($lnk2)
             $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log`""
+            $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -F /var/log/squid/access.log"
             $sc2.WorkingDirectory = 'C:\'
             $sc2.IconLocation = "$sshExe,0"
             $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn"
