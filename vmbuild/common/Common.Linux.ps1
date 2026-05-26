@@ -3451,7 +3451,9 @@ local-hostname: memlabs-bake
     $networkConfig = @"
 version: 2
 ethernets:
-  eth0:
+  primary:
+    match:
+      name: "e*"
     addresses: [172.16.200.10/24]
     routes:
       - to: 0.0.0.0/0
