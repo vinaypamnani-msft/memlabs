@@ -749,7 +749,15 @@ $script:MenuLayout = @{
 # Regex matching ANSI CSI escape sequences (\e[...m, \e[...K, etc.). Used by
 # the wrap-aware line-count helpers below to measure *visible* text length
 # rather than raw .Length (which over-counts ANSI-colored rows).
-$script:AnsiCsiPattern = [regex]('\x1b\[[0-9;?]*[A-Za-z]')
+# Module-level constant accessed through a function getter so callers don't
+# depend on `$script:` scope resolution (which can return $null when this file
+# is dot-sourced into a non-script scope, e.g. inside Start-Job blocks).
+function Get-AnsiCsiPattern {
+    if (-not $script:_AnsiCsiPatternCache) {
+        $script:_AnsiCsiPatternCache = [regex]'\x1b\[[0-9;?]*[A-Za-z]'
+    }
+    return $script:_AnsiCsiPatternCache
+}
 
 # Visible character count for a string that may contain ANSI escapes.
 function Get-MenuVisibleLength {
@@ -758,7 +766,7 @@ function Get-MenuVisibleLength {
     $s = [string]$Text
     if ($s.Length -eq 0) { return 0 }
     if ($s.IndexOf([char]27) -lt 0) { return $s.Length }
-    return $script:AnsiCsiPattern.Replace($s, '').Length
+    return (Get-AnsiCsiPattern).Replace($s, '').Length
 }
 
 # Number of extra rows a row of $VisibleLen visible chars consumes when the
