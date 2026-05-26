@@ -432,19 +432,66 @@ write_files:
       RemainAfterExit=no
       [Install]
       WantedBy=multi-user.target
-  # Replacement hv-kvp-daemon unit. The Ubuntu-shipped unit (under
-  # /usr/lib/systemd/system/) has BindsTo= and ConditionPathExists=
-  # against the /dev/vmbus/hv_kvp device node. On first boot of a fresh
-  # Ubuntu 24.04 cloud image, hv_utils' in-kernel KVP IC registration
-  # races cloud-init's start-of-targets, so the device node sometimes
-  # doesn't exist yet when systemd evaluates the unit -- it then marks
-  # the unit dependency-failed and refuses to retry until next boot,
-  # leaving KVP empty and the host unable to read the VM IP.
-  # Files under /etc/systemd/system/ fully override /usr/lib/, so this
-  # unit replaces the parent (drop-ins were tried -- the empty-list reset
-  # for BindsTo= on Ubuntu 24.04's systemd doesn't actually clear the
-  # parent value). ExecStartPre polls for the device node up to 60s so
-  # we tolerate hv_utils being slow without dep-failing.
+  # ----------------------------------------------------------------------
+  # Why this override exists (read before touching):
+  #
+  # Symptom: on a freshly-built Ubuntu 24.04 Hyper-V VM, the host cannot
+  # read the guest's IP address. (Get-VMNetworkAdapter -VMName X).IPAddresses
+  # is empty and `systemctl status hv-kvp-daemon` reports:
+  #     Active: inactive (dead)
+  #     Condition: start condition failed at ...
+  #     ConditionPathExists=/dev/vmbus/hv_kvp was not met
+  # or:
+  #     hv-kvp-daemon.service: Job hv-kvp-daemon.service/start failed
+  #         with result 'dependency-failed'.
+  #
+  # Root cause: the Ubuntu-shipped unit at
+  # /usr/lib/systemd/system/hv-kvp-daemon.service contains:
+  #     BindsTo=sys-devices-virtual-misc-vmbus\x21hv_kvp.device
+  #     ConditionPathExists=/dev/vmbus/hv_kvp
+  # Both guards reference a device node that's created by the hv_utils
+  # kernel module when it completes KVP Integration Component negotiation
+  # with the host. On first boot this can take ~40 seconds. systemd
+  # evaluates the guards much earlier than that, marks the unit
+  # dependency-failed, and -- by design -- will not retry the unit for
+  # the remainder of the boot. KVP stays dark until the next reboot
+  # (where the same race can repeat).
+  #
+  # hv_kvp_daemon talks to the host through /dev/vmbus/hv_kvp directly;
+  # it does not need the network. The original guards exist to avoid a
+  # busy-loop on systems where hv_utils never loads at all. We achieve
+  # the same goal more gracefully with the ExecStartPre poll below.
+  #
+  # Why a full unit replacement and not a drop-in:
+  # We tried /etc/systemd/system/hv-kvp-daemon.service.d/wait-for-device.conf
+  # with the documented empty-list reset:
+  #     [Unit]
+  #     BindsTo=
+  #     ConditionPathExists=
+  # On Ubuntu 24.04's systemd this loads (systemctl cat shows it merged)
+  # but does NOT clear the parent values (systemctl show still reports
+  # the original BindsTo= and ConditionPathExists=). This is a known
+  # systemd merge-behavior quirk for device-bound BindsTo on that
+  # version. A full unit at /etc/systemd/system/ wins outright over
+  # /usr/lib/systemd/system/ -- no merge, no surprises.
+  #
+  # Surgical diff vs Ubuntu's original unit:
+  #   - REMOVED BindsTo=...hv_kvp.device       (the racy guard)
+  #   - REMOVED ConditionPathExists=/dev/vmbus/hv_kvp (the racy guard)
+  #   - ADDED   systemd-modules-load.service in After= (kmod-load gating)
+  #   - ADDED   TimeoutStartSec=75    (bound the poll explicitly)
+  #   - ADDED   ExecStartPre poll (graceful wait, up to 60s)
+  #   - ADDED   Restart=on-failure / RestartSec=5 (upstream had none)
+  # Everything else (DefaultDependencies=no, Conflicts=shutdown.target,
+  # Before=walinuxagent.service, RequiresMountsFor=/var/lib/hyperv,
+  # WantedBy=multi-user.target, ConditionVirtualization=microsoft,
+  # ConditionKernelCommandLine=!snapd_recovery_mode) is copied verbatim
+  # from upstream so future Ubuntu changes are easy to spot in a diff.
+  #
+  # If Ubuntu eventually ships an upstream fix (e.g. drops BindsTo= or
+  # the systemd merge bug is fixed and a drop-in becomes viable), this
+  # whole block can be removed -- nothing else in memlabs depends on it.
+  # ----------------------------------------------------------------------
   - path: /etc/systemd/system/hv-kvp-daemon.service
     permissions: '0644'
     content: |
