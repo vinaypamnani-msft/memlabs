@@ -334,11 +334,14 @@ function Test-ValidCmOptions {
         }
     }
 
-    # If any VM is opted-in to use the proxy (either via per-VM useProxy or via
-    # the domainDefaults UseProxyFor* fallback), a reachable Proxy VM must
-    # exist -- either in this config or already deployed (hidden) in the
-    # same domain. Otherwise clients get configured to point at a host that
-    # doesn't exist and the host-side ACLs deny-all their Internet egress.
+    # If any VM is opted-in to use the proxy (per-VM useProxy=true), a
+    # reachable Proxy VM must exist -- either in this config or already
+    # deployed (hidden) in the same domain. Otherwise clients get
+    # configured to point at a host that doesn't exist and the host-side
+    # ACLs deny-all their Internet egress. domainDefaults.UseProxyFor*
+    # are seed-only hints for Add-NewVMForRole and are never consulted
+    # at runtime / validation -- per-VM useProxy is the sole source of
+    # truth.
     if (Get-Command Test-VmUsesProxy -ErrorAction SilentlyContinue) {
         $optedIn = @($ConfigObject.virtualMachines | Where-Object {
                 -not $_.hidden -and (Test-VmUsesProxy -Vm $_ -DeployConfig $ConfigObject)
@@ -352,16 +355,7 @@ function Test-ValidCmOptions {
             catch { $existingProxy = $null }
             if (-not $existingProxy -or $existingProxy.Count -eq 0) {
                 $names = ($optedIn | Select-Object -ExpandProperty vmName) -join ', '
-                $cause = if ($ConfigObject.domainDefaults -and
-                             (($ConfigObject.domainDefaults.UseProxyForClients) -or
-                              ($ConfigObject.domainDefaults.UseProxyForCM) -or
-                              ($ConfigObject.domainDefaults.UseProxy))) {
-                    "domainDefaults UseProxyForClients/UseProxyForCM is enabled"
-                }
-                else {
-                    "one or more VMs have useProxy=true"
-                }
-                Add-ValidationMessage -Message "VM Validation: $cause but no Proxy VM exists in this config or the existing '$($ConfigObject.vmOptions.domainName)' domain. Affected VM(s): $names. Add a Linux VM with role=Proxy, or set UseProxyForClients/UseProxyForCM to false." -ReturnObject $ReturnObject -Failure
+                Add-ValidationMessage -Message "VM Validation: one or more VMs have useProxy=true but no Proxy VM exists in this config or the existing '$($ConfigObject.vmOptions.domainName)' domain. Affected VM(s): $names. Add a Linux VM with role=Proxy, or set useProxy=false on the affected VMs." -ReturnObject $ReturnObject -Failure
             }
         }
     }

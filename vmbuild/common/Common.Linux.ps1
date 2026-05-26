@@ -2755,6 +2755,20 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
 
+            # 3b) HKLM Wow6432Node IE settings -- the 32-bit registry view.
+            #     Internet Settings is NOT redirected by WOW64, but some
+            #     32-bit installers (notably adksetup.exe, a 32-bit WiX Burn
+            #     bundle) explicitly read from Wow6432Node first. Without
+            #     this, the ADK bootstrapper bypasses the proxy and hits the
+            #     host's broken egress, failing with "dead fwlink" download
+            #     errors. Mirror the 64-bit values here so 32-bit consumers
+            #     see the same proxy config.
+            $ieKeyWow = 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (-not (Test-Path $ieKeyWow)) { New-Item -Path $ieKeyWow -Force | Out-Null }
+            New-ItemProperty -Path $ieKeyWow -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $ieKeyWow -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
+            New-ItemProperty -Path $ieKeyWow -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+
             # 4) HKU\.DEFAULT IE settings -- this is what SYSTEM context reads.
             #    .NET WebClient / HttpWebRequest (used by DSC scripts running as
             #    LocalSystem) resolves its default proxy via

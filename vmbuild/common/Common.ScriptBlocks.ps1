@@ -1446,6 +1446,7 @@ $global:VM_Config = {
         else {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
+
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"
