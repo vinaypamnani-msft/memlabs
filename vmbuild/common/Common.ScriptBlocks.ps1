@@ -431,6 +431,10 @@ $global:VM_Create = {
                     return
                 }
 
+                # Persist the IP so Remove-Lab can scrub known_hosts even if
+                # the VM is off (KVP is unavailable after power-off).
+                Set-VMNote -vmName $currentItem.vmName -vmNote @{ LastKnownIP = $linuxIP }
+
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
                 # dynamic DNS registration themselves). Skip this when the DC
@@ -556,6 +560,11 @@ $global:VM_Create = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within ${waitMin}min." -Failure -OutputStream
                     return
                 }
+
+                # Persist the IP so Remove-Lab can scrub known_hosts even if
+                # the VM is off (KVP is unavailable after power-off).
+                Set-VMNote -vmName $currentItem.vmName -vmNote @{ LastKnownIP = $linuxIP }
+
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
                 return
             }

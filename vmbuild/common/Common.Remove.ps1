@@ -134,6 +134,18 @@ function Remove-VirtualMachine {
         $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
             Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
             Select-Object -Unique)
+        # Fallback: if the VM is already off, KVP reports nothing. Pull the
+        # last known IP from Hyper-V VM notes (persisted during deploy).
+        if ($linuxIPs.Count -eq 0) {
+            try {
+                $vmNote = Get-VMNote -VMName $VmName
+                if ($vmNote -and $vmNote.LastKnownIP) {
+                    $linuxIPs = @($vmNote.LastKnownIP)
+                    Write-Log "$VmName`: VM is off; using LastKnownIP '$($vmNote.LastKnownIP)' from notes for known_hosts scrub." -SubActivity
+                }
+            }
+            catch { }
+        }
     }
 
     # -- Ensure VM is stopped before touching files --
