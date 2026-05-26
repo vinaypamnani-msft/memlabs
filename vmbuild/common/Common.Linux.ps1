@@ -256,7 +256,15 @@ chpasswd:
         # systemd-resolved consults FallbackDNS only when no DHCP/static DNS
         # answers. Restart so the dropin in write_files is picked up before
         # cloud-init's package_update tries to resolve archive.ubuntu.com.
-        'systemctl restart systemd-resolved || true'
+        'systemctl restart systemd-resolved || true',
+        # Pick up the /etc/systemd/system/hv-kvp-daemon.service override
+        # written above. Do NOT restart the unit from runcmd -- if the
+        # /dev/vmbus/hv_kvp device node hasn't appeared yet (hv_utils KVP
+        # IC registration races first boot), even our override's ExecStartPre
+        # poll can't help once systemd has already marked a prior start
+        # dependency-failed. The post-cloud-init reboot lets the daemon come
+        # up cleanly from the override on next boot.
+        'systemctl daemon-reload || true'
     ) + $ExtraRunCmd + @(
         # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
         # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
@@ -422,6 +430,38 @@ write_files:
       Type=oneshot
       ExecStart=/usr/local/sbin/memlabs-loggrab
       RemainAfterExit=no
+      [Install]
+      WantedBy=multi-user.target
+  # Replacement hv-kvp-daemon unit. The Ubuntu-shipped unit (under
+  # /usr/lib/systemd/system/) has BindsTo= and ConditionPathExists=
+  # against the /dev/vmbus/hv_kvp device node. On first boot of a fresh
+  # Ubuntu 24.04 cloud image, hv_utils' in-kernel KVP IC registration
+  # races cloud-init's start-of-targets, so the device node sometimes
+  # doesn't exist yet when systemd evaluates the unit -- it then marks
+  # the unit dependency-failed and refuses to retry until next boot,
+  # leaving KVP empty and the host unable to read the VM IP.
+  # Files under /etc/systemd/system/ fully override /usr/lib/, so this
+  # unit replaces the parent (drop-ins were tried -- the empty-list reset
+  # for BindsTo= on Ubuntu 24.04's systemd doesn't actually clear the
+  # parent value). ExecStartPre polls for the device node up to 60s so
+  # we tolerate hv_utils being slow without dep-failing.
+  - path: /etc/systemd/system/hv-kvp-daemon.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Hyper-V KVP Protocol Daemon (memlabs override)
+      ConditionVirtualization=microsoft
+      ConditionKernelCommandLine=!snapd_recovery_mode
+      DefaultDependencies=no
+      After=systemd-remount-fs.service systemd-modules-load.service
+      Before=shutdown.target cloud-init-local.service
+      Conflicts=shutdown.target
+      RequiresMountsFor=/var/lib/hyperv
+      [Service]
+      ExecStartPre=/bin/bash -c 'for i in `$(seq 1 60); do [ -e /dev/vmbus/hv_kvp ] && exit 0; sleep 1; done; exit 1'
+      ExecStart=/usr/sbin/hv_kvp_daemon -n
+      Restart=on-failure
+      RestartSec=5
       [Install]
       WantedBy=multi-user.target
 
