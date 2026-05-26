@@ -441,11 +441,13 @@ function New-RDCManFileFromHyperV {
         foreach ($vm in $vmListFull) {
             if (Test-VmIsLinux -Vm $vm) {
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
-                if (-not $rdpOn) {
+                    $isLinuxClient = $vm.Role -eq 'LinuxClient'
+                    if (-not ($rdpOn -or $isLinuxClient)) {
                     Write-Verbose "Skipping Linux VM $($vm.VmName) (enableRDP not set)"
                     continue
                 }
-                # Linux VM with xrdp enabled. Add as a regular server entry in the
+                    # Linux VM with xrdp enabled (or LinuxClient which has xrdp baked in).
+                    # Add as a regular server entry in the
                 # domain group (zAllVirtualMachines) with Comment="Linux" so the
                 # per-domain "Linux" smartGroup picks it up via rule match. Per-server
                 # logonCredentials uses vmbuildadmin + LocalAdmin password (matches
