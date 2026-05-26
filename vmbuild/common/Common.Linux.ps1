@@ -458,6 +458,10 @@ write_files:
       Conflicts=shutdown.target
       RequiresMountsFor=/var/lib/hyperv
       [Service]
+      # Poll bound is 60s; set TimeoutStartSec=75s so the script owns the
+      # timeout and systemd doesn't race it (default TimeoutStartSec=90s
+      # is close enough to the poll bound to be ambiguous in logs).
+      TimeoutStartSec=75
       ExecStartPre=/bin/bash -c 'for i in `$(seq 1 60); do [ -e /dev/vmbus/hv_kvp ] && exit 0; sleep 1; done; exit 1'
       ExecStart=/usr/sbin/hv_kvp_daemon -n
       Restart=on-failure
