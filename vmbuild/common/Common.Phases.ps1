@@ -390,11 +390,14 @@ function Start-PhaseJobs {
         }
 
         # Linux VMs have no Windows DSC config. Phase 2 has a dedicated
-        # dispatch branch ($global:Proxy_Install) and Phase 3 has another
-        # ($global:Linux_Configure) below. Skip every other phase so we
-        # don't queue a $global:VM_Config job that would hang on
-        # "Waiting for VM to respond" (Invoke-VmCommand is Windows-only).
-        if ($Phase -gt 3 -and (Test-VmIsLinux -Vm $currentItem)) {
+        # dispatch branch ($global:Proxy_Install, Proxy role only) and
+        # Phase 3 has another ($global:Linux_Configure, all Linux). Skip
+        # every other Linux case so we don't queue a $global:VM_Config job
+        # that would hang on "Waiting for VM to respond" (Invoke-VmCommand
+        # is Windows-only). That means: Phase 4+ for any Linux, AND Phase 2
+        # for non-Proxy Linux roles (LinuxClient, LinuxServer).
+        if ((Test-VmIsLinux -Vm $currentItem) -and
+            ($Phase -gt 3 -or ($Phase -eq 2 -and $currentItem.role -ne 'Proxy'))) {
             Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
             continue
         }
