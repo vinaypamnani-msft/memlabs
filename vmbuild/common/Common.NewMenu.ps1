@@ -1290,6 +1290,21 @@ function Show-Menu {
         else {
             $prompt = "No Selections. Press Left/Enter or Escape to exit"
         }
+        # Truncate the prompt so it leaves room on the same row for Update-Prompt's
+        # " [<currentItem>]: <buffer>" suffix. If the prompt wraps, PromptPosition
+        # lands on the wrapped row and the "[X]:" appears on its own line.
+        $promptLive = Get-LiveWindowSize
+        $promptWidth = if ($promptLive) { [int]$promptLive.Width } else { $host.UI.RawUI.WindowSize.Width }
+        $promptTailReserve = 20  # " [<item>]: " plus a small safety margin
+        $promptMax = $promptWidth - $promptTailReserve
+        if ($promptMax -lt 10) { $promptMax = 10 }
+        if ($prompt.Length -gt $promptMax) {
+            if ($promptMax -ge 4) {
+                $prompt = $prompt.Substring(0, $promptMax - 3) + '...'
+            } else {
+                $prompt = $prompt.Substring(0, $promptMax)
+            }
+        }
         #$currentValue = "T"
         if (-not $Maxshrink) {
             Write-Host ""
