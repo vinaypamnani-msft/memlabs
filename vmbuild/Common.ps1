@@ -1999,13 +1999,12 @@ function Test-DHCPScope {
     try {
 
         write-log -logonly "Test-DHCPScope called with ScopeID: $ScopeID ScopeName: $ScopeName DomainName: $DomainName DNSSERVER: $DNSServer"
-        # Define Lease Time
-        $leaseTimespan = New-TimeSpan -Days 16
-        $DomainScope = $true
-        if (-not $DomainName) {
-            $leaseTimespan = New-TimeSpan -Days 365
-            $DomainScope = $false
-        }
+        # Define Lease Time. Use 365 days for all scopes -- lab VMs on
+        # small subnets rarely churn, and Linux VMs (which lack LLMNR) are
+        # referenced by IP in RDCMan, so a short lease would break those
+        # entries when the IP changes.
+        $leaseTimespan = New-TimeSpan -Days 365
+        $DomainScope = [bool]$DomainName
 
         # Install DHCP, if not found
 
