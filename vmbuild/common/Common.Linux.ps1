@@ -667,6 +667,17 @@ write_files:
       RestartSec=5
       [Install]
       WantedBy=multi-user.target
+  # NetworkManager unmanage config: on Desktop images NM is installed
+  # alongside systemd-networkd. Without this file NM auto-manages eth*
+  # and races networkd for the DHCP lease. On Server images NM isn't
+  # installed so this file is a harmless no-op.
+  # Also written during bake (bakeWriteFilesYaml); having it here ensures
+  # deployed VMs always have it regardless of bake-era bugs.
+  - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
+    permissions: '0644'
+    content: |
+      [keyfile]
+      unmanaged-devices=interface-name:eth*
 
 package_update: true
 package_upgrade: false
