@@ -3378,6 +3378,19 @@ function Invoke-LinuxBaseImageBake {
     if (-not (Test-Path $VhdxPath)) {
         throw "Bake: VHDX '$VhdxPath' not found."
     }
+
+    # Clean up any stale bake VMs from a previous interrupted run.
+    # Ctrl+C can bypass the inner finally block, leaving an orphan VM that
+    # holds the VHDX file lock and blocks the next attempt.
+    $staleVMs = @(Get-VM -Name 'memlabs-bake-*' -ErrorAction SilentlyContinue)
+    foreach ($staleVM in $staleVMs) {
+        Write-Log "Bake: removing stale bake VM '$($staleVM.Name)' (state=$($staleVM.State))." -Warning
+        if ($staleVM.State -ne 'Off') {
+            Stop-VM -VM $staleVM -TurnOff -Force -ErrorAction SilentlyContinue
+        }
+        Remove-VM -VM $staleVM -Force -ErrorAction SilentlyContinue
+    }
+
     # Auto-manage only the canonical 'MemLabsNAT' / 'Default Switch' names; for
     # anything exotic, require the caller to have it set up already.
     if ($SwitchName -in @('MemLabsNAT', 'Default Switch')) {
@@ -3604,8 +3617,18 @@ $desktopRuncmdYaml
         Write-Log "Bake: VM shut down cleanly." -Success
     }
     finally {
-        # Remove-VM keeps the VHDX file; we only want to drop the VM config and DVD attachment.
-        Remove-VM -Name $vmName -Force -ErrorAction SilentlyContinue
+        # Stop the VM before removing it.  Remove-VM -Force should handle
+        # running VMs, but an explicit TurnOff is more reliable at releasing
+        # the VHDX file handle so the caller can move/delete it immediately.
+        $bakeVM = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+        if ($bakeVM) {
+            if ($bakeVM.State -ne 'Off') {
+                Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
+            }
+            # Remove-VM keeps the VHDX file; we only want to drop the VM
+            # config and DVD attachment.
+            Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
+        }
         Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
