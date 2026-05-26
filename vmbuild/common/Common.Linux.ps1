@@ -443,10 +443,17 @@ local-hostname: $($VmName.ToLower())
     # archive.ubuntu.com or bing.com). nameservers.addresses sets per-link DNS to
     # public resolvers so external resolution always works. The DHCP-advertised
     # search domain (e.g. adatum.com) is still honored via use-domains default.
+    #
+    # renderer: networkd is mandatory. Desktop Ubuntu 24.04 defaults netplan to
+    # the NetworkManager renderer. The NM unmanage config (write_files above)
+    # tells NM to ignore eth*, so without an explicit renderer: networkd netplan
+    # generates an NM profile that NM immediately ignores — and networkd has no
+    # config at all. Result: eth0 stays DOWN, no DHCP, no IP.
     if ($StaticIPv4) {
         if (-not $Gateway) { throw "New-LinuxSeedIso: -Gateway is required when -StaticIPv4 is specified." }
         $networkConfig = @"
 version: 2
+renderer: networkd
 ethernets:
   primary:
     match:
@@ -463,6 +470,7 @@ ethernets:
     else {
         $networkConfig = @"
 version: 2
+renderer: networkd
 ethernets:
   primary:
     match:
@@ -3462,6 +3470,7 @@ local-hostname: memlabs-bake
     # meta-data and user-data.
     $networkConfig = @"
 version: 2
+renderer: networkd
 ethernets:
   primary:
     match:
