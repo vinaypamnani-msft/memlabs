@@ -475,7 +475,28 @@ class InstallADK {
         # Documentation MSI was a known casualty -- retired by MS without
         # a corresponding bundle refresh). That's why direct goes first.
         $runAdkInstall = {
-            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts)
+            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, [string[]]$verifyPaths)
+
+            # Helper: adksetup sometimes exits 0 in a few seconds without
+            # actually installing anything (e.g. another bundle instance
+            # already handled by Burn, bootstrapper detected an in-progress
+            # install, etc.). Caller passes the install paths it expects to
+            # exist after success; we verify them and treat missing-paths
+            # as a non-zero outcome so the retry/layout fallback path fires.
+            $verifyInstall = {
+                if (-not $verifyPaths -or $verifyPaths.Count -eq 0) { return $true }
+                $missing = @($verifyPaths | Where-Object { -not (Test-Path $_) })
+                if ($missing.Count -eq 0) { return $true }
+                Write-Status ("ADK {0} : adksetup reported success but expected install path(s) missing: {1}" -f $label, ($missing -join '; '))
+                $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+                if (Test-Path $logFile) {
+                    try {
+                        $tail = Get-Content -LiteralPath $logFile -Tail 15 -ErrorAction SilentlyContinue
+                        if ($tail) { Write-Status ("ADK {0} : adksetup log tail ({1}):`n{2}" -f $label, $logFile, ($tail -join "`n")) }
+                    } catch { }
+                }
+                return $false
+            }
 
             $attempt = 0
             $lastExit = -1
@@ -491,7 +512,11 @@ class InstallADK {
                     Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
                     throw "Failed to launch ADK $label setup: $ErrorMessage"
                 }
-                if ($lastExit -eq 0) { return 0 }
+                if ($lastExit -eq 0) {
+                    if (& $verifyInstall) { return 0 }
+                    # 0-exit but install didn't happen -- treat as soft failure, retry.
+                    $lastExit = -2
+                }
                 Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
                 Start-Sleep -Seconds 5
             }
@@ -518,6 +543,10 @@ class InstallADK {
                 }
                 $offlineArgs = @('/quiet','/features') + $features
                 $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
+                if ($offlineExit -eq 0 -and -not (& $verifyInstall)) {
+                    Write-Status "ADK $label : offline install reported success but expected paths still missing. Giving up."
+                    return -2
+                }
                 return $offlineExit
             }
             catch {
@@ -534,9 +563,9 @@ class InstallADK {
         Write-Status "ADK [1/2]: installing DeploymentTools + UserStateMigrationTool (first of two adksetup runs)"
         $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
         $deptoolsLayout = 'C:\temp\adk-layout-deptools'
-        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts
+        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts @($adkinstallpath, $adkinstallpath2)
         if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
-            throw ("ADK DeploymentTools/UserStateMigrationTool install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Paths missing: " +
+            throw ("ADK DeploymentTools/UserStateMigrationTool install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Paths missing: " +
                    (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
         Write-Status "ADK [1/2] DeploymentTools + UserStateMigrationTool installed successfully. Starting [2/2] WinPE addon..."
@@ -546,9 +575,9 @@ class InstallADK {
         Write-Status "ADK [2/2]: installing WinPE addon to $adkinstallpath (separate ~1.5GB download, typically 3-5 min on a healthy link)"
         $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
         $winpeLayout = 'C:\temp\adk-layout-winpe'
-        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts
+        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts @($adkinstallpath)
         if (!(Test-Path $adkinstallpath)) {
-            throw "ADK WinPE addon install failed after $maxAttempts direct attempts + layout fallback (last exit code $lastExit). Path missing: $adkinstallpath"
+            throw "ADK WinPE addon install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Path missing: $adkinstallpath"
         }
         Write-Status "ADK [2/2] WinPE addon installed successfully. ADK install complete."
     }
