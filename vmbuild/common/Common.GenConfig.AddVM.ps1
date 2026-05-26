@@ -310,13 +310,13 @@ function Add-NewVMForRole {
         # Linux, Defender for Endpoint, Landscape, etc.). Heavier footprint
         # than LinuxServer since GNOME wants ~3GB to be usable, and the
         # baked-in xrdp/xorgxrdp service means RDP into a real Ubuntu
-        # session works out of the box (no enableRDP cloud-init toggle
-        # needed -- the existing toggle installs xfce4 which would clash
-        # with GNOME on this image).
+        # session works out of the box. Set enableRDP=true so RDCMan picks
+        # it up (no cloud-init toggle needed, but the property must exist).
         $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
         $virtualMachine.memory = "4GB"
         $virtualMachine.virtualProcs = 4
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $true -Force
         # Optional realmd/SSSD join to the lab AD domain on first boot
         # (same helper as LinuxServer).
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
