@@ -2049,6 +2049,68 @@ function Start-DHCP {
         }
     }
 
+    # Verify the DhcpServer PowerShell module actually loads. Don't just
+    # check -ListAvailable (files on disk) — the module is CDXML-based and
+    # depends on the WMI/CIM service. If winmgmt is wedged the files exist
+    # but Import-Module fails with "module could not be loaded".
+    $moduleLoaded = $false
+    try {
+        Import-Module DhcpServer -Force -ErrorAction Stop
+        $moduleLoaded = $true
+    }
+    catch {
+        $importError = $_
+        Write-Log "Start-DHCP: DhcpServer module failed to load: $importError" -Warning
+
+        # Diagnose: are the module files even on disk?
+        $moduleOnDisk = [bool](Get-Module DhcpServer -ListAvailable -ErrorAction SilentlyContinue)
+
+        if ($moduleOnDisk) {
+            # Files present but module won't load — likely WMI/CIM service
+            # is in a bad state (CDXML modules use CIM under the hood).
+            Write-Log "Start-DHCP: Module files exist on disk but won't load. Restarting WMI service (winmgmt)..." -Warning
+            Restart-Service winmgmt -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+            # DHCP service depends on WMI; restarting winmgmt may stop it.
+            Start-Service DHCPServer -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            try {
+                Import-Module DhcpServer -Force -ErrorAction Stop
+                $moduleLoaded = $true
+                Write-GreenCheck "DhcpServer module loaded after WMI service restart."
+            }
+            catch {
+                Write-Log "Start-DHCP: Module still won't load after WMI restart: $_" -Failure
+                Write-Log "Start-DHCP: A host reboot may be required. Original error: $importError" -Failure
+            }
+        }
+        else {
+            # Module files missing — RSAT tools were stripped (e.g. by a Windows Update).
+            Write-OrangePoint "DhcpServer module is not installed. Reinstalling DHCP management tools..."
+            if (Get-Command -Name "Install-WindowsFeature" -ErrorAction SilentlyContinue) {
+                $installed = Install-WindowsFeature 'RSAT-DHCP' -Confirm:$false -ErrorAction SilentlyContinue
+                if (-not $installed -or -not $installed.Success) {
+                    $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
+                }
+                if ($installed -and $installed.Success) {
+                    Import-Module DhcpServer -Force -ErrorAction SilentlyContinue
+                    $moduleLoaded = $true
+                    Write-GreenCheck "DHCP management tools reinstalled."
+                }
+                else {
+                    Write-Log "Start-DHCP: Failed to reinstall DHCP management tools. Run 'Install-WindowsFeature RSAT-DHCP' manually." -Failure
+                }
+            }
+            else {
+                Write-Log "Start-DHCP: DhcpServer module is missing and Install-WindowsFeature is unavailable. Install RSAT-DHCP manually." -Failure
+            }
+        }
+    }
+
+    if (-not $moduleLoaded) {
+        return $false
+    }
+
     return $true
 }
 
