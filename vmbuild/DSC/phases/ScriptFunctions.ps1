@@ -553,7 +553,7 @@ function Install-SRP {
 
         $installed = Get-CMReportingServicePoint -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
-            Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
+            Write-DscStatus "Reporting Point Role not detected on $ServerFQDN. Adding Reporting Point role using DB Server [$SqlServerName], DB Name [$DatabaseName], UserName [$UserName]"
             Add-CMReportingServicePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -UserName $UserName -DatabaseServerName $SqlServerName -DatabaseName $DatabaseName -ReportServerInstance "PBIRS" *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 30
         }
