@@ -600,7 +600,7 @@ function Remove-Domain {
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
-        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$false
+        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
         Write-Host
     }
     

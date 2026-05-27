@@ -389,7 +389,7 @@ function New-MRemoteNGFileFromHyperV {
 
     if ($OverWrite -and (Test-Path $MRemoteNGFile)) {
         Write-Log "Deleting $MRemoteNGFile and regenerating."
-        Remove-Item $MRemoteNGFile -ProgressAction SilentlyContinue | Out-Null
+        Remove-Item $MRemoteNGFile -Force -ErrorAction SilentlyContinue
     }
 
     $shouldSave = $false
