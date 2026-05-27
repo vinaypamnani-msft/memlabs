@@ -1119,7 +1119,7 @@ Function Get-CMVersionMenu {
 
     $valid = $false
     $noteColor = $Global:Common.Colors.GenConfigTip
-    $effectiveCmOptions = Get-ConfigCmOptions -Config $Global:Config
+    $effectiveCmOptions = if ($Global:Config) { Get-ConfigCmOptions -Config $Global:Config } else { $null }
 
     if ($effectiveCmOptions.OfflineSCP) {   
         write-host2 -ForegroundColor $noteColor "Note: "-NoNewLine
