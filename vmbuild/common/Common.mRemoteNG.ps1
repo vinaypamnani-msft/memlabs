@@ -616,7 +616,7 @@ function New-MRemoteNGFileFromHyperV {
                     $cSSH | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
                 }
                 $commentValue = "Linux"
-                if ($vm.Role -eq 'Proxy') { $commentValue = "Linux - Squid logs are in /var/log/squid" }
+                if ($vm.Role -eq 'Proxy') { $commentValue = "Linux - Squid logs: /var/log/squid | Proxy Admin: http://${sshHost}:8443" }
                 $cSSH | Add-Member -MemberType NoteProperty -Name "Comment" -Value $commentValue -Force
                 $sshComment = ($cSSH | ConvertTo-Json -Depth 4 -Compress)
 

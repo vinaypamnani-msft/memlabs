@@ -175,6 +175,10 @@ function Test-VmFunctionality {
     if ($testsPassed -and $role -eq 'Proxy') {
         $testsPassed = Test-ProxyListening -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
+    # 1b) Verify the Proxy Admin web UI is listening on TCP 8443.
+    if ($testsPassed -and $role -eq 'Proxy') {
+        $testsPassed = Test-ProxyAdminWebUI -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
     # 2) For any opted-in Windows client/CM-role VM: verify it's pointed at the proxy,
     #    that direct Internet is blocked by host ACLs, and (CM site roles only) that
     #    Get-CMSiteSystemServer reports UseProxy=$true.
@@ -2651,6 +2655,45 @@ function Test-ProxyListening {
     }
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :3128 (ss output: '$output')" -Failure -LogOnly
     $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on TCP 3128"; Level = 'Failure' })
+    return $false
+}
+
+function Test-ProxyAdminWebUI {
+    <#
+    .SYNOPSIS
+        Phase 11 test: verifies the Proxy Admin web UI is listening on TCP 8443.
+    .DESCRIPTION
+        Runs `ss -ltn` over SSH to check for a listener on port 8443 (the
+        Flask-based blocklist management UI deployed by Install-LinuxProxyServer).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = 'ProxyAdmin'
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing Proxy Admin web UI on TCP 8443" -LogOnly
+
+    $bash = "ss -ltn '( sport = :8443 )' 2>/dev/null | tail -n +2"
+    $result = Invoke-LinuxVmCommand -VmName $VMName -BashCommand $bash -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Phase11-ProxyAdmin-Listen"
+
+    if (-not $result -or $result.ScriptBlockFailed) {
+        $err = if ($result) { $result.ScriptBlockOutput } else { 'SSH failed' }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - ss query failed: $err" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - ss query failed: $err"; Level = 'Failure' })
+        return $false
+    }
+
+    $output = ($result.ScriptBlockOutput | Out-String).Trim()
+    if ($output -match ':8443') {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Proxy Admin listening on :8443 ($($output -replace '\s+', ' '))" -LogOnly
+        return $true
+    }
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - no listener on :8443 (ss output: '$output')" -Failure -LogOnly
+    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Proxy Admin web UI not listening on TCP 8443"; Level = 'Failure' })
     return $false
 }
 
