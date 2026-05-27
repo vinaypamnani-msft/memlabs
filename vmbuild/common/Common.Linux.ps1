@@ -2981,6 +2981,24 @@ x-scheme-handler/https=microsoft-edge.desktop
 text/html=microsoft-edge.desktop
 MIMEEOF
 
+# --- PAM: auto-unlock GNOME Keyring on xrdp login -------------------------
+# microsoft-identity-broker (pulled in by intune-portal) stores Entra ID
+# auth tokens in GNOME Keyring via libsecret / Secret Service D-Bus API.
+# xrdp's default PAM config doesn't include pam_gnome_keyring.so, so the
+# keyring stays locked → broker can't persist tokens → enrollment fails
+# or re-prompts every session.
+# Add auth + session hooks to /etc/pam.d/xrdp-sesman so the keyring is
+# unlocked (or created) automatically using the login password.
+if [ -f /etc/pam.d/xrdp-sesman ]; then
+    if ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
+        sed -i '/^@include common-auth/a auth       optional     pam_gnome_keyring.so' \
+            /etc/pam.d/xrdp-sesman
+        sed -i '/^@include common-session/a session    optional     pam_gnome_keyring.so auto_start' \
+            /etc/pam.d/xrdp-sesman
+        echo '[memlabs-gnome] added pam_gnome_keyring.so to xrdp-sesman PAM config'
+    fi
+fi
+
 # --- Microsoft Intune app (intune-portal) --------------------------------
 # Uses the same Microsoft signing key already imported above.
 echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
