@@ -3067,7 +3067,19 @@ function Set-WindowsClientProxy {
             & $writeConnBlob $hkcuKey $proxyServer $bypassList $true
             & $writeConnBlob $ieKey  $proxyServer $bypassList $true
 
-            # 3b) HKLM Wow6432Node IE settings -- the 32-bit registry view.
+            # 3b) Edge browser policy (HKLM\SOFTWARE\Policies\Microsoft\Edge).
+            #     Edge reads managed proxy settings from this policy key before
+            #     falling back to WinINET / DefaultConnectionSettings. Setting
+            #     ProxyMode=fixed_servers here guarantees Edge uses the proxy
+            #     regardless of whether the DefaultConnectionSettings blob is
+            #     being picked up by WinHttpGetIEProxyConfigForCurrentUser().
+            $edgePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+            if (-not (Test-Path $edgePolicyKey)) { New-Item -Path $edgePolicyKey -Force | Out-Null }
+            New-ItemProperty -Path $edgePolicyKey -Name 'ProxyMode'       -PropertyType String -Value 'fixed_servers'      -Force | Out-Null
+            New-ItemProperty -Path $edgePolicyKey -Name 'ProxyServer'     -PropertyType String -Value "http://$proxyServer" -Force | Out-Null
+            New-ItemProperty -Path $edgePolicyKey -Name 'ProxyBypassList' -PropertyType String -Value $bypassList           -Force | Out-Null
+
+            # 3c) HKLM Wow6432Node IE settings -- the 32-bit registry view.
             #     Internet Settings is NOT redirected by WOW64, but some
             #     32-bit installers (notably adksetup.exe, a 32-bit WiX Burn
             #     bundle) explicitly read from Wow6432Node first. Without
@@ -3290,6 +3302,14 @@ function Remove-WindowsClientProxy {
             Remove-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
             Remove-ItemProperty -Path $ieKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
             & $writeConnBlob $ieKey '' '' $false
+
+            # 3a-edge) Edge browser policy
+            $edgePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
+            if (Test-Path $edgePolicyKey) {
+                Remove-ItemProperty -Path $edgePolicyKey -Name 'ProxyMode'       -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $edgePolicyKey -Name 'ProxyServer'     -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $edgePolicyKey -Name 'ProxyBypassList' -ErrorAction SilentlyContinue
+            }
 
             # 3b) HKLM Wow6432Node IE settings (32-bit view)
             $ieKeyWow = 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings'
