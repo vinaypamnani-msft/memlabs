@@ -515,6 +515,7 @@ function select-RestoreSnapshotDomain {
                 Remove-VirtualMachine -VmName $item
             }
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+            New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$false
         }
 
     }

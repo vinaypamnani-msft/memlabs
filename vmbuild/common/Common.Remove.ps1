@@ -600,6 +600,7 @@ function Remove-Domain {
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$false
         Write-Host
     }
     
@@ -655,6 +656,7 @@ function Remove-All {
 
     Remove-Orphaned -WhatIf:$WhatIf
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
+    Remove-Item -Path $Global:Common.MRemoteNGFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 
     # Get all the folders in E:\VirtualMachines and delete them
     $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory

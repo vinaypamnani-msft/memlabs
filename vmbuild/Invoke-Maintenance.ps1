@@ -285,6 +285,36 @@ function Invoke-WindowsTerminalMaintenance {
     Write-LogMessage 'Windows Terminal maintenance completed.'
 }
 
+function Invoke-MRemoteNGMaintenance {
+    Write-LogMessage 'Starting mRemoteNG maintenance...'
+
+    $mRNGExe = "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe"
+    if (Test-Path $mRNGExe) {
+        Write-LogMessage 'mRemoteNG already installed. Skipping installation.'
+        return
+    }
+
+    Write-LogMessage 'mRemoteNG not installed, attempting to install...'
+
+    if (-not (Test-ChocoAvailable)) {
+        Write-LogMessage 'Chocolatey CLI not found. Skipping mRemoteNG install.' -Level 'WARNING'
+        return
+    }
+
+    & choco install mremoteng -y | Out-Null
+    $exitCode = $LASTEXITCODE
+    Write-LogMessage "choco install mremoteng returned exit code: $exitCode"
+
+    if (Test-ChocoSuccessCode -Code $exitCode) {
+        Write-LogMessage 'mRemoteNG successfully installed.'
+    }
+    else {
+        Write-LogMessage 'Failed to install mRemoteNG.' -Level 'WARNING'
+    }
+
+    Write-LogMessage 'mRemoteNG maintenance completed.'
+}
+
 function Invoke-WeeklyUpgrades {
     Write-LogMessage 'Starting weekly upgrades...'
 
@@ -381,6 +411,7 @@ Write-LogMessage '========================================'
 try { Invoke-System32CurlMaintenance } catch { Write-LogMessage "System32 curl maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-DotNet6Maintenance } catch { Write-LogMessage ".NET 6 maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WindowsTerminalMaintenance } catch { Write-LogMessage "Windows Terminal maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
+try { Invoke-MRemoteNGMaintenance } catch { Write-LogMessage "mRemoteNG maintenance threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 try { Invoke-WeeklyUpgrades } catch { Write-LogMessage "Weekly upgrades threw: $_" -Level 'ERROR'; $script:MaintenanceHadFailure = $true }
 
 Write-LogMessage '========================================' 

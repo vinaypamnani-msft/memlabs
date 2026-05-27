@@ -4998,6 +4998,7 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Validation.ps1
 . $PSScriptRoot\common\Common.Validation.Functional.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
+. $PSScriptRoot\common\Common.mRemoteNG.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
@@ -5415,6 +5416,7 @@ if (-not $Common.Initialized) {
             LogPath                     = Join-Path $logsPath "VMBuild.log"                                         # Log File
             CrashLogsPath               = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
             RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
+            MRemoteNGFilePath           = Join-Path $DesktopPath "memlabs-mremoteng.xml"                              # mRemoteNG File
             VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
             DevBranch                   = $devBranch                                                                # Git dev branch
             Supported                   = $null                                                                     # Supported Configs

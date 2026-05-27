@@ -208,9 +208,10 @@ function Select-ConfigMenu {
             }
             "v" { Select-VMMenu }
             "r" { 
-                $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and re-create it. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
+                $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and memlabs-mremoteng.xml and re-create them. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
                 if ($response -eq "y") {
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
+                    New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
                 }               
             }
             "f" { Select-DeletePending; Clear-HealthStatsCache }
