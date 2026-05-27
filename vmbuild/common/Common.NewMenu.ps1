@@ -694,6 +694,111 @@ public static bool TryGetWindowSize(out int width, out int height) {
 '@
 }
 
+# P/Invoke for ReadConsoleInput: returns keyboard AND mouse events from the
+# console input buffer. Used by Get-KeyStroke to support mouse click-to-select
+# and hover highlighting in menus.
+if (-not ('MemLabsConsole.MouseInput' -as [type])) {
+    Add-Type -Namespace MemLabsConsole -Name MouseInput -MemberDefinition @'
+// INPUT_RECORD.EventType constants
+public const ushort KEY_EVENT   = 0x0001;
+public const ushort MOUSE_EVENT = 0x0002;
+
+// MOUSE_EVENT_RECORD.dwButtonState flags
+public const uint FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001;
+
+// MOUSE_EVENT_RECORD.dwEventFlags values
+public const uint MOUSE_MOVED  = 0x0001;
+public const uint MOUSE_WHEELED = 0x0004;
+
+// Console mode flags
+public const uint ENABLE_PROCESSED_INPUT  = 0x0001;
+public const uint ENABLE_MOUSE_INPUT      = 0x0010;
+public const uint ENABLE_WINDOW_INPUT     = 0x0008;
+public const uint ENABLE_EXTENDED_FLAGS   = 0x0080;
+public const uint ENABLE_QUICK_EDIT_MODE  = 0x0040;
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern System.IntPtr GetStdHandle(int nStdHandle);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetConsoleMode(System.IntPtr hConsole, out uint lpMode);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetConsoleMode(System.IntPtr hConsole, uint dwMode);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool GetNumberOfConsoleInputEvents(System.IntPtr hConsole, out uint lpcNumberOfEvents);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool ReadConsoleInput(
+    System.IntPtr hConsoleInput,
+    [System.Runtime.InteropServices.Out] INPUT_RECORD[] lpBuffer,
+    uint nLength,
+    out uint lpNumberOfEventsRead);
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct COORD {
+    public short X;
+    public short Y;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 20)]
+public struct INPUT_RECORD {
+    [System.Runtime.InteropServices.FieldOffset(0)] public ushort EventType;
+    [System.Runtime.InteropServices.FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
+    [System.Runtime.InteropServices.FieldOffset(4)] public MOUSE_EVENT_RECORD MouseEvent;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public struct KEY_EVENT_RECORD {
+    public int bKeyDown;
+    public ushort wRepeatCount;
+    public ushort wVirtualKeyCode;
+    public ushort wVirtualScanCode;
+    public char UnicodeChar;
+    public uint dwControlKeyState;
+}
+
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+public struct MOUSE_EVENT_RECORD {
+    public COORD dwMousePosition;
+    public uint dwButtonState;
+    public uint dwControlKeyState;
+    public uint dwEventFlags;
+}
+'@
+}
+
+# The saved console mode before mouse input was enabled. Used by
+# Disable-MouseInput to restore the original state.
+$script:_savedConsoleMode = $null
+$script:_consoleInputHandle = $null
+
+function Enable-MouseInput {
+    if ($null -eq $script:_consoleInputHandle -or $script:_consoleInputHandle -eq [IntPtr]::Zero) {
+        # STD_INPUT_HANDLE = -10
+        $script:_consoleInputHandle = [MemLabsConsole.MouseInput]::GetStdHandle(-10)
+    }
+    $mode = [uint32]0
+    [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
+    $script:_savedConsoleMode = $mode
+
+    # Enable mouse input and disable Quick Edit Mode (which swallows mouse
+    # events for text selection). Preserve processed input so Ctrl+C works.
+    $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT `
+                       -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS `
+                       -bor [MemLabsConsole.MouseInput]::ENABLE_WINDOW_INPUT) `
+                       -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
+    [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+}
+
+function Disable-MouseInput {
+    if ($null -ne $script:_savedConsoleMode -and $null -ne $script:_consoleInputHandle) {
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_savedConsoleMode)
+        $script:_savedConsoleMode = $null
+    }
+}
+
 function Get-LiveWindowSize {
     $w = 0; $h = 0
     $gotIt = $false
@@ -1426,24 +1531,149 @@ function Set-PointerDisplayAsPerMenu {
     }
 }
 
+# Track the last hovered menu item index so we can un-highlight it when the
+# mouse moves to a different row.
+$script:_lastHoveredIndex = -1
+
+# Update hover highlighting: when the mouse is over a selectable menu item,
+# re-render that item's row with an underline (ANSI SGR 4). When the mouse
+# moves off, restore the original rendering. Only touches the text portion
+# (columns 3+) to avoid interfering with the selection arrow.
+function Set-MouseHoverHighlight {
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.ArrayList]$menuItems,
+        [Parameter(Mandatory)]
+        [int]$mouseY,
+        [switch]$MultiSelect
+    )
+    [System.Console]::CursorVisible = $false
+
+    # Find which menu item (if any) the mouse is over
+    $hoveredIndex = -1
+    for ($i = 0; $i -lt $menuItems.Count; $i++) {
+        if ($menuItems[$i].Displayed -and $menuItems[$i].Selectable -and $menuItems[$i].CurrentPosition -eq $mouseY) {
+            $hoveredIndex = $i
+            break
+        }
+    }
+
+    # Nothing changed
+    if ($hoveredIndex -eq $script:_lastHoveredIndex) { return }
+
+    # Un-highlight the old hovered item (re-render with original colors)
+    if ($script:_lastHoveredIndex -ge 0 -and $script:_lastHoveredIndex -lt $menuItems.Count) {
+        $old = $menuItems[$script:_lastHoveredIndex]
+        if ($old.Displayed -and $old.Selectable) {
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Write-Host "`e[K" -NoNewline
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Write-Option $old.ItemName $old.Text -color $old.Color1 -Color2 $old.Color1 -MultiSelect:$MultiSelect -MultiSelected:$old.MultiSelected
+        }
+    }
+
+    # Highlight the new hovered item with a brighter hover color.
+    # The hover prefix "── " (dim arrow) replaces the normal 3-space indent.
+    if ($hoveredIndex -ge 0) {
+        $item = $menuItems[$hoveredIndex]
+        Set-CursorPosition -x 0 -y $item.CurrentPosition
+        Write-Host "`e[K" -NoNewline
+        Set-CursorPosition -x 0 -y $item.CurrentPosition
+        # Show a dim hover indicator unless this item already has the selection arrow
+        if (-not $item.Selected) {
+            Write-Host "── " -ForegroundColor DarkGray -NoNewline
+        }
+        else {
+            Write-Host "━➤ " -ForegroundColor Yellow -NoNewline
+        }
+        Write-Option $item.ItemName $item.Text -color "SkyBlue" -Color2 "SkyBlue" -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
+    }
+
+    $script:_lastHoveredIndex = $hoveredIndex
+}
+
 # Get the key stroke from the user. If $WatchSize is supplied, polls every
 # ~100ms and returns $null if the window size changes before a key is pressed.
 # Otherwise blocks until a key is pressed (original behavior).
+#
+# When mouse input is enabled ($script:_savedConsoleMode is set), uses
+# ReadConsoleInput to receive both keyboard and mouse events. Returns either:
+#   - A standard KeyInfo object (keyboard), or
+#   - A [pscustomobject] with .IsMouseEvent=$true, .MouseX, .MouseY,
+#     .MouseButton (0=move, 1=left-click), .MouseFlags (from dwEventFlags)
 function Get-KeyStroke {
     param(
         # Accepts the {Width;Height} pscustomobject returned by Get-LiveWindowSize.
         # Untyped so a $null baseline (captured while window was minimized) is OK.
         $WatchSize
     )
-    if (-not $WatchSize) {
+
+    $mouseActive = ($null -ne $script:_savedConsoleMode -and $null -ne $script:_consoleInputHandle)
+
+    if (-not $WatchSize -and -not $mouseActive) {
         return $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+
+    # When mouse input is active, use ReadConsoleInput for unified key+mouse reading.
+    if ($mouseActive) {
+        $buf = New-Object 'MemLabsConsole.MouseInput+INPUT_RECORD[]' 1
+        while ($true) {
+            # Non-blocking check: are any events waiting?
+            $eventCount = [uint32]0
+            [void][MemLabsConsole.MouseInput]::GetNumberOfConsoleInputEvents($script:_consoleInputHandle, [ref]$eventCount)
+            if ($eventCount -gt 0) {
+                $read = [uint32]0
+                [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
+                if ($read -gt 0) {
+                    $rec = $buf[0]
+                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::MOUSE_EVENT) {
+                        $me = $rec.MouseEvent
+                        $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
+                        $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
+                        if ($isClick -or $isMove) {
+                            return [pscustomobject]@{
+                                IsMouseEvent = $true
+                                MouseX       = [int]$me.dwMousePosition.X
+                                MouseY       = [int]$me.dwMousePosition.Y
+                                MouseButton  = $(if ($isClick) { 1 } else { 0 })
+                                MouseFlags   = [int]$me.dwEventFlags
+                            }
+                        }
+                        # Ignore other mouse events (right-click, wheel, etc.)
+                        continue
+                    }
+                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::KEY_EVENT) {
+                        $ke = $rec.KeyEvent
+                        if ($ke.bKeyDown) {
+                            # Synthesize a KeyInfo object matching what ReadKey returns
+                            return [System.Management.Automation.Host.KeyInfo]::new(
+                                [int]$ke.wVirtualKeyCode,
+                                $ke.UnicodeChar,
+                                [System.Management.Automation.Host.ControlKeyStates]$ke.dwControlKeyState,
+                                $true
+                            )
+                        }
+                        continue
+                    }
+                    # WINDOW_BUFFER_SIZE_EVENT or FOCUS_EVENT — skip
+                    continue
+                }
+            }
+
+            # No events pending — check for resize
+            if ($WatchSize) {
+                $live = Get-LiveWindowSize
+                if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
+                    return $null
+                }
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    # Non-mouse fallback: original keyboard-only poll loop
     while ($true) {
         try {
-            # Use [System.Console]::KeyAvailable (not $Host.UI.RawUI.KeyAvailable):
-            # after mstsc minimize/restore, the PS host's KeyAvailable property
-            # becomes blocking until input arrives, which freezes the resize
-            # poll loop entirely. The .NET API is guaranteed non-blocking.
             $ka = [System.Console]::KeyAvailable
         }
         catch {
@@ -1660,6 +1890,13 @@ function Start-Navigation {
     # Loop until the user presses the Escape key
     Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
     #Update-HelpText -HelpPosition $HelpPosition -CurrentHelpText $menuItems[$selectedIndex].HelpText -Color $menuItems[$selectedIndex].Color1 -wait:$false
+
+    # Enable mouse input so Get-KeyStroke can return click/move events.
+    # Wrapped in try/finally to guarantee Disable-MouseInput runs on every
+    # exit path (Enter, Escape, resize, PgUp/PgDn, etc.).
+    Enable-MouseInput
+    $script:_lastHoveredIndex = -1
+    try {
     while ($true) {
         $currentsize = Get-LiveWindowSize
         if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
@@ -1676,6 +1913,58 @@ function Start-Navigation {
             return
         }
         write-log -Verbose -HostOnly "key: $key"
+
+        # --- Mouse event handling ---
+        if ($key.IsMouseEvent) {
+            if ($key.MouseButton -eq 1) {
+                # Left click: find the menu item at the clicked Y position
+                $clickedIndex = -1
+                for ($mi = 0; $mi -lt $menuItems.Count; $mi++) {
+                    if ($menuItems[$mi].Displayed -and $menuItems[$mi].Selectable -and $menuItems[$mi].CurrentPosition -eq $key.MouseY) {
+                        $clickedIndex = $mi
+                        break
+                    }
+                }
+                if ($clickedIndex -ge 0) {
+                    # Clear hover highlight before acting on the click
+                    if ($script:_lastHoveredIndex -ge 0) {
+                        Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+                    }
+                    $selectedIndex = $clickedIndex
+                    $buffer = $null
+
+                    if ($MultiSelect) {
+                        # In multiselect, clicking a numbered item toggles its
+                        # check mark; clicking a letter item (A/N/D) fires its
+                        # action, same as pressing Enter on it.
+                        $optionInt = ($menuItems[$selectedIndex].ItemName -as [int])
+                        if ($optionInt) {
+                            $menuItems[$selectedIndex].MultiSelected = -not $menuItems[$selectedIndex].MultiSelected
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                    }
+
+                    # Single-select (or non-numeric multiselect item): confirm
+                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                    Set-CursorPosition -X $CPosition.x -Y $CPosition.y
+                    return $menuItems[$selectedIndex]
+                }
+            }
+            elseif ($key.MouseButton -eq 0) {
+                # Mouse move: update hover highlight
+                Set-MouseHoverHighlight -menuItems $menuItems -mouseY $key.MouseY -MultiSelect:$MultiSelect
+            }
+            continue
+        }
+
+        # Keyboard event: clear any active hover highlight so arrow/type
+        # navigation doesn't leave a stale hover color on a different row.
+        if ($script:_lastHoveredIndex -ge 0) {
+            Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+        }
 
         $currentsize = Get-LiveWindowSize
         if ($currentsize -and $startSize -and ($currentsize.Width -ne $startSize.Width -or $currentsize.Height -ne $startSize.Height)) {
@@ -1987,6 +2276,11 @@ function Start-Navigation {
             }
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
         }
+    } # end while
+    } # end try
+    finally {
+        Disable-MouseInput
+        $script:_lastHoveredIndex = -1
     }
 
     [System.Console]::CursorVisible = $true # Show the cursor
