@@ -6,6 +6,7 @@ function Install-MRemoteNG {
     # Check standard install paths
     $mRemoteNGExe = $null
     $searchPaths = @(
+        (Join-Path $env:ProgramData "memlabs\mRemoteNG\mRemoteNG.exe"),
         "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe",
         "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe",
         "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe"
@@ -73,24 +74,32 @@ function Install-MRemoteNG {
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
     # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
     # to our memlabs XML so mRemoteNG loads it without needing /cons:.
+    # The nightly build is portable, so the primary path is the install directory (next to the exe).
     $memlabsXml = $Global:Common.MRemoteNGFilePath
     if ($memlabsXml -and (Test-Path $memlabsXml)) {
-        try {
-            $defaultDir = Join-Path $env:LOCALAPPDATA "mRemoteNG"
-            $defaultFile = Join-Path $defaultDir "confCons.xml"
-            if (-not (Test-Path $defaultDir)) {
-                New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+        $installDir = Split-Path $mRemoteNGExe
+        $symlinkTargets = @(
+            Join-Path $installDir "confCons.xml"
+            Join-Path $env:LOCALAPPDATA "mRemoteNG\confCons.xml"
+            Join-Path ([Environment]::GetFolderPath("ApplicationData")) "mRemoteNG\confCons.xml"
+        )
+        foreach ($defaultFile in $symlinkTargets) {
+            try {
+                $defaultDir = Split-Path $defaultFile
+                if (-not (Test-Path $defaultDir)) {
+                    New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+                }
+                $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
+                $isCorrectSymlink = $item -and $item.LinkTarget -eq $memlabsXml
+                if (-not $isCorrectSymlink) {
+                    if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
+                    New-Item -ItemType SymbolicLink -Path $defaultFile -Target $memlabsXml -Force | Out-Null
+                    Write-Log "Symlinked $defaultFile -> $memlabsXml" -LogOnly -Verbose
+                }
             }
-            $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
-            $isCorrectSymlink = $item -and $item.LinkTarget -eq $memlabsXml
-            if (-not $isCorrectSymlink) {
-                if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
-                New-Item -ItemType SymbolicLink -Path $defaultFile -Target $memlabsXml -Force | Out-Null
-                Write-Log "Symlinked confCons.xml -> $memlabsXml (workaround for /cons: bug)" -LogOnly -Verbose
+            catch {
+                Write-Log "Could not create symlink at $defaultFile`: $_" -Warning -LogOnly
             }
-        }
-        catch {
-            Write-Log "Could not create confCons.xml symlink: $_" -Warning -LogOnly
         }
     }
 }
@@ -100,6 +109,7 @@ function Get-MRemoteNGPassword {
     # Same pattern as Get-RDCManPassword loading rdcman.dll.
     $mRNGPath = $null
     $searchPaths = @(
+        (Join-Path $env:ProgramData "memlabs\mRemoteNG"),
         "$env:ProgramFiles\mRemoteNG",
         "${env:ProgramFiles(x86)}\mRemoteNG"
     )
@@ -989,7 +999,7 @@ function New-MRemoteNGFileFromHyperV {
     # Restart mRemoteNG if we stopped it (or start it fresh after saving)
     if ($killed -or $shouldSave) {
         $mRNGExe = $null
-        foreach ($p in @("$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
+        foreach ($p in @((Join-Path $env:ProgramData "memlabs\mRemoteNG\mRemoteNG.exe"), "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
             if (Test-Path $p) { $mRNGExe = $p; break }
         }
         if ($mRNGExe) {

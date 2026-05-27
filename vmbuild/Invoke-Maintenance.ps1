@@ -338,24 +338,32 @@ function Update-MRemoteNGShortcut {
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
     # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
     # to our memlabs XML so mRemoteNG loads it without needing /cons:.
+    # The nightly build is portable, so the default path is the install directory (next to the exe).
     if (Test-Path $xmlPath) {
-        try {
-            $defaultDir = Join-Path $env:LOCALAPPDATA "mRemoteNG"
-            $defaultFile = Join-Path $defaultDir "confCons.xml"
-            if (-not (Test-Path $defaultDir)) {
-                New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+        # Portable edition: confCons.xml lives next to mRemoteNG.exe
+        $installDir = Split-Path $ExePath
+        $symlinkTargets = @(
+            Join-Path $installDir "confCons.xml"
+            Join-Path $env:LOCALAPPDATA "mRemoteNG\confCons.xml"
+            Join-Path ([Environment]::GetFolderPath("ApplicationData")) "mRemoteNG\confCons.xml"
+        )
+        foreach ($defaultFile in $symlinkTargets) {
+            try {
+                $defaultDir = Split-Path $defaultFile
+                if (-not (Test-Path $defaultDir)) {
+                    New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+                }
+                $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
+                $isCorrectSymlink = $item -and $item.LinkTarget -eq $xmlPath
+                if (-not $isCorrectSymlink) {
+                    if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
+                    New-Item -ItemType SymbolicLink -Path $defaultFile -Target $xmlPath -Force | Out-Null
+                    Write-LogMessage "Symlinked $defaultFile -> $xmlPath"
+                }
             }
-            # Check if already a symlink to our file
-            $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
-            $isCorrectSymlink = $item -and $item.LinkTarget -eq $xmlPath
-            if (-not $isCorrectSymlink) {
-                if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
-                New-Item -ItemType SymbolicLink -Path $defaultFile -Target $xmlPath -Force | Out-Null
-                Write-LogMessage "Symlinked $defaultFile -> $xmlPath (workaround for /cons: bug in 1.78.2)"
+            catch {
+                Write-LogMessage "Could not create symlink at $defaultFile`: $_" -Level 'WARNING'
             }
-        }
-        catch {
-            Write-LogMessage "Could not create confCons.xml symlink: $_" -Level 'WARNING'
         }
     }
 }
@@ -366,12 +374,13 @@ function Invoke-MRemoteNGMaintenance {
     # mRemoteNG 1.77+ nightly builds support Hyper-V Console via UseVmId/UseEnhancedMode.
     # The stable choco package (1.76.20) does not. We install the nightly portable build from GitHub.
     $minVersion = [version]"1.77.0"
-    $installDir = "$env:ProgramFiles\mRemoteNG"
+    $installDir = Join-Path $env:ProgramData "memlabs\mRemoteNG"
     $mRNGExe = Join-Path $installDir "mRemoteNG.exe"
 
     # Check all known install locations for a sufficient version
     $candidatePaths = @(
         $mRNGExe
+        "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe"
         "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe"
         "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe"
     )
@@ -475,6 +484,13 @@ function Invoke-MRemoteNGMaintenance {
     if ((Test-Path $oldChocoExe) -and (Test-ChocoAvailable)) {
         Write-LogMessage 'Removing old mRemoteNG choco package (1.76)...'
         & choco uninstall mremoteng -y 2>&1 | Out-Null
+    }
+
+    # Remove old Program Files install if present (moved to ProgramData\memlabs)
+    $oldPFDir = "$env:ProgramFiles\mRemoteNG"
+    if (Test-Path $oldPFDir) {
+        Write-LogMessage "Removing old install at $oldPFDir..."
+        Remove-Item -Path $oldPFDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     # Extract to install directory
