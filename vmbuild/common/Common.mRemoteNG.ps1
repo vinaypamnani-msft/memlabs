@@ -6,8 +6,8 @@ function Install-MRemoteNG {
     # Check standard install paths
     $mRemoteNGExe = $null
     $searchPaths = @(
-        "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe",
         "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe",
+        "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe",
         "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe"
     )
     foreach ($p in $searchPaths) {
@@ -26,11 +26,11 @@ function Install-MRemoteNG {
     $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mRemoteNG.lnk"
     $shouldRecreate = $false
     if (Test-Path $shortcutPath) {
-        # Verify existing shortcut has correct /cons: argument
+        # Verify existing shortcut points to the correct exe and has correct /cons: argument
         try {
             $shell = New-Object -ComObject WScript.Shell
             $existing = $shell.CreateShortcut($shortcutPath)
-            if ($existing.Arguments -notlike "*/cons:*" -or $existing.Arguments -like "*/consfile:*") {
+            if ($existing.TargetPath -ne $mRemoteNGExe -or $existing.Arguments -notlike "*/cons:*" -or $existing.Arguments -like "*/consfile:*") {
                 $shouldRecreate = $true
             }
         }
@@ -74,8 +74,8 @@ function Get-MRemoteNGPassword {
     # Same pattern as Get-RDCManPassword loading rdcman.dll.
     $mRNGPath = $null
     $searchPaths = @(
-        "${env:ProgramFiles(x86)}\mRemoteNG",
-        "$env:ProgramFiles\mRemoteNG"
+        "$env:ProgramFiles\mRemoteNG",
+        "${env:ProgramFiles(x86)}\mRemoteNG"
     )
     foreach ($p in $searchPaths) {
         if (Test-Path "$p\mRemoteNG.exe") {
