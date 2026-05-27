@@ -209,12 +209,20 @@ function Remove-VirtualMachine {
     }
 
     # -- Parent folder cleanup (only if now empty) --
-    if ($parent -and (Test-Path $parent.FullName) -and -not $Migrate -and -not $WhatIf) {
-        $remaining = Get-ChildItem $parent.FullName -ErrorAction SilentlyContinue
-        if (-not $remaining -or $remaining.Count -eq 0) {
-            Write-Log "$VmName`: Removing empty parent folder '$($parent.FullName)'..." -SubActivity
-            Remove-Item -Path $parent.FullName -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+    # Wrapped in try/catch because parallel VM-removal jobs race here:
+    # two threads can both pass Test-Path/Get-ChildItem, then one deletes
+    # the folder before the other's Remove-Item runs.
+    try {
+        if ($parent -and (Test-Path $parent.FullName) -and -not $Migrate -and -not $WhatIf) {
+            $remaining = Get-ChildItem $parent.FullName -ErrorAction SilentlyContinue
+            if (-not $remaining -or $remaining.Count -eq 0) {
+                Write-Log "$VmName`: Removing empty parent folder '$($parent.FullName)'..." -SubActivity
+                Remove-Item -Path $parent.FullName -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+            }
         }
+    }
+    catch {
+        # Another job already removed it -- benign.
     }
 
     # -- Proxy: unconfigure clients + clean up host desktop shortcuts --
