@@ -140,8 +140,7 @@ function New-MRemoteNGXmlDocument {
     $root.SetAttribute("BlockCipherMode", "GCM")
     $root.SetAttribute("KdfIterations", "1000")
     $root.SetAttribute("FullFileEncryption", "false")
-    # Protected hash for default master password "mR3m" — mRemoteNG verifies this on load
-    $root.SetAttribute("Protected", "GiUis20DIzSqD0ImEK0MlgAAAJR0LJCh1w6MnTi5hYhbrFYqo1YB")
+    # No Protected attribute — mRemoteNG silently uses default key "mR3m" without prompting
     $root.SetAttribute("ConfVersion", "2.8")
 
     return $doc
