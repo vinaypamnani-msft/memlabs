@@ -169,7 +169,13 @@ if ($blmEnabled) {
     try {
         Push-Location $env:SystemDrive
         $cm_svc_file = "C:\Staging\DSC\cm_svc.txt"
-        $masterKeyPass = if (Test-Path $cm_svc_file) { (Get-Content $cm_svc_file).Trim() } else { 'oMm$Bl!2024x' }
+        if (-not (Test-Path $cm_svc_file)) {
+            throw "SQL service account password file '$cm_svc_file' not found. Cannot create database master key without it."
+        }
+        $masterKeyPass = (Get-Content $cm_svc_file).Trim()
+        if ([string]::IsNullOrWhiteSpace($masterKeyPass)) {
+            throw "SQL service account password file '$cm_svc_file' is empty. Cannot create database master key."
+        }
         $sqlCertQuery = @"
 USE [$cmDbName];
 IF NOT EXISTS (SELECT name FROM sys.symmetric_keys WHERE name = '##MS_DatabaseMasterKey##')
