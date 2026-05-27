@@ -206,7 +206,6 @@ function New-MRemoteNGConnectionNode {
         [string]$Domain = "",
         [string]$Password = "",
         [string]$Id = "",
-        [bool]$InheritCreds = $true,
         [string]$PuttySession = "Default Settings",
         [string]$VmId = "",
         [bool]$UseEnhancedMode = $false
@@ -234,12 +233,6 @@ function New-MRemoteNGConnectionNode {
         $node.SetAttribute("VmId", $VmId)
         $node.SetAttribute("UseVmId", "true")
         $node.SetAttribute("UseEnhancedMode", $UseEnhancedMode.ToString().ToLower())
-    }
-
-    if ($InheritCreds) {
-        $node.SetAttribute("InheritUsername", "true")
-        $node.SetAttribute("InheritPassword", "true")
-        $node.SetAttribute("InheritDomain", "true")
     }
 
     return $node
@@ -279,7 +272,6 @@ function Add-MRemoteNGConnectionToContainer {
         [string]$Domain = "",
         [string]$Password = "",
         [string]$GuidSeed = "",
-        [bool]$InheritCreds = $true,
         [string]$VmId = "",
         [bool]$UseEnhancedMode = $false,
         [bool]$ForceOverwrite = $false
@@ -302,7 +294,7 @@ function Add-MRemoteNGConnectionToContainer {
     $node = New-MRemoteNGConnectionNode -Doc $Doc -Name $Name -DisplayName $DisplayName -Hostname $Hostname `
         -Protocol $Protocol -Port $Port -Description $Description `
         -Username $Username -Domain $Domain -Password $Password -Id $id `
-        -InheritCreds $InheritCreds -VmId $VmId -UseEnhancedMode $UseEnhancedMode
+        -VmId $VmId -UseEnhancedMode $UseEnhancedMode
 
     [void]$Container.AppendChild($node)
     Write-Log "Added $DisplayName ($Protocol) to mRemoteNG" -LogOnly -Verbose
@@ -505,7 +497,7 @@ function New-MRemoteNGFileFromHyperV {
                         -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
                         -Protocol "SSH2" -Port "22" -Description $sshComment `
                         -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
-                        -GuidSeed "ssh:${domain}:$($vm.VmName)" -InheritCreds $false `
+                        -GuidSeed "ssh:${domain}:$($vm.VmName)" `
                         -ForceOverwrite $true) {
                     $shouldSave = $true
                 }
@@ -521,7 +513,7 @@ function New-MRemoteNGFileFromHyperV {
                             -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
                             -Protocol "RDP" -Port "3389" -Description $sshComment `
                             -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
-                            -GuidSeed "rdp:${domain}:$($vm.VmName)" -InheritCreds $false `
+                            -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                             -ForceOverwrite $true) {
                         $shouldSave = $true
                     }
@@ -664,31 +656,28 @@ function New-MRemoteNGFileFromHyperV {
                 $vmID = $vm.vmId
             }
 
-            $connUsername = ""
-            $connDomain = ""
-            $connPassword = ""
-            $inheritCreds = $true
+            $connUsername = $username
+            $connDomain = $domain
+            $connPassword = $encryptedPass
 
             if (-not [string]::IsNullOrWhiteSpace($vmID)) {
                 $displayName = "[console] " + $displayName
                 $connUsername = $env:username
                 $connDomain = ""
                 $connPassword = ""
-                $inheritCreds = $false
                 $name = $env:computername
             }
             elseif ($vm.domainUser) {
                 $connUsername = $vm.domainUser
                 $connDomain = $vm.Domain
                 $connPassword = $encryptedPass
-                $inheritCreds = $false
             }
 
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
                     -Name $name -DisplayName $displayName -Hostname $name `
                     -Protocol "RDP" -Port "3389" -Description $comment.ToString() `
                     -Username $connUsername -Domain $connDomain -Password $connPassword `
-                    -GuidSeed "rdp:${domain}:$($vm.VmName)" -InheritCreds $inheritCreds `
+                    -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                     -VmId $(if ($vmID) { $vmID } else { "" }) `
                     -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
                     -ForceOverwrite $ForceOverwrite) {
@@ -739,7 +728,7 @@ function New-MRemoteNGFileFromHyperV {
                     -Name $vm.VmName -DisplayName $displayName -Hostname $hostname `
                     -Protocol $protocol -Port $port -Description $comment.ToString() `
                     -GuidSeed "${protocol}:unknown:$($vm.VmName)" `
-                    -InheritCreds $false -ForceOverwrite $false) {
+                    -ForceOverwrite $false) {
                 $shouldSave = $true
             }
         }
