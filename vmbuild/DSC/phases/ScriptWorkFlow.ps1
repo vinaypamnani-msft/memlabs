@@ -106,6 +106,35 @@ if (Test-Path -Path $ConfigurationFile) {
         $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
+
+    # Add-to-existing: the deployConfig may contain new SiteSystem VMs that
+    # need DP/MP/SUP installed, but the previous deploy already marked
+    # InstallDP/InstallSUP as Completed. Reset those statuses when the
+    # current deployConfig has SiteSystem VMs requesting those roles so the
+    # installer scripts actually run.
+    $newSiteSystemVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SiteSystem' })
+    if ($newSiteSystemVMs.Count -gt 0) {
+        $needsDP  = @($newSiteSystemVMs | Where-Object { $_.installDP }).Count -gt 0
+        $needsMP  = @($newSiteSystemVMs | Where-Object { $_.installMP }).Count -gt 0
+        $needsSUP = @($newSiteSystemVMs | Where-Object { $_.installSUP -or $_.installRP }).Count -gt 0
+        if (($needsDP -or $needsMP) -and $Configuration.InstallDP -and $Configuration.InstallDP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallDP status (new SiteSystem VMs with DP/MP found)"
+            $Configuration.InstallDP.Status = 'NotStart'
+            $Configuration.InstallDP.StartTime = ''
+            $Configuration.InstallDP.EndTime = ''
+            if ($Configuration.InstallMP) {
+                $Configuration.InstallMP.Status = 'NotStart'
+                $Configuration.InstallMP.StartTime = ''
+                $Configuration.InstallMP.EndTime = ''
+            }
+        }
+        if ($needsSUP -and $Configuration.InstallSUP -and $Configuration.InstallSUP.Status -eq 'Completed') {
+            Write-DscStatus "Resetting InstallSUP status (new SiteSystem VMs with SUP found)"
+            $Configuration.InstallSUP.Status = 'NotStart'
+            $Configuration.InstallSUP.StartTime = ''
+            $Configuration.InstallSUP.EndTime = ''
+        }
+    }
 }
 if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
