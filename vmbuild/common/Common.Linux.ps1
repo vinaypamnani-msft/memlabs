@@ -3219,38 +3219,39 @@ function Invoke-LinuxRoleConfiguration {
     #
     # Two-phase gate:
     #   1) SSH in and run `cloud-init status --wait`. This blocks until
-    #      cloud-init reaches 'done' or 'error'. The reboot that follows
-    #      will kill this SSH session (exit ≠ 0 / connection reset) — that
-    #      is expected and not treated as an error.
-    #   2) Re-probe SSH after the reboot. Once SSH is back, cloud-init is
+    #      cloud-init reaches 'done' or 'error'. If cloud-init already
+    #      finished (reboot already happened), this returns instantly with
+    #      exit 0 and we skip straight to the install modules.
+    #   2) If the SSH session was killed (reboot just happened mid-wait),
+    #      sleep 15s then re-probe SSH. Once SSH is back, cloud-init is
     #      fully done and the system is stable for our install scripts.
     Write-Progress2 -Activity $activity -Status "Waiting for cloud-init to finish" -force
     Write-Log "[LinuxConfig] $vmName`: waiting for cloud-init to complete (reboot expected after)"
     $ciResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
         -BashCommand 'cloud-init status --wait 2>/dev/null; echo "cloud-init exit=$?"' `
         -Sudo -DisplayName 'cloud-init-wait' -TimeoutSeconds 600
-    if ($ciResult -and $ciResult.ScriptBlockOutput) {
+    $ciCleanExit = $ciResult -and $ciResult.CommandResult
+    if ($ciCleanExit) {
         $ciOutput = ($ciResult.ScriptBlockOutput -split "`n" | Select-Object -Last 5) -join ' | '
-        Write-Log "[LinuxConfig] $vmName`: cloud-init result: $ciOutput"
+        Write-Log "[LinuxConfig] $vmName`: cloud-init already done: $ciOutput"
     }
     else {
-        # Connection reset by reboot — this is the normal path for Desktop images.
+        # Connection reset by reboot — this is the normal path for Desktop
+        # images on first boot. Wait for SSH to come back after the reboot.
         Write-Log "[LinuxConfig] $vmName`: cloud-init wait session ended (likely rebooting)"
+        Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
+        Write-Log "[LinuxConfig] $vmName`: waiting for VM to come back after cloud-init reboot"
+        # Sleep briefly so the VM has time to actually go down; otherwise
+        # Wait-LinuxVmReady may immediately succeed against the old
+        # (pre-reboot) SSH session before the kernel starts shutting down.
+        Start-Sleep -Seconds 15
+        $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+        if (-not $ip) {
+            Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
+            return $false
+        }
+        Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
     }
-
-    # Wait for the post-cloud-init reboot to complete and SSH to come back.
-    # Sleep briefly first so the VM has time to actually go down; otherwise
-    # Wait-LinuxVmReady may immediately succeed against the old (pre-reboot)
-    # SSH session before the kernel starts shutting down.
-    Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
-    Write-Log "[LinuxConfig] $vmName`: waiting for VM to come back after cloud-init reboot"
-    Start-Sleep -Seconds 15
-    $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
-    if (-not $ip) {
-        Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
-        return $false
-    }
-    Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
 
     # Run each module as its own SSH invocation so the Phase 3 row reflects
     # exactly what's running. Fail-fast: a module failure aborts subsequent
