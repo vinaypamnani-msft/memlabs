@@ -1677,7 +1677,13 @@ function Set-MouseHoverHighlight {
         else {
             Write-Host "━➤ " -ForegroundColor Yellow -NoNewline
         }
-        Write-Option $item.ItemName $item.Text -color "SkyBlue" -Color2 "SkyBlue" -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
+        # Strip any embedded ANSI color sequences so the hover color (SkyBlue)
+        # applies uniformly. Items with hardcoded ANSI (e.g. domain stats lines)
+        # would otherwise keep their original colors and ignore the hover.
+        $hoverText = if ($item.Text -and $item.Text.Contains([char]27)) {
+            (Get-AnsiCsiPattern).Replace($item.Text, '')
+        } else { $item.Text }
+        Write-Option $item.ItemName $hoverText -color "SkyBlue" -Color2 "SkyBlue" -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
     }
 
     $script:_lastHoveredIndex = $hoveredIndex
