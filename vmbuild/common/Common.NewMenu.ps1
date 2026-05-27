@@ -790,6 +790,14 @@ public struct MOUSE_EVENT_RECORD {
 '@
 }
 
+# Detect whether the current (possibly cached) MemLabsConsole.MouseInput type
+# includes the newer P/Invoke methods. When the type was compiled in an earlier
+# session run (before these methods were added), the guard above skips
+# recompilation and the methods are missing. The polling loop falls back to
+# GetNumberOfConsoleInputEvents in that case (original behavior).
+$script:_hasPeekConsoleInput = [MemLabsConsole.MouseInput].GetMethod('PeekConsoleInput') -ne $null
+$script:_hasFlushConsoleInput = [MemLabsConsole.MouseInput].GetMethod('FlushConsoleInputBuffer') -ne $null
+
 # The saved console mode before mouse input was enabled. Used by
 # Disable-MouseInput to restore the original state.
 $script:_savedConsoleMode = $null
@@ -822,7 +830,9 @@ function Enable-MouseInput {
     # input buffer. ReadConsoleInput blocks if it finds the buffer empty
     # after GetNumberOfConsoleInputEvents reported stale counts, causing
     # the polling loop to hang.
-    [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+    if ($script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+    }
 }
 
 function Disable-MouseInput {
@@ -859,7 +869,9 @@ function Resume-MouseInput {
         # Flush events generated while Quick Edit was active (text selection
         # clicks, ConPTY internal bookkeeping). Without this, phantom events
         # linger and poison the next menu's input buffer.
-        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+        if ($script:_hasFlushConsoleInput) {
+            [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+        }
     }
 }
 
@@ -1698,9 +1710,20 @@ function Get-KeyStroke {
             # ConPTY mode toggles (Shift-suspend/resume Quick Edit), causing
             # ReadConsoleInput to block indefinitely on events that ConPTY
             # consumed internally.
-            $peekRead = [uint32]0
-            [void][MemLabsConsole.MouseInput]::PeekConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$peekRead)
-            if ($peekRead -gt 0) {
+            # Falls back to GetNumberOfConsoleInputEvents when PeekConsoleInput
+            # is unavailable (type compiled in a stale session).
+            $hasEvents = $false
+            if ($script:_hasPeekConsoleInput) {
+                $peekRead = [uint32]0
+                [void][MemLabsConsole.MouseInput]::PeekConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$peekRead)
+                $hasEvents = $peekRead -gt 0
+            }
+            else {
+                $eventCount = [uint32]0
+                [void][MemLabsConsole.MouseInput]::GetNumberOfConsoleInputEvents($script:_consoleInputHandle, [ref]$eventCount)
+                $hasEvents = $eventCount -gt 0
+            }
+            if ($hasEvents) {
                 $read = [uint32]0
                 [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
                 if ($read -gt 0) {
