@@ -24,12 +24,29 @@ function Install-MRemoteNG {
 
     # Create desktop shortcut pointing to our connection file
     $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mRemoteNG.lnk"
-    if (-not (Test-Path $shortcutPath)) {
+    $shouldRecreate = $false
+    if (Test-Path $shortcutPath) {
+        # Verify existing shortcut has correct /cons: argument
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            $existing = $shell.CreateShortcut($shortcutPath)
+            if ($existing.Arguments -notlike "*/cons:*" -or $existing.Arguments -like "*/consfile:*") {
+                $shouldRecreate = $true
+            }
+        }
+        catch {
+            $shouldRecreate = $true
+        }
+    }
+    else {
+        $shouldRecreate = $true
+    }
+    if ($shouldRecreate) {
         try {
             $shell = New-Object -ComObject WScript.Shell
             $shortcut = $shell.CreateShortcut($shortcutPath)
             $shortcut.TargetPath = $mRemoteNGExe
-            $shortcut.Arguments = "/consfile:`"$($Global:Common.MRemoteNGFilePath)`""
+            $shortcut.Arguments = "/cons:`"$($Global:Common.MRemoteNGFilePath)`""
             $shortcut.WorkingDirectory = Split-Path $mRemoteNGExe
             $shortcut.Save()
             Write-Log "Created mRemoteNG desktop shortcut: $shortcutPath" -Success -LogOnly
