@@ -25,6 +25,23 @@
     $ThisVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisMachineName }
 
 
+    # OR-across-top-levels: DC-level PKI templates publish if ANY hierarchy in
+    # this domain wants PKI. Over-provisioning is harmless; under-provisioning
+    # breaks the hierarchy that needed it. Falls back to global mirror when no
+    # per-VM blocks are stamped yet (mid-migration shape).
+    $usePKI = $false
+    $dcDomain = if ($ThisVM.Domain) { $ThisVM.Domain } else { $deployConfig.parameters.domainName }
+    $domainTopCmOptions = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and
+            (-not $_.Domain -or $_.Domain -eq $dcDomain) -and $_.cmOptions
+        }).cmOptions
+    if (-not $domainTopCmOptions -and $deployConfig.cmOptions) {
+        $domainTopCmOptions = @($deployConfig.cmOptions)
+    }
+    foreach ($_cmo in $domainTopCmOptions) {
+        if ($_cmo.UsePKI) { $usePKI = $true }
+    }
+
     $RealDC = $deployConfig.virtualMachines | Where-Object { $_.role -in ("DC") }
 
     $DCIPAddr = $RealDC.thisParams.DCIPAddress
@@ -76,12 +93,14 @@
 
         $nextDepend = "[DnsServerConditionalForwarder]Forwarder1"
 
-        UpdateCAPrefs UpdateCAPrefs {
-            DependsOn     = $nextDepend
-            RootCa        = $ThisVM.vmName
-        }
+        if ($usePKI) {
+            UpdateCAPrefs UpdateCAPrefs {
+                DependsOn     = $nextDepend
+                RootCa        = $ThisVM.vmName
+            }
 
-        $nextDepend = "[UpdateCAPrefs]UpdateCAPrefs"
+            $nextDepend = "[UpdateCAPrefs]UpdateCAPrefs"
+        }
 
         AddToAdminGroup AddRemoteAdmins {
             DomainName   = ($deployConfig.vmOptions.domainName)
@@ -118,38 +137,40 @@
             }
         }
 
-        $waitOnDependency = @()
-        if ($iisCount) {
-            AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                GroupName    = "$DomainName\ConfigMgr IIS Servers"
-                Permissions  = 'Read, Enroll'
-                PermissionsOnly = $true
-                SkipIfNotExist = $true
-                DependsOn    = $nextDepend
-            }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+        $waitOnDependency = @($nextDepend)
+        if ($usePKI) {
+            if ($iisCount) {
+                AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
+                    TemplateName = "ConfigMgrClientDistributionPointCertificate"
+                    GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    Permissions  = 'Read, Enroll'
+                    PermissionsOnly = $true
+                    SkipIfNotExist = $true
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
 
-            AddCertificateTemplate ConfigMgrWebServerCertificate {
-                TemplateName = "ConfigMgrWebServerCertificate"
-                GroupName    = "$DomainName\ConfigMgr IIS Servers"
-                Permissions  = 'Read, Enroll'
+                AddCertificateTemplate ConfigMgrWebServerCertificate {
+                    TemplateName = "ConfigMgrWebServerCertificate"
+                    GroupName    = "$DomainName\ConfigMgr IIS Servers"
+                    Permissions  = 'Read, Enroll'
+                    PermissionsOnly = $true
+                    SkipIfNotExist = $true
+                    DependsOn    = $nextDepend
+                }
+                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+            }
+
+            AddCertificateTemplate ConfigMgrClientCertificate {
+                TemplateName = "ConfigMgrClientCertificate"
+                GroupName    = "$DomainName\Domain Computers"
+                Permissions  = 'Read, Enroll, AutoEnroll'
                 PermissionsOnly = $true
                 SkipIfNotExist = $true
                 DependsOn    = $nextDepend
             }
-            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
+            $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
         }
-        
-        AddCertificateTemplate ConfigMgrClientCertificate {
-            TemplateName = "ConfigMgrClientCertificate"
-            GroupName    = "$DomainName\Domain Computers"
-            Permissions  = 'Read, Enroll, AutoEnroll'
-            PermissionsOnly = $true
-            SkipIfNotExist = $true
-            DependsOn    = $nextDepend
-        }
-        $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
 
 
        

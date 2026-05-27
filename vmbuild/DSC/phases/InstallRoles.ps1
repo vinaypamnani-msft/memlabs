@@ -13,8 +13,10 @@ $DomainFullName = $deployConfig.vmOptions.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CSName = $ThisVM.thisParams.ParentSiteServer
-$usePKI = $deployConfig.cmOptions.UsePKI
-$offlineSUP = $deployConfig.cmOptions.OfflineSUP
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
+$offlineSUP = $cmo.OfflineSUP
 if (-not $usePKI) {
     $usePKI = $false
 }
@@ -179,6 +181,31 @@ if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 }
 
+# Quick check: if all SUPs are already installed, skip the entire install+sync
+$allSUPsInstalled = $true
+foreach ($SUP in $SUPs) {
+    if ([string]::IsNullOrWhiteSpace($SUP.ServerName)) { continue }
+    $SUPFQDN = $SUP.ServerName.Trim() + "." + $DomainFullName
+    if (-not (Get-CMSoftwareUpdatePoint -SiteSystemServerName $SUPFQDN)) {
+        $allSUPsInstalled = $false
+        break
+    }
+}
+if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
+    Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+if ($SUPs.Count -eq 0) {
+    Write-DscStatus "No SUPs configured. Skipping SUP install."
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 # Check if a SUP Exists on this site
 $configureSUP = $false
 $existingSUPs = Get-CMSoftwareUpdatePoint -SiteCode $SiteCode
@@ -295,3 +322,7 @@ if ($configureSUP) {
 $Configuration.InstallSUP.Status = 'Completed'
 $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+
+# CM site-role proxy is now applied by phases/ConfigureCMProxy.ps1, invoked
+# directly from ScriptWorkflow.ps1 so it runs even when this script returns
+# early (e.g. no SUP configured).

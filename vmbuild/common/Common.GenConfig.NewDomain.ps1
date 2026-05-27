@@ -26,6 +26,7 @@ function Get-NewMachineName {
     $CurrentName = $vm.vmName
     $Role = $vm.Role
     $RoleName = $vm.Role
+    $DuplicateRoleName = $null
     if ($Role -eq "OSDClient") {
         $RoleName = "OSD"
     }
@@ -187,10 +188,22 @@ function Get-NewMachineName {
         }
     }
 
+    if ($Role -eq "StandaloneRootCA") {
+        # First attempt: "OfflineRoot" (PREFIX-OFFLINEROOT = 15 chars with a
+        # 3-char prefix). If a duplicate exists, fall back to "OfflineCA1",
+        # "OfflineCA2", etc. (PREFIX-OFFLINECA1 = 15 chars).
+        $RoleName = "OfflineRoot"
+        $DuplicateRoleName = "OfflineCA"
+        $SkipOne = $true
+    }
+
     [int]$i = 1
     while ($true) {
         if ($SkipOne -and $i -eq 1) {
             $NewName = $RoleName
+        }
+        elseif ($DuplicateRoleName) {
+            $NewName = $DuplicateRoleName + ($i - 1)
         }
         else {
             $NewName = $RoleName + ($i)
@@ -315,7 +328,10 @@ function select-timezone {
     $timezone = Get-Menu2 -MenuName "Timezone Selection" -Prompt "Select Timezone" -OptionArray $commonTimeZones -CurrentValue $($ConfigToCheck.vmOptions.timezone) -additionalOptions @{"F" = "Display Full List" }
     if ($timezone -eq "F") {
         Write-Log -Activity "Full Timezone Selection" -NoNewLine
-        $timezone = Get-Menu -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
+        $timezone = Get-Menu2 -MenuName "Full Timezone Selection" -Prompt "Select Timezone" -OptionArray $((Get-TimeZone -ListAvailable).Id) -CurrentValue $($ConfigToCheck.vmOptions.timezone) -test:$false
+        if ($timezone -eq "ESCAPE") {
+            $timezone = $ConfigToCheck.vmOptions.timezone
+        }
     }
     return $timezone
 }
@@ -517,6 +533,12 @@ function Get-NewDomainConfigHelp {
         "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "EnableSUPOnSiteServers" { "Enabling this will automatically install the SUP role on CAS/Primary site servers, sharing SQL with the site server" }
+        "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
+        "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
+        "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
+        "UseProxyForClients" { "Default value for the per-VM 'useProxy' flag on newly added non-site-system Windows VMs (clients + plain DomainMembers). When true, those VMs are configured to route HTTP/HTTPS through the domain's Linux Squid Proxy VM and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
+        "UseProxyForCM" { "Default value for the per-VM 'useProxy' flag on newly added ConfigMgr site-system VMs (CAS/Primary/Secondary/SiteSystem/PassiveSite/WSUS/SQLAO/FileServer). When true, CM site roles (including SUP) are configured to use the Proxy for their outbound calls and the host blocks their direct Internet egress (requires a Proxy role VM in the config)." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
         default { "Help Missing for $text" }
     }
@@ -543,18 +565,71 @@ function Select-NewDomainConfig {
         DefaultServerOS     = "Server 2022"
         DefaultSqlVersion   = "Sql Server 2022"
         UseDynamicMemory    = $true
-        IncludeClients      = $true
-        IncludeSSMSOnNONSQL = $true
+        IncludeClients              = $true
+        IncludeSSMSOnNONSQL         = $true
+        EnableSUPOnSiteServers      = $false
+        PushCMClientToClients       = $true
+        PushCMClientToServers       = $false
+        PushCMClientToSiteSystems   = $false
+        UseProxyForClients          = $false
+        UseProxyForCM               = $false
     }
+
+    # Load saved defaults from previous run if available
+    # DomainName and Network are excluded - they are always auto-generated from available/unused values
+    $savedDefaultsPath = Join-Path $Common.ConfigPath "_domainDefaults.json"
+    $nonStickyProps = @('DomainName', 'Network')
+    if (Test-Path $savedDefaultsPath) {
+        try {
+            $savedDefaults = Get-Content -Path $savedDefaultsPath -Force -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            # Migration: an old saved file may still contain a single 'UseProxy'
+            # property. Seed both split keys from it on first load.
+            $legacyUseProxy = $savedDefaults.PSObject.Properties['UseProxy']
+            if ($legacyUseProxy -and $null -ne $legacyUseProxy.Value) {
+                $domainDefaults.UseProxyForClients = [bool]$legacyUseProxy.Value
+                $domainDefaults.UseProxyForCM = [bool]$legacyUseProxy.Value
+            }
+            foreach ($prop in $savedDefaults.psobject.Properties) {
+                if ($prop.Name -in $nonStickyProps) { continue }
+                if ($prop.Name -eq 'UseProxy') { continue }   # legacy key, already migrated above
+                if ($null -ne $domainDefaults."$($prop.Name)") {
+                    $domainDefaults."$($prop.Name)" = $prop.Value
+                }
+            }
+        }
+        catch {
+            Write-Log "Could not load saved domain defaults from _domainDefaults.json. Using built-in defaults." -Warning
+        }
+    }
+
     $newconfig | Add-Member -MemberType NoteProperty -name "domainDefaults" -Value $domainDefaults -Force
 
 
     #Select-Options -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" 
     #$additionalOptions = [ordered]@{"*HF" = "Get-NewDomainConfigHelp"}
-    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp"
+
+    # Section headers rendered above the first property in each group.
+    # Order of properties is controlled by Get-SortedProperties; section
+    # headers attach to whichever property currently leads each group.
+    $sections = @{
+        'DeploymentType'        = 'Domain'
+        'CMVersion'             = 'ConfigMgr'
+        'PushCMClientToClients' = 'Client Push'
+        'UseProxyForClients'    = 'Proxy Settings'
+    }
+    $result = Select-Options -MenuName "New Domain Wizard - Default Settings" -Rootproperty $newConfig -PropertyName domainDefaults -prompt "Select Default Property to modify" -ContinueMode:$true -additionalOptions $additionalOptions -HelpFunction "Get-NewDomainConfigHelp" -Sections $sections
 
     if ($result -eq "ESCAPE") {
         return $result
+    }
+
+    # Save the user-selected defaults for next run
+    try {
+        $newconfig.domainDefaults | ConvertTo-Json -Depth 3 | Out-File -FilePath $savedDefaultsPath -Force -ErrorAction Stop
+        Write-Log "Saved domain defaults to _domainDefaults.json" -LogOnly
+    }
+    catch {
+        Write-Log "Could not save domain defaults to _domainDefaults.json." -Warning
     }
     
  
@@ -599,6 +674,15 @@ function Select-NewDomainConfig {
                 Add-NewVMForRole -Role "DC" -Domain $newconfig.domainDefaults.DomainName -ConfigToModify $newconfig -OperatingSystem $newconfig.domainDefaults.DefaultServerOS -Quiet:$true -test:$test
             }
         }
+        # If domainDefaults opted into proxy (UseProxyForClients / UseProxyForCM),
+        # auto-add a Linux Proxy VM up front so the new config is internally
+        # consistent before the user ever sees the Deployment Menu. The
+        # Select-MainMenu loop also calls this every iteration, so a later
+        # toggle still adds/removes the Proxy VM as needed.
+        if (-not $newConfig.vmOptions.domainName) {
+            $newConfig.vmOptions.domainName = $newconfig.domainDefaults.DomainName
+        }
+        try { Add-ProxyVMIfMissing -ConfigToModify $newconfig } catch { Write-Log "Add-ProxyVMIfMissing (NewDomain) failed: $_" -LogOnly }
         $valid = $true
         if ($test) {
             $valid = Get-TestResult -Config $newConfig -SuccessOnWarning

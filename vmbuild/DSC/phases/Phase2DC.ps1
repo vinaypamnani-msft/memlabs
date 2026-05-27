@@ -22,15 +22,26 @@
     $DomainAdminName = $deployConfig.vmOptions.adminName
 
 
+    # DC-level provisioning (PKI cert templates, CM content pre-pop, BLM cert
+    # templates) is shared across every hierarchy in this domain. Use OR-across-
+    # top-levels: if ANY top-level site server (CAS or standalone Primary) has
+    # the flag set, the DC publishes it. Over-provisioning is harmless; under-
+    # provisioning breaks the hierarchy that needed it. Falls back to the
+    # rehydrated global block when no per-VM cmOptions are present yet (mid-
+    # migration shape) or when no site servers are in this deploy.
     $usePKI = $false
     $prePopulate = $false
-    if ($deployConfig.cmOptions) {
-        if ($deployConfig.cmOptions.UsePKI) {
-            $usePKI = $deployConfig.cmOptions.UsePKI
-        }
-        if ($deployConfig.cmOptions.PrePopulateObjects) {
-            $prePopulate = $deployConfig.cmOptions.PrePopulateObjects
-        }
+    $enableBLM = $false
+    $topLevelCmOptions = @($deployConfig.virtualMachines | Where-Object {
+            $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
+        }).cmOptions
+    if (-not $topLevelCmOptions -and $deployConfig.cmOptions) {
+        $topLevelCmOptions = @($deployConfig.cmOptions)
+    }
+    foreach ($cmo in $topLevelCmOptions) {
+        if ($cmo.UsePKI) { $usePKI = $true }
+        if ($cmo.PrePopulateObjects) { $prePopulate = $true }
+        if ($cmo.EnableBLM) { $enableBLM = $true }
     }
 
 
@@ -97,6 +108,16 @@
         }
     }
 
+    # BitLocker Management: ensure DC waits for BLM client VMs to domain-join
+    if ($enableBLM) {
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.BitLocker -eq $true -and -not $vm.Hidden) {
+                if (-not $waitOnDomainJoin.Contains($vm.vmName)) {
+                    $waitOnDomainJoin += $vm.vmName
+                }
+            }
+        }
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
@@ -361,6 +382,34 @@
             $nextDepend = $adSiteDependency
         }
       
+        # Reverse lookup zones: one AD-integrated /24 in-addr.arpa zone per
+        # distinct VM network in this deployment. Provides PTR records for
+        # every host the DC serves (Windows clients via Secure dynamic update,
+        # Linux via Register-LinuxVmDns). Idempotent: DnsServerADZone is a
+        # no-op when the zone already exists.
+        $reverseZoneNames = @{}
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if (-not $vm.network) { continue }
+            $oct = $vm.network.Split('.')
+            if ($oct.Count -ne 4) { continue }
+            $reverseZoneNames["$($oct[2]).$($oct[1]).$($oct[0]).in-addr.arpa"] = $true
+        }
+        $revIdx = 0
+        $reverseZoneDeps = @($nextDepend)
+        foreach ($zoneName in $reverseZoneNames.Keys) {
+            $revIdx++
+            DnsServerADZone "ReverseZone$revIdx" {
+                Name             = $zoneName
+                DynamicUpdate    = 'Secure'
+                ReplicationScope = 'Domain'
+                Ensure           = 'Present'
+                DependsOn        = $nextDepend
+            }
+            $reverseZoneDeps += "[DnsServerADZone]ReverseZone$revIdx"
+        }
+        if ($revIdx -gt 0) {
+            $nextDepend = $reverseZoneDeps
+        }
 
         if ($OtherDC) {
             DnsServerConditionalForwarder 'Forwarder1' {
@@ -489,61 +538,15 @@
             }
         }
 
-        if ($ThisVM.InstallCA) {
 
+
+        if ($ThisVM.InstallCA) {
+            # CA installation is handled by the host-driven PKI orchestrator
+            # (Install-PKI) after Phase2 completes. This ensures consistent
+            # behavior regardless of whether the CA is on a DC or member server.
             WriteStatus ADCS {
                 DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Authority"
-            }
-
-            if ($ThisVM.ThisParams.RootCA) {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                    #RootCa        = $ThisVM.ThisParams.RootCA
-                }
-            }
-            else {
-                InstallCA InstallCA {
-                    DependsOn     = $waitOnDependency
-                    HashAlgorithm = "SHA256"
-                }
-            }
-            $nextDepend = "[InstallCA]InstallCA"
-
-            if ($usePKI) {
-                
-                WriteStatus ImportCertificateTemplate {
-                    DependsOn = $nextDepend
-                    Status    = "Importing Template to Domain"
-                }
-
-                $waitOnDependency = @($nextDepend)
-
-                if ($iisCount) {
-                    ImportCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
-
-                    ImportCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        DNPath       = $DNName
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                ImportCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    DNPath       = $DNName
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[ImportCertificateTemplate]ConfigMgrClientCertificate"
-            }
-            else {
-                $waitOnDependency = $nextDepend
+                Status    = "Skipping CA install (will be configured post-Phase2 by PKI orchestrator)"
             }
         }
 
@@ -585,7 +588,9 @@
 
             $waitOnDependency += "[DelegateControl]Add$server"
         }
-      
+
+
+
         if ($sitecount) {
 
             ADGroup ConfigMgrSiteServers {
@@ -615,96 +620,57 @@
         }
 
 
-        WriteStatus GroupPolicyStatus {
-            DependsOn = $waitOnDependency
-            Status    = "Installing Auto Enrollment Group Policy"
-        }
-
-        $GPOName = "Certificate AutoEnrollment"
-
-        GroupPolicy GroupPolicyConfig {
-            Name      = $GPOName
-            DependsOn = $waitOnDependency
-        }
-
-        GPLink GPLinkConfig {
-            Path      = $DNName
-            GPOName   = $GPOName
-            DependsOn = "[GroupPolicy]GroupPolicyConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig1 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "AEPolicy"
-            ValueType = "DWord"
-            Value     = "7"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig2 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "OfflineExpirationPercent"
-            ValueType = "DWord"
-            Value     = "10"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-
-        GPRegistryValue GPRegistryValueConfig3 {
-            Name      = $GPOName
-            Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
-            ValueName = "OfflineExpirationStoreNames"
-            ValueType = "String"
-            Value     = "MY"
-            DependsOn = "[GPLink]GPLinkConfig"
-        }
-        $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
-        $waitOnDependency = $nextDepend
-        
-
-        if ($ThisVM.InstallCA) {
-
-
-            WriteStatus CertTemplates {
+        if ($usePKI) {
+            WriteStatus GroupPolicyStatus {
                 DependsOn = $waitOnDependency
-                Status    = "Installing Certificate Templates"
+                Status    = "Installing Auto Enrollment Group Policy"
             }
 
-            ModuleAdd PSPKI {
-                Key             = 'Always'
-                CheckModuleName = 'PSPKI'
-                DependsOn       = $waitOnDependency
-            }
-            $nextDepend = "[ModuleAdd]PSPKI"
-            $waitOnDependency = @("[ModuleAdd]PSPKI")
-            if ($usePKI) {
-                if ($iisCount) {
-                    AddCertificateTemplate ConfigMgrClientDistributionPointCertificate {
-                        TemplateName = "ConfigMgrClientDistributionPointCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientDistributionPointCertificate"
+            $GPOName = "Certificate AutoEnrollment"
 
-                    AddCertificateTemplate ConfigMgrWebServerCertificate {
-                        TemplateName = "ConfigMgrWebServerCertificate"
-                        GroupName    = 'ConfigMgr IIS Servers'
-                        Permissions  = 'Read, Enroll'
-                        DependsOn    = $nextDepend
-                    }
-                    $waitOnDependency += "[AddCertificateTemplate]ConfigMgrWebServerCertificate"
-                }
-                AddCertificateTemplate ConfigMgrClientCertificate {
-                    TemplateName = "ConfigMgrClientCertificate"
-                    GroupName    = 'Domain Computers'
-                    Permissions  = 'Read, Enroll, AutoEnroll'
-                    DependsOn    = $nextDepend
-                }
-                $waitOnDependency += "[AddCertificateTemplate]ConfigMgrClientCertificate"
+            GroupPolicy GroupPolicyConfig {
+                Name      = $GPOName
+                DependsOn = $waitOnDependency
             }
+
+            GPLink GPLinkConfig {
+                Path      = $DNName
+                GPOName   = $GPOName
+                DependsOn = "[GroupPolicy]GroupPolicyConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig1 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "AEPolicy"
+                ValueType = "DWord"
+                Value     = "7"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig2 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationPercent"
+                ValueType = "DWord"
+                Value     = "10"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+
+            GPRegistryValue GPRegistryValueConfig3 {
+                Name      = $GPOName
+                Key       = "HKLM\SOFTWARE\Policies\Microsoft\Cryptography\AutoEnrollment"
+                ValueName = "OfflineExpirationStoreNames"
+                ValueType = "String"
+                Value     = "MY"
+                DependsOn = "[GPLink]GPLinkConfig"
+            }
+            $nextDepend = "[GPRegistryValue]GPRegistryValueConfig3"
+            $waitOnDependency = $nextDepend
         }
+
+        # Certificate template import and publishing is handled by the
+        # host-driven PKI orchestrator (Install-PKI) after Phase2 completes.
 
         if ($ThisVM.externalDomainJoinSiteCode -and $ThisVM.externalDomainJoinSiteCode -ne "NONE") {
             [System.Management.Automation.PSCredential]$groupCreds = New-Object System.Management.Automation.PSCredential ("$($ThisVM.ForestTrust)\Admin", $Admincreds.Password)

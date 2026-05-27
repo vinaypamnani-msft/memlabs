@@ -1,4 +1,4 @@
-#New-Lab.ps1
+﻿#New-Lab.ps1
 [CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Lab Configuration: Standalone, Hierarchy, etc.")]
@@ -37,10 +37,10 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Skip specified Phase! Applies to Phase > 1.")]
     [int[]]$SkipPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Run specified Phase and above. Applies to Phase > 1.")]
-    [ValidateRange(2, 10)]
+    [ValidateRange(2, 11)]
     [int]$StartPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Stop at specified Phase!")]
-    [ValidateRange(2, 10)]
+    [ValidateRange(2, 11)]
     [int]$StopPhase,
     [Parameter(Mandatory = $false, HelpMessage = "Dry Run. Do not use. Deprecated.")]
     [switch]$WhatIf,
@@ -51,7 +51,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Activate restore menu before deployment")]
     [switch]$Restore,
     [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
-    [switch]$NoSnapshot
+    [switch]$NoSnapshot,
+    [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
+    [switch]$KeepFailedVMs
 
 )
 
@@ -114,31 +116,181 @@ if ($global:init_failed) {
 }
 
 
+Write-Log "Post-init: Testing NoRRAS..." -LogOnly
+Flush-LogBuffer -All
 Test-NoRRAS
 
-
-if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
-    Set-VMHost -EnableEnhancedSessionMode $True
+Write-Log "Post-init: Checking VMHost enhanced session mode..." -LogOnly
+Flush-LogBuffer -All
+# Cache the enhanced session mode check — Get-VMHost is a CIM call that can
+# stall for minutes when vmms.exe is busy. The setting persists across reboots
+# once enabled; only re-check once per 24 hours.
+$esmCacheFile = Join-Path $Common.CachePath "vmhost-esm-state.json"
+$esmNeedsCheck = $true
+if (Test-Path $esmCacheFile) {
+    try {
+        $esmCache = Get-Content $esmCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+        if ($esmCache -and $esmCache.Enabled -eq $true) {
+            $esmAge = ((Get-Date) - [DateTime]::Parse($esmCache.CheckedUtc)).TotalHours
+            if ($esmAge -le 24) {
+                $esmNeedsCheck = $false
+                Write-Log "Post-init: Enhanced session mode already enabled (cached, age=$([Math]::Round($esmAge,1))h)." -LogOnly
+            }
+        }
+    }
+    catch {}
 }
+if ($esmNeedsCheck) {
+    Write-Log "Post-init: Calling Get-VMHost (CIM — may be slow if vmms is busy)..." -LogOnly
+    if (((Get-VMHost).EnableEnhancedSessionMode) -eq $false) {
+        Set-VMHost -EnableEnhancedSessionMode $True
+    }
+    try {
+        [PSCustomObject]@{
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+            Enabled    = $true
+        } | ConvertTo-Json | Set-Content -Path $esmCacheFile -Encoding UTF8
+    }
+    catch {}
+}
+Write-Log "Post-init: VMHost check complete. Proceeding to window resize and config..." -LogOnly
 
 if (-not $NoWindowResize.IsPresent) {
     try {
+        Write-Log "Post-init: Window resize - loading System.Windows.Forms..." -LogOnly
+        Flush-LogBuffer -All
         Add-Type -AssemblyName System.Windows.Forms
         $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Primary -eq $true }
 
-        $percent = 0.85
-        $percentheight = 0.90
-        $width = $screen.Bounds.Width * $percent
-        $height = $screen.Bounds.Height * $percentheight
+        # Target columns: fit the longest help text + 6 col prefix + buffer, minimum 170.
+        $curCols = $host.UI.RawUI.WindowSize.Width
+        $curRows = $host.UI.RawUI.WindowSize.Height
+        $helpOverhead = 8   # 6 col prefix (` │🕮  `) + 2 buffer
+        $minCols = 170
+        # Scan help files for longest string literal to size the terminal dynamically
+        $longestHelp = 0
+        $helpFiles = @(
+            (Join-Path $PSScriptRoot "common\Common.GenConfig.Help.ps1"),
+            (Join-Path $PSScriptRoot "genconfig.ps1")
+        )
+        foreach ($helpFile in $helpFiles) {
+            if (Test-Path $helpFile) {
+                $helpLines = Get-Content $helpFile -ErrorAction SilentlyContinue
+                foreach ($line in $helpLines) {
+                    # Match "H..." = "help text" pattern (genconfig) or "text" } pattern (Help.ps1)
+                    if ($line -match '"H\w+"\s*=\s*"([^"]+)"' -or $line -match '"([^"]+)"[^"]*\}') {
+                        $len = $Matches[1].Length
+                        if ($len -gt $longestHelp) { $longestHelp = $len }
+                    }
+                }
+            }
+        }
+        $targetCols = [Math]::Max($minCols, $longestHelp + $helpOverhead)
+        $targetRows = 65
 
-        # Set Window
-        Set-Window -ProcessID $PID -X 20 -Y 20 -Width $width -Height $height
-        $parent = (Get-CimInstance win32_process -ErrorAction SilentlyContinue | Where-Object processid -eq  $PID).parentprocessid
-        $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
-        if ($parent) {
-            # set parent, cmd -> ps
-            Set-Window -ProcessID $parent -X 20 -Y 20 -Width $width -Height $height
-        }       
+        $screenW = $screen.Bounds.Width
+        $screenH = $screen.Bounds.Height
+
+        # Cap target chars so window won't exceed ~92% of screen.
+        # Use conservative 10px/col and 20px/row (upper bound for typical fonts).
+        # This only caps on very small screens; on 1920+ it won't trigger.
+        $maxCols = [int][Math]::Floor(($screenW * 0.92) / 10)
+        $maxRows = [int][Math]::Floor(($screenH * 0.92) / 20)
+        $targetCols = [Math]::Min($targetCols, $maxCols)
+        $targetRows = [Math]::Min($targetRows, $maxRows)
+
+        Write-Log "Post-init: Window resize - screen ${screenW}x${screenH}, current ${curCols}x${curRows} chars, target ${targetCols}x${targetRows} chars" -LogOnly
+
+        $isWT = [bool]$env:WT_SESSION
+        $wtDetected = $isWT
+        $wtProcessId = $null
+        $resizeDone = $false
+        $myProc = Get-Process -Id $PID -ErrorAction SilentlyContinue
+        $myHandle = $myProc.MainWindowHandle
+        $mySessionId = $myProc.SessionId
+        Write-Log "Post-init: Window resize - WT_SESSION=$(if ($isWT) { 'yes' } else { 'no' }), PID=$PID, SessionId=$mySessionId, MainWindowHandle=$myHandle" -LogOnly
+
+        # Walk ancestors ONLY looking for WindowsTerminal - never resize anything else
+        $walker = $myProc
+        for ($i = 0; $i -lt 5; $i++) {
+            $walker = $walker.Parent
+            if (-not $walker) { break }
+            Write-Log "Post-init: Window resize - ancestor[$i]: $($walker.ProcessName) (PID $($walker.Id)) Handle=$($walker.MainWindowHandle)" -LogOnly
+            if ($walker.ProcessName -match '^(WindowsTerminal|Terminal)$') {
+                $wtDetected = $true
+                $wtProcessId = $walker.Id
+                break
+            }
+        }
+        # Also check for WT process if not found in ancestors (default terminal routing)
+        if (-not $wtDetected) {
+            $wtProc = Get-Process -Name 'WindowsTerminal', 'Terminal' -ErrorAction SilentlyContinue |
+                Where-Object { $_.SessionId -eq $mySessionId } |
+                Sort-Object StartTime -Descending | Select-Object -First 1
+            if ($wtProc) {
+                $wtDetected = $true
+                $wtProcessId = $wtProc.Id
+                Write-Log "Post-init: Window resize - found $($wtProc.ProcessName) PID $($wtProc.Id) via process search (session $mySessionId)" -LogOnly
+            }
+            else {
+                $termProcs = Get-Process -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ProcessName -match 'terminal|console|conhost' -and $_.SessionId -eq $mySessionId } |
+                    Select-Object ProcessName, Id, MainWindowHandle
+                $termList = ($termProcs | ForEach-Object { "$($_.ProcessName)($($_.Id))=$($_.MainWindowHandle)" }) -join ', '
+                Write-Log "Post-init: Window resize - no WT found. Terminal-related in session ${mySessionId}: $termList" -LogOnly
+            }
+        }
+
+        Write-Log "Post-init: Window resize - wtDetected=$wtDetected, wtProcessId=$wtProcessId" -LogOnly
+
+        # --- Primary sizing: VT escape sets exact character dimensions ---
+        # \e[8;rows;cols t tells the terminal to resize to fit those chars.
+        # Works in WT and modern conhost. WT adjusts the window pixel size automatically.
+        Write-Log "Post-init: Window resize - sending VT escape for ${targetCols}x${targetRows} chars" -LogOnly
+        Write-Host -NoNewline "`e[8;${targetRows};${targetCols}t"
+
+        # --- Positioning: MoveWindow to (20,20) after VT resize ---
+        if ($wtDetected -and $wtProcessId) {
+            $wtHandle = (Get-Process -Id $wtProcessId -ErrorAction SilentlyContinue).MainWindowHandle
+            Write-Log "Post-init: Window resize - WT PID $wtProcessId MainWindowHandle=$wtHandle" -LogOnly
+            if ($wtHandle -ne [IntPtr]::Zero) {
+                # Ensure [Window] type is loaded
+                try { Set-Window -ProcessID $PID -Passthru | Out-Null } catch {}
+                # Read current WT window size (post-VT-resize) and reposition to (20,20)
+                $wtRect = New-Object RECT
+                $null = [Window]::GetWindowRect($wtHandle, [ref]$wtRect)
+                $wtW = $wtRect.Right - $wtRect.Left
+                $wtH = $wtRect.Bottom - $wtRect.Top
+                Write-Log "Post-init: Window resize - WT window now ${wtW}x${wtH} at ($($wtRect.Left),$($wtRect.Top))" -LogOnly
+                if ($wtW -gt 0 -and $wtH -gt 0) {
+                    $null = [Window]::MoveWindow($wtHandle, 20, 20, $wtW, $wtH, $true)
+                    Write-Log "Post-init: Window resize - repositioned WT to (20,20)" -LogOnly
+                }
+                $resizeDone = $true
+            }
+        }
+
+        # === Fallback for non-WT (classic conhost) ===
+        if (-not $resizeDone -and -not $wtDetected) {
+            # VT escape already sent above; also try Set-Window for positioning
+            Write-Log "Post-init: Window resize - classic conhost path, positioning via Set-Window" -LogOnly
+            $fallbackW = [int]($targetCols * 10)  # conservative pixel estimate
+            $fallbackH = [int]($targetRows * 20)
+            Set-Window -ProcessID $PID -X 20 -Y 20 -Width $fallbackW -Height $fallbackH
+            $parent = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
+            if ($parent -and $parent.ProcessName -eq 'cmd') {
+                Set-Window -ProcessID $parent.Id -X 20 -Y 20 -Width $fallbackW -Height $fallbackH
+            }
+            $null = (New-Object -ComObject WScript.Shell).AppActivate($PID)
+            $resizeDone = $true
+        }
+
+        if (-not $resizeDone) { $resizeDone = $true } # VT escape was sent regardless
+
+        # Log final char dimensions
+        $finalCols = $host.UI.RawUI.WindowSize.Width
+        $finalRows = $host.UI.RawUI.WindowSize.Height
+        Write-Log "Post-init: Window resize - resizeDone=$resizeDone, final ${finalCols}x${finalRows} chars" -LogOnly
     }
     catch {
         Write-Log "Failed to set window size. $_" -LogOnly -Warning
@@ -163,10 +315,14 @@ if (-not $Common.PS7) {
           Install-HostToServer2025
 }
 
+Write-Log "Post-init: Set-PS7ProgressWidth..." -LogOnly
+Flush-LogBuffer -All
 Set-PS7ProgressWidth
 
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -Name "WinREVersion" -PropertyType String -Value "10.0.20348.2201" -Force | Out-Null
 
+Write-Log "Post-init: Setting background image and animation..." -LogOnly
+Flush-LogBuffer -All
 if (-not $Common.DevBranch) {
     $image = (Join-Path $PSScriptRoot "MemLabs.png")
     Set-BackgroundImage $image "right" 5 "uniform"
@@ -227,6 +383,9 @@ function Write-Phase {
         10 {
             Write-Log "Phase $Phase - Run Maintenance" -Activity
         }
+        11 {
+            Write-Log "Phase $Phase - Functional Validation" -Activity
+        }
     }
 }
 
@@ -274,11 +433,17 @@ try {
 
 
     # Verify Hyper-V is installed
+    Write-Log "Post-init: Calling Install-HyperV..." -LogOnly
+    Flush-LogBuffer -All
     Install-HyperV
+    Write-Log "Post-init: Install-HyperV complete." -LogOnly
+    Flush-LogBuffer -All
 
     ### Run maintenance
     if (-not $Configuration) {
+        Write-Log "Post-init: Starting maintenance..." -LogOnly
         Start-Maintenance
+        Write-Log "Post-init: Maintenance complete." -LogOnly
     }
 
     # Get config
@@ -328,7 +493,9 @@ try {
 
     # Determine if we need to run Phase 1
     $runPhase1 = $false
+    Write-Log "Calling Get-List to determine existing VMs..." -LogOnly
     $existingVMs = Get-List -Type VM -SmartUpdate
+    Write-Log "Get-List returned $($existingVMs.Count) existing VMs." -LogOnly
     $newVMs = @()
     $newVMs += $userConfig.virtualMachines | Where-Object { -not $_.Hidden -and ($userConfig.vmOptions.prefix + $_.vmName -notin $existingVMs.vmName) }
     $count = ($newVMs | Measure-Object).count
@@ -343,7 +510,7 @@ try {
 
     # Test Config
     try {
-        $testConfigResult = Test-Configuration -InputObject $userConfig -Final
+        $testConfigResult = Test-Configuration -InputObject $userConfig -Final -StartPhase ([int]$StartPhase)
         if ($runPhase1 -eq $false -or $SkipValidation.IsPresent) {
             # Skip validation in phased run or when asked to skip
             $deployConfig = $testConfigResult.DeployConfig
@@ -449,7 +616,12 @@ try {
 
     Write-Log "### START DEPLOYMENT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
 
-    if (-not $StartPhase -or ($StartPhase -and $StartPhase -le 2)) {
+    # Tools are injected in Phase 2. Skip download/verify when we won't run Phase 2.
+    $needTools = $true
+    if ($StartPhase -and $StartPhase -gt 2) { $needTools = $false }
+    if ($Phase -and 2 -notin $Phase) { $needTools = $false }
+
+    if ($needTools) {
         # Download tools
         $success = Get-Tools -WhatIf:$WhatIf
         if (-not $success) {
@@ -564,7 +736,8 @@ try {
 
     # Define phases
     $start = 1
-    $maxPhase = 10
+    $maxPhase = 11
+    $global:StartPhase = $StartPhase
     if ($prepared) {
 
         for ($i = $start; $i -le $maxPhase; $i++) {
@@ -611,8 +784,56 @@ try {
                     # Create RDCMan file
                     Start-Sleep -Seconds 5
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false -NoActivity -WhatIf:$WhatIf
+                    New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -NoActivity -WhatIf:$WhatIf
                     #Refresh deployConfig to add any props that may have been added in New-VirtualMachine, eg ClusterIPAddress
                     $deployConfig = ConvertTo-DeployConfigEx -DeployConfig $deployConfig
+                }
+                if ($i -eq 2) {
+                    # PKI: orchestrate CA installation post-Phase2 (single-tier or two-tier).
+                    # Only trigger for NEW VMs (non-hidden). If only existing/hidden VMs have
+                    # InstallCA, PKI is already deployed and should not be re-orchestrated.
+                    $hasPKI = @($deployConfig.virtualMachines | Where-Object { $_.InstallCA -and -not $_.hidden }).Count -gt 0
+                    if ($hasPKI) {
+                        $pkiSuccess = Install-PKI -DeployConfig $deployConfig
+                        if (-not $pkiSuccess) {
+                            Write-Log "[PKI] PKI deployment failed." -Failure
+                            $configured = $false
+                            break
+                        }
+                    }
+
+                    # Linux DNS flip from bootstrap public DNS (1.1.1.1) to the
+                    # DC happens inside Start-PhaseDeployment for Phase 2 -- it
+                    # must run before the proxy client config / enforcement so
+                    # the Proxy is fully configured before clients route to it.
+                }
+                if ($i -eq 11) {
+                    # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
+                    if (-not $global:NoSnapshot) {
+                        Merge-Phase8AutoSnapshot -DeployConfig $deployConfig
+                    }
+                    else {
+                        Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
+                    }
+
+                    # Cross-lab proxy ACL reconciliation. Runs here (post-
+                    # Phase 11 success) rather than in Phase 2 because:
+                    #   - This deploy's VMs are now fully built, verified,
+                    #     and their subnets/useProxy values are populated
+                    #     in Get-NetworkList cache.
+                    #   - Parallel deploys in other domains may have been
+                    #     mid-flight during our Phase 2, which made the
+                    #     global subnet union unreliable.
+                    # Per-VM safety net inside Set-VmProxyEnforcementForAllLabs
+                    # refuses to stamp any VM whose own subnet isn't in the
+                    # final union, so even with concurrent labs we never
+                    # shrink a VM's allow-list below its own subnet.
+                    try {
+                        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+                    }
+                    catch {
+                        Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
+                    }
                 }
             }
         }
@@ -674,6 +895,21 @@ try {
         # Update Existing VMs
         if ($updateExistingRequired) {
             Write-Log "Update Existing Virtual Machine Properties" -Activity -HostOnly
+
+            # Capture previous useProxy values from live VM notes BEFORE the
+            # update loop overwrites them. The -Original properties are
+            # stripped by Add-ModifiedExistingVMToDeployConfig, so we compare
+            # against the actual VM note to detect changes.
+            $previousUseProxy = @{}
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                if ($null -ne $vm.useProxy) {
+                    $note = Get-VMNote -VMName $vm.vmName
+                    if ($note) {
+                        $previousUseProxy[$vm.vmName] = if ($note.PSObject.Properties.Name -contains 'useProxy') { [bool]$note.useProxy } else { $false }
+                    }
+                }
+            }
+
             foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
                 Write-Host "Updating VM Notes on $($vm.VmName)"
                 foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
@@ -681,6 +917,44 @@ try {
                         Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
                         Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
                     }
+                }
+            }
+
+            # Apply or remove Windows proxy settings on existing VMs whose
+            # useProxy property was modified. This handles the host-side
+            # configuration (in-guest proxy + Hyper-V ACLs) that Phase 8
+            # can't do (Phase 8 only covers CM site-system proxy via
+            # ConfigureCMProxy.ps1).
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                if ($null -eq $vm.useProxy) { continue }
+                $prevValue = if ($previousUseProxy.ContainsKey($vm.vmName)) { $previousUseProxy[$vm.vmName] } else { $false }
+                if ([bool]$vm.useProxy -eq $prevValue) { continue }
+
+                if ($vm.useProxy -eq $true) {
+                    # Enabling proxy: find the Proxy VM and configure
+                    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+                    if (-not $proxyVm) {
+                        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+                        if ($existingProxyName) {
+                            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+                        }
+                    }
+                    if ($proxyVm) {
+                        $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+                        Write-Log "[Proxy] Enabling proxy on existing VM $($vm.vmName) -> $proxyFqdn`:3128"
+                        Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                        Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets (Get-VmProxyEnforcementSubnets -deployConfig $deployConfig)
+                    }
+                    else {
+                        Write-Log "[Proxy] $($vm.vmName): useProxy=true but no Proxy VM found; skipping" -Warning
+                    }
+                }
+                else {
+                    # Disabling proxy: remove in-guest config and host ACLs
+                    Write-Log "[Proxy] Removing proxy from existing VM $($vm.vmName)"
+                    Remove-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName
+                    Clear-VmProxyEnforcement -VmName $vm.vmName
                 }
             }
         }
@@ -738,6 +1012,16 @@ finally {
         }
         Write-Host
     }
+    # Restore dynamic memory settings (were pinned to max during deploy for performance).
+    # Skip if we never made it past Phase 1 (VMs being created/removed there aren't
+    # worth touching, and the noisy "[Phase 11] Restoring dynamic memory" line on
+    # an early cancel is just confusing).
+    if ($deployConfig -and $currentPhase -gt 1) {
+        try { Restore-DynamicMemory -DeployConfig $deployConfig } catch {
+            Write-Log "Restore-DynamicMemory failed: $_" -Warning
+        }
+    }
+
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
     foreach ($job in Get-Job) {
@@ -764,20 +1048,28 @@ finally {
 
     # Delete in progress or failed VM's
     if ($global:vm_remove_list.Count -gt 0) {
-        if ($NewLabsuccess) {
-            Write-Log "Phase 1 encountered failures. Removing all VM's created in Phase 1." -Warning
-            $NewLabsuccess = $false
+        if ($KeepFailedVMs) {
+            Write-Log "Phase 1 did not complete cleanly, but -KeepFailedVMs was specified. NOT removing: $($global:vm_remove_list -join ', ')" -Warning
+            Write-Log "Inspect VMs in Hyper-V Manager. Use the 'Delete Failed/In-Progress VMs' option in genconfig.ps1 to clean up when done." -Warning
+            if ($NewLabsuccess) { $NewLabsuccess = $false }
         }
         else {
-            Write-Log "Script exited before Phase 1 completion. Removing all VM's created in Phase 1." -Warning
-        }
-        Write-Host
+            if ($NewLabsuccess) {
+                Write-Log "Phase 1 encountered failures. Removing all VMs created in Phase 1." -Warning
+                $NewLabsuccess = $false
+            }
+            else {
+                Write-Log "Script exited before Phase 1 completion. Removing all VMs created in Phase 1." -Warning
+            }
+            Write-Log "(Re-run with -KeepFailedVMs to preserve failed VMs for investigation.)" -Warning
+            Write-Host
 
-        foreach ($vmname in $global:vm_remove_list) {
-            Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
-        }
+            foreach ($vmname in $global:vm_remove_list) {
+                Remove-VirtualMachine -VmName $vmname -Migrate $Migrate -Force
+            }
 
-        # Get-Job | Stop-Job
+            # Get-Job | Stop-Job
+        }
     }
 
     # Clear vm remove list

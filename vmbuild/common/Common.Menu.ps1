@@ -3,333 +3,6 @@
 ############################
 #Common.menu.ps1
 
-# Offers a menu for any array passed in.
-# This is used for Sql Versions, Roles, Etc
-function Get-Menu {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
-        [string] $prompt,
-        [Parameter(Mandatory = $false, HelpMessage = "Array of objects to display a menu from")]
-        [object] $OptionArray,
-        [Parameter(Mandatory = $false, HelpMessage = "The default if enter is pressed")]
-        [string] $CurrentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Additional Menu options, in dictionary format.. X = Exit")]
-        [object] $additionalOptions = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Pre Menu options, in dictionary format.. X = Exit")]
-        [object] $preOptions = $null,
-        [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
-        [bool] $Test = $true,
-        [Parameter(Mandatory = $false, HelpMessage = "Suppress newline")]
-        [switch] $NoNewLine,
-        [Parameter(Mandatory = $false, HelpMessage = "Split response")]
-        [switch] $split,
-        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 0,
-        [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
-        [bool] $HideHelp = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return from this menu on enter")]
-        [switch] $return
-    )
-
-
-
-    if (!$NoNewLine) {
-        write-Host
-        Write-Verbose "4 Get-Menu"
-    }
-
-    if ($null -ne $preOptions) {
-        foreach ($item in $preOptions.keys) {
-            $value = $preOptions."$($item)"
-            $color1 = $Global:Common.Colors.GenConfigDefault
-            $color2 = $Global:Common.Colors.GenConfigDefaultNumber
-
-            if (-not [String]::IsNullOrWhiteSpace($item)) {
-                $TextValue = $value -split "%"
-
-                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
-                    $color1 = $TextValue[1]
-                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
-                        $color2 = $TextValue[2]
-                    }
-                    else {
-                        $color2 = $color1
-                    }
-                }
-
-                if ($TextValue[0].StartsWith("$")) {
-                    continue
-                }
-
-                if ($item.StartsWith("*B")) {
-                    $breakPrefix = " $($common.BreakPrefix) "
-                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix -NoNewline
-                    write-host2 -ForeGroundColor $color1 $TextValue[0] -NoNewline
-                    Write-Host2 -ForegroundColor "MediumPurple" $breakPrefix
-                }
-                else {
-                    if ($item.StartsWith("*")) {
-                        write-host2 -ForeGroundColor $color1 $TextValue[0]
-                        continue
-                    }
-                }
-                Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
-            }
-        }
-    }
-
-
-    $i = 0
-
-    foreach ($option in $OptionArray) {
-        if (-not [String]::IsNullOrWhiteSpace($option)) {
-            $i = $i + 1
-            $item = $option
-            $color1 = $Global:Common.Colors.GenConfigNormal
-            $color2 = $Global:Common.Colors.GenConfigNormalNumber
-            if (-not [String]::IsNullOrWhiteSpace($item)) {
-                $TextValue = $item -split "%"
-
-                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
-                    $color1 = $TextValue[1]
-                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
-                        $color2 = $TextValue[2]
-                    }
-                    else {
-                        $color2 = $color1
-                    }
-                }
-                Write-Option $i $TextValue[0] -color $color1 -Color2 $color2
-            }
-        }
-    }
-
-    if ($null -ne $additionalOptions) {
-        foreach ($item in $additionalOptions.keys) {
-            $value = $additionalOptions."$($item)"
-
-            $color1 = $Global:Common.Colors.GenConfigDefault
-            $color2 = $Global:Common.Colors.GenConfigDefaultNumber
-
-            if (-not [String]::IsNullOrWhiteSpace($item)) {
-                $TextValue = $value -split "%"
-
-                if (-not [string]::IsNullOrWhiteSpace($TextValue[1])) {
-                    $color1 = $TextValue[1]
-                    if (-not [string]::IsNullOrWhiteSpace($TextValue[2])) {
-                        $color2 = $TextValue[2]
-                    }
-                    else {
-                        $color2 = $color1
-                    }
-                }
-
-                if ($TextValue[0].StartsWith("$")) {
-                    continue
-                }
-                if ($item.StartsWith("*")) {
-                    write-host2 -ForeGroundColor $color1 $TextValue[0]
-                    continue
-                }
-                Write-Option $item $TextValue[0] -color $color1 -Color2 $color2
-            }
-        }
-    }
-    $totalOptions = $preOptions + $additionalOptions
-
-
-    #Show-GenConfigErrorMessages
-    #Write-Verbose "Calling Get-ValidResponse with -return:true"
-    $response = get-ValidResponse -Prompt $Prompt -max $i -CurrentValue $CurrentValue -AdditionalOptions $totalOptions -TestBeforeReturn:$Test -timeout:$timeout -HideHelp:$HideHelp -return:$return
-
-    if (-not [String]::IsNullOrWhiteSpace($response)) {
-        $i = 0
-        foreach ($option in $OptionArray) {
-            $i = $i + 1
-            if ($i -eq $response) {
-                if ($split) {
-                    $option = $option -Split " " | Select-Object -First 1
-                }
-                Write-Verbose "[Get-Menu] Returned (O) '$option'"
-                return $option
-            }
-        }
-        if ($split) {
-            $response = $response -Split " " | Select-Object -First 1
-        }
-        Write-Log -LogOnly "[$prompt] Returned (R) '$response'"
-
-        return $response
-    }
-    else {
-        Write-Log -LogOnly  "[$prompt] Returned (CV) '$CurrentValue'"
-        return $CurrentValue
-    }
-}
-
-#Checks if the response from the menu was valid.
-# Prompt is the prompt to display
-# Max is the max int allowed [1], [2], [3], etc
-# The current value of the option
-# additionalOptions , like [N] New VM, [S] Add SQL, either as a single letter in a string, or keys in a dictionary.
-function get-ValidResponse {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, HelpMessage = "Prompt to display")]
-        [string] $prompt,
-        [Parameter(Mandatory = $true, HelpMessage = "Max # to be valid.  If your Menu is 1-5, 5 is the max. Higher numbers will fail")]
-        [int] $max,
-        [Parameter(Mandatory = $false, HelpMessage = "Current value will be returned if enter is pressed")]
-        [string] $currentValue,
-        [Parameter(Mandatory = $false, HelpMessage = "Extra Valid entries that allow escape.. EG X = Exit")]
-        [object] $additionalOptions,
-        [switch]
-        $AnyString,
-        [Parameter(Mandatory = $false, HelpMessage = "Run a test-Configuration before exiting")]
-        [switch] $TestBeforeReturn,
-        [Parameter(Mandatory = $false, HelpMessage = "timeout")]
-        [int] $timeout = 0,
-        [Parameter(Mandatory = $false, HelpMessage = "Hide Help")]
-        [bool] $HideHelp = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will return")]
-        [bool] $return = $false,
-        [Parameter(Mandatory = $false, HelpMessage = "Hint for help to show we will continue")]
-        [bool] $ContinueMode = $false
-
-    )
-
-    $responseValid = $false
-    while ($responseValid -eq $false) {
-        Write-Host
-        Write-Verbose "5 get-ValidResponse max = $max $($additionalOptions.Keys -join ",")"
-        $response = $null
-        $response2 = $null
-        $first = $true
-        while (-not $response) {
-            $response = $null
-            $response2 = $null
-
-            Write-Verbose "5 else get-ValidResponse max = $max"
-            if ($first) {
-                Write-Verbose "6 else get-ValidResponse max = $max"
-                $response = Read-Single -Prompt $prompt $currentValue -timeout:$timeout -HideHelp:$HideHelp -return:$return -ContinueMode:$ContinueMode
-            }
-            else {
-                Write-Verbose "7 else get-ValidResponse max = $max"
-                $response = Read-SingleKeyWithTimeout -timeout 0
-            }
-            $first = $false
-            if ([string]::IsNullOrWhiteSpace($response)) {
-                Write-Verbose "return null"
-                return $null
-            }
-            else {
-                Write-Verbose "got $response"
-            }
-            #$response = Read-Host2 -Prompt $prompt $currentValue
-            if (-not $Global:EnterKey) {
-                if (($response -as [int]) -is [int]) {
-
-                    [int]$testmax = ([string]$response + "0" -as [int])
-                    Write-Verbose "Testing $testmax -le $max"
-                    if ([int]$testmax -le [int]$max) {
-                        # Write-Verbose "Reading Another Key"
-                        $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
-                        #Write-Verbose "Next Key was '$response2'"
-                    }
-                }
-                foreach ($key in $additionalOptions.Keys) {
-                    if ($key.length -gt 1 -and ($key.StartsWith($response))) {
-                        $response2 = Read-SingleKeyWithTimeout -timeout 2 -backspace -noflush
-                        break
-                    }
-                }
-                if ($response2 -eq "BACKSPACE") {
-                    $response = $null
-                    $response2 = $null
-                }
-                if ($response2) {
-                    $response = $response + $response2
-                    if ([String]::IsNullOrWhiteSpace($response2)) {
-                        write-host
-                    }
-                }
-            }
-        }
-
-        Write-Host
-        #Write-Host "`r --------------- Processing Response $response -------------"
-
-        try {
-            if ([String]::IsNullOrWhiteSpace($response)) {
-                $responseValid = $true
-            }
-            else {
-                try {
-                    if (($response -as [int]) -is [int]) {
-                        if ([int]$response -le [int]$max -and [int]$response -gt 0 ) {
-                            $responseValid = $true
-                        }
-                    }
-                }
-                catch {}
-            }
-            if ($responseValid -eq $false -and $null -ne $additionalOptions) {
-                try {
-                    if ($response.ToLowerInvariant() -eq $additionalOptions.ToLowerInvariant()) {
-                        $responseValid = $true
-                    }
-                }
-                catch {}
-
-                foreach ($i in $($additionalOptions.keys)) {
-                    if ($response) {
-                        if ($response.ToLowerInvariant() -eq $i.ToLowerInvariant()) {
-                            $responseValid = $true
-                        }
-                    }
-                }
-            }
-            if ($responseValid -eq $false -and $currentValue -is [bool]) {
-                if ($currentValue) {
-                    if ($currentValue.ToLowerInvariant() -eq "true" -or $currentValue.ToLowerInvariant() -eq "false") {
-                        $responseValid = $false
-                        if ($response) {
-                            if ($response.ToLowerInvariant() -eq "true") {
-                                $response = $true
-                                $responseValid = $true
-                            }
-                            if ($response.ToLowerInvariant() -eq "false") {
-                                $response = $false
-                                $responseValid = $true
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        catch {}
-        if (-not $responseValid) {
-            $validResponses = @()
-            if ($max -gt 0) {
-                $validResponses += 1..$max
-            }
-            if ($additionalOptions) {
-                $validResponses += $additionalOptions.Keys | Where-Object { -not $_.StartsWith("*") }
-            }
-            write-host2 -ForegroundColor $Global:Common.Colors.GenConfigInvalidResponse "Invalid response '$response'.  " -NoNewline
-            write-host "Valid Responses are: " -NoNewline
-            write-host2 -ForegroundColor $Global:Common.Colors.GenConfigValidResponses "$($validResponses -join ",")"
-        }
-        if ($TestBeforeReturn.IsPresent -and $responseValid) {
-            $responseValid = Get-TestResult -SuccessOnError
-        }
-    }
-    #Write-Host "Returning: $response"
-    return $response
-}
-
 function Write-Option {
     [CmdletBinding()]
     param (
@@ -378,6 +51,67 @@ function Write-Option {
     Write-Host2 -ForegroundColor $color2 $option -NoNewline
     Write-Host2 "] ".PadRight(4 - $option.Length) -NoNewLine -ForegroundColor $Global:Common.Colors.GenConfigBrackets
 
+    # Truncate text to fit terminal width (accounts for prefix already written).
+    # Prefix width: 3 (arrow/spaces) + 1 ([) + option.Length + PadRight(4-len) + already at column ~8.
+    # MultiSelect prepends an extra "[X] " or "    " (4 chars) before the brackets.
+    $prefixLen = 3 + 1 + $option.Length + [Math]::Max(0, 4 - $option.Length)
+    if ($MultiSelect) { $prefixLen += 4 }
+    # Get-LiveWindowSize (from Common.NewMenu.ps1) reads a fresh CONOUT$ handle
+    # so it reflects post-resize width even when the .NET console cache is stale.
+    # Both [Console]::WindowWidth and $host.UI.RawUI.WindowSize.Width can return
+    # the old size after a resize, causing this truncation to use the wrong
+    # budget and let rows wrap onto the next line.
+    $termWidth = 0
+    try {
+        if (Get-Command Get-LiveWindowSize -ErrorAction Ignore) {
+            $live = Get-LiveWindowSize
+            if ($live) { $termWidth = [int]$live.Width }
+        }
+    } catch { }
+    if (-not $termWidth) { $termWidth = [Console]::WindowWidth }
+    if (-not $termWidth) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+    # Subtract 2 (not 1) so we never write to the final column. Writing the
+    # last cell on Windows conhost triggers an automatic newline; the explicit
+    # Write-Host at the end of this function would then add a SECOND newline,
+    # shifting every later menu row down by 1 and breaking arrow positioning.
+    $availWidth = $termWidth - $prefixLen - 2
+    if ($availWidth -gt 0 -and $text) {
+        $hasAnsi = $text.Contains([char]27)
+        if ($hasAnsi) {
+            $ansiPat = [char]27 + '\[[0-9;]*[A-Za-z]'
+            $plainLen = [regex]::Replace($text, $ansiPat, '').Length
+        }
+        else {
+            $plainLen = $text.Length
+        }
+        if ($plainLen -gt $availWidth) {
+            # Walk the string counting visible chars (skipping ANSI), cut at limit.
+            # ANSI CSI sequences end on any letter (A-Z, a-z), not just 'm' --
+            # cursor moves (e.g. ESC[12A) and erases (ESC[2K) would otherwise
+            # leave $inEsc=$true and silently consume all later visible chars.
+            $visCount = 0
+            $cutIdx = $text.Length
+            $inEsc = $false
+            for ($ci = 0; $ci -lt $text.Length; $ci++) {
+                if ($text[$ci] -eq [char]27) { $inEsc = $true; continue }
+                if ($inEsc) {
+                    $ch = $text[$ci]
+                    if (($ch -ge 'A' -and $ch -le 'Z') -or ($ch -ge 'a' -and $ch -le 'z')) {
+                        $inEsc = $false
+                    }
+                    continue
+                }
+                $visCount++
+                if ($visCount -ge $availWidth - 3) {
+                    $cutIdx = $ci + 1
+                    break
+                }
+            }
+            $suffix = if ($hasAnsi) { "...$([char]27)[0m" } else { "..." }
+            $text = $text.Substring(0, $cutIdx) + $suffix
+        }
+    }
+
     Write-ColorizedBrackets -ForeGroundColor $color $text
     write-host
 }
@@ -400,6 +134,7 @@ function Show-GenConfigErrorMessages {
     $Errors = $global:GenConfigErrorMessages | Select-Object -Unique
     $count = ($Errors | Measure-Object).Count
     if ($LineCount) {
+        if ($count -eq 0) { return 0 }
         return $count + 4
     }
     if ($count -gt 0) {
@@ -524,10 +259,10 @@ function select-ChangeDynamicMemory {
             $vmsname = $disabled
         }
         if ($vmsname -and ($vmsname | Measure-Object).count -gt 0) {
-            Write-OrangePoint "$(($vmsname | Measure-Object).count) VM's in '$domain' are in state: $verb"
+            Write-OrangePoint "$(($vmsname | Measure-Object).count) VMs in '$domain' are in state: $verb"
         }
         else {
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' already have Dynamic Memory $($verb)d ***" }
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' already have Dynamic Memory $($verb)d ***" }
         }
         $ReturnVal = Get-Menu2 -MenuName "$verb Dynamic Memory on VMs in $domain" -Prompt "Select VMs" -OptionArray $vmsname -AdditionalOptions $customOptions -Test:$false -MultiSelect -AllSelected
         Write-Log -Verbose "Returned $ReturnVal of type $($ReturnVal.GetType()) with $($ReturnVal.Count) items"
@@ -549,7 +284,17 @@ function select-ChangeDynamicMemory {
             }
             $Memory = $vmNotes.Memory
             if ($enable) {
-                $dynamicMinRam = "1GB"
+                $role = $vm.role
+                if ($vm.sqlVersion) {
+                    $role = "SqlServer"
+                }
+                # SQL workloads default to a 4GB floor; everything else 1GB
+                if ($role -in ("SqlServer", "Primary", "SQLAO", "CAS")) {
+                    $dynamicMinRam = "4GB"
+                }
+                else {
+                    $dynamicMinRam = "1GB"
+                }
                 $dynamicRamInBytes = ($dynamicMinRam / 1)
                 $Memory = $vmNotes.Memory
                 if ($dynamicRamInBytes -gt ($Memory / 1)) {
@@ -558,10 +303,6 @@ function select-ChangeDynamicMemory {
                 }
                 $priority = 25
                 $buffer = 10
-                $role = $vm.role
-                if ($vm.sqlVersion) {
-                    $role = "SqlServer"
-                }
                 if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
                     $priority = 50
                     $buffer = 20
@@ -622,14 +363,14 @@ function Select-StartDomain {
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $CustomOptions = [ordered]@{}
 
-        $notRunning = $vms | Where-Object { $_.State -ne "Running" }
+        $notRunning = $vms | Where-Object { $_.State -ne "Running" -and $_.Role -ne "StandaloneRootCA" }
         if ($notRunning -and ($notRunning | Measure-Object).count -gt 0) {
-            Write-OrangePoint "$(($notRunning | Measure-Object).count) VM's in '$domain' are not Running"
+            Write-OrangePoint "$(($notRunning | Measure-Object).count) VMs in '$domain' are not Running"
         }
         else {
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already Running ***" }
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' are already Running ***" }
             return
-            #Write-GreenCheck "All VM's in '$domain' are already Running"
+            #Write-GreenCheck "All VMs in '$domain' are already Running"
             #return
         }
 
@@ -711,11 +452,11 @@ function Select-StopDomain {
         $vms = get-list -type vm -DomainName $domain -SmartUpdate
         $running = $vms | Where-Object { $_.State -ne "Off" }
         if ($running -and ($running | Measure-Object).count -gt 0) {
-            Write-host "$(($running| Measure-Object).count) VM's in '$domain' are currently running."
+            Write-host "$(($running| Measure-Object).count) VMs in '$domain' are currently running."
         }
         else {
-            Write-host "All VM's in '$domain' are already turned off."
-            $customOptions = [ordered]@{"*B" = "*** All VM's in '$domain' are already turned off. ***" }  
+            Write-host "All VMs in '$domain' are already turned off."
+            $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' are already turned off. ***" }  
             return "NOITEMS"
         }
 

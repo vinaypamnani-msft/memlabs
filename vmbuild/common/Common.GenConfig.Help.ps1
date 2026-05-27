@@ -18,14 +18,17 @@ function Get-GenericHelp {
     switch (($text -split "=")[0].Trim()) {
         "DeploymentType" { "Selects the default type of deployment, Primary or Hierarchy" }
         "DomainName" { "Change the FQDN of the domain" }
-        "CMVersion" { "Select which version of ConfigMgr to install.  Will not be used if not installing CM" }
+        "CMVersion" { "Select which version of ConfigMgr to install. Ignored if ConfigMgr is not being installed" }
         "Network" { "Select the Network VMs will join.  Only /24 ranges are acceptable. " }
         "DefaultServerOS" { "When adding new server VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultClientOS" { "When adding new client VMs, they will default to this OS. Can be changed on individual VMs." }
         "DefaultSqlVersion" { "When adding new SQL instances, they will default to this version. Can be changed on individual VMs." }
-        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM.  Can be turned off in the settings for each VM, using dynamicMinRam" }
+        "UseDynamicMemory" { "Enable Dynamic Memory on each new VM. Can be overridden per VM via the dynamicMinRam setting" }
         "IncludeClients" { "Disabling this will prevent the 2 automatic client VMs from appearing in a new domain config" }
         "IncludeSSMSOnNONSQL" { "Disabling this will prevent SQL Management Studio from getting installed on NON-SQL servers" }
+        "PushCMClientToClients" { "Default value for the per-VM 'pushClient' flag on newly added client-OS DomainMember VMs (Windows 10/11)." }
+        "PushCMClientToServers" { "Default value for the per-VM 'pushClient' flag on newly added server-OS DomainMember VMs (Windows Server)." }
+        "PushCMClientToSiteSystems" { "Default value for the per-VM 'pushClient' flag on newly added site system VMs (Primary, CAS, Secondary, SiteSystem, PassiveSite). Off by default since site servers install the client locally during CM setup." }
         "Done with changes" { "All the settings look good.  Move onto next menu" }
 
         # Global VM
@@ -33,8 +36,8 @@ function Get-GenericHelp {
         "Prefix" { "Change the prefix of all machines in the domain.  This is used to ensure unique machine names across all domains." }
         "AdminName" { "Change the default administrator name for all machines and domains. Not recommended to change." }
         "BasePath" { "Change the location to save hyper-v VHDX and other files. Not recommended to change." }
-        "domainNetBiosName" { "Change the netbios name of the domain.  This will result in a disjoined namespace if it does not match the FQDN" }
-        "locale" { "If you have configured _localconfig.json, you can change the default language of your VM via language packs" }
+        "domainNetBiosName" { "Change the NetBIOS name of the domain. This will result in a disjoint namespace if it does not match the FQDN" }
+        "locale" { "If you have configured _localeConfig.json, you can change the default language of your VMs via language packs" }
         "timeZone" { "Change the timezone of all new VMs deployed in this session." }
 
         # Global CM
@@ -42,26 +45,32 @@ function Get-GenericHelp {
         "Version" { "Change the version of CM to install. By default, we select the newest baseline version." }
         "Install" { "Disable this setting to prevent CM from installing.  This is useful to pre-stage your VMs, but perform a custom installation by hand" }
         "EVALVersion" { "Install the EVAL license for ConfigMgr.  This will expire in 6 months." }
-        "UsePKI" { "Automatically setup a complete PKI infrastructure, and use HTTPS all CM Roles, include DP/MP/SUP/RP." }
+        "UsePKI" { "Automatically set up a complete PKI infrastructure, and use HTTPS for all CM roles, including DP/MP/SUP/RP. Also configurable via PKI Settings menu." }
+        "UseOfflineRoot" { "Deploy a two-tier PKI: a Standalone Offline Root CA (workgroup, powered off after setup) issues a certificate for an Enterprise Subordinate CA. Configured via PKI Settings menu." }
         "OfflineSCP" { "Install the SCP role in Offline mode.  This will prevent CM from updating. Useful for offline repros" }
         "OfflineSUP" { "Install the SUP role in Offline mode.  This will prevent WSUS from talking to Microsoft Update to get patch information" }
-        "PushClientToDomainMembers" { "Disable this setting to prevent client push from CM.  Clients will not be installed automatically" }
-        "PrePopulateObjects" { "This setting will pre populate a number of objects in the CM database, such as packages, scripts, OSD TS's, Baselines, etc" }
+        "EnableBLM" { "Enable BitLocker Management. Configures GPO, enables the BLM site feature, and deploys a BitLocker policy to encrypt client OS drives via the MP recovery service." }
+        "PrePopulateObjects" { "This setting will pre-populate a number of objects in the CM database, such as packages, scripts, OSD Task Sequences, Baselines, etc." }
 
         # VM
 
         "vmName" { "Change the name of the VM" }
-        "Role" { "Change the role of the VM. Not recommended to change." }
+        "Role" { "Change the VM's role. Changing this is not recommended." }
         "Memory" { "Change the starting and Maximum memory for this VM." }
         "DynamicMinRam" { "Enables Dynamic Memory.  Sets the Minimum amount of RAM." }
         "VirtualProcs" { "Change the number of virtual processors assigned to this VM" }
         "OperatingSystem" { "Change the Operating System that will be installed on this VM" }
         "tpmEnabled" { "Enable the virtual TPM on this VM." }
+        "enableRDP" { "Install xrdp + a lightweight XFCE desktop on this Linux VM via cloud-init, open TCP/3389 in ufw, and add an RDCMan entry that auto-logs in as vmbuildadmin using the lab's LocalAdmin password. Use this when you need a GUI on the Proxy VM (browser, file manager, etc.)." }
+        "joinDomain" { "On first boot, install realmd/SSSD and join this Linux VM to the lab AD domain using vmOptions.adminName + the host's LocalAdmin password. Waits up to 20min for the DC's DNS to come up, then runs 'realm join'. Domain Admins get sudo NOPASSWD. Leave off for a standalone DHCP-only Linux VM." }
+        "useProxy" { "Route this VM's outbound HTTP/HTTPS through the domain's Squid Proxy VM. CM site systems also get Set-CMSiteSystemServer -UseProxy. Requires a Proxy VM." }
+        "pushClient" { "Install the ConfigMgr client on this VM via client push from the Primary. Defaults are seeded from domainDefaults.PushCMClientToClients (client OS), PushCMClientToServers (server OS DomainMembers), or PushCMClientToSiteSystems (site system roles)." }
+        "BitLocker" { "Enable BitLocker encryption on this VM. Adds the computer to the ConfigMgr BLM collection so the BitLocker policy targets it. Requires tpmEnabled and cmOptions.EnableBLM." }
         "InstallCA" { "Installs and configures a Certificate Authority on this VM" }
         "ForestTrust" { "This option allows you to create a Forest Trust between this domain, and another already deployed domain." }
         "Add Additional Disk" { "Adds another VHDX to this VM" }
         "Remove Last Additional Disk" { "Removes the last VHDX added to this machine" }
-        "Remove this VM from config" { "'Deletes' the VM. Since its not actually deployed yet, just prevents it from being deployed." }
+        "Remove this VM from config" { "'Deletes' the VM. Since it's not actually deployed yet, just prevents it from being deployed." }
         "SiteCode" { "Changes the sitecode for this site" }
         "InstallSSMS" { "SQL Server Management Studio will be installed on this VM" }
         "InstallDP" { "Install the Distribution Point role on this VM" }
@@ -98,6 +107,7 @@ function Get-GenericHelp {
         "pullDPSourceDP" { "Sets the source Distribution point for this PullDP" }
         "InstallPatchMyPC" { "Installs the PatchMyPC service on this VM. Must be installed on the Top-Level SUP" }
         "PatchMyPCFileServer" { "Sets the FileServer that PatchMyPC will use to store its updates" }
+        "cmOptions" { "ConfigMgr options for this top-level site server (version, license, install, push, PKI, SCP, BLM). Press Enter to edit." }
 
         default { "Help Missing for $text" }
     }

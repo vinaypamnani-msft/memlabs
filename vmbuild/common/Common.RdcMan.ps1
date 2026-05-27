@@ -277,6 +277,20 @@ function Save-RdcManSettingsFile {
 #    }
 #}
 
+function Get-RDCManOSShortName {
+    param([string]$deployedOS)
+    if ([string]::IsNullOrWhiteSpace($deployedOS)) { return $null }
+    switch -Wildcard ($deployedOS) {
+        "Server 2025*"     { return "S25" }
+        "Server 2022*"     { return "S22" }
+        "Server 2019*"     { return "S19" }
+        "Server 2016*"     { return "S16" }
+        "Windows 11*"      { return "W11" }
+        "Windows 10*"      { return "W10" }
+        default            { return $null }
+    }
+}
+
 function New-RDCManFileFromHyperV {
     [CmdletBinding()]
     param(
@@ -417,7 +431,57 @@ function New-RDCManFileFromHyperV {
         # $vmList = (Get-List -Type VM -domain $domain).VmName
         $vmListFull = (Get-List -Type VM -domain $domain)
 
+        $cmVersion = $null
+        $dcVM = $vmListFull | Where-Object { $_.Role -eq 'DC' } | Select-Object -First 1
+        if ($dcVM.domainDefaults.CMVersion) {
+            $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
+        }
+
+        $hasLinuxRdp = $false
         foreach ($vm in $vmListFull) {
+            if (Test-VmIsLinux -Vm $vm) {
+                $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
+                    $isLinuxClient = $vm.Role -eq 'LinuxClient'
+                    if (-not ($rdpOn -or $isLinuxClient)) {
+                    Write-Verbose "Skipping Linux VM $($vm.VmName) (enableRDP not set)"
+                    continue
+                }
+                    # Linux VM with xrdp enabled (or LinuxClient which has xrdp baked in).
+                    # Add as a regular server entry in the
+                # domain group (zAllVirtualMachines) with Comment="Linux" so the
+                # per-domain "Linux" smartGroup picks it up via rule match. Per-server
+                # logonCredentials uses vmbuildadmin + LocalAdmin password (matches
+                # cloud-init chpasswd).
+                $hasLinuxRdp = $true
+                # Use IP as the RDCMan connection target. The host resolves
+                # Windows VMs via LLMNR, but Ubuntu doesn't respond to LLMNR
+                # so hostname-based connections fail. Fall back to vmName if
+                # no IP is available (VM never started).
+                $linuxIp = $vm.LastKnownIP
+                if ([string]::IsNullOrWhiteSpace($linuxIp)) {
+                    try {
+                        $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
+                            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+                    } catch {}
+                }
+                $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
+                $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+                if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
+                $cLinux = [PsCustomObject]@{}
+                foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
+                    $cLinux | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -Force
+                }
+                # Comment="Linux" is what the smartGroup rule matches against
+                $cLinux | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Linux" -Force
+                $linuxComment = ($cLinux | ConvertTo-Json -Depth 4 -Compress)
+                if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
+                        -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing `
+                        -comment $linuxComment -ForceOverwrite:$true `
+                        -domain '' -username 'vmbuildadmin') -eq $True) {
+                    $shouldSave = $true
+                }
+                continue
+            }
             Write-Verbose "Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
@@ -427,7 +491,12 @@ function New-RDCManFileFromHyperV {
                 $isServer = $deployedOS -match "Server"
 
                 if ( $null -eq $vm.SqlVersion -and $isServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
+                    if ($vm.InstallCA) {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "IssuingCA" -force
+                    }
+                    else {
+                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
+                    }
                 }
                 else {
                     if (-not $isServer) {
@@ -471,22 +540,87 @@ function New-RDCManFileFromHyperV {
             else {
                 $name = $($vm.VmName)
             }            
-            $rolename = ""
             $ForceOverwrite = $false
+            $roleTag = $null
             switch ($vm.Role) {
-                #"DomainMember" { if ($null -eq $vm.SqlVersion) { $rolename = "[AD] " } }
-                "InternetClient" {
-                    $ForceOverwrite = $true
-                    $rolename = "[Internet] "
-                }
-                "AADClient" {
-                    $ForceOverwrite = $true
-                    $rolename = "[AAD] "
-                }
-                "WorkgroupMember" { $rolename = "[WG] " }
+                "DC"              { $roleTag = "DC" }
+                "BDC"             { $roleTag = "BDC" }
+                "CAS"             { $roleTag = "CAS" }
+                "Primary"         { $roleTag = "PRI" }
+                "Secondary"       { $roleTag = "SEC" }
+                "PassiveSite"     { $roleTag = "Passive" }
+                "SQLAO"           { $roleTag = "SQLAO" }
+                "WSUS"            { $roleTag = "WSUS" }
+                "FileServer"      { $roleTag = "FS" }
+                "OSDClient"       { $roleTag = "OSD" }
+                "StandaloneRootCA" { $roleTag = "RootCA" }
+                "InternetClient"  { $roleTag = "Internet"; $ForceOverwrite = $true }
+                "AADClient"       { $roleTag = "AAD"; $ForceOverwrite = $true }
+                "WorkgroupMember" { $roleTag = "WG" }
                 Default {}
             }
-            $displayName = $rolename + $($vm.VmName)
+
+            # SiteSystem: show actual installed roles instead of generic tag
+            $siteRolesTag = $null
+            if ($vm.Role -eq "SiteSystem") {
+                $sr = @()
+                if ($vm.installMP) { $sr += "MP" }
+                if ($vm.installDP) { $sr += "DP" }
+                if ($vm.installSUP -or $vm.InstallSUP) { $sr += "SUP" }
+                if ($vm.InstallRP) { $sr += "RP" }
+                if ($vm.InstallSMSProv) { $sr += "SMSProv" }
+                if ($sr.Count -gt 0) { $siteRolesTag = $sr -join ',' }
+            }
+
+            # Certificate Authority tag (Issuing CA via InstallCA property)
+            $caTag = $null
+            if ($vm.InstallCA -and $vm.Role -ne "StandaloneRootCA") {
+                $caTag = "CA"
+            }
+
+            # SUP/WSUS tag for non-SiteSystem VMs with installSUP
+            $supTag = $null
+            if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") {
+                $supTag = "WSUS"
+            }
+
+            # Proxy-client tag: VM is opted in to route HTTP(S) through the
+            # Linux Squid proxy (per-VM useProxy=true, set from genconfig).
+            $proxyTag = $null
+            if ($vm.useProxy) {
+                $proxyTag = "Proxy"
+            }
+
+            # Dedup: skip role tag if VM name already contains it
+            if ($roleTag -and $vm.VmName -match [regex]::Escape($roleTag)) {
+                $roleTag = $null
+            }
+
+            # Build bracket tag: [ROLE OS CMver SiteRoles CA SUP Proxy]
+            $tagParts = @()
+            if ($roleTag) { $tagParts += $roleTag }
+            if ($caTag) { $tagParts += $caTag }
+            if ($supTag) { $tagParts += $supTag }
+            if ($proxyTag) { $tagParts += $proxyTag }
+
+            $osShort = Get-RDCManOSShortName -deployedOS $vm.deployedOS
+            # Dedup: skip OS tag if VM name already contains it
+            if ($osShort -and -not ($vm.VmName -match [regex]::Escape($osShort))) {
+                $tagParts += $osShort
+            }
+
+            # CM version for site server roles
+            if ($cmVersion -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+                $tagParts += $cmVersion
+            }
+
+            # Append site system role flags
+            if ($siteRolesTag) { $tagParts += $siteRolesTag }
+
+            $displayName = $vm.VmName
+            if ($tagParts.Count -gt 0) {
+                $displayName += " [$($tagParts -join ' ')]"
+            }
             if ($vm.SiteCode) {
                 $displayName += " ($($vm.SiteCode)"
                 if ($vm.ParentSiteCode) {
@@ -513,7 +647,7 @@ function New-RDCManFileFromHyperV {
             }
             $ForceOverwrite = $true
             $vmID = $null
-            if ($vm.Role -in ("OSDClient", "AADClient", "Linux")) {
+            if ($vm.Role -in ("OSDClient", "AADClient")) {
                 $vmID = $vm.vmId
             }
 
@@ -581,40 +715,6 @@ function New-RDCManFileFromHyperV {
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
         }
         $clonedSG = $SmartGroupToClone.clone()
-        if ($roles -contains "Linux") {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Linux"
-            $clonedSG.ruleGroup.rule.value = "Linux"
-            [void]$findgroup.AppendChild($clonedSG)
-            $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
-            $subKeys = @(
-                "AllowDefaultCredentialsDomain",
-                "AllowSavedCredentialsDomain",
-                "AllowDefaultCredentials",
-                "AllowFreshCredentialsDomain",
-                "AllowFreshCredentials",
-                "AllowFreshCredentialsWhenNTLMOnly",
-                "AllowFreshCredentialsWhenNTLMOnlyDomain",
-                "AllowSavedCredentials",
-                "AllowSavedCredentialsWhenNTLMOnly"
-            )
-            foreach ($subKey in $subKeys) {
-                $fullPath = Join-Path $policyDefaultsPath $subKey
-
-                if (-not (Test-Path $fullPath)) {
-                    New-Item -Path $fullPath -Force | Out-Null
-                }
-            }
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowDefaultCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowFreshCredentialsWhenNTLMOnlyDomain -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-            New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
-        }
         #if ($roles -contains "AADClient") {
         #    Write-Host "Adding SmartGroup AAD Clients"
         #    $clonedSG = $SmartGroupToClone.clone()
@@ -628,6 +728,12 @@ function New-RDCManFileFromHyperV {
         #    $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
         #    #    $findgroup.AppendChild($clonedSG)
         #}
+        if ($hasLinuxRdp) {
+            $clonedSG = $SmartGroupToClone.clone()
+            $clonedSG.properties.name = "Linux"
+            $clonedSG.ruleGroup.rule.value = "Linux"
+            [void]$findgroup.AppendChild($clonedSG)
+        }
         # Add new group
         [void]$file.AppendChild($findgroup)
 
@@ -655,6 +761,10 @@ function New-RDCManFileFromHyperV {
         }
 
         foreach ($vm in $unknownVMs) {
+            if (Test-VmIsLinux -Vm $vm) {
+                Write-Verbose "New-RDCManFileFromHyperV: Skipping Linux VM $($vm.VmName) (RDCMan is RDP-only)"
+                continue
+            }
             Write-Verbose "New-RDCManFileFromHyperV: Adding VM $($vm.VmName)"
             $c = [PsCustomObject]@{}
             foreach ($item in $vm | get-member -memberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" } ) { $c | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -force }
@@ -683,8 +793,6 @@ function New-RDCManFileFromHyperV {
             }
             Start-Sleep 1
             $existing.save($rdcmanfile) | Out-Null
-            Write-GreenCheck "Updated $rdcmanfile. Restarting the process if possible" -ForegroundColor ForestGreen
-
         }
         catch {
             Write-RedX "Could not update $rdcmanfile. $_"
@@ -695,8 +803,35 @@ function New-RDCManFileFromHyperV {
     }
     if ($killed -or $killedAlready) {
 
-        #Write-GreenCheck "Calling Start-Process on C:\Tools\RDCMan.exe"
-        Start-Process "C:\tools\RDCMan.exe" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        # Capture our console's window handle BEFORE launching RDCMan. We restore
+        # focus to this specific window (not "whatever was foreground") because
+        # RDCMan's launch + minimize loop briefly takes foreground itself, so a
+        # GetForegroundWindow() call later would return the wrong hwnd.
+        $focusApi = Add-Type -MemberDefinition @"
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetConsoleWindow();
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+            [DllImport("user32.dll")]
+            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")]
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            [DllImport("kernel32.dll")]
+            public static extern uint GetCurrentThreadId();
+            [DllImport("user32.dll")]
+            public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+            [DllImport("user32.dll")]
+            public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+"@ -Name "FocusApi" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+        $ourWindow = $focusApi::GetConsoleWindow()
+        # Fallback to current foreground if no console (e.g. running in ISE/VSCode terminal)
+        if (-not $ourWindow -or $ourWindow -eq [IntPtr]::Zero) {
+            $ourWindow = $focusApi::GetForegroundWindow()
+        }
+
+        $rdcProc = Start-Process "C:\tools\RDCMan.exe" -ArgumentList "/reconnect" -WindowStyle Minimized -WorkingDirectory "C:\Temp" -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -PassThru
         $i = 0
         while ($i -lt 3) {
             Set-RdcManMin
@@ -704,6 +839,50 @@ function New-RDCManFileFromHyperV {
             $i++
         }
         Set-RdcManMin
+
+        # Restore focus to our terminal. Windows blocks SetForegroundWindow from
+        # processes that don't own the current foreground; the standard
+        # workaround is twofold:
+        #   1. keybd_event Alt-down/up tricks Win32 into thinking the user just
+        #      interacted with us, granting us foreground-set privilege.
+        #   2. AttachThreadInput to the current foreground thread also lifts the
+        #      restriction (belt-and-suspenders if step 1 didn't take).
+        if ($ourWindow -and $ourWindow -ne [IntPtr]::Zero) {
+            try {
+                # Step 1: synthesize Alt press/release (VK_MENU = 0x12, KEYEVENTF_KEYUP = 0x2)
+                $focusApi::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+                $focusApi::keybd_event(0x12, 0, 0x2, [UIntPtr]::Zero)
+
+                # Step 2: attach to foreground thread, set, detach
+                $fg = $focusApi::GetForegroundWindow()
+                $fgPid = [uint32]0
+                $fgThread = $focusApi::GetWindowThreadProcessId($fg, [ref]$fgPid)
+                $ourThread = $focusApi::GetCurrentThreadId()
+                $attached = $false
+                if ($fgThread -ne 0 -and $fgThread -ne $ourThread) {
+                    $attached = $focusApi::AttachThreadInput($ourThread, $fgThread, $true)
+                }
+                # SW_RESTORE = 9 (in case our window got minimized too)
+                $focusApi::ShowWindow($ourWindow, 9) | Out-Null
+                $focusApi::SetForegroundWindow($ourWindow) | Out-Null
+                if ($attached) {
+                    $focusApi::AttachThreadInput($ourThread, $fgThread, $false) | Out-Null
+                }
+            }
+            catch {
+                # Focus restoration is best-effort; don't fail the whole update.
+            }
+        }
+
+        if ($rdcProc) {
+            Write-GreenCheck "Updated $rdcmanfile. Restarted RDCMan (PID $($rdcProc.Id))" -ForegroundColor ForestGreen
+        }
+        else {
+            Write-GreenCheck "Updated $rdcmanfile. RDCMan was stopped but failed to restart" -ForegroundColor ForestGreen
+        }
+    }
+    else {
+        Write-GreenCheck "Updated $rdcmanfile. RDCMan was not running" -ForegroundColor ForestGreen
     }
 }
 

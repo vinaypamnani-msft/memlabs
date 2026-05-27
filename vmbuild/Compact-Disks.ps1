@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Compacts Hyper-V virtual hard disks in parallel with a WPF progress UI.
 
@@ -2879,7 +2879,7 @@ $btnXaml
         if ($vmName.Length   -gt 18) { $vmName   = $vmName.Substring(0,17) + '…' }
         if ($fileName.Length -gt 32) { $fileName = $fileName.Substring(0,31) + '…' }
 
-        if ($d.Status -eq 'Completed' -and $d.NewSize -ne $null) {
+        if ($d.Status -eq 'Completed' -and $null -ne $d.NewSize) {
             $before = Format-Size $d.OriginalSize
             $after  = Format-Size ([long]$d.NewSize)
             $saved  = $d.OriginalSize - [long]$d.NewSize

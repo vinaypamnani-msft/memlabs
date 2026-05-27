@@ -21,7 +21,9 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisMachineFQDN = $ThisMachineName + "." + $DomainFullName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Resolve per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }
@@ -161,6 +163,9 @@ $Install_Secondary = {
                     $siteName = $ThisVM.siteName
                 }
 
+                # Seed Primary's own status row so it shows what it's working on
+                # before the first 30s monitor poll updates it.
+                Write-DscStatus "Installing Secondary site on $secondaryFQDN (initializing)" -NoLog
                 if ($usePki) {
                     Write-DscStatus "Adding secondary site server on $secondaryFQDN With PKI" -NoStatus
                     $CertPath = "C:\temp\ConfigMgrClientDistributionPointCertificate.pfx"
@@ -170,7 +175,7 @@ $Install_Secondary = {
                             $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                             New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                 -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Write-StatusLogEntry
                         }
                     }
                 }
@@ -178,13 +183,13 @@ $Install_Secondary = {
                     Write-DscStatus "Adding secondary site server on $secondaryFQDN Without PKI" -NoStatus
                     New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                         -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                        -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Write-StatusLogEntry
                 }
                 Start-Sleep -Seconds 15
             }
             catch {
                 try {
-                    $_ | Out-File $global:StatusLog -Append
+                    $_ | Write-StatusLogEntry
                     Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_. Retrying once." -MachineName $SecondaryName
                     Start-Sleep -Seconds 300
                     if ($usePki) {
@@ -195,18 +200,18 @@ $Install_Secondary = {
                                 $certPass = Get-Content $CertAuth | ConvertTo-SecureString -AsPlainText -Force
                                 New-CMSecondarySite -Https -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                                     -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                                    -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Out-File $global:StatusLog -Append
+                                    -SiteName $siteName -SqlServerSetting $SQLSetting -ImportCertificate -CertificatePath $CertPath -CertificatePassword $certPass -ForceWhenDuplicateCertificate:$true *>&1 | Write-StatusLogEntry
                             }
                         }
                     }
                     else {
                         New-CMSecondarySite -CertificateExpirationTimeUtc $Date -Http -InstallationFolder $SMSInstallDir -InstallationSourceFile $FileSetting -InstallInternetServer $True `
                             -PrimarySiteCode $parentSiteCode -ServerName $secondaryFQDN -SecondarySiteCode $secondarySiteCode `
-                            -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Out-File $global:StatusLog -Append
+                            -SiteName $siteName -SqlServerSetting $SQLSetting -CreateSelfSignedCertificate *>&1 | Write-StatusLogEntry
                     }
                 }
                 catch {
-                    $_ | Out-File $global:StatusLog -Append
+                    $_ | Write-StatusLogEntry
                     Write-DscStatus "Failed to add secondary site on $secondaryFQDN. Error: $_" -Failure -MachineName $SecondaryName
                     $installFailure = $true
                     continue
@@ -218,8 +223,16 @@ $Install_Secondary = {
         # ================
         # Monitor install
         # ================
+        # Poll cadence: 15s gives snappier UI updates than the old 30s; iteration
+        # cap is doubled to preserve the same overall timeout window (~30 min
+        # without progress, ~10 min between SMS_Executive restarts).
         $i = 0
-        $sleepSeconds = 30
+        $sleepSeconds = 15
+        $startTime = Get-Date
+        $lastStatusText = $null
+        $lastProgressTime = $startTime
+        $lastSeenMessageTime = [datetime]::MinValue
+        $stepNumber = 0
         do {
 
             Start-Sleep -Seconds $sleepSeconds
@@ -237,20 +250,51 @@ $Install_Secondary = {
             }
 
             if ($siteStatus -and $siteStatus.Status -eq 2) {
-                $state = Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime | Select-Object -Last 1
+                # Pull the full history so we can count distinct steps and detect
+                # whether anything new has happened since the last poll.
+                $allStates = @(Get-WmiObject -ComputerName $smsProvider.FQDN -Namespace $smsProvider.NamespacePath -Class SMS_SecondarySiteStatus -Filter "SiteCode = '$secondarySiteCode'" | Sort-Object MessageTime)
+                $state = $allStates | Select-Object -Last 1
 
                 if ($state) {
-                    Write-DscStatus "Installing Secondary site on $secondaryFQDN`: $($state.Status)" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
+                    # MessageTime comes back as a CIM/WMI datetime string; convert
+                    # for comparison. Fall back to "now" if the conversion fails so
+                    # we don't blow up the monitor loop.
+                    $msgTime = $null
+                    try { $msgTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($state.MessageTime) } catch { $msgTime = Get-Date }
+
+                    # Count a new "step" whenever the status text changes OR a
+                    # newer state message arrives (handles repeated-text cases like
+                    # "Creating compressed package" that fires multiple times).
+                    if ($state.Status -ne $lastStatusText -or $msgTime -gt $lastSeenMessageTime) {
+                        $stepNumber = $allStates.Count
+                        $lastStatusText = $state.Status
+                        $lastSeenMessageTime = $msgTime
+                        $lastProgressTime = Get-Date
+                    }
+
+                    $elapsedMin = [int]((Get-Date) - $startTime).TotalMinutes
+                    $sinceProgressSec = [int]((Get-Date) - $lastProgressTime).TotalSeconds
+                    $progressTag = "step $stepNumber, $($elapsedMin)m elapsed"
+                    if ($sinceProgressSec -ge 60) {
+                        $progressTag += ", $([int]($sinceProgressSec/60))m on this step"
+                    }
+
+                    $msg = "Installing Secondary site on $secondaryFQDN ($progressTag): $($state.Status)"
+                    Write-DscStatus $msg -RetrySeconds $sleepSeconds -MachineName $SecondaryName
+                    # Keep Primary's own row on the simpler "Installing Secondary site on X"
+                    # line -- no need to duplicate per-step detail that's already visible
+                    # on the Secondary's row.
+                    Write-DscStatus "Installing Secondary site on $secondaryFQDN" -RetrySeconds $sleepSeconds -NoLog
                 }
 
                 if (-not $state) {
-                    if (0 -eq $i % 20) {
+                    if (0 -eq $i % 40) {
                         Write-DscStatus "No Progress reported after $($i * $sleepSeconds) seconds, restarting SMS_Executive" -MachineName $SecondaryName
                         Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
                         Start-Sleep -Seconds ($sleepSeconds * 2)
                     }
 
-                    if ($i -gt 61) {
+                    if ($i -gt 122) {
                         Write-DscStatus "No Progress for adding secondary site reported after $($i * $sleepSeconds) seconds, giving up." -Failure -MachineName $SecondaryName
                         $installFailure = $true
                     }

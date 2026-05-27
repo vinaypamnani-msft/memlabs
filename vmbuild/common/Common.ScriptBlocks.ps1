@@ -13,23 +13,41 @@ $global:Phase10Job = {
         $global:ScriptBlockName = "Phase10Job"
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue -GetLatestHotfixVersion
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
-        if ($NewVMS) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
-        }
-        $rootPath = Split-Path $using:PSScriptRoot -Parent
-        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch -GetLatestHotfixVersion
-     
         # Get variables from parent scope
         $currentItem = $using:currentItem
         $Phase = $using:Phase
         if (-not $Phase) {
             $Phase = "Maintenance"
         }
-        if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+
+        # Set domain-specific log path (same pattern as Phase11Job)
+        try { Flush-LogBuffer -All } catch { }
+        $domainNameForLogging = if ($using:deployConfigCopy) { ($using:deployConfigCopy).vmOptions.domainName } else { $currentItem.domain }
+        if (-not $domainNameForLogging) {
+            try { $domainNameForLogging = (Get-VMNote -VMName $currentItem.vmName).domain } catch { }
+        }
+        if ($domainNameForLogging) {
+            $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+        }
+
+        if ($NewVMS) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
+        }
+        if ($currentItem.Role -in @("OSDClient", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
+        }
+        # Linux VMs have no Windows-side maintenance; Start-VMMaintenance also
+        # short-circuits, but log a clearer message here.
+        $jobIsLinuxVm = $false
+        if ($currentItem.role -eq 'Proxy') { $jobIsLinuxVm = $true }
+        elseif ($currentItem.PSObject.Properties.Name -contains 'osFamily' -and $currentItem.osFamily -eq 'Linux') { $jobIsLinuxVm = $true }
+        elseif ($currentItem.operatingSystem -and ($currentItem.operatingSystem -like 'Ubuntu*' -or $currentItem.operatingSystem -like 'Debian*' -or $currentItem.operatingSystem -like 'Linux*')) { $jobIsLinuxVm = $true }
+        if ($jobIsLinuxVm) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
+            return
         }
         $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
         if (-not $worked) {
@@ -46,6 +64,66 @@ $global:Phase10Job = {
     }
 
 }
+
+$global:Phase11Job = {
+    param (
+        [object] $vm,
+        [array] $Dummy,
+        [boolean] $Dummy1,
+        [boolean] $Dummy2,
+        [string] $ScriptRoot
+    )
+
+    try {
+        $global:ScriptBlockName = "Phase11Job"
+        # Dot source common -- use bare $using:devBranchValue (not
+        # $using:Common.DevBranch) so this scriptblock works under both
+        # Start-Job and Start-ThreadJob. ThreadJob's $using: parser only
+        # supports bare variable names. Start-PhaseJobs and Start-NormalJobs
+        # both define $devBranchValue in their scope.
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
+
+        # Get variables from parent scope
+        $currentItem = $using:currentItem
+        $deployConfig = $using:deployConfigCopy
+        $Phase = 11
+
+        # Set domain-specific log path (same pattern as VM_Create/VM_Config)
+        try { Flush-LogBuffer -All } catch { }
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Starting functional validation for role '$($currentItem.role)'" -OutputStream
+
+        $passed = Test-VmFunctionality -VMName $currentItem.vmName -CurrentItem $currentItem -DeployConfig $deployConfig
+
+        # Emit buffered output lines (failures/warnings collected during test)
+        # This must happen at top-level where -OutputStream goes to job output.
+        if ($script:Phase11OutputBuffer) {
+            foreach ($entry in $script:Phase11OutputBuffer) {
+                switch ($entry.Level) {
+                    'Failure' { Write-Log $entry.Text -OutputStream -Failure }
+                    'Warning' { Write-Log $entry.Text -OutputStream -Warning }
+                    default   { Write-Log $entry.Text -OutputStream }
+                }
+            }
+        }
+
+        if ($passed) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
+        }
+        else {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation FAILED for $($currentItem.role)." -OutputStream -Failure
+            throw "Functional validation failed for $($currentItem.vmName) ($($currentItem.role))"
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log -LogOnly "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)"
+    }
+}
+
 # Initialize disks
 $global:Initialize_Disk = {
     param($letter,
@@ -74,7 +152,7 @@ $global:Initialize_Disk = {
         try {
             (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
             Get-Disk | Update-Disk
-            start-sleep -Seconds 30
+            start-sleep -Seconds 10
         }
         catch {}
         $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
@@ -87,7 +165,7 @@ $global:Initialize_Disk = {
             try {
                 (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
                 Get-Disk | Update-Disk
-                start-sleep -Seconds 30
+                start-sleep -Seconds 10
             }
             catch {}
             $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | out-null 
@@ -171,8 +249,17 @@ $global:VM_Create = {
             $dynamicMinRam = $currentItem.dynamicMinRam
         }
 
+        # During deployment, pin VMs near max RAM by setting dynamic min to 99% of max.
+        # This keeps dynamic memory enabled (so Restore-DynamicMemory can adjust without stopping VMs)
+        # but prevents balloon-down during heavy parallel workloads.
+        if ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($currentItem.memory / 1))) {
+            $dynamicMinRamDeferred = $dynamicMinRam
+            $raw99 = [long][math]::Floor(($currentItem.memory / 1) * 0.99)
+            $dynamicMinRam = [string]($raw99 - ($raw99 % 2MB))
+        }
+
         if (-not $CreateVM) {
-            # Check if memory matches
+            # Check if memory amount or processor count changed; skip dynamic memory toggle for existing VMs
             $restart = $false
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if memory has changed."
             $vm = Get-VM2 -name $currentItem.VmName
@@ -180,44 +267,67 @@ $global:VM_Create = {
             $memory = ($currentItem.Memory / 1)            
             $currentMemory = $vm.MemoryStartup
 
-            $dynamicRamEnabledRequested = ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0 -and (($dynamicMinRam / 1) -lt ($Memory / 1)))
-            $dynamicRamEnabledCurrent = $vm.DynamicMemoryEnabled
-            if ($dynamicRamEnabledRequested) {
-                $dynamicRamInBytes = ($dynamicMinRam / 1)
-                $dynamicRamCurrent = $vm.MemoryMinimum
-            }
-            else {
-                $dynamicRamInBytes = 0
-                $dynamicRamCurrent = 0
-            }
+            # Linux VMs get static memory; no balloon driver gymnastics.
+            # If memory amount changed, stop, set static, restart. Otherwise
+            # just ensure dynamic is off (cheap, no-op if already off).
+            # NB: $IsLinux is a PowerShell automatic constant -- use a
+            # different name or assignment throws "read-only or constant".
+            $vmIsLinux = Test-VmIsLinux -Vm $currentItem
 
-
-            if ($memory -ne $currentMemory -or $dynamicRamEnabledCurrent -ne $dynamicRamEnabledRequested -or $dynamicRamInBytes -ne $dynamicRamCurrent) {
+            if ($vmIsLinux) {
+                if ($memory -ne $currentMemory) {
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping Linux VM."
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+                elseif ($vm.DynamicMemoryEnabled) {
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disabling dynamic memory on Linux VM (requires stop)."
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
+                }
+            }
+            elseif ($memory -ne $currentMemory) {
                
                 if ($vm.State -eq "Running") {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Memory changed ($currentMemory -> $memory). Stopping VM."
                     stop-vm2 -name $vm.VmName
                     $restart = $true
                 }
 
-                if ($dynamicRamEnabledRequested) {
-           
-                    $priority = 25
-                    $buffer = 10
-                    if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
-                        $priority = 50
-                        $buffer = 20
-                    }
-                    if ($dynamicRamInBytes -gt 40MB) {
-                        Write-log -logonly "$VmName` Setting Dynamic Ram to $dynamicMinRam / $Memory"
-                        $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $dynamicRamInBytes -maximumbytes ($Memory / 1) -startupbytes ($Memory / 1) -Priority $priority -buffer $buffer -ErrorAction Stop               
-                    }
-                    else {
-                        Write-log -logonly "$VmName` Not Setting Dynamic Ram to $dynamicMinRam / $Memory"
+                # Keep dynamic memory enabled with min pinned at 99% so Restore-DynamicMemory
+                # can lower it later on a running VM (switching static->dynamic requires a stop).
+                $pinnedMin = [long][math]::Floor($memory * 0.99)
+                $pinnedMin = $pinnedMin - ($pinnedMin % 2MB)
+                if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
+                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
+            }
+            elseif ($dynamicMinRam -and ($dynamicMinRam / 1) -ne 0) {
+                # Memory amount unchanged but VM may need dynamic memory pinned at 99% during deploy.
+                # If already dynamic, raise min to 99% while running. If static, must stop.
+                $pinnedMin = [long][math]::Floor($memory * 0.99)
+                $pinnedMin = $pinnedMin - ($pinnedMin % 2MB)
+                if ($pinnedMin -lt 40MB) { $pinnedMin = $memory }
+                if ($vm.DynamicMemoryEnabled) {
+                    if ($vm.MemoryMinimum -ne $pinnedMin) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Pinning dynamic memory min to 99% for deploy" -LogOnly
+                        $vm | Set-VMMemory -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction SilentlyContinue
                     }
                 }
                 else {
-                    $vm | Set-VMMemory -DynamicMemoryEnabled $false -StartupBytes $memory -ErrorAction Stop
-                }                
+                    # Static memory from a pre-fix deploy; switch to dynamic (requires stop)
+                    if ($vm.State -eq "Running") {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Switching from static to dynamic memory (99% pin)"
+                        stop-vm2 -name $vm.VmName
+                        $restart = $true
+                    }
+                    $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $pinnedMin -MaximumBytes $memory -StartupBytes $memory -ErrorAction Stop
+                }
             }
 
             $currentprocs = $vm.ProcessorCount
@@ -233,10 +343,10 @@ $global:VM_Create = {
 
             if ($restart) {
                 if ($vm.Role -ne "DC") {
-                    start-sleep -seconds 60
+                    start-sleep -seconds 15
                 }
                 start-vm2 -name $vm.VmName
-                start-sleep -Seconds 60
+                start-sleep -Seconds 20
             }
         }
 
@@ -251,14 +361,37 @@ $global:VM_Create = {
 
             # Determine which OS image file to use for the VM
             if ($currentItem.role -notin "OSDClient") {
-                $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
-                if ($imageFile) {
-                    $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
+                # Linux VMs (Proxy etc.) don't ship in the Azure storage
+                # catalog - the base VHDX is built locally by
+                # baseimagestaging\New-LinuxBaseImage.ps1 and lives at a
+                # well-known path. Resolve directly and skip the fileList
+                # lookup, otherwise this throws "Could not find Ubuntu
+                # Server 24.04 LTS in file list" on any environment whose
+                # _fileList.json doesn't carry the Ubuntu entry.
+                if (Test-VmIsLinux -Vm $currentItem) {
+                    # Pick the per-role base VHDX. LinuxClient uses the Desktop
+                    # variant (ubuntu-desktop-minimal + GDM3 + NetworkManager +
+                    # xrdp, built by baseimagestaging\New-LinuxBaseImage.ps1
+                    # -Desktop). Everything else Linux (Proxy, LinuxServer)
+                    # uses the smaller server cloud image.
+                    $linuxVhdxName = switch ($currentItem.role) {
+                        'LinuxClient' { 'UbuntuDesktop2404.vhdx' }
+                        default       { 'UbuntuServer2404.vhdx' }
+                    }
+                    $vhdxPath = Join-Path $Common.AzureImagePath $linuxVhdxName
+                    if (-not (Test-Path $vhdxPath)) {
+                        $buildHint = if ($linuxVhdxName -eq 'UbuntuDesktop2404.vhdx') {
+                            "baseimagestaging\New-LinuxBaseImage.ps1 -Desktop"
+                        } else {
+                            "baseimagestaging\New-LinuxBaseImage.ps1"
+                        }
+                        throw "Linux base image $vhdxPath not found. Run $buildHint first."
+                    }
                 }
-                if (-not $vhdxPath) {
-                    $linuxFile = (Get-LinuxImages).Name | Where-Object { $_ -eq $currentItem.operatingSystem }
-                    if ($linuxFile) {
-                        $vhdxPath = Join-Path $Common.AzureImagePath $($linuxFile + ".vhdx")
+                else {
+                    $imageFile = $azureFileList.OS | Where-Object { $_.id -eq $currentItem.operatingSystem }
+                    if ($imageFile) {
+                        $vhdxPath = Join-Path $Common.AzureFilesPath $imageFile.filename
                     }
                     if (-not $vhdxPath) {
                         throw "Could not find $($currentItem.operatingSystem) in file list"
@@ -269,13 +402,78 @@ $global:VM_Create = {
             # Create VM
             $vmSwitch = Get-VMSwitch2 -NetworkName $network
 
+            # Linux VMs follow a separate create path: Gen2 with cloud-init
+            # seed ISO instead of sysprepped Windows + OOBE wait + DSC.
+            # Test-VmIsLinux recognises osFamily=Linux as well as Ubuntu*/
+            # Debian*/Linux* operatingSystem strings (forward-compatible).
+            if (Test-VmIsLinux -Vm $currentItem) {
+                $createdLinux = New-LinuxVirtualMachine `
+                    -VmName $currentItem.vmName `
+                    -VmPath $virtualMachinePath `
+                    -SourceDiskPath $vhdxPath `
+                    -Memory $currentItem.memory `
+                    -DynamicMinRam $dynamicMinRam `
+                    -Processors $currentItem.virtualProcs `
+                    -SwitchName $vmSwitch.Name `
+                    -Domain $deployConfig.vmOptions.domainName `
+                    -DeployConfig $deployConfig
+                if (-not ($createdLinux -eq $true)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM creation failed." -Failure -OutputStream -HostOnly
+                    return
+                }
+
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+                if (-not $linuxIP) {
+                    $waitMin = [int]($waitTimeout / 60)
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within ${waitMin}min." -Failure -OutputStream
+                    return
+                }
+
+                # Attach the IP to the VM config object so the New-VmNote
+                # call below (which copies all $currentItem.PSObject.Properties)
+                # persists it as LastKnownIP in the VM note. Remove-Lab uses
+                # this to scrub known_hosts even when the VM is off.
+                $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $linuxIP -Force
+
+                # Push an A record to the domain DC so other VMs can resolve
+                # this Linux host by name (Linux VMs do not perform secure
+                # dynamic DNS registration themselves). Skip this when the DC
+                # in the deploy is a brand-new (non-hidden) VM -- it hasn't
+                # been promoted to a Domain Controller yet (DSC runs in
+                # Phase 2), so the DNS Server role isn't installed and the
+                # Add-DnsServerResourceRecordA call would just fail. The
+                # post-Phase-2 Set-LinuxVmsDcDns path picks this up later.
+                $dcVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                if (-not $dcVm) {
+                    $dcVm = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                }
+                $dcIsExisting = $dcVm -and ($dcVm.hidden -eq $true)
+                if ($dcVm -and $dcIsExisting) {
+                    write-progress2 "Register DNS" -Status "$($currentItem.vmName): registering A record on DC" -force
+                    $null = Register-LinuxVmDns -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName -DCName $dcVm.vmName -IPAddress $linuxIP
+                }
+                elseif ($dcVm) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring DNS A record registration until DC '$($dcVm.vmName)' is promoted (Phase 2)." -LogOnly
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DC found in deployConfig or domain; skipping DNS registration." -Warning
+                }
+
+                New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM creation completed (IP $linuxIP)." -OutputStream -Success
+                write-progress2 "Linux VM" -Status "$($currentItem.vmName): ready at $linuxIP" -force -Completed
+                return
+            }
+
             $Generation = 2
             if ($currentItem.vmGeneration) {
                 $Generation = $currentItem.vmGeneration
             }
 
             $tpmEnabled = $true
-            if ($currentItem.tpmEnabled) {
+            if ($null -ne $currentItem.tpmEnabled) {
                 $tpmEnabled = $currentItem.tpmEnabled
             }
            
@@ -312,10 +510,6 @@ $global:VM_Create = {
                 $HashArguments.Add("SwitchName2", "cluster")
             }
 
-            if ($currentItem.role -eq "Linux") {
-                $HashArguments.Add("DiskControllerType", "IDE")
-            }
-
             $created = New-VirtualMachine @HashArguments
 
             if (-not ($created -eq $true)) {
@@ -324,7 +518,7 @@ $global:VM_Create = {
             }
 
             if (-not $Migrate) {
-                if ($currentItem.role -in ("OSDClient", "Linux")) {
+                if ($currentItem.role -eq "OSDClient") {
                     New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
                     return
@@ -354,6 +548,27 @@ $global:VM_Create = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not start the VM. Exiting." -Failure -OutputStream
                     return
                 }
+            }
+
+            # Linux VMs (Proxy etc.) have no Windows PSDirect surface, so
+            # Wait-ForVM -PathToVerify "C:\Users" would just time out trying
+            # to Invoke-VmCommand. Probe over SSH instead.
+            if (Test-VmIsLinux -Vm $currentItem) {
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+                if (-not $linuxIP) {
+                    $waitMin = [int]($waitTimeout / 60)
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM did not become SSH-ready within ${waitMin}min." -Failure -OutputStream
+                    return
+                }
+
+                # Persist the IP so Remove-Lab can scrub known_hosts even if
+                # the VM is off (KVP is unavailable after power-off).
+                Set-VMNote -vmName $currentItem.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $linuxIP })
+
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
+                return
             }
 
             # Check if RDP is enabled on DC. We saw an issue where RDP was enabled on DC, but didn't take effect until reboot.
@@ -410,7 +625,7 @@ $global:VM_Create = {
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
-            start-sleep -seconds 60
+            start-sleep -seconds 20
             $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
             if (-not $ps) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not establish a session. Exiting." -Failure -OutputStream
@@ -421,7 +636,7 @@ $global:VM_Create = {
         if ($Migrate) {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Set-Disk -IsOffline 0 }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to online. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -431,7 +646,7 @@ $global:VM_Create = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Disk | Where-Object { $_.IsReadOnly } | Set-Disk -IsReadOnly 0 }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed set-disk to read-write. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -446,7 +661,7 @@ $global:VM_Create = {
                     if ($Dev.InstanceId -ne $null) {
                         Write-Host "Removing $($Dev.FriendlyName)" -ForegroundColor Cyan
                         $RemoveKey = "HKLM:\SYSTEM\CurrentControlSet\Enum\$($Dev.InstanceId)"
-                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ProgressAction SilentlyContinue }
+                        Get-Item $RemoveKey | Select-Object -ExpandProperty Property | ForEach-Object { Remove-ItemProperty -Path $RemoveKey -Name $_ -Force -ErrorAction SilentlyContinue }
                     }
                 }
             }
@@ -488,10 +703,10 @@ $global:VM_Create = {
         # Set PS Execution Policy (required on client OS)
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 60
+            start-sleep -seconds 15
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
             if ($result.ScriptBlockFailed) {
-                start-sleep -seconds 60
+                start-sleep -seconds 15
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue }
                 if ($result.ScriptBlockFailed) {
                     if (-not $currentItem.operatingSystem -like "*Server*") {
@@ -606,7 +821,7 @@ $global:VM_Create = {
                    
 
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
-            Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed -Log
+            Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
             $count = 0
             $label = $null
             $diskNum = 1
@@ -660,7 +875,7 @@ $global:VM_Create = {
             if ($currentItem.sqlVersion -and $createVM) {
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files to the VM" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Mounting ISO" -force
 
                 # Determine which SQL version files should be used
                 $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
@@ -673,10 +888,10 @@ $global:VM_Create = {
                 Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
                 # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force }
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force; New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
 
                 # Copy files from DVD
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -697,12 +912,13 @@ $global:VM_Create = {
 
                 # Eject ISO from guest
                 Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Done" -Completed
             }
             #Copy CM to the VM
             if ($currentItem.CMInstallDir -and $createVM) {
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying CM installation files to the VM" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Mounting ISO" -force
 
                 # Determine which SQL version files should be used
                 $CMFiles = $azureFileList.CMVersions | Where-Object { $deployConfig.cmOptions.version -in $_.versions }
@@ -733,6 +949,7 @@ $global:VM_Create = {
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
 
                     # Copy files from DVD
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Copying from DVD" -force
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -748,6 +965,7 @@ $global:VM_Create = {
 
                     # Eject ISO from guest
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Done" -Completed
                 }
                 else {
                      Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
@@ -756,7 +974,7 @@ $global:VM_Create = {
         }
         
         if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
-            Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files"
+            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Checking site server" -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if this is the Top Level SiteServer to prepopulate objects"
             $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
 
@@ -767,26 +985,27 @@ $global:VM_Create = {
                     $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
                 }
 
+                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying baselines.zip" -force
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
-                #E:\repos\memlabs\vmbuild\azureFiles \support\baselines.zip
-                #$common.AzureFilesPath
                 $sourceLocation = Join-Path $Common.AzureFilesPath "support\baselines.zip"
-                $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying baselines.zip to the VM."
+                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $sourceLocation -Destination "C:\tools" -Recurse -Container -Force
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished copying baselines.zip to the VM."
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying OS ISO files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying OS ISO files to the VM" -Completed
 
                 $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
 
                 $isoFiles = $azureFileList.OSISO | Where-Object { $_.id -in $OsVersionsToGet }
-                
+                $isoIndex = 0
+                $isoTotal = @($isoFiles).Count
+
                 foreach ($isoFile in $isoFiles) {
-                    
+                    $isoIndex++
+
                     # SQL Iso Path
                     $Iso = $isoFile.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
+                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Mounting $($isoFile.id) ($isoIndex/$isoTotal)" -force
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying $iso files to the VM."
-                    Write-Progress2 -Activity "$($currentItem.vmName): Copying $iso files to the VM" -Completed
                     $IsoPath = Join-Path $Common.AzureFilesPath $Iso
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Mounting $IsoPath to the VM."
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
@@ -805,7 +1024,7 @@ $global:VM_Create = {
                             write-Log "Successfully mounted the dvd from $($dvd.Path)"
                         }
                     }
-                    $dirname = $dirname = (join-path $driveLetter "OSD" $isoFile.id)
+                    $dirname = (join-path $driveLetter "OSD" $isoFile.id)
 
                     $CopyIsoFiles = {
                         param ($dirname)
@@ -813,14 +1032,13 @@ $global:VM_Create = {
                         $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
                         Copy-Item -Path "$($cd.DriveLetter):\*" -Destination $dirname -Recurse -Force -Confirm:$false
                     }
-                   
 
                     # Copy files from DVD
+                    Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying $($isoFile.id) ISO to VM ($isoIndex/$isoTotal)" -force
                     Write-Log "Copying ISO WIM Files to $dirname"
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
-                        #write-Log (Get-VMDvdDrive -VMName $currentItem.vmName)
                         Write-Log "Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
@@ -834,7 +1052,7 @@ $global:VM_Create = {
 
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                 }
-                Write-Progress2 -Activity "$($currentItem.vmName): Prepopulating ISO files" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed
             }
         }
 
@@ -919,7 +1137,7 @@ $global:VM_Config = {
         Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
 
         # Verify again that VM is connectable, in case DSC caused a reboot
-        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+        $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest:$alreadyCopiedDSC
         if (-not $connected) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return
@@ -935,7 +1153,7 @@ $global:VM_Config = {
             start-vm2 -Name $currentItem.vmName
             Start-Sleep -seconds 20
             
-            $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName
+            $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest
             if (-not $connected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
                 return
@@ -1005,7 +1223,7 @@ $global:VM_Config = {
             }
         }
 
-        if ($Phase -ge 2) {
+        if ($Phase -eq 2) {
             $retryCount = 0
             $success = $false
           
@@ -1041,7 +1259,7 @@ $global:VM_Config = {
                                     $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -ErrorAction SilentlyContinue
 
                                     start-vm2 -Name $currentItem.vmname
-                                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName
+                                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName -SkipDiskTest
                                     $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
                                 }
                                 catch {
@@ -1084,6 +1302,32 @@ $global:VM_Config = {
             $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
             if (-not $injected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not inject tools in the VM." -Warning
+
+                # The VM may be wedged (PSDirect OutOfMemoryException, "remote session might have
+                # ended", repeated Get-VmSession failures all indicate the guest is dead). Probe
+                # the session; if it's gone, hard reset and retry Install-Tools once before we
+                # fall through to DSC module detection, which would otherwise also fail.
+                $probeSession = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
+                if (-not $probeSession) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No session after Install-Tools failure. VM appears wedged; performing hard reset." -Warning -OutputStream
+                    Write-Progress2 $Activity -Status "VM unresponsive after Install-Tools, hard resetting" -percentcomplete 12 -force
+                    try { Stop-VM2 -Name $currentItem.vmName -TurnOff } catch { Stop-VM2 -Name $currentItem.vmName }
+                    Start-Sleep -Seconds 10
+                    Start-VM2 -Name $currentItem.vmName
+                    Start-Sleep -Seconds 20
+
+                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest
+                    if (-not $connected) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM did not come back after hard reset. Exiting." -Failure -OutputStream
+                        return
+                    }
+
+                    Write-Progress2 $Activity -Status "Retrying tool injection after reboot" -percentcomplete 13 -force
+                    $injected = Install-Tools -VmName $currentItem.vmName -ShowProgress -SkipAutoDeploy:$SkipAutoDeploy
+                    if (-not $injected) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Tool injection still failing after hard reset." -Warning -OutputStream
+                    }
+                }
             }
         }
         
@@ -1243,6 +1487,7 @@ $global:VM_Config = {
         else {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
+
         $Expand_Archive = {
 
             $global:ScriptBlockName = "Expand_Archive"
@@ -1279,7 +1524,7 @@ $global:VM_Config = {
             catch {
 
                 if (Test-Path $extractPath) {
-                    Start-Sleep -Seconds 60
+                    Start-Sleep -Seconds 10
                     Remove-Item -Path $extractPath -Force -Recurse | Out-Null
                 }
 
@@ -1325,23 +1570,18 @@ $global:VM_Config = {
 
                 }
 
-                Start-Sleep 10
-
                 foreach ($folder in $modules) {
                     try {
 
                         "Copying $($folder.FullName) to WindowsPowerShell\Modules." | Out-File $log -Append
 
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
-                        "Import-Module $($folder.Name)" | Out-File $log -Append
-                        Import-Module $folder.Name -Force
                     }
                     catch {
                         "Failed to copy $($folder.Name) to WindowsPowerShell\Modules. Retrying once after killing WMIPRvSe.exe hosting DSC modules." | Out-File $log -Append
                         Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-                        Start-Sleep -Seconds 60
+                        Start-Sleep -Seconds 10
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction SilentlyContinue
-                        Import-Module $folder.Name -Force
                     }
                 }
                 #Create the zip flag
@@ -1517,7 +1757,7 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
         $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 60
+            start-sleep -seconds 20
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -1548,6 +1788,7 @@ $global:VM_Config = {
                     "WorkgroupMember" { $dscRole += "WorkgroupMember" }
                     "AADClient" { $dscRole += "WorkgroupMember" }
                     "InternetClient" { $dscRole += "WorkgroupMember" }
+                    "StandaloneRootCA" { $dscRole += "WorkgroupMember" }
                     default { $dscRole += "DomainMember" }
                 }
 
@@ -1928,7 +2169,7 @@ $global:VM_Config = {
                         }
                     }
 
-                    Start-Sleep -Seconds 6
+                    Start-Sleep -Seconds 3
                 } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
@@ -1970,6 +2211,29 @@ $global:VM_Config = {
             }
             Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
+        }
+
+        # =============================================================
+        # Stamp a per-deploy RunId on the VM and clear any stale
+        # completion marker. ScriptWorkflow.ps1 will echo this RunId
+        # into ScriptWorkflow.completed.runid once it finishes ALL of
+        # its post-install scripts (InstallProvider, PushClients,
+        # EnableBLM, etc.). The monitoring loop below treats matching
+        # RunIds as authoritative completion, eliminating the race
+        # where Complete! status is overwritten by later writes.
+        # =============================================================
+        $expectedRunId = [guid]::NewGuid().ToString()
+        $stampResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
+            param($runId)
+            $dir = 'C:\staging\DSC'
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            # Delete any stale completion marker from a prior deploy BEFORE writing expected -- guarantees no false positive
+            Remove-Item -Path (Join-Path $dir 'ScriptWorkflow.completed.runid') -Force -ErrorAction SilentlyContinue
+            Set-Content -Path (Join-Path $dir 'ScriptWorkflow.expected.runid') -Value $runId -Force -Encoding ASCII
+        } -ArgumentList $expectedRunId -DisplayName "DSC: Stamp Phase RunId"
+        if ($stampResult.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to stamp RunId (will rely on status-string fallback). $($stampResult.ScriptBlockOutput)" -Warning
+            $expectedRunId = $null
         }
 
         ### ===========================
@@ -2036,8 +2300,8 @@ $global:VM_Config = {
 
                     if (-not $rebooted -and $dscStatus.ScriptBlockOutput.RebootRequested -eq $true) {
                         # Reboot the machine
-                        start-sleep -Seconds 90 # Wait 90 seconds and re-request.. maybe its going to reboot itself.
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 90 seconds to see if it reboots itself."
+                        start-sleep -Seconds 30 # Wait 30 seconds and re-request.. maybe its going to reboot itself.
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, Waiting 30 seconds to see if it reboots itself."
                         $dscStatus = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 120 -ScriptBlock {
                             $ProgressPreference = 'SilentlyContinue'
                             try { 
@@ -2174,7 +2438,31 @@ $global:VM_Config = {
                 }
                 $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
                 $stopwatch2.Start()
-                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock { Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue } -SuppressLog:$suppressNoisyLogging
+                # Single round-trip: fetch DSC_Status.txt AND the completion-runid sentinel
+                $status = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -ScriptBlock {
+                    $statusText = Get-Content C:\staging\DSC\DSC_Status.txt -ErrorAction SilentlyContinue
+                    $completedRunId = $null
+                    if (Test-Path C:\staging\DSC\ScriptWorkflow.completed.runid) {
+                        $completedRunId = (Get-Content C:\staging\DSC\ScriptWorkflow.completed.runid -ErrorAction SilentlyContinue | Select-Object -First 1)
+                    }
+                    # Emit status text first (preserves legacy string consumers) then runid as a side property
+                    [pscustomobject]@{ StatusText = $statusText; CompletedRunId = $completedRunId }
+                } -SuppressLog:$suppressNoisyLogging
+                # Unwrap the bundled object into local snapshots WITHOUT mutating
+                # $status. On some failure paths Invoke-VmCommand returns an
+                # object whose ScriptBlockOutput is read-only/non-settable, and
+                # assigning to it threw "The property 'ScriptBlockOutput' cannot
+                # be found on this object" during Phase 2 startup.
+                $completedRunIdSnapshot = $null
+                $statusTextSnapshot = $null
+                if ($status -and $status.ScriptBlockOutput -is [pscustomobject]) {
+                    $completedRunIdSnapshot = $status.ScriptBlockOutput.CompletedRunId
+                    $statusTextSnapshot = $status.ScriptBlockOutput.StatusText
+                }
+                elseif ($status) {
+                    # Fallback (e.g. when the scriptblock failed before returning a pscustomobject)
+                    $statusTextSnapshot = $status.ScriptBlockOutput
+                }
                 $stopwatch2.Stop()
 
                 if (-not $status -or ($status.ScriptBlockFailed)) {
@@ -2225,9 +2513,9 @@ $global:VM_Config = {
                     }
                 }
 
-                if ($status.ScriptBlockOutput -and $status.ScriptBlockOutput -is [string]) {
+                if ($statusTextSnapshot -and $statusTextSnapshot -is [string]) {
                     $noStatus = $false
-                    $currentStatus = $status.ScriptBlockOutput | Out-String
+                    $currentStatus = $statusTextSnapshot | Out-String
 
                     # Write to log if status changed
                     if ($currentStatus -ne $previousStatus) {
@@ -2277,53 +2565,34 @@ $global:VM_Config = {
 
                     if (-not $skipProgress) {
                         # Write progress
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $status.ScriptBlockOutput
+                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $statusTextSnapshot
                     }
 
                     # Check if complete
-                    $complete = $status.ScriptBlockOutput -eq "Complete!"
+                    $complete = $statusTextSnapshot -eq "Complete!"
                     if (-not $complete) {
-                        $complete = $status.ScriptBlockOutput -eq "Setting up ConfigMgr. Status: Complete!"
+                        $complete = $statusTextSnapshot -eq "Setting up ConfigMgr. Status: Complete!"
+                    }
+                    # Authoritative path: ScriptWorkflow.ps1 echoes our per-deploy RunId into
+                    # ScriptWorkflow.completed.runid only after ALL its post-install scripts
+                    # finish. Immune to status-string overwrites and stale state from prior deploys.
+                    if (-not $complete -and $expectedRunId -and $completedRunIdSnapshot -eq $expectedRunId) {
+                        $complete = $true
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Completion confirmed via RunId match ($expectedRunId)"
                     }
                     if (-not $complete) {
                         #$complete = ($dscStatus.ScriptBlockOutput -and $dscStatus.ScriptBlockOutput.Status -eq "Success")
                     }
 
                     $bailEarly = $false
-                    if ($complete) {
-                        #~~===================== Failed Configuration Manager Server Setup =====================
-                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup" -Context 0, 0 } -SuppressLog
-                        if ($result.ScriptBlockOutput.Line) {
-                            $failEntry = $result.ScriptBlockOutput.Line
-                            $bailEarly = $true
+                    # Check ConfigMgrSetup.log for fatal errors in a single PSDirect call
+                    $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
+                        if (Test-Path C:\ConfigMgrSetup.log) {
+                            Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights|Prereq check didn't pass" | Select-Object -First 1
                         }
                     }
-
-                    # ~Setup has encountered fatal errors
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Setup has encountered fatal errors" -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    
-                    #~Setup could not install SQL RMO, ConfigMgr installation cannot be completed.
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ConfigMgr installation cannot be completed." -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    #ERROR: Computer account doesn't have administrative rights to the SQL Server~
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "ERROR: Computer account doesn't have administrative rights to the SQL Server~" -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
-                        $bailEarly = $true
-                    }
-
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "~Prereq check didn't pass, site installation will be stopped. Please check ConfigMgrPrereq.log for results." -Context 0, 0 } -SuppressLog
-                    if ($result.ScriptBlockOutput.Line) {
-                        $failEntry = $result.ScriptBlockOutput.Line
+                    if ($cmLogCheck.ScriptBlockOutput.Line) {
+                        $failEntry = $cmLogCheck.ScriptBlockOutput.Line
                         $bailEarly = $true
                     }
 
@@ -2410,11 +2679,38 @@ $global:VM_Config = {
             else {
                 $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
             }
+
+            # Per-VM proxy client config. Runs inside this VM's Phase 2 job so
+            # it parallelizes with every other VM's job instead of serial-looping
+            # in the post-Phase-2 hook. No-op for VMs without useProxy=true and
+            # for hard-excluded roles (handled inside Test-VmUsesProxy).
+            try {
+                if (Test-VmUsesProxy -Vm $currentItem -DeployConfig $deployConfig) {
+                    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+                    if (-not $proxyVm) {
+                        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+                        if ($existingProxyName) {
+                            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+                        }
+                    }
+                    if ($proxyVm) {
+                        $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+                        $null = Set-WindowsClientProxy -VmName $currentItem.vmName -Domain $deployConfig.vmOptions.domainName `
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): useProxy=true but no Proxy VM in config or domain; skipping client config" -Warning
+                    }
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Proxy client config failed: $_" -Warning
+            }
         }
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
-            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete
+            New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
         }
 
         if (-not $complete) {
@@ -2430,5 +2726,104 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
         Write-Progress "Exception Occurred" -Status "Failed end2 $_"
+    }
+}
+# Per-VM Phase 2 job for the Linux Proxy VM. Runs Install-LinuxProxyServer
+# inside the same Wait-Phase tracking loop as the Windows VM_Config jobs so
+# progress and elapsed time render consistently with the rest of Phase 2.
+$global:Proxy_Install = {
+    try {
+        $global:ScriptBlockName = "Proxy_Install"
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+
+        $deployConfig = $using:deployConfigCopy
+        $currentItem  = $using:currentItem
+        $Phase        = $using:Phase
+
+        if (-not ($Common.LogPath)) {
+            Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+            return
+        }
+        try { Flush-LogBuffer -All } catch {}
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Installing Squid forward proxy" -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing Squid forward proxy" -OutputStream
+
+        $ok = Install-LinuxProxyServer -deployConfig $deployConfig -ProxyVM $currentItem
+        if (-not $ok) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Squid install failed." -OutputStream -Failure
+            return
+        }
+
+        # Mark Phase 2 complete on the VM note so re-runs short-circuit.
+        try {
+            $note = Get-VMNote -VMName $currentItem.vmName
+            if ($note) {
+                $note.lastPhaseComplete = [Math]::Max([int]$note.lastPhaseComplete, 2)
+                Set-VMNote -VMName $currentItem.vmName -vmNote $note
+            }
+        } catch {}
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Squid install complete" -Completed
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Squid install complete." -OutputStream -Success
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
+    }
+}
+
+# Per-VM Phase 3 job for Linux VMs. Runs Invoke-LinuxRoleConfiguration which
+# applies role-driven post-boot config (xrdp/xfce4/Firefox for enableRDP,
+# realm-join for joinDomain) over SSH. Sits inside the same Wait-Phase
+# tracking loop as the Windows DSC jobs so progress renders consistently and
+# the long apt-get installs run in parallel with Windows DSC instead of
+# serializing into cloud-init first boot.
+$global:Linux_Configure = {
+    try {
+        $global:ScriptBlockName = "Linux_Configure"
+        $rootPath = Split-Path $using:PSScriptRoot -Parent
+        . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+
+        $deployConfig = $using:deployConfigCopy
+        $currentItem  = $using:currentItem
+        $Phase        = $using:Phase
+
+        if (-not ($Common.LogPath)) {
+            Write-Output "ERROR: [Phase $Phase] $($currentItem.vmName): Logpath is null. Common.ps1 may not be initialized."
+            return
+        }
+        try { Flush-LogBuffer -All } catch {}
+        $domainNameForLogging = $deployConfig.vmOptions.domainName
+        $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Applying Linux role configuration" -force
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Applying Linux role configuration" -OutputStream
+
+        $ok = Invoke-LinuxRoleConfiguration -Vm $currentItem -DeployConfig $deployConfig
+        if (-not $ok) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux_Configure failed." -OutputStream -Failure
+            return
+        }
+
+        try {
+            $note = Get-VMNote -VMName $currentItem.vmName
+            if ($note) {
+                $note.lastPhaseComplete = [Math]::Max([int]$note.lastPhaseComplete, 3)
+                Set-VMNote -VMName $currentItem.vmName -vmNote $note
+            }
+        } catch {}
+
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Linux configuration complete" -Completed
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux configuration complete." -OutputStream -Success
+    }
+    catch {
+        Write-Exception -ExceptionInfo $_
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName) Exception: $_" -OutputStream -Failure
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
     }
 }

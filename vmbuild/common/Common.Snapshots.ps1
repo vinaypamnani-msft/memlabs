@@ -3,6 +3,113 @@
 ############################
 #Common.Snapshots.ps1
 
+function Merge-Phase8AutoSnapshot {
+    <#
+    .SYNOPSIS
+        Merges the Phase 8 auto-snapshot for all VMs in the domain after
+        Phase 11 functional validation passes.
+    .DESCRIPTION
+        Finds all "MemLabs Phase 8 AutoSnapshot" checkpoints in the domain,
+        verifies sufficient free disk space, then removes the checkpoints
+        (triggering live AVHDX merge in background). VMs remain running.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $domain = $DeployConfig.vmOptions.domainName
+    $snapshotPattern = "*MemLabs Phase 8 AutoSnapshot*"
+
+    Write-Log "[Phase 11] Checking for Phase 8 auto-snapshot to merge..." -LogOnly
+
+    # Get all VMs in this domain
+    $vms = Get-List -Type VM -DomainName $domain
+    if (-not $vms) {
+        Write-Log "[Phase 11] No VMs found in domain '$domain'; skipping snapshot merge" -LogOnly
+        return
+    }
+
+    # Find VMs that have the Phase 8 auto-snapshot
+    $vmsWithSnapshot = @()
+    foreach ($vm in $vms) {
+        $snaps = @(Get-VMCheckpoint -VMName $vm.vmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like $snapshotPattern })
+        if ($snaps.Count -gt 0) {
+            $vmsWithSnapshot += @{ VMName = $vm.vmName; Snapshots = $snaps }
+        }
+    }
+
+    if ($vmsWithSnapshot.Count -eq 0) {
+        Write-Log "[Phase 11] No Phase 8 auto-snapshot found on any VM; skipping merge" -LogOnly
+        return
+    }
+
+    Write-Log "[Phase 11] Found Phase 8 auto-snapshot on $($vmsWithSnapshot.Count) VM(s); checking free space..." -Activity
+
+    # Pre-flight: verify enough free disk space to absorb the AVHDX chain
+    $insufficient = @()
+    foreach ($entry in $vmsWithSnapshot) {
+        try {
+            $chk = Test-VMCheckpointMergeFreeSpace -VMName $entry.VMName
+        }
+        catch {
+            Write-Log "[Phase 11] Free-space check for $($entry.VMName) failed: $($_.Exception.Message)" -Warning
+            continue
+        }
+        if (-not $chk.Ok) {
+            $insufficient += [PSCustomObject]@{ VMName = $entry.VMName; Reason = $chk.Reason }
+            Write-Log "[Phase 11]   $($entry.VMName): $($chk.Reason)" -Failure
+        }
+    }
+    if ($insufficient.Count -gt 0) {
+        Write-Log "[Phase 11] Aborting snapshot merge: $($insufficient.Count) VM(s) do not have enough free disk space" -Warning
+        return
+    }
+
+    Write-Log "[Phase 11] Free-space check passed; merging (live)..." -SubActivity
+
+    # Remove the Phase 8 auto-snapshot from each VM (live merge)
+    $mergeFailures = 0
+    foreach ($entry in $vmsWithSnapshot) {
+        foreach ($snap in $entry.Snapshots) {
+            Write-Log "[Phase 11] Removing checkpoint '$($snap.Name)' from $($entry.VMName)" -LogOnly
+            try {
+                Remove-VMCheckpoint -VMName $entry.VMName -Name $snap.Name -ErrorAction Stop
+                Write-Log "[Phase 11]   ok" -LogOnly
+            }
+            catch {
+                Write-Log "[Phase 11]   Remove-VMCheckpoint failed: $($_.Exception.Message)" -Warning
+                try {
+                    Remove-VMSnapshot -VMSnapshot $snap -ErrorAction Stop
+                    Write-Log "[Phase 11]   Remove-VMSnapshot fallback ok" -LogOnly
+                }
+                catch {
+                    Write-Log "[Phase 11]   Remove-VMSnapshot also failed: $($_.Exception.Message)" -Failure
+                    $mergeFailures++
+                }
+            }
+
+            # Remove sidecar notes file if present
+            $vmPath = (Get-VM -Name $entry.VMName -ErrorAction SilentlyContinue).Path
+            if ($vmPath) {
+                $notesFile = Join-Path $vmPath ($snap.Name + '.json')
+                if (Test-Path $notesFile) {
+                    Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    if ($mergeFailures -eq 0) {
+        Write-Log "[Phase 11] Phase 8 auto-snapshot merge initiated successfully (merging in background)" -Success
+    }
+    else {
+        Write-Log "[Phase 11] Phase 8 auto-snapshot merge completed with $mergeFailures failure(s)" -Warning
+    }
+}
+
 function Invoke-AutoSnapShotDomain {
     [CmdletBinding()]
     param (
@@ -54,31 +161,90 @@ function Invoke-SnapshotDomain {
         Write-Log "Snapshotting Virtual Machines in '$domain'" -Activity
         Write-Log "Domain $domain has $(($vms | Measure-Object).Count) resources"
     }
-    foreach ($vm in $vms) {
-        $complete = $false
+
+    # Per-VM Checkpoint-VM is dominated by VHDX flush + AVHDX creation, mostly
+    # disk I/O on whatever drive backs each VM. Parallelize via ThreadJob with
+    # a modest throttle so we don't queue-storm the storage controller. Falls
+    # back to sequential when ThreadJob isn't available.
+    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+
+    $snapshotWorker = {
+        param($vmName, $snapshotName)
+        $messages = New-Object System.Collections.Generic.List[object]
+        $ok = $false
         $tries = 0
-        While ($complete -ne $true) {
+        while (-not $ok) {
             try {
                 if ($tries -gt 10) {
-                    $failures++
-                    return $failures
+                    return @{ VmName = $vmName; Ok = $false; Messages = $messages }
                 }
-                if (-not $quiet) {
-                    Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
-                }
-
-                Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
-                $complete = $true
-                if (-not $quiet) {
-                    Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
-                }
+                # Inline Checkpoint-VM2 equivalent: write notes file then snapshot.
+                # Get-VM2 (cache-aware) isn't available in the ThreadJob runspace.
+                $vm = Get-VM -Name $vmName -ErrorAction Stop
+                $notesFile = Join-Path $vm.Path ($snapshotName + ".json")
+                $vm.notes | Out-File $notesFile
+                Checkpoint-VM -VM $vm -SnapshotName $snapshotName -ErrorAction Stop
+                $ok = $true
             }
             catch {
-                Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
-                write-log "Error: $_" -LogOnly
+                $messages.Add("Error: $_")
                 $tries++
-                stop-vm2 -name $vm.VmName
+                try { Stop-VM -Name $vmName -Force -ErrorAction SilentlyContinue } catch {}
                 Start-Sleep 10
+            }
+        }
+        return @{ VmName = $vmName; Ok = $ok; Messages = $messages }
+    }
+
+    if ($useThreadJob) {
+        if (-not $quiet) {
+            Show-StatusEraseLine "Checkpointing $(($vms | Measure-Object).Count) VM(s) to [$snapshot]" -indent
+        }
+        $jobs = foreach ($vm in $vms) {
+            Start-ThreadJob -ScriptBlock $snapshotWorker -ArgumentList $vm.VmName, $snapshot -ThrottleLimit 4
+        }
+        $results = $jobs | Wait-Job | Receive-Job
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        foreach ($r in $results) {
+            foreach ($m in $r.Messages) { Write-Log $m -LogOnly }
+            if ($r.Ok) {
+                if (-not $quiet) {
+                    Write-GreenCheck "Checkpoint $($r.VmName) to [$snapshot] Complete                     "
+                }
+            }
+            else {
+                $failures++
+                Write-RedX "Checkpoint $($r.VmName) to [$snapshot] Failed after retries. See Logs for error."
+            }
+        }
+    }
+    else {
+        foreach ($vm in $vms) {
+            $complete = $false
+            $tries = 0
+            While ($complete -ne $true) {
+                try {
+                    if ($tries -gt 10) {
+                        $failures++
+                        return $failures
+                    }
+                    if (-not $quiet) {
+                        Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
+                    }
+
+                    Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
+                    $complete = $true
+                    if (-not $quiet) {
+                        Write-GreenCheck "Checkpoint $($vm.VmName) to [$($snapshot)] Complete                     "
+                    }
+                }
+                catch {
+                    Write-RedX "Checkpoint $($vm.VmName) to [$($snapshot)] Failed. Retrying. See Logs for error."
+                    write-log "Error: $_" -LogOnly
+                    $tries++
+                    stop-vm2 -name $vm.VmName
+                    Start-Sleep 10
+                }
             }
         }
     }
@@ -190,7 +356,7 @@ function select-SnapshotDomain {
         [string] $domain
     )
     Write-Host
-    Write-Host2 -ForegroundColor Orange "It is recommended to stop Critical VM's before snapshotting. Please select which VM's to stop."
+    Write-Host2 -ForegroundColor Orange "It is recommended to stop Critical VMs before snapshotting. Please select which VMs to stop."
     #Invoke-StopVMs -domain $domain
     $result = Select-StopDomain -domain $domain -AllSelected
     write-log "Snapshotting Virtual Machines in '$domain' result: $result"
@@ -278,7 +444,7 @@ function select-RestoreSnapshotDomain {
     }
     if ($missingVMS.Count -gt 0) {
         Write-Host
-        $DeleteVMs = Read-Host2 -Prompt "The following VM's do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
+        $DeleteVMs = Read-Host2 -Prompt "The following VMs do not have checkpoints. [$($missingVMs -join ",")]  Delete them? (y/N)" -HideHelp
     }
 
     if ($auto -and $snapshots.Count -eq 1) {
@@ -349,6 +515,7 @@ function select-RestoreSnapshotDomain {
                 Remove-VirtualMachine -VmName $item
             }
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+            New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
         }
 
     }

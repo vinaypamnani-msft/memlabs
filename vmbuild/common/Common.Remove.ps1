@@ -11,7 +11,18 @@ function Remove-VirtualMachine {
         [Parameter()]
         [switch] $Force,
         [Parameter()]
-        [bool] $Migrate = $false
+        [bool] $Migrate = $false,
+        # Optional: caller-supplied VM list record (from a prior Get-List).
+        # When provided, skip the inline Get-List -SmartUpdate call -- saves
+        # ~1s per VM in parallel-removal scenarios where every worker would
+        # otherwise re-enumerate the entire host VM inventory.
+        [Parameter()]
+        [object] $VmRecord,
+        # When true, the caller is tearing down the entire domain (or
+        # removing the DC). Skip expensive per-client proxy
+        # unconfiguration since all VMs are going away anyway.
+        [Parameter()]
+        [switch] $RemovingDomain
     )
 
     # Helper: retry Remove-Item with configurable attempts and delay
@@ -77,7 +88,12 @@ function Remove-VirtualMachine {
 
     # ── Main logic ────────────────────────────────────────────────────────────
 
-    $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    if ($VmRecord -and $VmRecord.vmName -eq $VmName) {
+        $vmFromList = $VmRecord
+    }
+    else {
+        $vmFromList = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VmName }
+    }
     if ($vmFromList.vmBuild -eq $false) {
         if (-not ($Force.IsPresent)) {
             Write-Log "VM '$VmName' exists, but it was not deployed via MemLabs. Skipping." -SubActivity
@@ -116,6 +132,25 @@ function Remove-VirtualMachine {
         Remove-DHCPReservation -mac $adapter.MacAddress -vmName $VmName   # fixed: was $currentItem.vmName
     }
 
+    # -- Linux: capture IPs before stopping (KVP dies with the VM) --
+    $linuxIPs = @()
+    $isLinuxVm = $vmFromList -and ($vmFromList.role -in @('Proxy', 'LinuxServer', 'LinuxClient') -or $vmFromList.osFamily -eq 'Linux')
+    if ($isLinuxVm) {
+        # Live adapter IPs (available only while the VM is running)
+        $linuxIPs = @($adapters | ForEach-Object { $_.IPAddresses } |
+            Where-Object { $_ -and $_ -notmatch ':' -and $_ -notmatch '^169\.254\.' } |
+            Select-Object -Unique)
+
+        # Fallback: LastKnownIP from VM notes (works even if VM is already off)
+        try {
+            $vmNoteObj = Get-VMNote -VMName $VmName
+            if ($vmNoteObj.LastKnownIP -and $vmNoteObj.LastKnownIP -notin $linuxIPs) {
+                $linuxIPs += $vmNoteObj.LastKnownIP
+            }
+        }
+        catch {}
+    }
+
     # -- Ensure VM is stopped before touching files --
     $stopped = Wait-VMStopped -VM $vmTest -WhatIf:$WhatIf
     if (-not $stopped -and -not $WhatIf) {
@@ -130,10 +165,26 @@ function Remove-VirtualMachine {
         }
     }
 
-    # -- Remove VM from Hyper-V first --
-    # Remove-VM only removes the VM definition (it does NOT delete VHDX/folder),
-    # so it's fast. Doing this first releases the vmms.exe lock on the .vmcx
-    # configuration file, which otherwise blocks folder deletion.
+    # -- Detach hard drives to prevent checkpoint merge during Remove-VM --
+    # When a VM has checkpoints, Remove-VM triggers an AVHDX merge ("Destroying..."
+    # state) which can take minutes. Detaching the disks first means there is
+    # nothing for Hyper-V to merge, making Remove-VM instantaneous.
+    if (-not $WhatIf) {
+        try {
+            $drives = Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue
+            if ($drives) {
+                $drives | Remove-VMHardDiskDrive -ErrorAction SilentlyContinue
+                Write-Log "VM '$VmName': Detached $($drives.Count) disk(s) to skip merge." -SubActivity
+            }
+        }
+        catch {
+            Write-Log "VM '$VmName': Could not detach disks (non-fatal): $($_.Exception.Message)" -Warning
+        }
+    }
+
+    # -- Remove VM from Hyper-V --
+    # With disks detached, Remove-VM completes instantly (no checkpoint merge).
+    # This also releases the vmms.exe lock on the .vmcx configuration file.
     try {
         $vmTest | Remove-VM -Force -WhatIf:$WhatIf -ErrorAction Stop
         Write-Log "VM '$VmName' removed from Hyper-V." -SubActivity
@@ -163,6 +214,66 @@ function Remove-VirtualMachine {
         if (-not $remaining -or $remaining.Count -eq 0) {
             Write-Log "$VmName`: Removing empty parent folder '$($parent.FullName)'..." -SubActivity
             Remove-Item -Path $parent.FullName -Force -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue
+        }
+    }
+
+    # -- Proxy: unconfigure clients + clean up host desktop shortcuts --
+    # When removing a Proxy VM (but NOT tearing down the entire domain),
+    # reverse proxy configuration on all opted-in Windows clients in the
+    # domain: clear in-guest settings, remove Hyper-V port ACLs, and set
+    # useProxy=false in VM Notes. Skip when -RemovingDomain since every
+    # VM is going away anyway.
+    if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
+        if (-not $RemovingDomain) {
+            if (Get-Command -Name Remove-WindowsClientProxyForDomain -ErrorAction SilentlyContinue) {
+                Remove-WindowsClientProxyForDomain -DomainName $vmFromList.domain
+            }
+            # Reconcile cross-lab ACLs: the proxy's subnet may need to be
+            # removed from allow-lists on VMs in other domains.
+            if (Get-Command -Name Set-VmProxyEnforcementForAllLabs -ErrorAction SilentlyContinue) {
+                Write-Log "$VmName`: Reconciling cross-lab proxy ACLs after Proxy removal"
+                Set-VmProxyEnforcementForAllLabs
+            }
+        }
+        # The shared ~/.ssh/id_ed25519 key stays put -- other domains' proxies
+        # (and any future Linux VMs) still depend on it.
+        if (Get-Command -Name Remove-HostProxyShortcuts -ErrorAction SilentlyContinue) {
+            Remove-HostProxyShortcuts -ProxyFqdn "$VmName.$($vmFromList.domain)"
+        }
+        # Remove SSH shortcuts from guest VM desktops (DC, Primary, etc.)
+        if (-not $RemovingDomain) {
+            if (Get-Command -Name Remove-ProxyAdminAccessForDomain -ErrorAction SilentlyContinue) {
+                Remove-ProxyAdminAccessForDomain -DomainName $vmFromList.domain -ProxyFqdn "$VmName.$($vmFromList.domain)"
+            }
+        }
+    }
+
+    # -- Linux: scrub stale known_hosts entries for the removed VM's IP --
+    # A stale host-key entry causes ssh.exe to reject connections to a
+    # future VM that reuses the same IP (different host keys after rebuild).
+    # Scrub both the memlabs-private known_hosts (next to the shared key)
+    # and the user's default ~/.ssh/known_hosts.
+    if (-not $WhatIf -and $linuxIPs.Count -gt 0) {
+        try {
+            $keyPair = Get-LinuxAdminSshKeyPair
+            $memlabsKH = Join-Path (Split-Path $keyPair.PrivateKeyPath) 'known_hosts'
+            $userKH = Join-Path $env:USERPROFILE '.ssh\known_hosts'
+            $scrubTargets = @($memlabsKH, $userKH) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+            foreach ($ip in $linuxIPs) {
+                $pattern = "^[^ ]*\b$([regex]::Escape($ip))\b"
+                foreach ($kh in $scrubTargets) {
+                    $hits = @(Select-String -Path $kh -Pattern $pattern -ErrorAction SilentlyContinue)
+                    if ($hits.Count -gt 0) {
+                        $allLines = Get-Content -LiteralPath $kh -ErrorAction Stop
+                        $keep = $allLines | Where-Object { $_ -notmatch $pattern }
+                        Set-Content -LiteralPath $kh -Value $keep -Encoding ASCII -NoNewline:$false
+                        Write-Log "$VmName`: Scrubbed $($hits.Count) known_hosts entry/entries for $ip from $kh" -SubActivity
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "$VmName`: Failed to scrub known_hosts: $($_.Exception.Message)" -Warning
         }
     }
 }
@@ -247,6 +358,23 @@ function Remove-Orphaned {
             $response = Read-YesOrNoWithTimeout -Prompt "  Hyper-V Switch '$($switch.Name)' may be orphaned. Delete Switch? [y/N]" -HideHelp -Default "n"
             if ($response -and $response.ToLowerInvariant() -eq "y") {
                 Remove-VMSwitch2 -NetworkName $switch.Name
+            }
+            Write-Host
+        }
+    }
+
+    Write-Log "Detecting orphaned NAT entries" -Activity
+    $natEntries = Get-NetNat -ErrorAction SilentlyContinue
+    foreach ($nat in $natEntries) {
+        # Memlabs NAT entries are named with the subnet (e.g. 192.168.1.0).
+        # Skip entries whose name doesn't look like a subnet -- they belong
+        # to something else (e.g. Docker, WSL).
+        if ($nat.Name -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+        if ($vmNetworksInUse2 -notcontains $nat.Name) {
+            $response = Read-YesOrNoWithTimeout -Prompt "  NAT entry '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix)) may be orphaned. Delete? [y/N]" -HideHelp -Default "n"
+            if ($response -and $response.ToLowerInvariant() -eq "y") {
+                Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Log "Removed orphaned NAT entry '$($nat.Name)'" -SubActivity
             }
             Write-Host
         }
@@ -397,6 +525,12 @@ function Remove-Domain {
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName
     }
+
+    # When removing the full domain ($all) or the DC, every VM is going
+    # away -- skip the expensive per-client proxy unconfiguration inside
+    # Remove-VirtualMachine.
+    $removingDomain = ($all -or [bool]$DC)
+
     $DeleteVMs = {
     
         try {
@@ -405,22 +539,33 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
+            # StartupProfile Fast skips Initialize-Storage (the main remaining
+            # cost in -InJob mode) plus the 4 InJob-already-skipped probes.
+            # Remove-VirtualMachine only needs Get-List / Get-VM2 / DHCP cmdlets
+            # / $Common.CachePath -- none of which depend on storage init,
+            # supported-options, hotfix lookup, or env detection.
+            . $rootPath\Common.ps1 -InJob -StartupProfile Fast -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
 
             $currentItem = $using:currentItem
             $Phase = $using:Phase
             $vm = $currentItem
-            Remove-VirtualMachine -VmName $vm.VmName
+            # Pass the already-resolved VM record so the worker doesn't
+            # re-enumerate every VM on the host (~1s/worker saved).
+            Remove-VirtualMachine -VmName $vm.VmName -VmRecord $vm -RemovingDomain:$using:removingDomain
             Write-Log "[Phase $Phase]: $($vm.vmName): Remove VM Successful" -OutputStream -Success
         }
         catch {
-            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM." -OutputStream -Failure
+            Write-Log "[Phase $Phase]: $($vm.vmName): Failed to delete VM. $($_.Exception.Message)" -OutputStream -Failure
+            Write-Log "$($_.ScriptStackTrace)" -LogOnly
         }
     }
 
 
     if ($vmsToDelete) {        
-        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove"
+        # PreferThreadJob: removes share parent's Hyper-V/DhcpServer modules
+        # and skip a fresh powershell.exe process per VM -- each worker's
+        # init drops from ~10s to ~1-2s when combined with StartupProfile Fast.
+        $start = Start-NormalJobs -machines $vmsToDelete -ScriptBlock $DeleteVMs -Phase "DomainRemove" -PreferThreadJob
 
         $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
         
@@ -438,12 +583,24 @@ function Remove-Domain {
             foreach ($scope in $scopesToDelete) {
                 Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
             }
+
+            Write-Log "Removing NAT entries for '$DomainName'" -Activity
+            foreach ($scope in $scopesToDelete) {
+                $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
+                if ($nat) {
+                    Write-Log "Removing NAT entry '$scope'" -SubActivity
+                    if (-not $WhatIf) {
+                        Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
+                    }
+                }
+            }
         }
     }
 
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+        New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
         Write-Host
     }
     
@@ -455,7 +612,6 @@ function Remove-Domain {
     }
 
     Start-Sleep -seconds 3
-    clear-host
 }
 
 function Remove-All {
@@ -471,7 +627,7 @@ function Remove-All {
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
         foreach ($vm in $vmsToDelete) {
-            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf
+            Remove-VirtualMachine -VmName $vm.VmName -WhatIf:$WhatIf -RemovingDomain
         }
     }
 
@@ -485,10 +641,22 @@ function Remove-All {
         foreach ($scope in $scopesToDelete) {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
         }
+
+        Write-Log "Removing ALL NAT entries" -Activity
+        foreach ($scope in $scopesToDelete) {
+            $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
+            if ($nat) {
+                Write-Log "Removing NAT entry '$scope'" -SubActivity
+                if (-not $WhatIf) {
+                    Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
+                }
+            }
+        }
     }
 
     Remove-Orphaned -WhatIf:$WhatIf
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
+    Remove-Item -Path $Global:Common.MRemoteNGFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 
     # Get all the folders in E:\VirtualMachines and delete them
     $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory

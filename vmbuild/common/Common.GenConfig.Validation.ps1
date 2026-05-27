@@ -52,6 +52,31 @@ function Add-ErrorMessage {
         Message  = $message
     }
     Write-Verbose "Add-ErrorMessage $message"
+
+    # Log every banner-visible validation message with caller context so we
+    # can correlate the red X / yellow ! on screen with the exact emission
+    # site and time. Without this we can't tell live failures from ghosts
+    # carried over from prior save attempts.
+    try {
+        $stack = Get-PSCallStack
+        # Skip frame 0 (this function). Prefer the first frame outside this
+        # file so 'Convert-ValidationMessages' style funnels show their
+        # caller too.
+        $thisFile = $PSCommandPath
+        $caller = $null
+        for ($i = 1; $i -lt $stack.Count; $i++) {
+            if (-not $thisFile -or $stack[$i].ScriptName -ne $thisFile) {
+                $caller = $stack[$i]
+                break
+            }
+        }
+        if (-not $caller -and $stack.Count -gt 1) { $caller = $stack[1] }
+        $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+        $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+        Write-Log "[Add-ErrorMessage] $level $message  (from $callerName`:$callerLine)" -LogOnly
+    } catch {
+        Write-Log "[Add-ErrorMessage] $level $message" -LogOnly
+    }
 }
 
 
@@ -116,11 +141,11 @@ function Get-AdditionalValidations {
             }
             $value = $property."$($Name)"
             if (($value / 1) -lt 50MB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to less than 50MB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to less than 50MB"
                 $value = $CurrentValue
             }
             if (($value / 1) -gt 64GB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to more than 64GB"
                 $value = $CurrentValue
             }
             if (($value / 1) -ge $property.memory / 1 ) {
@@ -139,12 +164,12 @@ function Get-AdditionalValidations {
             }
             $value = $property."$($Name)"
             if (($value / 1) -lt 50MB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to less than 50MB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to less than 50MB"
                 
                 $value = $CurrentValue
             }
             if (($value / 1) -gt 64GB) {
-                Add-ErrorMessage -property $name -Warning "Can not set $name to more than 64GB"
+                Add-ErrorMessage -property $name -Warning "Cannot set $name to more than 64GB"
                 $value = $CurrentValue
             }
             $property.$name = $value.ToUpperInvariant()
@@ -163,9 +188,45 @@ function Get-AdditionalValidations {
                     Add-ErrorMessage -property $name "Windows 11 must include TPM support"
                     $property.$name = $true
                 }
+                else {
+                    # Remove BitLocker property when TPM is disabled
+                    $property.PsObject.Members.Remove("BitLocker")
+                }
+            }
+            elseif ($value -eq $true) {
+                # Add BitLocker property if BLM is enabled and VM doesn't already have it
+                if ($Global:Config.cmOptions -and $Global:Config.cmOptions.EnableBLM) {
+                    if ($null -eq $property.BitLocker) {
+                        $isClientOS = $property.operatingSystem -and $property.operatingSystem -like "Windows 1*"
+                        $property | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                    }
+                }
             }
         }
 
+        "enableRDP" {
+            # Proxy VM defaults are 1GB/1vCPU which is fine for headless Squid
+            # but anaemic for an xfce4 + xrdp session. Bump to 4GB/2 when the
+            # user opts in; leave alone if they've already raised the values.
+            # Linux VMs are pinned to static memory in New-LinuxVirtualMachine
+            # (Hyper-V Dynamic Memory on Linux is historically flaky), so
+            # bumping dynamicMinRam wouldn't change runtime RAM -- we have to
+            # raise the static 'memory' value itself.
+            if ($value -eq $true) {
+                if ($property.memory) {
+                    $memBytes = 0
+                    try { $memBytes = [int64]($property.memory / 1) } catch {}
+                    if ($memBytes -gt 0 -and $memBytes -lt 4GB) {
+                        $property.memory = "4GB"
+                        Add-ErrorMessage -property $name -Warning "Raised memory to 4GB for xrdp + xfce4 session."
+                    }
+                }
+                if ($property.virtualProcs -and [int]$property.virtualProcs -lt 2) {
+                    $property.virtualProcs = 2
+                    Add-ErrorMessage -property $name -Warning "Raised virtualProcs to 2 for xrdp + xfce4 session."
+                }
+            }
+        }
         "vmGeneration" {
             if ($value -notin ("1", "2")) {
                 $property.$name = "2"
@@ -176,7 +237,7 @@ function Get-AdditionalValidations {
         }
         "virtualProcs" {            
             if ($value -le "0" -or $value -gt 16) {
-                Add-ErrorMessage -property $name -Warning "Valid values for $name is 1-16"
+                Add-ErrorMessage -property $name -Warning "Valid values for $name are 1-16"
                 $property.$name = 4
             }
         }
@@ -283,7 +344,7 @@ function Get-AdditionalValidations {
 
         }
         "OtherNode" {
-            Add-ErrorMessage -property $name  "OtherNode can not be set manually. Please rename the 2nd node of the cluster to change this property."
+            Add-ErrorMessage -property $name  "OtherNode cannot be set manually. Please rename the 2nd node of the cluster to change this property."
             $property.$name = $currentValue
         }
         "network" {
@@ -309,7 +370,7 @@ function Get-AdditionalValidations {
         "vmName" {
 
             if (($value.Length + $Global:Config.VmOptions.Prefix.Length) -gt 15) {
-                Add-ErrorMessage -property $name  "VMName + Prefix can not be longer than 15 chars"
+                Add-ErrorMessage -property $name  "VMName + Prefix cannot be longer than 15 chars"
                 $property.$name = $currentValue
             }
             
@@ -334,7 +395,7 @@ function Get-AdditionalValidations {
             if ($value -eq $true) {
                 if ($property.Role -notin ("CAS", "Primary")) {
                     if (-not $Global:Config.cmOptions.UsePKI) {
-                        Add-ErrorMessage -property $name "PatchMyPC must be installed on the site server if not using PKI for SCCM"
+                        Add-ErrorMessage -property $name "PatchMyPC must be installed on the site server if not using PKI for ConfigMgr"
                         $property.$name = $false
                         $property.PsObject.Members.Remove("PatchMyPCFileServer")
                         return
@@ -351,6 +412,39 @@ function Get-AdditionalValidations {
             }
             else {
                 $property.PsObject.Members.Remove("PatchMyPCFileServer")
+            }
+        }
+        "EnableBLM" {
+            if ($value -eq $true) {
+                # Add BitLocker property to all VMs with TPM enabled
+                foreach ($vm in $Global:Config.virtualMachines) {
+                    if ($vm.tpmEnabled -and $null -eq $vm.BitLocker) {
+                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                        $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                    }
+                }
+            }
+            else {
+                # Remove BitLocker property from all VMs
+                foreach ($vm in $Global:Config.virtualMachines) {
+                    $vm.PsObject.Members.Remove("BitLocker")
+                }
+            }
+        }
+        "UsePKI" {
+            # Cascade: when UsePKI is toggled from the CM Options menu, sync pkiOptions
+            if ($Global:Config.pkiOptions) {
+                if ($value -eq $true) {
+                    if (-not $Global:Config.pkiOptions.EnablePKI) {
+                        $Global:Config.pkiOptions.EnablePKI = $true
+                    }
+                    if (-not $Global:Config.pkiOptions.IssuingCAVM) {
+                        $firstDC = $Global:Config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                        if ($firstDC) {
+                            $Global:Config.pkiOptions.IssuingCAVM = $firstDC.vmName
+                        }
+                    }
+                }
             }
         }
         "installSUP" {
@@ -381,7 +475,7 @@ function Get-AdditionalValidations {
                                 $property.PsObject.Members.Remove("wsusDataBaseServer")
                                 $property.PsObject.Members.Remove("InstallPatchMyPC")
                                 $property.PsObject.Members.Remove("PatchMyPCFileServer")
-                                Add-ErrorMessage -property $name "SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
+                                Add-ErrorMessage -property $name "SUP role cannot be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP"
                             }
                         }
                         else {
@@ -465,7 +559,7 @@ function Get-AdditionalValidations {
         }
         "installMP" {
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -in "Secondary", "CAS") {
-                Add-ErrorMessage -property $name -Warning "Can not install an MP on a CAS or secondary site"
+                Add-ErrorMessage -property $name -Warning "Cannot install an MP on a CAS or secondary site"
                 $property.installMP = $false
             }
             $newName = Rename-VirtualMachine -vm $property
@@ -482,18 +576,29 @@ function Get-AdditionalValidations {
             $newName = Rename-VirtualMachine -vm $property
         }
         "installCA" {
+            if ($value -eq $true) {
+                # Show UseOfflineRoot option when InstallCA is enabled
+                if ($null -eq $property.UseOfflineRoot) {
+                    $property | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value $false -Force
+                }
+            }
+            else {
+                # Remove UseOfflineRoot when InstallCA is disabled
+                $property.PsObject.Members.Remove("UseOfflineRoot")
+            }
             if ($property.ForestTrust -and $property.ForestTrust -ne "NONE") {
-                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.Role -eq "DC" } | Select-Object InstallCA).InstallCA
+                $remoteCA = (get-list -type vm -DomainName $property.ForestTrust | Where-Object { $_.InstallCA })
                 if ($remoteCA) {
                     Add-ErrorMessage -property $name -Warning "Domain $($property.ForestTrust) already has a CA. Disabling CA in this domain"
                     $property.InstallCA = $false
+                    $property.PsObject.Members.Remove("UseOfflineRoot")
                 }
             }
         }
         "installDP" {
 
             if ((get-RoleForSitecode -ConfigToCheck $Global:Config -siteCode $property.siteCode) -eq "CAS") {
-                Add-ErrorMessage -property $name -Warning "Can not install an DP for a CAS site"
+                Add-ErrorMessage -property $name -Warning "Cannot install a DP for a CAS site"
                 $property.installDP = $false
             }
 

@@ -20,8 +20,14 @@ $CurrentRole = $ThisVM.role
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
 
-$pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Push is now per-VM (pushClient property). thisParams.ClientPush only contains
+# VMs that have opted in, so an empty list means nothing to push.
+$pushClients = [bool]$ClientNames
+# Per-VM cmOptions wins over the rehydrated global so multi-hierarchy deploys
+# (CAS hierarchy alongside a separate standalone Primary with differing PKI)
+# pick this VM's own UsePKI setting.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }
@@ -83,7 +89,7 @@ if ($CurrentRole -ne "CAS") {
                     Write-DscStatus "[ClientPush][Retry $retries] Running: New-CMAccount -Name $cm_svc -Password <secure> -SiteCode $SiteCode"
                     Write-DscStatus "[ClientPush] Adding cm_svc domain account as CM account"
                     Start-Sleep -Seconds 5
-                    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Out-File $global:StatusLog -Append
+                    New-CMAccount -Name $cm_svc -Password $secure -SiteCode $SiteCode *>&1 | Write-StatusLogEntry
                 } catch {
                     Write-DscStatus "[ClientPush][Retry $retries] Failed to add cm_svc as CM account: $_. Exception: $($_.Exception.Message)"
                 }
@@ -104,7 +110,7 @@ if ($CurrentRole -ne "CAS") {
                 try {
                     Write-DscStatus "[ClientPush][Retry $retries] Running: Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc"
                     Write-DscStatus "[ClientPush][Retry $retries] Setting the Client Push Account"
-                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Out-File $global:StatusLog -Append
+                    Set-CMClientPushInstallation -EnableAutomaticClientPushInstallation $True -SiteCode $SiteCode -AddAccount $cm_svc *>&1 | Write-StatusLogEntry
                     Start-Sleep -Seconds 5
                     if ($retries -gt 5) {
                         Write-DscStatus "[ClientPush][Retry $retries] Running: Restart-Service -DisplayName 'SMS_Executive'"
@@ -153,12 +159,18 @@ if ($CurrentRole -ne "CAS") {
     Write-DscStatus "[ClientPush] Skipping client push account configuration because current site is CAS."
 }
 
+# When PKI/HTTPS is enabled, ccmsetup must be told to use the PKI cert to reach the HTTPS-only MP
+if ($usePKI -and $CurrentRole -ne "CAS") {
+    Write-DscStatus "[ClientPush] PKI is enabled. Setting /UsePKICert installation property for client push."
+    Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Write-StatusLogEntry
+}
+
 Write-DscStatus "Client push candidates are '$ClientNames'"
 
 # Push Clients
 #==============
 if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
+    Write-DscStatus "Skipping Client Push. No VMs have pushClient=true in this deployment."
     $Configuration.InstallClient.Status = 'NotRequested'
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
@@ -174,6 +186,15 @@ foreach ($clientName in $ClientNameList) {
         $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
         $AnyClientFound = $true
     }    
+}
+
+# If all clients already have the agent installed, skip the rest
+if ($ClientNameList.Count -eq 0) {
+    Write-DscStatus "[ClientPush] All clients already have the agent installed. Skipping."
+    $Configuration.InstallClient.Status = 'Completed'
+    $Configuration.InstallClient.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
 }
 
 $CollectionName = "All Systems"
@@ -221,15 +242,6 @@ if ($PackageSuccess -eq 0) {
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 }
-$machinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
-foreach ($client in $ClientNameList) {
-
-    if ($machinelist -contains $client) {
-        continue
-    }
-    Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
-}
-
 $installedmachinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 foreach ($client in $ClientNameList) {
@@ -274,7 +286,7 @@ foreach ($client in $ClientNameList) {
     }
     if ($success) {
         Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
         Start-Sleep -Seconds 5
     }
 }

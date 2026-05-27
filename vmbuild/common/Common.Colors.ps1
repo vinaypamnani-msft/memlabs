@@ -47,7 +47,40 @@ function Set-BackgroundImage {
 
         $a = Get-Content $SettingsJson | ConvertFrom-Json   
         $a | Add-Member -MemberType NoteProperty -Name "tabWidthMode" -Value "titleLength" -Force
-    
+        $a | Add-Member -MemberType NoteProperty -Name "initialRows" -Value 40 -Force
+        $a | Add-Member -MemberType NoteProperty -Name "initialCols" -Value 140 -Force
+
+        # --- Active-tab highlight theme -------------------------------------------------
+        # Make the focused tab visually distinct from inactive tabs/tab-row.
+        # tab.background  = active tab (lighter)
+        # tab.unfocusedBackground / tabRow.* = inactive tabs + bar (darker)
+        $themeName = "MemLabsActiveTab"
+        $tabTheme = [PSCustomObject]@{
+            name      = $themeName
+            tab       = [PSCustomObject]@{
+                background            = "#264F78FF"   # active tab (VS Code accent blue)
+                unfocusedBackground   = "#1F1F1FFF"   # inactive tabs
+                showCloseButton       = "always"
+            }
+            tabRow    = [PSCustomObject]@{
+                background            = "#0C0C0CFF"   # tab strip
+                unfocusedBackground   = "#0C0C0CFF"
+            }
+            window    = [PSCustomObject]@{
+                applicationTheme = "dark"
+            }
+        }
+
+        if (-not $a.PSObject.Properties.Match('themes').Count) {
+            $a | Add-Member -MemberType NoteProperty -Name "themes" -Value @($tabTheme) -Force
+        }
+        else {
+            $existing = @($a.themes | Where-Object { $_.name -ne $themeName })
+            $a.themes = @($existing + $tabTheme)
+        }
+        $a | Add-Member -MemberType NoteProperty -Name "theme" -Value $themeName -Force
+        # --------------------------------------------------------------------------------
+
         if (-not $a.profiles.defaults) {
             $defaults = [PSCustomObject]@{
                 backgroundImage            = $file
@@ -55,6 +88,7 @@ function Set-BackgroundImage {
                 backgroundImageOpacity     = ($opacityPercent / 100)
                 backgroundImageStretchMode = $stretchMode
                 antialiasingMode           = "cleartype"
+                historySize                = 32768
             }
             $a.profiles | Add-Member -MemberType NoteProperty -Name "defaults" -Value $defaults -Force
         }
@@ -64,6 +98,7 @@ function Set-BackgroundImage {
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageOpacity" -Value ($opacityPercent / 100) -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "backgroundImageStretchMode" -Value $stretchMode -Force
             $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "antialiasingMode" -Value "cleartype" -Force
+            $a.profiles.defaults | Add-Member -MemberType NoteProperty -Name "historySize" -Value 32768 -Force
     
         }
     
@@ -93,7 +128,28 @@ function Get-Animate {
     # Calculate the start position for centering the text
     $startRow = [math]::Max(0, [math]::Floor(($rows - $lines.Length) / 2))
     $startCol = [math]::Max(0, [math]::Floor(($columns - $lines[0].Length) / 2))
-    $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+
+    # Show red if local branch is behind remote (unpulled changes) or has uncommitted edits
+    $hasPendingChanges = $false
+    try {
+        $repoDir = Split-Path $Global:Common.CachePath
+        # Check for commits on remote not yet pulled
+        $behind = & git -C $repoDir rev-list HEAD..@{u} --count 2>$null
+        if ($behind -and [int]$behind -gt 0) { $hasPendingChanges = $true }
+        # Check for uncommitted local changes
+        if (-not $hasPendingChanges) {
+            $gitStatus = & git -C $repoDir status --porcelain 2>$null
+            if ($gitStatus) { $hasPendingChanges = $true }
+        }
+    }
+    catch {}
+
+    if ($hasPendingChanges) {
+        $colorCode = "`e[38;2;255;50;50m"  # RGB 255, 50, 50 (Red - pending git changes)
+    }
+    else {
+        $colorCode = "`e[38;2;0;127;255m"  # RGB 0, 127, 255 (Azure Blue)
+    }
     $resetCode = "`e[0m"               # Reset ANSI formatting
     # Animation function to reveal characters one at a time
     
@@ -166,7 +222,7 @@ function Get-Colors {
         GenConfigVMRemoteServer    = "DodgerBlue"
 
         GenConfigSQLProp           = "LightSeaGreen"
-        GenConfigSiteCode          = "LightCoral"
+        GenConfigSiteCode          = "DarkOrange"
         GenConfigTrue              = "LightGreen"
         GenConfigFalse             = "FireBrick"
 
@@ -262,7 +318,7 @@ function Write-Host2 {
 
     #if ($Global:Common.PS7) {
     if ($ForegroundColor) {
-        $ansi = Get-RGB $ForegroundColor | Convert-RGBtoAnsi
+        $ansi = Get-AnsiColorCached $ForegroundColor
         if ($ansi) {
             $Object = "$($ansi)$Object$($PSStyle.Reset)"
         }

@@ -4,7 +4,7 @@ param (
     [string]$IsoPath,
     [Parameter(Mandatory = $true, HelpMessage = "New Name of the WIM File.")]
     [string]$WimFileName,
-    [Parameter(Mandatory = $true, HelpMessage = "Hyper-V Switch to use for the VM. Must have Internet access for Server OS.")]
+    [Parameter(Mandatory = $false, HelpMessage = "Hyper-V Switch to use for the VM. Must have Internet access for Server OS. If not specified, a NAT switch is created.")]
     [string]$SwitchName,
     [Parameter(Mandatory = $false, HelpMessage = "Force reimporting WIM, if WIM already exists.")]
     [switch]$ForceNewWim,
@@ -36,6 +36,15 @@ if ($PSVersionTable.PSVersion.Major -gt 5) {
     return
 }
 
+# Check for admin rights
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host
+    Write-Host "This script must run as Administrator." -ForegroundColor Red
+    Write-Host
+    return
+}
+
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
@@ -47,6 +56,54 @@ $RootPath = Split-Path -Path $PSScriptRoot -Parent
 if ($Common.FatalError) {
     Write-Log "Critical Failure! $($Common.FatalError)" -Failure
     return
+}
+
+# Validate Hyper-V is available
+try {
+    $null = Get-Command Get-VM -ErrorAction Stop
+}
+catch {
+    Write-Log "Hyper-V PowerShell module not available. Install the Hyper-V feature first." -Failure
+    return
+}
+
+# Validate or create switch
+if (-not $SwitchName) {
+    # No switch specified - look for an existing external switch, or create a NAT switch
+    $existingExternal = Get-VMSwitch -SwitchType External -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existingExternal) {
+        $SwitchName = $existingExternal.Name
+        Write-Log "No switch specified. Using existing external switch: '$SwitchName'"
+    }
+    else {
+        $SwitchName = "MemLabsNAT"
+        $natSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+        if (-not $natSwitch) {
+            Write-Log "No switch specified and no external switch found. Creating internal NAT switch '$SwitchName'..."
+            try {
+                New-VMSwitch -SwitchName $SwitchName -SwitchType Internal -ErrorAction Stop | Out-Null
+                $natAdapter = Get-NetAdapter | Where-Object { $_.Name -like "*$SwitchName*" }
+                New-NetIPAddress -IPAddress 172.16.200.1 -PrefixLength 24 -InterfaceIndex $natAdapter.ifIndex -ErrorAction Stop | Out-Null
+                New-NetNat -Name "${SwitchName}Nat" -InternalIPInterfaceAddressPrefix 172.16.200.0/24 -ErrorAction Stop | Out-Null
+                Write-Log "Created NAT switch '$SwitchName' (172.16.200.0/24). VM will get internet via NAT."
+            }
+            catch {
+                Write-Log "Failed to create NAT switch: $($_.Exception.Message)" -Failure
+                Write-Log "Available switches: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')" -Failure
+                return
+            }
+        }
+        else {
+            Write-Log "No switch specified. Using existing NAT switch: '$SwitchName'"
+        }
+    }
+}
+else {
+    $switchTest = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+    if (-not $switchTest) {
+        Write-Log "Hyper-V switch '$SwitchName' not found. Available switches: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')" -Failure
+        return
+    }
 }
 
 # Validate/Download bginfo.exe
@@ -65,11 +122,15 @@ Write-Host
 Write-Log "### START." -Success
 
 $timer = New-Object -TypeName System.Diagnostics.Stopwatch
+$phaseTimer = New-Object -TypeName System.Diagnostics.Stopwatch
 $timer.Start()
 
 ################
 ### VALIDATION
 ################
+
+Write-Log "Validating parameters and prerequisites..." -Activity
+$phaseTimer.Restart()
 
 # Validate WimFileName
 if ($WimFileName -notlike "*.wim") {
@@ -78,6 +139,21 @@ if ($WimFileName -notlike "*.wim") {
 
 # Set VHDX file name
 $vhdxFile = $WimFileName -replace ".wim", ".vhdx"
+
+# Validate ISO path if specified
+if ($IsoPath -and -not (Test-Path $IsoPath)) {
+    Write-Log "ISO path not found: $IsoPath" -Failure
+    return
+}
+
+# Check disk space (need ~150GB free for VHDX creation + golden image copy)
+$targetDrive = (Split-Path $Common.StagingImagePath -Qualifier)
+if ($targetDrive) {
+    $freeSpace = (Get-PSDrive ($targetDrive -replace ':','') -ErrorAction SilentlyContinue).Free
+    if ($freeSpace -and $freeSpace -lt 150GB) {
+        Write-Log "Low disk space on $targetDrive - only $([math]::Round($freeSpace / 1GB, 1)) GB free. Recommend at least 150 GB." -Warning
+    }
+}
 
 # Check if gold image exists
 $purgeGoldImage = $false
@@ -94,12 +170,23 @@ if (-not $WhatIf -and (Test-Path $goldImagePath)) {
     }
 }
 
+Write-Log "Validation complete. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+
 ################
 ### GET TOOLS
 ################
 if ($Common.AzureFileList.Tools) {
     Write-Log "Obtaining Tools to inject in the image." -Activity
-    Get-ToolsForBaseImage -ForceTools:$ForceTools
+    $phaseTimer.Restart()
+    try {
+        Get-ToolsForBaseImage -ForceTools:$ForceTools
+        Write-Log "Tools obtained successfully. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+    }
+    catch {
+        Write-Log "Failed to obtain tools: $($_.Exception.Message)" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
+        return
+    }
 }
 
 ##############
@@ -107,6 +194,7 @@ if ($Common.AzureFileList.Tools) {
 ##############
 
 Write-Log "Obtaining $WimFileName." -Activity
+$phaseTimer.Restart()
 
 # Check if WIM exists
 $importWim = $true
@@ -144,11 +232,14 @@ if ($null -eq $wimPath -and -not $WhatIf) {
     return
 }
 
+Write-Log "WIM ready. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+
 ##############
 ### GET VHDX
 ##############
 
 Write-Log "Using WIM $WimFileName to create a VHDX file." -Activity
+$phaseTimer.Restart()
 $vhdxPath = Join-Path $Common.StagingImagePath $vhdxFile
 
 # Check if VHDX exists
@@ -169,22 +260,25 @@ if (-not $WhatIf -and (Test-Path $vhdxPath)) {
 if ($createVhdx) {
     $worked = New-VhdxFile -WimName $WimFileName -VhdxPath $vhdxPath -WhatIf:$WhatIf
     if (-not $worked) {
-        Write-Log "Valid $vhdxFile was not found. Exiting!" -Failure
+        Write-Log "VHDX creation failed for $vhdxFile. Exiting!" -Failure
         return
     }
 }
 
 # Validate we have the VHDX
 if (-not $WhatIf -and -not (Test-Path $vhdxPath)) {
-    Write-Log "$vhdxFile was not found. Exiting!" -Failure
+    Write-Log "$vhdxFile was not found after creation. Exiting!" -Failure
     return
 }
+
+Write-Log "VHDX ready. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
 
 ##############
 ### GET VM
 ##############
 
 Write-Log "Using $vhdxFile for staging a VM for image customization" -Activity
+$phaseTimer.Restart()
 
 $vmName = $WimFileName -replace ".wim", ""
 $vmName = "z$vmName"
@@ -221,26 +315,38 @@ if ($createVm) {
     }
 }
 
+Write-Log "VM created. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+
 Write-Log "Wait for $vmName to be ready to start customization... Auth Errors are expected for 5+ minutes while unattend runs"
+$phaseTimer.Restart()
 $connected = Wait-ForVm -VmName $VmName -OobeComplete -WhatIf:$WhatIf
 if (-not $connected) {
     Write-Log "Could not verify if VM is ready for customization. Exiting!" -Failure
     return
 }
+Write-Log "VM is ready. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
 
 #################
 ### GET CUSTOM
 #################
 
-Write-Log "Sleep for 45 seconds before preparing $vmName for customization..." -Activity
+Write-Log "Preparing $vmName for audit-mode customization..." -Activity
+$phaseTimer.Restart()
+
+# Brief delay to ensure VM is fully at login screen
 if (-not $WhatIf.IsPresent) {
-    Start-Sleep -Seconds 45
+    Write-Log "Waiting 15 seconds for VM to stabilize..."
+    Start-Sleep -Seconds 15
 }
 Write-Log "Restarting $vmName in Audit-Mode..."
 
-$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf # Sleep for a bit to make sure VM is at login screen.
-$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { & $env:windir\system32\sysprep\sysprep.exe /audit /reboot } -WhatIf:$WhatIf
+$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { Remove-Item -Path "C:\staging\Customization.txt" -Force -ErrorAction SilentlyContinue } -WhatIf:$WhatIf
+if (-not $worked) {
+    Write-Log "Could not connect to VM to clear customization marker. Exiting!" -Failure
+    return
+}
 
+$worked = Invoke-VmCommand -VmName $vmName -VmDomainName "WORKGROUP" -ScriptBlock { & $env:windir\system32\sysprep\sysprep.exe /audit /reboot } -WhatIf:$WhatIf
 if (-not $worked) {
     Write-Log "Could not restart VM in Audit-mode. Exiting!" -Failure
     return
@@ -255,6 +361,8 @@ if (-not $connected) {
     Write-Log "Could not verify if customization finished in allotted time. Exiting!" -Failure
     return
 }
+
+Write-Log "Customization complete. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
 
 ###################
 # PAUSE IF NEEDED
@@ -273,33 +381,53 @@ if ($PauseAfterCustomization.IsPresent) {
 # WAIT FOR GOLDEN
 ###################
 
-Write-Log "Customization finished. Waiting for sysprep, and VM to stop..." -Activity
+Write-Log "Waiting for sysprep to complete and VM to stop..." -Activity
+$phaseTimer.Restart()
 $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
 
 if (-not $connected) {
+    Write-Log "First wait timed out, retrying..." -Warning
     $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
     if (-not $connected) {
-        start-sleep -Seconds 60
+        Write-Log "Second wait timed out, final retry in 60s..." -Warning
+        Start-Sleep -Seconds 60
         $connected = Wait-ForVm -VmName $VmName -VmState "Off" -WhatIf:$WhatIf
     }
     if (-not $connected) {
-        Write-Log "Timed out while waiting for VM to stop. Exiting!" -Failure
+        Write-Log "Timed out while waiting for VM to stop after 3 attempts. Exiting!" -Failure
         return
     }
 }
 
+Write-Log "VM stopped. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+
 Write-Log "Capturing the golden image from $vmName..." -Activity
+$phaseTimer.Restart()
 
 Write-Log "Obtaining OS disk path of $vmName..."
 if (-not $WhatIf) {
-    $f = Get-VM2 -Fallback -Name $vmName | Get-VMFirmware
-    $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
-    $osDiskPath = $f_hd.Device.Path
-
-    if (-not $osDiskPath) {
-        Write-Log "Could not obtain the disk path of the VM.. Exiting!" -Failure
+    try {
+        $f = Get-VM2 -Fallback -Name $vmName | Get-VMFirmware
+        $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
+        $osDiskPath = $f_hd.Device.Path
+    }
+    catch {
+        Write-Log "Error retrieving VM firmware info: $($_.Exception.Message)" -Failure
+        Write-Log "$($_.ScriptStackTrace)" -LogOnly
         return
     }
+
+    if (-not $osDiskPath) {
+        Write-Log "Could not obtain the disk path of the VM. Exiting!" -Failure
+        return
+    }
+
+    if (-not (Test-Path $osDiskPath)) {
+        Write-Log "OS disk path '$osDiskPath' does not exist. Exiting!" -Failure
+        return
+    }
+
+    Write-Log "OS disk: $osDiskPath (Size: $([math]::Round((Get-Item $osDiskPath).Length / 1GB, 2)) GB)"
 }
 
 #################
@@ -317,14 +445,29 @@ Write-Log "Copying the 'golden' image..."
 
 $worked = Get-File -Source $osDiskPath -Destination $goldImagePath -DisplayName "Copying the 'golden' image to $($Common.AzureImagePath)" -Action "Copying" -WhatIf:$WhatIf
 if (-not $WhatIf -and -not $worked) {
-    Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.AzureImagePath). Please copy manually." -Warning
+    Write-Log "### Something went wrong copying the 'golden' image $osDiskPath to $($Common.AzureImagePath). Please copy manually." -Failure
+    return
 }
-else {
-    Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)..." -Success
 
-    # Delete VM
-    $vmTest = Get-VM2 -Fallback -Name $VmName -ErrorAction SilentlyContinue
-    if ($vmTest -and $DeleteVM.IsPresent) {
+# Verify golden image integrity
+if (-not $WhatIf -and (Test-Path $goldImagePath)) {
+    $goldSize = (Get-Item $goldImagePath).Length
+    $sourceSize = (Get-Item $osDiskPath).Length
+    if ($goldSize -ne $sourceSize) {
+        Write-Log "Golden image size mismatch! Source: $([math]::Round($sourceSize / 1GB, 2)) GB, Destination: $([math]::Round($goldSize / 1GB, 2)) GB" -Failure
+        return
+    }
+    Write-Log "Golden image verified: $([math]::Round($goldSize / 1GB, 2)) GB"
+}
+
+Write-Log "The 'golden' image $vhdxFile was copied to $($Common.AzureImagePath)." -Success
+Write-Log "Golden image capture complete. ($($phaseTimer.Elapsed.ToString('mm\:ss')))" -Success
+
+# Delete VM
+$vmTest = Get-VM2 -Fallback -Name $VmName -ErrorAction SilentlyContinue
+if ($vmTest -and $DeleteVM.IsPresent) {
+    Write-Log "Cleaning up VM '$VmName'..."
+    try {
         if ($vmTest.State -ne "Off") {
             Write-Log "$VmName`: Turning the VM off forcefully..."
             $vmTest | Stop-VM -TurnOff -Force
@@ -332,6 +475,10 @@ else {
         $vmTest | Remove-VM -Force
         Write-Log "$VmName`: Purging $($vmTest.Path) folder..."
         Remove-Item -Path $($vmTest.Path) -Force -Recurse
+        Write-Log "$VmName`: VM cleaned up successfully."
+    }
+    catch {
+        Write-Log "$VmName`: Warning - VM cleanup failed: $($_.Exception.Message)" -Warning
     }
 }
 

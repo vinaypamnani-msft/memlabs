@@ -1,4 +1,15 @@
 
+# ThreadJob (PS7+) exposes its data streams directly on the job object and
+# has an empty ChildJobs collection, whereas Start-Job wraps the work in a
+# child PSRemotingChildJob whose streams hold the data. Return whichever
+# object actually carries Output/Error/Progress for a given job.
+function Get-JobStreamSource {
+    param($Job)
+    if (-not $Job) { return $null }
+    if ($Job.ChildJobs -and $Job.ChildJobs.Count -gt 0) { return $Job.ChildJobs[0] }
+    return $Job
+}
+
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
@@ -8,13 +19,13 @@ function Write-JobProgress {
         }
         $latestActivity = $null
         $latestStatus = $null
-        #Make sure the first child job exists
-        $childJobs = $Job.ChildJobs
-        if ($null -ne $job -and $null -ne $childJobs -and $null -ne $childJobs.Progress) {
+        # ThreadJob has no ChildJobs -- streams live directly on the job.
+        $streamSource = Get-JobStreamSource -Job $Job
+        if ($null -ne $job -and $null -ne $streamSource -and $null -ne $streamSource.Progress) {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
-            $lastProgress = $childJobs[0].Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            $lastProgress = $streamSource.Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -104,6 +115,11 @@ function Start-Phase {
         }
     }
 
+    # Linux Proxy Squid install is dispatched as a per-VM job through
+    # Start-PhaseJobs in Phase 2 (see $global:Proxy_Install), so it shows
+    # up in the same Wait-Phase progress block as the DC/client jobs and
+    # benefits from the same lifetime/error handling.
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
@@ -119,6 +135,42 @@ function Start-Phase {
         return $false
     }
 
+    # After Phase 2 (domain-join + initial member config) succeeds, push proxy
+    # client settings to any VM with useProxy=true. Done from the host over
+    # PSDirect so we don't have to thread proxy config through DSC. No-op if
+    # no Proxy VM or no opted-in clients are present.
+    if ($Phase -eq 2) {
+        # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
+        # to the DC's DNS first, so the Proxy can resolve internal names
+        # and clients pointed at it land on a fully-configured upstream.
+        $hasLinux = @($deployConfig.virtualMachines | Where-Object { (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count -gt 0
+        if ($hasLinux) {
+            $null = Set-LinuxVmsDcDns -DeployConfig $deployConfig
+        }
+
+        # NOTE: Set-WindowsClientProxyForConfig used to run here as a serial
+        # foreach over Windows clients. Per-VM proxy client config now lives in
+        # $global:VM_Config (Phase 2 post-DSC block) so it parallelizes with
+        # every other per-VM Phase 2 job. The function remains callable for
+        # Fix-* scripts and manual reruns.
+
+        # Per-deploy enforcement covers brand-new VMs whose useProxy lives only
+        # in deployConfig (VM Notes not yet written on first-run cases).
+        Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
+        # NOTE: Cross-lab reconciliation (Set-VmProxyEnforcementForAllLabs)
+        # used to run here, but Phase 2 is too early -- parallel deploys in
+        # other domains may be mid-flight with stale VM Notes, so the global
+        # subnet union read from Get-NetworkList can be incomplete and we'd
+        # potentially re-stamp other labs with a too-narrow allow-list.
+        # Reconcile now runs from New-Lab.ps1 after Phase 11 succeeds, when
+        # this deploy's own VMs are fully built + verified and their subnets
+        # are visible in the cache.
+
+        # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
+        # site-server desktops. No-op when no Proxy VM is in this config.
+        Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
+    }
+
     return $true
 }
 
@@ -129,8 +181,22 @@ function Start-NormalJobs {
         [object]$phase,
         [Object]$argument1,
         [Object]$argument2,
-        [Object]$argument3
+        [Object]$argument3,
+        # When set and Start-ThreadJob is available (PS7+ with ThreadJob
+        # module), spawn ThreadJobs instead of Start-Job. ThreadJobs share
+        # the parent process and its already-loaded modules/assemblies, so
+        # each worker skips powershell.exe startup (~1s) and Hyper-V /
+        # DhcpServer module imports (~2-3s). Falls back to Start-Job when
+        # ThreadJob isn't available. Throttle limit is set generously since
+        # ThreadJobs are cheap; caller-controlled via -ThreadJobThrottle.
+        [switch]$PreferThreadJob,
+        [int]$ThreadJobThrottle = 16
     )
+
+    $useThreadJob = $PreferThreadJob.IsPresent -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)
+    if ($PreferThreadJob.IsPresent -and -not $useThreadJob) {
+        Write-Log "Start-NormalJobs: ThreadJob requested but not available; using Start-Job." -LogOnly
+    }
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
@@ -141,6 +207,21 @@ function Start-NormalJobs {
     if (-not $phase) {
         $phase = "NormalJob"
     }
+    # Define $deployConfigCopy in local scope so $using:deployConfigCopy in
+    # script blocks (e.g. Phase10Job) binds successfully even when this caller
+    # (e.g. Start-Maintenance) has no deployConfig. The script blocks guard
+    # against null before using it.
+    $deployConfigCopy = $null
+
+    # ThreadJob's $using: parser only supports bare variable expressions --
+    # member access like $using:Common.DevBranch throws "Cannot get the value
+    # of the Using expression". Pre-extract the few $Common properties used
+    # by ThreadJob-eligible scriptblocks (Phase10Job, DeleteVMs) into locals
+    # so they can be referenced as $using:devBranchValue / etc. Harmless when
+    # ThreadJob isn't in play -- Start-Job also resolves these names fine.
+    $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
+    $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
+    $localAdmin = if ($Common) { $Common.LocalAdmin } else { $null }
     foreach ($currentItem in $machines) {
         $jobName = "$($currentItem.vmName) [$($currentItem.role)] "
         if ($currentItem.vmName.Length -gt $maxVmNameLength) {
@@ -151,9 +232,17 @@ function Start-NormalJobs {
         }
 
         Write-Log -verbose "Starting Job for $jobName $argument2, $argument3"
-        if ($argument1) {
+        if ($useThreadJob) {
+            if ($argument1) {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+            }
+            else {
+                $job = Start-ThreadJob -ScriptBlock $scriptBlock -Name $jobName -ThrottleLimit $ThreadJobThrottle -ErrorAction Stop -ErrorVariable Err
+            }
+        }
+        elseif ($argument1) {
             $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
-        } 
+        }
         else {
             $job = Start-Job -ScriptBlock $scriptBlock -Name $jobName -ErrorAction Stop -ErrorVariable Err
         }
@@ -195,12 +284,44 @@ function Start-PhaseJobs {
         [object]$deployConfig
     )
 
+    # Detect if DSC source files changed since last copy; if so, force re-copy
+    $dscSourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) "DSC"
+    $newestFile = Get-ChildItem -Path "$dscSourcePath\phases" -Filter "*.ps1" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($newestFile -and $global:DSC_CopiedTime -and $newestFile.LastWriteTime -gt $global:DSC_CopiedTime) {
+        Write-Log "[Phase $Phase] DSC source files modified since last copy; forcing re-copy" -LogOnly
+        $global:DSC_Copied = @()
+    }
+    if (-not $global:DSC_CopiedTime) {
+        $global:DSC_CopiedTime = Get-Date
+    }
+
     $global:preparePhasePercent = 5
     Write-Progress2 "Preparing Phase $Phase" -Status "Getting configuration data" -PercentComplete $global:preparePhasePercent
 
     [System.Collections.ArrayList]$jobs = @()
     $job_created_yes = 0
     $job_created_no = 0
+
+    # Phase10Job/Phase11Job (and any other scriptblock dispatched from here
+    # that uses the bare-name form) reference $using:devBranchValue. The
+    # Start-Job/Start-ThreadJob parent must have it in scope or the job-
+    # creation call throws "The value of the using variable
+    # '$using:devBranchValue' cannot be retrieved because it has not been
+    # set in the local session." Mirror the same shim Start-NormalJobs uses
+    # so both call sites agree.
+    $devBranchValue = if ($Common) { $Common.DevBranch } else { $false }
+
+    # Phase 10 (Maintenance) and Phase 11 (Functional Validation) per-VM
+    # work is short (~3-10s of PSDirect probes), so the ~10s of fresh
+    # powershell.exe startup + module imports under Start-Job dominates.
+    # When ThreadJob is available, both phases share the parent's already-
+    # loaded Hyper-V module + assemblies and skip that init entirely.
+    # Other phases (VM_Create, VM_Config) stay on Start-Job for now --
+    # their per-VM payload is larger so the relative win is smaller, and
+    # they touch $global:DSC_Copied which would need review for ThreadJob.
+    $usePhaseThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+    $phaseThreadJobThrottle = 16
 
     # Determine single vs. multi-DSC
     $multiNodeDsc = $true
@@ -232,7 +353,7 @@ function Start-PhaseJobs {
     $global:vm_remove_list = @()
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
-    $existingVMs = Get-List -Type VM -SmartUpdate
+    $existingVMs = Get-List -Type VM
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
@@ -243,8 +364,8 @@ function Start-PhaseJobs {
             continue
         }
 
-        # Don't touch hidden VM's in Phase 1 or 10
-        if ($currentItem.hidden -and $Phase -in @(1, 10)) {
+        # Don't touch hidden VM's in Phase 1, 10, or 11
+        if ($currentItem.hidden -and $Phase -in @(1, 10, 11)) {
             continue
         }
 
@@ -273,16 +394,29 @@ function Start-PhaseJobs {
         }
 
         # Skip everything for OSDClient, nothing for us to do
-        if ($Phase -gt 1 -and $currentItem.role -in ("OSDClient", "Linux")) {
-            if ($currentItem.role -in ("OSDClient")) {
-                stop-vm2 -Name $currentItem.vmName -TurnOff
-            }
+        if ($Phase -gt 1 -and $currentItem.role -eq "OSDClient") {
+            stop-vm2 -Name $currentItem.vmName -TurnOff
+            continue
+        }
+
+        # Linux VMs have no Windows DSC config. Phase 2 has a dedicated
+        # dispatch branch ($global:Proxy_Install, Proxy role only) and
+        # Phase 3 has another ($global:Linux_Configure, all Linux). Skip
+        # every other Linux case so we don't queue a $global:VM_Config job
+        # that would hang on "Waiting for VM to respond" (Invoke-VmCommand
+        # is Windows-only). That means: Phase 4+ for any Linux, AND Phase 2
+        # for non-Proxy Linux roles (LinuxClient, LinuxServer).
+        if ((Test-VmIsLinux -Vm $currentItem) -and
+            ($Phase -gt 3 -or ($Phase -eq 2 -and $currentItem.role -ne 'Proxy'))) {
+            Write-Log "[Phase $Phase] Skipping Linux VM $($currentItem.vmName) (no Windows DSC)" -LogOnly
             continue
         }
 
         # Skip multi-node DSC (& monitoring) for all machines except those in the ConfigurationData.AllNodes
+        # Exception: Linux Proxy in Phase 2 — handled below by $global:Proxy_Install.
+        # Exception: any Linux VM in Phase 3 — handled below by $global:Linux_Configure.
         $vmNamefull = "$($currentItem.vmName).$($currentItem.domain)"
-        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName)) {
+        if ($multiNodeDsc -and ($currentItem.vmName -notin $ConfigurationData.AllNodes.NodeName) -and ($vmNamefull -notin $ConfigurationData.AllNodes.NodeName) -and -not ($Phase -eq 2 -and $currentItem.role -eq 'Proxy') -and -not ($Phase -eq 3 -and (Test-VmIsLinux -Vm $currentItem))) {
             Write-Log -Verbose "Skipping $($currentItem.vmName) because it does not exist in ConfigData"
             continue
         }
@@ -303,14 +437,81 @@ function Start-PhaseJobs {
             $maxRoleNameLength = $currentItem.role.Length
         }
 
-        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10) {
+        # Linux Proxy (Phase 2): dispatch a per-VM job that runs the Squid
+        # install. This gives the Proxy VM the same Wait-Phase progress row
+        # as the Windows DSC jobs, and bypasses the multi-node DSC skip
+        # below (the Proxy has no DSC config so it isn't in
+        # $ConfigurationData.AllNodes). The install bash short-circuits
+        # quickly when squid is already healthy, so dispatching
+        # unconditionally is cheap and keeps the progress UI consistent.
+        if ($Phase -eq 2 -and $currentItem.role -eq 'Proxy') {
+            $job = Start-Job -ScriptBlock $global:Proxy_Install -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if (-not $job) {
+                Write-Log "[Phase $Phase] Failed to create Proxy_Install job for VM $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
+            else {
+                Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Proxy_Install)" -LogOnly
+                $jobs += $job
+                $job_created_yes++
+            }
+            continue
+        }
 
-            if ($Phase -eq 10) {         
-                if ($currentItem.Role -in @("OSDClient", "Linux", "AADClient")) {
+        # Linux Phase 3: dispatch a per-VM job that applies role-driven
+        # post-boot config (xrdp/xfce4/Firefox for enableRDP, realm-join for
+        # joinDomain). Mirrors the Phase 2 Proxy_Install branch so Linux VMs
+        # get the same Wait-Phase progress treatment and run in parallel with
+        # the Windows DSC jobs instead of bloating cloud-init first boot.
+        # No-op success (returns true) when the VM has no applicable flags.
+        if ($Phase -eq 3 -and (Test-VmIsLinux -Vm $currentItem)) {
+            $job = Start-Job -ScriptBlock $global:Linux_Configure -Name $jobName -ErrorAction Stop -ErrorVariable Err
+            if (-not $job) {
+                Write-Log "[Phase $Phase] Failed to create Linux_Configure job for VM $($currentItem.vmName). $Err" -Failure
+                $job_created_no++
+            }
+            else {
+                Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Linux_Configure)" -LogOnly
+                $jobs += $job
+                $job_created_yes++
+            }
+            continue
+        }
+
+        if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {
+
+            if ($Phase -eq 11) {
+                # Phase 11 = functional validation. Skip only roles that have no
+                # PSDirect-reachable validation surface (OSDClient is the boot
+                # task-sequence image, AADClient isn't in the domain so
+                # Invoke-VmCommand's domain-cred path can't reach them reliably).
+                # Client roles (DomainMember/WorkgroupMember/InternetClient) DO
+                # run -- see Test-DomainMemberFunctionality et al.
+                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
+                    continue
+                }
+                if ($usePhaseThreadJob) {
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase11Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
+                else {
+                    $job = Start-Job -ScriptBlock $global:Phase11Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
+                if (-not $job) {
+                    Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
+                    $job_created_no++
+                }
+            }
+            elseif ($Phase -eq 10) {         
+                if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
                 }       
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
-                $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                if ($usePhaseThreadJob) {
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
+                else {
+                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
                     $job_created_no++
@@ -351,6 +552,7 @@ function Start-PhaseJobs {
             }
             else {
                 $global:DSC_Copied += $currentItem.VmName
+                $global:DSC_CopiedTime = Get-Date
             }
             Write-Log -verbose "[Phase $Phase] $($currentItem.vmName) alreadyCopiedDSC = $alreadyCopiedDSC"
             $job = Start-Job -ScriptBlock $global:VM_Config -Name $jobName -ErrorAction Stop -ErrorVariable Err
@@ -430,7 +632,7 @@ function Wait-Phase {
 
         $FailRetry = 0
         do {
-            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and - $_State -ne "Failed" } | Sort-Object -Property Id
+            $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
             }
@@ -440,7 +642,8 @@ function Wait-Phase {
                 $FailRetry = $FailRetry + 1
                 if ($FailRetry -gt 30) {
                     try {
-                        $childJobs = $job | Select-Object -ExpandProperty childjobs
+                        # ThreadJob has no ChildJobs -- read state/error from the job itself.
+                        $streamSource = Get-JobStreamSource -Job $job
                         if ($job.Name) {
                             $jobOutput = $job.Name
                             $jobOutput += " "
@@ -448,24 +651,24 @@ function Wait-Phase {
                         else {
                             $jobOutput = ""
                         }
-                        $joberror = $childJobs | Select-Object -ExpandProperty Error
+                        $joberror = $streamSource | Select-Object -ExpandProperty Error
                         if ($joberror -is [string]) {
                             $jobOutput += $joberror
                             $jobOutput += " "
                         }
                    
-                        if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception) {
-                            if ($childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
-                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception.Message
+                        if ($streamSource.JobStateInfo.Reason.ErrorRecord.Exception) {
+                            if ($streamSource.JobStateInfo.Reason.ErrorRecord.Exception.Message) {
+                                $jobOutput += $streamSource.JobStateInfo.Reason.ErrorRecord.Exception.Message
                                 $jobOutput += " "
                             }
                             else {
-                                $jobOutput += $childJobs.JobStateInfo.Reason.ErrorRecord.Exception
+                                $jobOutput += $streamSource.JobStateInfo.Reason.ErrorRecord.Exception
                                 $jobOutput += " "
                             }
                         }
-                        if ($childJobs.JobStateInfo.Message) {
-                            $jobOutput += $childJobs.JobStateInfo.Message
+                        if ($streamSource.JobStateInfo.Message) {
+                            $jobOutput += $streamSource.JobStateInfo.Message
                             $jobOutput += " "
                         }
                     }
@@ -487,9 +690,11 @@ function Wait-Phase {
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name
-                $jobOutput = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Output
+                # ThreadJob has no ChildJobs -- streams live directly on the job.
+                $streamSource = Get-JobStreamSource -Job $job
+                $jobOutput = $streamSource | Select-Object -ExpandProperty Output
                 if (-not $jobOutput) {
-                    $jobError = $job | Select-Object -ExpandProperty childjobs | Select-Object -ExpandProperty Error
+                    $jobError = $streamSource | Select-Object -ExpandProperty Error
 
                     if ($jobError) {
                         Write-RedX "[Phase $Phase] Job $jobName completed with error: $jobError" -ForegroundColor Red
@@ -502,7 +707,7 @@ function Wait-Phase {
                     $return.Failed++
                 }
                 #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
-                $incrementCount = $true
+                $worstLogLevel = 0
                 foreach ($OutputObject in $jobOutput) {
                     $line = $OutputObject.text
                     if (-not $line) {
@@ -511,30 +716,30 @@ function Wait-Phase {
                     $line = $line.ToString().Trim()
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($incrementCount) {
-                            $return.Failed++
-                        }
+                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                         if ($phase -ge 2 -and $jobName.Contains("[DC]")) {
                             Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
                                 $jobs | Stop-Job
                             }
                             catch {}
+                            $return.Failed++
                             return $return
                         }
                     }
                     elseif ($OutputObject.LogLevel -eq 2) {
                         Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($incrementCount) { $return.Warning++ }
+                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                     }
                     else {
                         Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
-                        # Assume no error/warning was a success
-                        if ($incrementCount) { $return.Success++ }
                     }
-
-                    $incrementCount = $false
                 }
+
+                # Count once per job based on worst severity seen
+                if ($worstLogLevel -ge 3) { $return.Failed++ }
+                elseif ($worstLogLevel -ge 2) { $return.Warning++ }
+                elseif ($jobOutput) { $return.Success++ }
 
                 #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
@@ -587,7 +792,21 @@ function Get-ConfigurationData {
                     $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
                 }
 
-                if (-not $snapshot) {
+                # Skip auto-snapshot if all phase 8 VMs already completed phase 8+ (re-run)
+                $phase8Nodes = $cd.AllNodes | Where-Object { $_.NodeName -ne "*" }
+                $allAlreadyDeployed = $true
+                foreach ($node in $phase8Nodes) {
+                    $vmNote = Get-VMNote -VMName $node.NodeName
+                    if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
+                        $allAlreadyDeployed = $false
+                        break
+                    }
+                }
+
+                if ($allAlreadyDeployed) {
+                    Write-Log "[Phase 8] Skipping auto-snapshot: all VMs already deployed (re-run)" -LogOnly
+                }
+                elseif (-not $snapshot) {
                     $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {
                         Invoke-AutoSnapShotDomain -domain $deployConfig.vmOptions.DomainName -comment $autoSnapshotName
@@ -610,7 +829,7 @@ function Get-ConfigurationData {
 
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 251
-        Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VM's are running" -PercentComplete $global:preparePhasePercent
+        Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VMs are running" -PercentComplete $global:preparePhasePercent
 
         $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
         if ($nodes) {
@@ -630,7 +849,7 @@ function Get-ConfigurationData {
         }
 
         $dc = $cd.AllNodes | Where-Object { $_.Role -eq "DC" }
-        if ($dc) {
+        if ($dc -and -not $global:StartPhase) {
 
             $global:preparePhasePercent++
             Start-Sleep -Milliseconds 251
@@ -660,17 +879,11 @@ function Get-ConfigurationData {
                 else {
                     Write-Log "[Phase $Phase]: $($dc.NodeName): VM is responsive" -LogOnly
         
-                    # Your existing RDP-specific test if needed
-                    $job = Start-Job -ScriptBlock {
-                        param($computerName)
-                        Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-                    } -ArgumentList $dc.NodeName
+                    # RDP port probe with hard timeout + retry (Test-NetConnection can hang)
+                    $testNet = Test-TcpPort -ComputerName $dc.NodeName -Port 3389 -TimeoutMs 3000 -Retries 3 -RetryDelayMs 1000
         
-                    $testNet = Wait-Job -Job $job -Timeout 10 | Receive-Job
-                    Remove-Job -Job $job -Force
-        
-                    if ($null -eq $testNet -or -not $testNet) {
-                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible. Attempting soft restart." -Warning
+                    if (-not $testNet) {
+                        Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible after retries. Attempting soft restart." -Warning
                         Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
                         Start-Sleep -Seconds 20
                     }
@@ -710,7 +923,7 @@ function Get-Phase2ConfigurationData {
         $global:preparePhasePercent++
 
         # Filter out machines with an unconnectable OS, except AADClient, which has a special case to skip the DSC
-        if ($vm.role -notin "OSDClient", "Linux") {
+        if ($vm.role -ne "OSDClient") {
             if (-not $vm.Hidden) {
                 $cd
                 #Write-Host "xxxReturning $cd for $($vm.vmName)"
@@ -741,8 +954,8 @@ function Get-Phase3ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "Linux", "OtherDC", "AADClient") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "InternetClient", "OSDClient", "OtherDC", "AADClient", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -788,8 +1001,8 @@ function Get-Phase4ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -914,8 +1127,8 @@ function Get-Phase6ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
         if ($vm.hidden -and $vm.domain -and ($vm.domain -ne $deployConfig.vmoptions.domainName) ) {
@@ -966,8 +1179,8 @@ function Get-Phase7ConfigurationData {
 
         $global:preparePhasePercent++
 
-        # Filter out workgroup machines
-        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "Linux", "OtherDC") {
+        # Filter out workgroup machines and Linux (Proxy/LinuxServer/LinuxClient) -- no DSC for Linux.
+        if ($vm.role -in "WorkgroupMember", "AADClient", "InternetClient", "OSDClient" , "OtherDC", "StandaloneRootCA", "Proxy", "LinuxServer", "LinuxClient") {
             continue
         }
 
@@ -1107,6 +1320,31 @@ function Get-Phase8ConfigurationData {
         $cd.AllNodes += $all
 
     }
+
+    # Even when cmOptions.Install is false (existing CM), include the hidden Primary
+    # if there are new VMs with BitLocker=true that need BLM collection membership,
+    # or new VMs that need client push. This allows ScriptWorkFlow re-run on the Primary
+    # to handle EnableBLM and PushClients for newly added VMs.
+    if ($NumberOfNodesAdded -eq 0) {
+        $newBLMVMs = @($deployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+        # Per-VM pushClient opt-in (null/absent treated as $true for back-compat)
+        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+        $newPushVMs = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -in $pushableRoles -and -not $_.hidden -and ($_.pushClient -ne $false)
+            })
+        if ($newBLMVMs.Count -gt 0 -or $newPushVMs.Count -gt 0) {
+            $hiddenPrimary = $deployConfig.virtualMachines | Where-Object {
+                $_.role -eq "Primary" -and $_.hidden -and
+                (-not $_.domain -or $_.domain -eq $deployConfig.vmOptions.domainName)
+            } | Select-Object -First 1
+            if ($hiddenPrimary) {
+                $cd.AllNodes += @{ NodeName = $hiddenPrimary.vmName; Role = $hiddenPrimary.Role }
+                $cd.AllNodes += @{ NodeName = "*"; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
+                $NumberOfNodesAdded = 1
+            }
+        }
+    }
+
     if ($NumberOfNodesAdded -eq 0) {
         return
     }

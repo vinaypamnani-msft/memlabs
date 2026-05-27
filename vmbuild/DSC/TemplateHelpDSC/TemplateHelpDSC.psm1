@@ -102,6 +102,121 @@ function Invoke-DownloadFile {
 
 }
 
+# Hardened MSI installer. Several DSC resources previously called `& msiexec /i ...`
+# directly -- but msiexec.exe is a launcher stub that returns immediately while the
+# real install runs async under the msiexec /V service. That made callers print
+# "Installed Successfully!" before the MSI had done anything, and never inspect
+# $LASTEXITCODE. Use Start-Process -Wait -PassThru so we actually block on
+# completion and can inspect ExitCode, capture a verbose log, and optionally
+# verify a registry marker proving the install registered.
+function Install-MSIPackage {
+    param(
+        [Parameter(Mandatory)][string] $MsiPath,
+        [Parameter(Mandatory)][string] $DisplayName,
+        [string[]] $AdditionalArguments = @(),
+        [string] $LogPath,
+        [string] $VerifyRegistryPath,
+        [string] $VerifyRegistryValueName,
+        [int[]]  $SuccessExitCodes = @(0, 3010)  # 3010 = success, reboot required
+    )
+
+    if (-not (Test-Path -Path $MsiPath)) {
+        throw "$DisplayName install failed: MSI not found at $MsiPath"
+    }
+
+    if (-not $LogPath) {
+        $base = [IO.Path]::GetFileNameWithoutExtension($MsiPath)
+        $LogPath = "C:\temp\$base.install.log"
+    }
+    $logDir = Split-Path -Path $LogPath -Parent
+    if ($logDir -and -not (Test-Path -Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+
+    $msiArgs = @("/i", "`"$MsiPath`"", "/qn", "/norestart") + $AdditionalArguments + @("/l*v", "`"$LogPath`"")
+
+    Write-Status "Installing $DisplayName from $MsiPath ..."
+    Write-Verbose ("Commandline: msiexec.exe $($msiArgs -join ' ')")
+
+    $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -NoNewWindow
+    $exit = $proc.ExitCode
+
+    if ($SuccessExitCodes -notcontains $exit) {
+        # MSI 1603 ("fatal error during installation") never tells you the
+        # cause in the tail of the log -- the tail is always MSI cleanup
+        # noise (MainEngineThread returning, RESTART MANAGER closing, etc).
+        # The real failure trigger lives upstream and is signalled by one
+        # of a small set of markers. Grep for those, take 5 lines of
+        # context before/after each match, dedupe, cap, and surface that
+        # instead of (or in addition to) the dumb tail.
+        $diag = ""
+        if (Test-Path -Path $LogPath) {
+            try {
+                $all = Get-Content -Path $LogPath -ErrorAction SilentlyContinue
+                if ($all) {
+                    # Patterns that bracket the real 1603 root cause:
+                    #   Return value 3.                  -> last custom action that failed
+                    #   CustomAction .* returned actual error code
+                    #   Error 1[0-9]{3}                  -> MSI numeric errors (1402 ACL, 1603 fatal, 1719 service, 1935 assembly)
+                    #   Note: 1: 27[0-9]{2}              -> internal MSI errors
+                    #   Product .* Installation failed
+                    #   Action ended .* Return value 3   -> redundant with above but catches some logs
+                    #   Failed to .*                     -> generic CA failure text
+                    $rx = '(Return value 3\.|returned actual error code|Error 1[0-9]{3}\b|Note: 1: 27[0-9]{2}|Installation failed\.|Action ended .* Return value 3|Failed to (?!find resource))'
+                    $hits = New-Object 'System.Collections.Generic.HashSet[int]'
+                    for ($i = 0; $i -lt $all.Count; $i++) {
+                        if ($all[$i] -match $rx) {
+                            for ($k = [math]::Max(0, $i - 5); $k -le [math]::Min($all.Count - 1, $i + 5); $k++) {
+                                [void]$hits.Add($k)
+                            }
+                        }
+                    }
+                    if ($hits.Count -gt 0) {
+                        $ordered = $hits | Sort-Object
+                        $sb = New-Object System.Text.StringBuilder
+                        $prev = -2
+                        foreach ($idx in $ordered) {
+                            if ($sb.Length -ge 4000) { break }
+                            if ($prev -ge 0 -and $idx -ne ($prev + 1)) { [void]$sb.AppendLine("  ...") }
+                            [void]$sb.AppendLine(("  L{0}: {1}" -f ($idx + 1), $all[$idx]))
+                            $prev = $idx
+                        }
+                        $diag = $sb.ToString().TrimEnd()
+                    }
+                }
+            } catch {}
+        }
+        # Also keep the tail as fallback context (helps if our patterns
+        # missed the actual trigger -- the tail at least shows the
+        # final state).
+        $tail = ""
+        if (Test-Path -Path $LogPath) {
+            try { $tail = (Get-Content -Path $LogPath -Tail 10 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+        }
+        $msg = "msiexec for $DisplayName exited with $exit. Log: $LogPath"
+        if ($diag) { $msg += "`nFailure context (matched lines + 5 before/after, deduped):`n$diag" }
+        if ($tail) { $msg += "`nLog tail (last 10):`n$tail" }
+        Write-Status $msg
+        throw "$DisplayName install failed (msiexec exit $exit). Log: $LogPath"
+    }
+
+    if ($VerifyRegistryPath) {
+        if (-not (Test-Path -Path $VerifyRegistryPath)) {
+            throw "$DisplayName msiexec exit was $exit but registry path $VerifyRegistryPath is missing -- install did not register"
+        }
+        if ($VerifyRegistryValueName) {
+            $val = (Get-ItemProperty -Path $VerifyRegistryPath -Name $VerifyRegistryValueName -ErrorAction SilentlyContinue).$VerifyRegistryValueName
+            if (-not $val) {
+                throw "$DisplayName msiexec exit was $exit but $VerifyRegistryPath\$VerifyRegistryValueName is empty -- install did not register"
+            }
+            Write-Status "$DisplayName installed successfully ($VerifyRegistryValueName=$val, exit $exit)"
+            return
+        }
+    }
+
+    Write-Status "$DisplayName installed successfully (exit $exit)"
+}
+
 [DscResource()]
 class InstallADK {
     [DscProperty(Key)]
@@ -136,74 +251,347 @@ class InstallADK {
         # Use this block to download the WinPE ADK, Filename: adkwinpesetup.exe
         Invoke-DownloadFile $_ADKWinPEDownloadPath $_adkWinPEpath        
 
-        #Install DeploymentTools
+        # Local helper: invoke adksetup with a dedicated log file, check
+        # exit code, and surface the real failure on error.
+        #
+        # adksetup is a WiX Burn bundle; on failure it dumps ~hundreds of
+        # WixBundle* variables at the end of the log, so a plain "last 40
+        # lines" tail just captures variable dumps and tells us nothing
+        # useful. Burn prefixes meaningful lines with single-letter codes:
+        #   i### informational, w### warning, e### error, f### fatal
+        # We extract the error/warning/fatal lines (plus a few lines of
+        # surrounding context) so the DSC status surfaces the actual root
+        # cause -- which package failed, MSI return, missing prereq, etc.
+        $invokeAdk = {
+            param($exe, [string[]]$argv, $label)
+            $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+            if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+
+            $full = @($argv) + @('/log', $logFile)
+            Write-Status ("ADK {0}: running adksetup (downloading + installing, may take several minutes): {1} {2}" -f $label, $exe, ($full -join ' '))
+            $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
+            $code = $proc.ExitCode
+            Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
+            if ($code -ne 0) {
+                $errLines = @()
+                if (Test-Path $logFile) {
+                    try {
+                        $all = Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue
+                        $pattern = '^\s*\[[^\]]+\]\s*[efw]\d{3}:|Error\s+\d|failed|returned\s+(error|exit code)|cancel|Applying execute package'
+                        $errLines = $all | Where-Object { $_ -match $pattern } | Select-Object -Last 40
+                    } catch { }
+                }
+                if (-not $errLines -or $errLines.Count -eq 0) {
+                    try { $errLines = Get-Content -LiteralPath $logFile -Tail 25 -ErrorAction SilentlyContinue } catch { }
+                }
+                $diag = ($errLines -join "`n")
+                Write-Status ("adksetup ({0}) failed. Log {1}. Diagnostic lines:`n{2}" -f $label, $logFile, $diag)
+
+                # Extract any download URLs Burn complained about (fwlinks,
+                # direct CDN urls, etc.) and probe each one. A dead/retired
+                # fwlink is the #1 cause of mystery 0x80070642 acquisition
+                # failures and the bundle's own log doesn't say "404 from
+                # microsoft" -- it just says HttpSendRequest failed. Probing
+                # here surfaces the actual HTTP status in the DSC log so
+                # the next reader knows immediately whether to blame the
+                # network, the proxy, or a retired link.
+                try {
+                    if (Test-Path $logFile) {
+                        $logText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
+                        $urlMatches = [regex]::Matches($logText, 'https?://[^\s''"<>)]+')
+                        $urls = $urlMatches | ForEach-Object { $_.Value.TrimEnd('.',',',';',':') } |
+                                Where-Object { $_ -match 'go\.microsoft\.com/fwlink|download\.microsoft\.com|\.cab(\?|$)|\.msi(\?|$)|\.exe(\?|$)' } |
+                                Sort-Object -Unique
+                        if ($urls) {
+                            Write-Status ("adksetup ({0}) referenced {1} download URL(s); probing each for dead-link detection." -f $label, $urls.Count)
+                            $deadHits = @()
+                            foreach ($u in $urls) {
+                                $probeMsg = $null
+                                $resolved = $null
+                                $status   = $null
+                                $isDead   = $false
+                                try {
+                                    $req = [System.Net.HttpWebRequest]::Create($u)
+                                    $req.Method = 'HEAD'
+                                    $req.Timeout = 15000
+                                    $req.AllowAutoRedirect = $true
+                                    $req.MaximumAutomaticRedirections = 10
+                                    $req.UserAgent = 'MemLabs-AdkProbe/1.0'
+                                    $resp = $req.GetResponse()
+                                    $status = [int]$resp.StatusCode
+                                    $resolved = $resp.ResponseUri.AbsoluteUri
+                                    $resp.Close()
+                                    if ($status -ge 400) {
+                                        $probeMsg = "DEAD (HTTP $status) -> $resolved"
+                                        $isDead = $true
+                                    } else {
+                                        $probeMsg = "ok  (HTTP $status) -> $resolved"
+                                    }
+                                } catch [System.Net.WebException] {
+                                    $we = $_.Exception
+                                    if ($we.Response) {
+                                        try { $status = [int]$we.Response.StatusCode } catch {}
+                                        try { $resolved = $we.Response.ResponseUri.AbsoluteUri } catch {}
+                                    }
+                                    if ($status -in 404,410) {
+                                        $probeMsg = "DEAD (HTTP $status, link retired by publisher)"
+                                        if ($resolved) { $probeMsg += " -> $resolved" }
+                                        $isDead = $true
+                                    } elseif ($status) {
+                                        $probeMsg = "DEAD (HTTP $status) -> $resolved"
+                                        $isDead = $true
+                                    } else {
+                                        $probeMsg = "probe failed: $($we.Message)"
+                                    }
+                                } catch {
+                                    $probeMsg = "probe error: $($_.Exception.Message)"
+                                }
+                                # Pull linkid out of fwlink URLs for at-a-glance correlation.
+                                $linkid = $null
+                                if ($u -match 'linkid=(\d+)') { $linkid = $Matches[1] }
+                                $tag = if ($linkid) { "fwlink linkid=$linkid" } else { 'url' }
+                                Write-Status ("  adksetup-link {0,-22} {1} : {2}" -f $tag, $u, $probeMsg)
+                                if ($isDead) {
+                                    $deadHits += [pscustomobject]@{ Url=$u; LinkId=$linkid; Status=$status; Resolved=$resolved }
+                                }
+                            }
+                            # Bubble a punchy summary status line so the host
+                            # monitor (which shows the most recent Write-Status)
+                            # surfaces the headline finding instead of just
+                            # "adksetup exit code 1603".
+                            if ($deadHits.Count -gt 0) {
+                                $summary = $deadHits | ForEach-Object {
+                                    if ($_.LinkId) { "fwlink $($_.LinkId) (HTTP $($_.Status))" }
+                                    else { "$($_.Url) (HTTP $($_.Status))" }
+                                }
+                                Write-Status ("ADK $label : DEAD LINK DETECTED -- {0} retired/unreachable download(s): {1}. See log {2} for full URL list." -f $deadHits.Count, ($summary -join '; '), $logFile)
+
+                                # Recovery: try to pre-stage the missing payload(s)
+                                # from the resolved CDN folder of each dead fwlink.
+                                # WiX Burn checks the local source path first; if
+                                # we drop the file there, the next attempt will
+                                # find it and skip the dead download entirely.
+                                #
+                                # This salvages the common Microsoft pattern where
+                                # the fwlink itself redirects to a download.microsoft.com
+                                # folder URL that returns 404 (directory listing
+                                # forbidden / folder removed) but specific files
+                                # UNDER that folder are still hosted. ADK bundles
+                                # have repeatedly shipped with baked-in child
+                                # fwlinks pointing at such retired folder roots
+                                # (e.g. linkid=2290227 in the Dec-2024 26100.2454
+                                # bundle, linkid=2337876 in the Nov-2025 28000.1
+                                # bundle) -- both fixable this way without waiting
+                                # for MS to republish the bootstrapper.
+                                try {
+                                    $expected = New-Object System.Collections.Generic.List[string]
+                                    foreach ($line in $all) {
+                                        if ($line -match 'Failed to resolve source for file:\s*(.+?),\s*error:') {
+                                            $p = $Matches[1].Trim()
+                                            if ($p -and -not $expected.Contains($p)) { $expected.Add($p) }
+                                        }
+                                    }
+                                    if ($expected.Count -gt 0) {
+                                        # Build candidate base URLs from the dead-link
+                                        # resolved URIs. Strip trailing filename if the
+                                        # resolved URL already points at a file (rare
+                                        # for the fwlink-folder case but defensive).
+                                        $candidateBases = New-Object System.Collections.Generic.List[string]
+                                        foreach ($hit in $deadHits) {
+                                            $b = $hit.Resolved
+                                            if (-not $b) { continue }
+                                            if ($b -notmatch '/$') { $b = ($b -replace '/[^/]*$','/') }
+                                            if ($b -and -not $candidateBases.Contains($b)) { $candidateBases.Add($b) }
+                                        }
+                                        if ($candidateBases.Count -gt 0) {
+                                            Write-Status ("ADK $label : attempting to pre-stage {0} missing payload(s) from {1} dead-link CDN base(s)." -f $expected.Count, $candidateBases.Count)
+                                            foreach ($localPath in $expected) {
+                                                if (Test-Path -LiteralPath $localPath) {
+                                                    Write-Status ("  pre-stage: $localPath already present, skipping")
+                                                    continue
+                                                }
+                                                $fname = Split-Path -Path $localPath -Leaf
+                                                $encoded = [uri]::EscapeDataString($fname)
+                                                $localDir = Split-Path -Path $localPath -Parent
+                                                if ($localDir -and -not (Test-Path -LiteralPath $localDir)) {
+                                                    New-Item -ItemType Directory -Path $localDir -Force | Out-Null
+                                                }
+                                                # ADK bundle layout puts every payload
+                                                # under an Installers/ subfolder on the
+                                                # CDN mirror. Try that first; fall back
+                                                # to base + filename for other layouts.
+                                                $relCandidates = @("Installers/$encoded", $encoded)
+                                                $staged = $false
+                                                :baseLoop foreach ($base in $candidateBases) {
+                                                    foreach ($rel in $relCandidates) {
+                                                        $url = $base + $rel
+                                                        try {
+                                                            $wc = New-Object System.Net.WebClient
+                                                            Write-Status ("  pre-stage: downloading $fname from $url")
+                                                            $wc.DownloadFile($url, $localPath)
+                                                            if ((Test-Path -LiteralPath $localPath) -and (Get-Item -LiteralPath $localPath).Length -gt 0) {
+                                                                $sz = (Get-Item -LiteralPath $localPath).Length
+                                                                Write-Status ("  pre-stage: OK ({0:N0} bytes) -> $localPath" -f $sz)
+                                                                $staged = $true
+                                                                break baseLoop
+                                                            }
+                                                        } catch {
+                                                            Write-Status ("  pre-stage: $url -> $($_.Exception.Message)")
+                                                            if (Test-Path -LiteralPath $localPath) {
+                                                                Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if (-not $staged) {
+                                                    Write-Status ("  pre-stage: could not locate $fname under any dead-link base")
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch {
+                                    Write-Status ("ADK $label : pre-stage attempt threw: $($_.Exception.Message)")
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    Write-Status ("adksetup ({0}) link probe threw: {1}" -f $label, $_.Exception.Message)
+                }
+            }
+            return $code
+        }
+
+        # Install routine: prefer direct /quiet /features (only fetches
+        # the packages the selected features need -- skips optional/dead
+        # children entirely). Falls back to /layout + offline install as
+        # a last resort if every direct attempt fails: layout caches the
+        # whole bundle locally and installs from there, which can rescue
+        # cases where Burn's child-package fetch is racing a flaky CDN.
+        #
+        # Note: /layout downloads EVERY package in the bundle regardless
+        # of /features, so it's vulnerable to baked-in dead child fwlinks
+        # (the 24H2 Dec-2024 bundle's linkid=2290227 / Toolkit
+        # Documentation MSI was a known casualty -- retired by MS without
+        # a corresponding bundle refresh). That's why direct goes first.
+        $runAdkInstall = {
+            param($exe, [string[]]$features, $label, $layoutDir, $maxAttempts, [string[]]$verifyPaths)
+
+            # Helper: adksetup sometimes exits 0 in a few seconds without
+            # actually installing anything (e.g. another bundle instance
+            # already handled by Burn, bootstrapper detected an in-progress
+            # install, etc.). Caller passes the install paths it expects to
+            # exist after success; we verify them and treat missing-paths
+            # as a non-zero outcome so the retry/layout fallback path fires.
+            $verifyInstall = {
+                if (-not $verifyPaths -or $verifyPaths.Count -eq 0) { return $true }
+                $missing = @($verifyPaths | Where-Object { -not (Test-Path $_) })
+                if ($missing.Count -eq 0) { return $true }
+                Write-Status ("ADK {0} : adksetup reported success but expected install path(s) missing: {1}" -f $label, ($missing -join '; '))
+                $logFile = Join-Path $env:TEMP ("adksetup-" + ($label -replace '\W','_') + ".log")
+                if (Test-Path $logFile) {
+                    try {
+                        $tail = Get-Content -LiteralPath $logFile -Tail 15 -ErrorAction SilentlyContinue
+                        if ($tail) { Write-Status ("ADK {0} : adksetup log tail ({1}):`n{2}" -f $label, $logFile, ($tail -join "`n")) }
+                    } catch { }
+                }
+                return $false
+            }
+
+            $attempt = 0
+            $lastExit = -1
+            while ($attempt -lt $maxAttempts) {
+                $attempt++
+                Write-Status "ADK $label install... (attempt $attempt/$maxAttempts, mode=direct)"
+                try {
+                    $directArgs = @('/quiet','/features') + $features
+                    $lastExit = & $invokeAdk $exe $directArgs $label
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
+                    throw "Failed to launch ADK $label setup: $ErrorMessage"
+                }
+                if ($lastExit -eq 0) {
+                    if (& $verifyInstall) { return 0 }
+                    # 0-exit but install didn't happen -- almost always means
+                    # Burn's dependency-provider registry has a stale entry
+                    # ("WixBundleInstalled = 1" in the log) from a prior run
+                    # whose MSIs got rolled back / cleaned. The bootstrapper
+                    # then no-op's every subsequent install attempt. Force an
+                    # uninstall to clear the stale provider key, then retry.
+                    Write-Status "ADK $label : running /uninstall /quiet to clear stale Burn registration before retry."
+                    try {
+                        $uninstallExit = & $invokeAdk $exe @('/uninstall','/quiet') ("$label-uninstall")
+                        Write-Status "ADK $label : /uninstall returned $uninstallExit."
+                    } catch {
+                        Write-Status "ADK $label : /uninstall threw: $($_.Exception.Message) (continuing to retry install)"
+                    }
+                    $lastExit = -2
+                }
+                Write-Status "ADK $label : adksetup exited $lastExit; will retry after backoff."
+                Start-Sleep -Seconds 5
+            }
+
+            # Direct path exhausted. Last-resort: try /layout + offline install.
+            Write-Status "ADK $label : all $maxAttempts direct attempts failed (last exit $lastExit). Falling back to /layout + offline install."
+            try {
+                if (!(Test-Path $layoutDir)) {
+                    New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+                }
+                $layoutArgs = @('/quiet','/layout',$layoutDir)
+                $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
+                if ($layoutExit -ne 0) {
+                    Write-Status "ADK $label : /layout fallback failed with exit $layoutExit. Giving up."
+                    return $layoutExit
+                }
+                $localExe = Join-Path $layoutDir 'adksetup.exe'
+                if (!(Test-Path $localExe)) {
+                    $localExe = Join-Path $layoutDir (Split-Path $exe -Leaf)
+                }
+                if (!(Test-Path $localExe)) {
+                    Write-Status "ADK $label : /layout succeeded but no installer found in $layoutDir. Giving up."
+                    return 1
+                }
+                $offlineArgs = @('/quiet','/features') + $features
+                $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
+                if ($offlineExit -eq 0 -and -not (& $verifyInstall)) {
+                    Write-Status "ADK $label : offline install reported success but expected paths still missing. Giving up."
+                    return -2
+                }
+                return $offlineExit
+            }
+            catch {
+                Write-Status "ADK $label : /layout fallback threw: $($_.Exception.Message)"
+                return $lastExit
+            }
+        }
+
+        $maxAttempts = 4
+
+        #Install DeploymentTools and UserStateMigrationTool in a single call
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
-        Write-Status "Installing ADK DeploymentTools to $adkinstallpath"
-        while (!(Test-Path $adkinstallpath)) {
-            $cmd = $_adkpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.DeploymentTools"
-            $arg3 = "/q"
-
-            try {
-                Write-Status "Installing ADK DeploymentTools..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "ADK DeploymentTools Installed Successfully!"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
-                throw "Failed to install ADK DeploymentTools with below error: $ErrorMessage"
-            }
-
-            Start-Sleep -Seconds 10
+        $adkinstallpath2 = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
+        Write-Status "ADK [1/2]: installing DeploymentTools + UserStateMigrationTool (first of two adksetup runs)"
+        $deptoolsFeatures = @('OptionId.DeploymentTools','OptionId.UserStateMigrationTool')
+        $deptoolsLayout = 'C:\temp\adk-layout-deptools'
+        $lastExit = & $runAdkInstall $_adkpath $deptoolsFeatures "deptools" $deptoolsLayout $maxAttempts @($adkinstallpath, $adkinstallpath2)
+        if (!(Test-Path $adkinstallpath) -or !(Test-Path $adkinstallpath2)) {
+            throw ("ADK DeploymentTools/UserStateMigrationTool install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Paths missing: " +
+                   (@($adkinstallpath, $adkinstallpath2) | Where-Object { -not (Test-Path $_) }) -join '; ')
         }
-
-        #Install UserStateMigrationTool
-        $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\User State Migration Tool"
-        Write-Status "Installing ADK UserStateMigrationTool to $adkinstallpath"
-        while (!(Test-Path $adkinstallpath)) {
-            $cmd = $_adkpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.UserStateMigrationTool"
-            $arg3 = "/q"
-
-            try {
-                Write-Status "Installing ADK UserStateMigrationTool..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "ADK UserStateMigrationTool Installed Successfully!"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
-                throw "Failed to install ADK UserStateMigrationTool with below error: $ErrorMessage"
-            }
-
-            Start-Sleep -Seconds 10
-        }
+        Write-Status "ADK [1/2] DeploymentTools + UserStateMigrationTool installed successfully. Starting [2/2] WinPE addon..."
 
         #Install WindowsPreinstallationEnvironment
         $adkinstallpath = "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment"
-        Write-Status "Installing ADK WindowsPreinstallationEnvironment to $adkinstallpath"
-        while (!(Test-Path $adkinstallpath)) {
-            $cmd = $_adkWinPEpath
-            $arg1 = "/Features"
-            $arg2 = "OptionId.WindowsPreinstallationEnvironment"
-            $arg3 = "/q"
-
-            try {
-                Write-Status "Installing WindowsPreinstallationEnvironment for ADK..."
-                & $cmd $arg1 $arg2 $arg3 | out-null
-                Write-Status "WindowsPreinstallationEnvironment for ADK Installed Successfully!"
-            }
-            catch {
-                $ErrorMessage = $_.Exception.Message
-                Write-Status "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
-                throw "Failed to install WindowsPreinstallationEnvironment for ADK with below error: $ErrorMessage"
-            }
-
-            Start-Sleep -Seconds 10
+        Write-Status "ADK [2/2]: installing WinPE addon to $adkinstallpath (separate ~1.5GB download, typically 3-5 min on a healthy link)"
+        $winpeFeatures = @('OptionId.WindowsPreinstallationEnvironment')
+        $winpeLayout = 'C:\temp\adk-layout-winpe'
+        $lastExit = & $runAdkInstall $_adkWinPEpath $winpeFeatures "winpe" $winpeLayout $maxAttempts @($adkinstallpath)
+        if (!(Test-Path $adkinstallpath)) {
+            throw "ADK WinPE addon install failed (last exit code $lastExit, $maxAttempts direct attempts + layout fallback exhausted). Path missing: $adkinstallpath"
         }
+        Write-Status "ADK [2/2] WinPE addon installed successfully. ADK install complete."
     }
 
     [bool] Test() {
@@ -272,7 +660,6 @@ class InstallSSMS {
                 & $cmd $arg1 $arg2 $arg3 | out-null
                 Write-Status "SSMS Installed Successfully!"
 
-                start-sleep -Seconds 20
                 # Reboot
                 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
                 $global:DSCMachineStatus = 1
@@ -282,7 +669,6 @@ class InstallSSMS {
                 Write-Status "Failed to install SSMS with below error: $ErrorMessage"
                 throw "Failed to install SSMS with below error: $ErrorMessage"
             }
-            Start-Sleep -Seconds 10
         }
     }
 
@@ -359,7 +745,7 @@ class InstallDotNet4 {
                     break
                 }
             }
-            Start-Sleep -Seconds 60 ## Buffer Wait
+            Start-Sleep -Seconds 10 ## Buffer Wait
             Write-Status ".NET $($this.FileName) Installed Successfully!"
 
             # Reboot
@@ -410,28 +796,11 @@ class InstallReportBuilder {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_Path
-       
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_Path
-        #$arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        $arg5 = "/l*v"
-        $arg6 = "c:\temp\reportbuilder.log"
 
-        try {
-            Write-Status "Installing Report Builder..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg4 $arg5 $arg6")
-            & $cmd $arg1 $arg2 $arg4 $arg5 $arg6
-            Write-Status "Report Builder was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Report Builder with error: $ErrorMessage"
-            throw "Failed to install Report Builder with error: $ErrorMessage"
-        }
-        Start-Sleep -Seconds 10
+        Install-MSIPackage `
+            -MsiPath $_Path `
+            -DisplayName "Report Builder" `
+            -LogPath "C:\temp\reportbuilder.log"
     }
 
     [bool] Test() {
@@ -482,36 +851,18 @@ class InstallODBCDriver {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_odbcpath
-       
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_odbcpath
-        $arg3 = "IACCEPTMSODBCSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
-        try {
-            Write-Status "Installing Microsoft ODBC Driver 18 for SQL Server..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
-            Write-Status "Microsoft ODBC Driver 18 for SQL Server was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-            throw "Failed to install Microsoft ODBC Driver 18 for SQL Server with error: $ErrorMessage"
-        }
-        Start-Sleep -Seconds 10
+        Install-MSIPackage `
+            -MsiPath $_odbcpath `
+            -DisplayName "Microsoft ODBC Driver 18 for SQL Server" `
+            -AdditionalArguments @("IACCEPTMSODBCSQLLICENSETERMS=YES") `
+            -LogPath "C:\temp\odbcinstallation.log" `
+            -VerifyRegistryPath "HKLM:\Software\Microsoft\MSODBCSQL18" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
         Write-Status "DSC Test- Checking deployment status"
-        $_path = $this.ODBCPath
-
-        if (-not (Test-Path -Path $_path)) {
-            return $false
-        }
 
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
@@ -568,28 +919,14 @@ class InstallOleDbDriver {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_msipath
-       
-        $packageName = "Microsoft OLEDB Driver 19"
-        # Install ODBC Driver
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_msipath
-        $arg3 = "IACCEPTMSOLEDBSQLLICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
 
-        try {
-            Write-Status "Installing $packageName..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 $arg4 #$arg5
-            Write-Status "$packageName was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install $packageName with error: $ErrorMessage"
-            throw "Failed to install $packageName with error: $ErrorMessage"
-        }
-        Start-Sleep -Seconds 10
+        Install-MSIPackage `
+            -MsiPath $_msipath `
+            -DisplayName "Microsoft OLEDB Driver 19" `
+            -AdditionalArguments @("IACCEPTMSOLEDBSQLLICENSETERMS=YES") `
+            -LogPath "C:\temp\msoledbsql.install.log" `
+            -VerifyRegistryPath "HKLM:\SOFTWARE\Microsoft\MSOLEDBSQL19" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
@@ -649,39 +986,18 @@ class InstallSqlClient {
         $_URL = $this.URL
         Invoke-DownloadFile $_URL $_path
 
-        # Install
-        #VC_redist.x64.exe /install /passive /quiet
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_path
-        $arg3 = "IACCEPTSQLNCLILICENSETERMS=YES"
-        $arg4 = "/qn"
-        #$arg5 = "/lv c:\temp\odbcinstallation.log"
-
-        try {
-            Write-Status "Installing Sql Client..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4")
-            & $cmd $arg1 $arg2 $arg3 #$arg5
-            Write-Status "SQL Client was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install Sql Client with error: $ErrorMessage"
-            throw "Failed to install Sql Client with error: $ErrorMessage"
-        }
-        Start-Sleep -Seconds 20
+        Install-MSIPackage `
+            -MsiPath $_path `
+            -DisplayName "SQL Server Native Client 11" `
+            -AdditionalArguments @("IACCEPTSQLNCLILICENSETERMS=YES") `
+            -LogPath "C:\temp\sqlncli.install.log" `
+            -VerifyRegistryPath "HKLM:\SOFTWARE\Microsoft\SQLNCLI11" `
+            -VerifyRegistryValueName "InstalledVersion"
     }
 
     [bool] Test() {
-        $_path = $this.Path
-
-        if (-not (Test-Path -Path $_path)) {
-            return $false
-        }
-
         Write-Status "DSC Test- Checking deployment status"
         try {
-            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
             $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
 
             if (Test-Path -Path $RegistryPath) {
@@ -736,68 +1052,163 @@ class InstallVCRedist {
         $_URL = $this.URL
 
         Invoke-DownloadFile $_URL $_path
-       
+
+        # Sanity-check the downloaded bootstrapper -- vc_redist.{x64,x86}.exe
+        # is ~25MB / ~14MB respectively. If WebClient/BITS handed us a tiny
+        # redirect body, an HTML error page from a misbehaving proxy, etc.,
+        # the "install" will exit in milliseconds and we'll happily move on
+        # to OLE DB which then fails its VCRedistCheck CA. Catch that here.
+        $minBytes = if ($_path -like "*x64*") { 20MB } else { 10MB }
+        $fi = Get-Item -LiteralPath $_path -ErrorAction SilentlyContinue
+        if (-not $fi -or $fi.Length -lt $minBytes) {
+            $sz = if ($fi) { $fi.Length } else { 0 }
+            throw "VC Redist download is suspect: $_path is $sz bytes (need >= $minBytes). URL=$_URL"
+        }
+
         # Install
         #VC_redist.x64.exe /install /passive /quiet
         $cmd = $_path
-        $arg1 = "/install"
-        $arg2 = "/quiet"
-        $arg3 = "/norestart"
-        $arg4 = "/l"
-        if ($_path -like "*x64*") {
-            $arg5 = "c:\temp\vc_redistx64.log"
-        }
-        else {
-            $arg5 = "c:\temp\vc_redistx86.log"
-        }
-
+        $logFile = if ($_path -like "*x64*") { "c:\temp\vc_redistx64.log" } else { "c:\temp\vc_redistx86.log" }
+        $argList = @('/install', '/quiet', '/norestart', '/log', $logFile)
 
         try {
             Write-Status "Installing VC Redist $_path..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
-            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
-            Write-Status "VC Redist $_path was Installed Successfully!"
+            Write-Verbose ("Commandline: $cmd $($argList -join ' ')")
+            # Use Start-Process so we actually capture the exit code.
+            # VC Redist bootstrapper exit codes:
+            #   0     success
+            #   1638  newer version already installed (treat as success)
+            #   3010  success, reboot required (treat as success)
+            #   1602  user canceled
+            #   1603  fatal install error
+            #   5100  prereq check failed
+            $proc = Start-Process -FilePath $cmd -ArgumentList $argList -Wait -PassThru -NoNewWindow
+            $exit = $proc.ExitCode
+            $ok = @(0, 1638, 3010)
+            if ($ok -notcontains $exit) {
+                $logTail = ""
+                if (Test-Path $logFile) {
+                    try { $logTail = (Get-Content -LiteralPath $logFile -Tail 30 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+                }
+                throw "VC Redist $_path failed (exit $exit). Log: $logFile`nTail:`n$logTail"
+            }
+            Write-Status "VC Redist $_path bootstrapper exited (exit $exit). Waiting for install to settle..."
+
+            # The WiX Burn bootstrapper for vc_redist detaches an elevated
+            # worker and returns from the parent process almost immediately
+            # (observed: parent exits in ~1.3s while child MSIs run for
+            # another 8-10s -- vcRuntimeMinimum then vcRuntimeAdditional).
+            # Start-Process -Wait only waits for the launched process, not
+            # its detached children. If we move on now, the next DSC
+            # resource (e.g. InstallOleDbDriver) starts and its
+            # VCRedistCheck CA reads a stale/in-flight registry state and
+            # fails with "requires VS2022 redist 14.34+".
+            #
+            # Wait for both the bundle's Package Cache uninstall key to
+            # appear AND for one of the child MSI logs (whichever the
+            # bundle writes) to contain a "Shutting down, exit code"
+            # line. Poll up to 120s; that covers slow disks and AV
+            # scanning the cached MSIs.
+            $bundleKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+            $childLogPattern = if ($_path -like "*x64*") {
+                "c:\temp\vc_redistx64_*_vcRuntime*_x64.log"
+            } else {
+                "c:\temp\vc_redistx86_*_vcRuntime*_x86.log"
+            }
+            $deadline = (Get-Date).AddSeconds(120)
+            $settled = $false
+            while ((Get-Date) -lt $deadline) {
+                # Look for any vcRuntime child MSI log whose tail shows
+                # MainEngineThread returning (msiexec completed).
+                $childLogs = @(Get-ChildItem -Path $childLogPattern -ErrorAction SilentlyContinue)
+                if ($childLogs.Count -ge 1) {
+                    $allDone = $true
+                    foreach ($cl in $childLogs) {
+                        $tail = $null
+                        try { $tail = (Get-Content -LiteralPath $cl.FullName -Tail 5 -ErrorAction SilentlyContinue) -join "`n" } catch {}
+                        if (-not $tail -or $tail -notmatch 'MainEngineThread is returning|=== Verbose logging stopped') {
+                            $allDone = $false
+                            break
+                        }
+                    }
+                    if ($allDone) { $settled = $true; break }
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $settled) {
+                Write-Status ("VC Redist {0}: child MSI logs did not settle within 120s; proceeding anyway (registry will be re-checked next)." -f $_path)
+            } else {
+                Write-Status ("VC Redist {0}: child MSI install completed." -f $_path)
+            }
         }
         catch {
             $ErrorMessage = $_.Exception.Message
             Write-Status "Failed to install VC Redist with error: $ErrorMessage"
             throw "Failed to install VC Redist with error: $ErrorMessage"
         }
-        Start-Sleep -Seconds 10
+
+        # Verify post-install -- not just that the key exists, but that the
+        # Bld DWORD is high enough. OLE DB Driver 19's VCRedistCheck custom
+        # action reads Bld and compares to 14.34 (build 33135). If our Set
+        # ran but registry still shows older Bld, fail loudly here rather
+        # than letting OLE DB blow up downstream.
+        $regPath = if ($_path -like "*x64*") {
+            "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+        } else {
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
+        }
+        if (-not (Test-Path $regPath)) {
+            throw "VC Redist install reported success but registry $regPath is missing."
+        }
+        # Bld DWORD updates after the child MSI commits; if we read it
+        # right when the bundle exits, it can still show the old value.
+        # Poll up to 30s.
+        $deadline2 = (Get-Date).AddSeconds(30)
+        $major = 0; $minor = 0; $bld = 0; $v = $null
+        while ((Get-Date) -lt $deadline2) {
+            $v = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
+            $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+            if ($major -ge 14 -and (($minor -gt 34) -or ($minor -eq 34 -and $bld -ge 33135))) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Status ("VC Redist registered: Major={0} Minor={1} Bld={2} Installed={3} InstalledVersion={4} ({5})" -f $major, $minor, $bld, $v.Installed, $v.Version, $regPath)
+        if ($major -lt 14 -or ($major -eq 14 -and $minor -lt 34) -or ($major -eq 14 -and $minor -eq 34 -and $bld -lt 33135)) {
+            throw "VC Redist install reported success but $regPath shows Major=$major Minor=$minor Bld=$bld (need >= 14.34, Bld >= 33135 for OLE DB Driver 19)."
+        }
     }
 
     [bool] Test() {
         Write-Status "DSC Test- Checking deployment status"
         try {
-            #HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X64\Major >= 14
+            # OLE DB Driver 19's VCRedistCheck CA reads Bld DWORD; require
+            # at least 14.34 (Bld 33135). Major.Minor alone isn't enough --
+            # an old runtime can register Major=14, Minor=34, Bld=0.
             if ($this.Path -like "*x64*") {
                 $RegistryPath = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
             }
             else {
-                $RegistryPath = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
+                $RegistryPath = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\X86"
             }
 
-            if (Test-Path -Path $RegistryPath) {
-                try {
-                    # Get the InstalledVersion only if the path exists
-                    $Version = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
-                }
-                catch {
-                    $ErrorMessage = $_.Exception.Message
-                    Write-Verbose "VC Redist Error $($ErrorMessage)!"
+            if (-not (Test-Path -Path $RegistryPath)) { return $false }
 
-                    return $false
-                }
-            }
-            else {
-                return $false
-            }
+            $v = Get-ItemProperty -Path $RegistryPath -ErrorAction SilentlyContinue
+            if (-not $v) { return $false }
+            $major = [int]($v.Major); $minor = [int]($v.Minor); $bld = [int]($v.Bld)
+            Write-Verbose "VC Redist registry: Major=$major Minor=$minor Bld=$bld at $RegistryPath"
 
-            If ($Version.Major -ge "14" -and $Version.Minor -ge "42") {
-                Write-Host "VC Redist 14.42 or greater $($Version.InstalledVersion) is installed"
-                return $true
-            }
-            return $false
+            # Require Major.Minor >= 14.42 OR (>= 14.34 with Bld set). We
+            # bump our floor to 14.42 (current aka.ms/vs/17 release) so a
+            # baseimage with an ancient stub doesn't satisfy Test() and
+            # silently leave OLE DB to discover the gap later.
+            if ($major -lt 14) { return $false }
+            if ($major -eq 14 -and $minor -lt 42) { return $false }
+            # Defense in depth: even at 14.42, require Bld DWORD present
+            # and non-trivial. Real installs always set Bld; absent means
+            # half-installed or hand-poked.
+            if ($bld -lt 33135) { return $false }
+            Write-Host "VC Redist 14.42+ (Bld $bld) is installed at $RegistryPath"
+            return $true
         }
         catch {
             return $false
@@ -807,46 +1218,6 @@ class InstallVCRedist {
     [InstallVCRedist] Get() {
         return $this
     }
-}
-
-[DscResource()]
-class InstallAndConfigWSUS {
-    [DscProperty(Key)]
-    [string] $WSUSPath
-
-    [DscProperty(Mandatory)]
-    [Ensure] $Ensure
-
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
-    [void] Set() {
-        $_WSUSPath = $this.WSUSPath
-        if (!(Test-Path -Path $_WSUSPath)) {
-            New-Item -Path $_WSUSPath -ItemType Directory
-        }
-        Write-Status "Installing WSUS..."
-        Install-WindowsFeature -Name UpdateServices, UpdateServices-WidDB -IncludeManagementTools
-        Write-Status "Finished installing WSUS..."
-
-        Write-Status "Starting the postinstall for WSUS..."
-        Set-Location "C:\Program Files\Update Services\Tools"
-        .\wsusutil.exe postinstall CONTENT_DIR=C:\WSUS
-        Write-Status "Finished the postinstall for WSUS"
-    }
-
-    [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
-        if ((Get-WindowsFeature -Name UpdateServices).installed -eq 'True') {
-            return $true
-        }
-        return $false
-    }
-
-    [InstallAndConfigWSUS] Get() {
-        return $this
-    }
-
 }
 
 [DscResource()]
@@ -878,26 +1249,11 @@ class InstallPMPC {
 
         $Name = "Patch my PC"
         Invoke-DownloadFile $_URL $_path
-       
-        $cmd = "msiexec"
-        $arg1 = "/i"
-        $arg2 = $_Path
-        $arg3 = "/qn"
-        $arg4 = "/l*v"
-        $arg5 = "c:\temp\pmpc.log"
-       
-        try {
-            Write-Status "Installing $Name  $_path..."
-            Write-Verbose ("Commandline: $cmd $arg1 $arg2 $arg3 $arg4 $arg5")
-            & $cmd $arg1 $arg2 $arg3 $arg4 $arg5
-            Write-Status "$Name  $_path was Installed Successfully!"
-        }
-        catch {
-            $ErrorMessage = $_.Exception.Message
-            Write-Status "Failed to install $Name  with error: $ErrorMessage"
-            throw "Failed to install $Name  with error: $ErrorMessage"
-        }
-        Start-Sleep -Seconds 10
+
+        Install-MSIPackage `
+            -MsiPath $_Path `
+            -DisplayName $Name `
+            -LogPath "C:\temp\pmpc.log"
 
         $SettingsXML = Get-Content "C:\Staging\DSC\Phases\PMPC.Settings.Template" -Raw
         $SettingsXML = $SettingsXML.Replace("TEMPLATESITECODE", $this.SiteCode)
@@ -1635,7 +1991,7 @@ class WaitForDomainReady {
     [string] $DomainName
 
     [DscProperty(Mandatory = $false)]
-    [int] $WaitSeconds = 20
+    [int] $WaitSeconds = 10
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
@@ -1717,33 +2073,54 @@ class VerifyComputerJoinDomain {
 }
 
 [DscResource()]
-class SetDNS {
-    [DscProperty(key)]
-    [string] $DNSIPAddress
+class MoveComputerToOU {
+    [DscProperty(Key)]
+    [string] $ComputerName
+
+    [DscProperty(Mandatory)]
+    [string] $TargetOU
 
     [DscProperty(Mandatory)]
     [Ensure] $Ensure
 
-    [DscProperty(NotConfigurable)]
-    [Nullable[datetime]] $CreationTime
-
     [void] Set() {
-        $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
-        Write-Status "Set dns: $_DNSIPAddress for $($dnsset.InterfaceAlias)"
-        Set-DnsClientServerAddress -InterfaceIndex $dnsset.InterfaceIndex -ServerAddresses $_DNSIPAddress
+        $_ComputerName = $this.ComputerName
+        $_TargetOU = $this.TargetOU
+
+        try {
+            $computer = Get-ADComputer -Identity $_ComputerName -ErrorAction Stop
+            $targetPath = $_TargetOU
+            $currentOU = ($computer.DistinguishedName -split ',', 2)[1]
+
+            if ($currentOU -ne $targetPath) {
+                Write-Status "Moving $_ComputerName from $currentOU to $targetPath"
+                Move-ADObject -Identity $computer.DistinguishedName -TargetPath $targetPath -ErrorAction Stop
+                Write-Status "Successfully moved $_ComputerName to $targetPath"
+            }
+            else {
+                Write-Status "$_ComputerName is already in $targetPath"
+            }
+        }
+        catch {
+            Write-Status "Failed to move $_ComputerName to $_TargetOU. Error: $_"
+        }
     }
 
     [bool] Test() {
-        $_DNSIPAddress = $this.DNSIPAddress
-        $dnsset = Get-DnsClientServerAddress | ForEach-Object { $_ | Where-Object { $_.InterfaceAlias.StartsWith("Ethernet") -and $_.AddressFamily -eq 2 } }
-        if ($dnsset.ServerAddresses -contains $_DNSIPAddress) {
-            return $true
+        $_ComputerName = $this.ComputerName
+        $_TargetOU = $this.TargetOU
+
+        try {
+            $computer = Get-ADComputer -Identity $_ComputerName -ErrorAction Stop
+            $currentOU = ($computer.DistinguishedName -split ',', 2)[1]
+            return ($currentOU -eq $_TargetOU)
         }
-        return $false
+        catch {
+            return $false
+        }
     }
 
-    [SetDNS] Get() {
+    [MoveComputerToOU] Get() {
         return $this
     }
 }
@@ -2217,7 +2594,6 @@ class RegisterTaskScheduler {
             }
             Unregister-ScheduledTask -TaskName $($this.TaskName) -Confirm:$false
             Write-Status "Task $($this.TaskName) Removed"
-            Start-Sleep -Seconds 10
         }
 
         $sourceDirectory = "$($this.ScriptPath)\*"
@@ -2300,6 +2676,12 @@ class InitializeDisks {
 
         Write-Status "Initializing disks"
 
+        # Move CD-ROM drive to Z: before assigning disk letters
+        if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
+            Write-Status "Moving CD-ROM drive to Z:.."
+            Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
+        }
+
         $_VM = $this.VM | ConvertFrom-Json
         $_Disks = $_VM.additionalDisks
 
@@ -2327,14 +2709,6 @@ class InitializeDisks {
     }
 
     [bool] Test() {
-
-        # TODO: Refine the Test logic, it works now, but it isn't in-line with what we do in Set()
-
-        # Move CD-ROM drive to Z:
-        if (-not (Get-Volume -DriveLetter "Z" -ErrorAction SilentlyContinue)) {
-            Write-Status "Moving CD-ROM drive to Z:.."
-            Get-WmiObject -Class Win32_volume -Filter 'DriveType=5' | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter = 'Z:' }
-        }
 
         # Check if there are any RAW disks
         Write-Verbose "Testing if any Raw disks are left"
@@ -2420,7 +2794,7 @@ class JoinDomain {
     [void] Set() {
         $_credential = $this.Credential
         $_DomainName = $this.DomainName
-        $_retryCount = 25
+        $_retryCount = 80
         try {
             Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
@@ -2436,7 +2810,7 @@ class JoinDomain {
                 if ($count -lt $_retryCount) {
                     $count++
                     Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
-                    Start-Sleep -Seconds 60
+                    Start-Sleep -Seconds 15
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
                     $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
@@ -2475,6 +2849,104 @@ class JoinDomain {
         return $this
     }
 
+}
+
+[DscResource()]
+class TestDomainJoin {
+    # Runs after JoinDomain (which always ends with a reboot). On the post-reboot
+    # DSC pass JoinDomain.Test() returns true (we're joined), so this resource is
+    # the first thing to actually exercise the machine-account secret against the
+    # DC. If the secret is out of sync (e.g. JoinDomain's retry loop fired
+    # Add-Computer twice against a half-promoted DC and rolled the password), we
+    # detect it here and self-heal before any downstream resource tries to talk
+    # to AD with a broken secure channel.
+    #
+    # Self-heal strategy:
+    #   1. Reset-ComputerMachinePassword against the named DC (no reboot needed).
+    #   2. If still broken, full Remove-Computer + Add-Computer + reboot.
+    [DscProperty(Key)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [string] $DCName
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $Credential
+
+    [bool] Test() {
+        $_DomainName = $this.DomainName
+        $cs = Get-WmiObject -Class Win32_ComputerSystem -ErrorAction SilentlyContinue
+        if (-not $cs -or $cs.Domain -ne $_DomainName) {
+            # Not joined yet -- nothing for us to test. JoinDomain should have run
+            # first; if it hasn't, returning true here just defers to its ordering.
+            return $true
+        }
+
+        # Retry a few times to ride out transient netlogon hiccups right after
+        # the reboot from JoinDomain. Only declare broken if all attempts fail.
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                if (Test-ComputerSecureChannel -ErrorAction Stop) {
+                    return $true
+                }
+            }
+            catch {
+                Write-Verbose "TestDomainJoin: Test-ComputerSecureChannel threw on attempt $i : $_"
+            }
+            if ($i -lt 3) { Start-Sleep -Seconds 10 }
+        }
+        return $false
+    }
+
+    [void] Set() {
+        $_DomainName = $this.DomainName
+        $_DCName = $this.DCName
+        $_credential = $this.Credential
+
+        # Step 1: try Reset-ComputerMachinePassword. Cheap, no reboot.
+        Write-Status "Secure channel to $_DomainName is broken. Resetting machine password against $_DCName."
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                Reset-ComputerMachinePassword -Server $_DCName -Credential $_credential -ErrorAction Stop
+                Start-Sleep -Seconds 5
+                if (Test-ComputerSecureChannel -ErrorAction SilentlyContinue) {
+                    Write-Status "Reset-ComputerMachinePassword restored secure channel (attempt $i)."
+                    return
+                }
+            }
+            catch {
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                Write-Status "Reset-ComputerMachinePassword attempt $i failed: $msg"
+            }
+            if ($i -lt 3) { Start-Sleep -Seconds 15 }
+        }
+
+        # Step 2: full unjoin + rejoin. Requires reboot, but avoids leaving the
+        # node wedged with a broken secret that every later phase will trip on.
+        Write-Status "Reset failed. Performing full Remove-Computer + Add-Computer cycle."
+        try {
+            Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
+        }
+        catch {
+            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $msg"
+        }
+        try {
+            Add-Computer -DomainName $_DomainName -Credential $_credential -Force -ErrorAction Stop
+            Write-Status "Add-Computer succeeded. Rebooting to complete rejoin."
+        }
+        catch {
+            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+            Write-Status "Add-Computer failed during self-heal: $msg"
+            throw
+        }
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+        $global:DSCMachineStatus = 1
+    }
+
+    [TestDomainJoin] Get() {
+        return $this
+    }
 }
 
 [DscResource()]
@@ -2783,7 +3255,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "6"
+    [string] $Version = "7"
 
     [void] Set() {
         $_Role = $this.Role
@@ -2796,7 +3268,6 @@ class InstallFeatureForSCCM {
             dism / online / Enable-Feature / FeatureName:TelnetClient
         }
         catch {}
-        #Install-WindowsFeature -Name Telnet-Client -ErrorAction SilentlyContinue
 
         # Server OS?
         $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -2819,126 +3290,102 @@ class InstallFeatureForSCCM {
             #
             #
             #
-            Write-Status "Installing Windows Features: Web-Windows-Auth, web-ISAPI-Ext"
-            Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
 
-            if ($_Role -contains "DC" -or $_Role -contains "BDC") {
-                #Moved to All Servers
-                #Install-WindowsFeature RSAT-AD-PowerShell
-            }
-            else {
-                # Always install IIS unless we are on a DC
-  
+            # Collect all features into a single list, then install once for speed.
+            $features = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-                # Always install BITS
-                Write-Status "Installing Windows Features: BITS, BITS-IIS-Ext"
-                Install-WindowsFeature BITS, BITS-IIS-Ext
-                
-                Write-Status "Installing Windows Features: Web-WMI, Web-Metabase"
-                Install-WindowsFeature Web-WMI, Web-Metabase
+            # All servers
+            [void]$features.Add("Web-Windows-Auth")
+            [void]$features.Add("Web-ISAPI-Ext")
+            [void]$features.Add("RSAT-AD-PowerShell")
+            [void]$features.Add("AD-Domain-Services")
+
+            if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
+                # Non-DC servers get BITS and IIS metabase
+                [void]$features.Add("BITS")
+                [void]$features.Add("BITS-IIS-Ext")
+                [void]$features.Add("Web-WMI")
+                [void]$features.Add("Web-Metabase")
 
                 if ($_Role -notcontains "DomainMember") {
-                    Write-Status "Installing Windows Features: Rdc"
-                    Install-WindowsFeature -Name "Rdc"
+                    [void]$features.Add("Rdc")
                 }
             }
 
-
-
-            Write-Status "Installing Windows Features: RSAT-AD-PowerShell"
-            Install-WindowsFeature RSAT-AD-PowerShell
-
-            Write-Status "Installing Windows Features: AD-Domain-Services"
-            $result = Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
-            if ($result.RestartNeeded -eq "Yes") {
-                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
-                $global:DSCMachineStatus = 1
-            }
-            
-          
             if ($_Role -contains "SQLAO") {
-                Write-Status "Installing Windows Features: Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell"
-                Install-WindowsFeature Failover-clustering, RSAT-Clustering-PowerShell, RSAT-Clustering-CmdInterface, RSAT-Clustering-Mgmt, RSAT-AD-PowerShell
+                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Site Server") {
-                Write-Status "Installing Windows Features: Net-Framework-Core"
-                Install-WindowsFeature Net-Framework-Core
-
-                Write-Status "Installing Windows Features: NET-Framework-45-Core"
-                Install-WindowsFeature "NET-Framework-45-Core"
-
-                Write-Status "Installing Windows Features: Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext"
-                Install-WindowsFeature Web-Basic-Auth, Web-IP-Security, Web-Url-Auth, Web-Windows-Auth, Web-ASP, Web-Asp-Net, web-ISAPI-Ext
-
-                Write-Status "Installing Windows Features: Web-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools"
-                #Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                #Server 2025 no longer supports Web-Lgcy-Mgmt-Console.. Probably not needed anywhere..
-                Install-WindowsFeature Web-Mgmt-Console, Web-Lgcy-Scripting, Web-WMI, Web-Metabase, Web-Mgmt-Service, Web-Mgmt-Tools, Web-Scripting-Tools
-                #Install-WindowsFeature BITS, BITS-IIS-Ext
-
-                Write-Status "Installing Windows Features: Rdc"
-                Install-WindowsFeature -Name "Rdc"
-
-                Write-Status "Installing Windows Features: UpdateServices-UI"
-                Install-WindowsFeature -Name UpdateServices-UI
-                #Install-WindowsFeature -Name WDS
+                foreach ($f in @("Net-Framework-Core", "NET-Framework-45-Core",
+                    "Web-Basic-Auth", "Web-IP-Security", "Web-Url-Auth", "Web-ASP", "Web-Asp-Net",
+                    "Web-Mgmt-Console", "Web-Lgcy-Scripting", "Web-Mgmt-Service", "Web-Mgmt-Tools", "Web-Scripting-Tools",
+                    "Web-WMI", "Web-Metabase", "Rdc", "UpdateServices-UI", "BITS", "BITS-IIS-Ext")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Application Catalog website point") {
-                #IIS
-                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-            }
-            if ($_Role -contains "Application Catalog web service point") {
-                #IIS
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
-            }
-            if ($_Role -contains "Asset Intelligence synchronization point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "Certificate registration point") {
-                #IIS
-                Install-WindowsFeature Web-Asp-Net, Web-Asp-Net45, Web-Metabase, Web-WMI
-            }
-            if ($_Role -contains "Distribution point") {
-                #IIS
-                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-                Install-WindowsFeature Web-WMI, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
 
-            if ($_Role -contains "Endpoint Protection point") {
-                #.NET 3.5 SP1 is installed
+            if ($_Role -contains "Application Catalog web service point") {
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            if ($_Role -contains "Certificate registration point") {
+                foreach ($f in @("Web-Asp-Net", "Web-Asp-Net45", "Web-Metabase", "Web-WMI")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            if ($_Role -contains "Distribution point") {
+                foreach ($f in @("Web-WMI", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
 
             if ($_Role -contains "Enrollment point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Enrollment proxy point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Static-Content, Web-Windows-Auth, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Static-Content", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
+
             if ($_Role -contains "Fallback status point") {
-                Install-WindowsFeature Web-Metabase
+                [void]$features.Add("Web-Metabase")
             }
+
             if ($_Role -contains "Management point") {
-                #BITS
-                Install-WindowsFeature BITS, BITS-IIS-Ext
-                #IIS
-                Install-WindowsFeature Web-Windows-Auth, web-ISAPI-Ext
-                Install-WindowsFeature Web-WMI, Web-Metabase
+                foreach ($f in @("BITS", "BITS-IIS-Ext", "Web-WMI", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
             }
-            if ($_Role -contains "Reporting services point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "Service connection point") {
-                #installed .net 4.5 or later
-            }
-            if ($_Role -contains "WSUS") {
-                #Write-Status "Installing Windows Features: WSUS Stuff.. This should nto be used anymore."
-                #Install-WindowsFeature "UpdateServices-Services", "UpdateServices-RSAT", "UpdateServices-API", "UpdateServices-UI"
-            }
+
             if ($_Role -contains "State migration point") {
-                #iis
-                Install-WindowsFeature Web-Default-Doc, Web-Asp-Net, Web-Asp-Net45, Web-Net-Ext, Web-Net-Ext45, Web-Metabase
+                foreach ($f in @("Web-Default-Doc", "Web-Asp-Net", "Web-Asp-Net45", "Web-Net-Ext", "Web-Net-Ext45", "Web-Metabase")) {
+                    [void]$features.Add($f)
+                }
+            }
+
+            # Install all collected features in a single call
+            $featureList = @($features)
+            Write-Status "Installing $($featureList.Count) Windows Features: $($featureList -join ', ')"
+            $result = Install-WindowsFeature -Name $featureList -IncludeManagementTools
+            if ($result.RestartNeeded -eq "Yes") {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+                $global:DSCMachineStatus = 1
             }
         }
 
@@ -3065,55 +3512,6 @@ class FileReadAccessShare {
     }
 
     [FileReadAccessShare] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
-class InstallCA {
-    [DscProperty(Key)]
-    [string] $HashAlgorithm
-
-    [DscProperty()]
-    [string] $RootCA
-
-    [void] Set() {
-        try {
-            $_HashAlgorithm = $this.HashAlgorithm
-            #Install CA
-            Import-Module ServerManager
-            Install-WindowsFeature Adcs-Cert-Authority -IncludeManagementTools
-
-            if ($this.RootCA) {
-                Write-Status "Installing Root CA with Hash Algorithm $_HashAlgorithm"
-                Install-AdcsCertificationAuthority -CAType EnterpriseSubordinateCa  -ParentCA $($this.RootCA) -force
-            }
-            else {
-                Write-Status "Installing Non-Root CA with Hash Algorithm $_HashAlgorithm"
-                Install-AdcsCertificationAuthority -CAType EnterpriseRootCa -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" -KeyLength 2048 -HashAlgorithmName $_HashAlgorithm -force
-            }
-
-            $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
-            "Finished" >> $StatusPath
-
-            Write-Status "Finished installing CA."
-        }
-        catch {
-            Write-Status "Failed to install CA."
-        }
-    }
-
-    [bool] Test() {
-        $StatusPath = "$env:windir\temp\InstallCAStatus.txt"
-        if (Test-Path $StatusPath) {
-            return $true
-        }
-
-        return $false
-    }
-
-    [InstallCA] Get() {
         return $this
     }
 
@@ -3358,6 +3756,12 @@ class ModuleAdd {
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -SkipPublisherCheck -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             }
         }
+
+        # Ensure PSGallery is trusted and PowerShellGet is current in this session.
+        # Without this, the first Install-Module call for the target module fails
+        # because the session still has stale provider state from bootstrapping.
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
@@ -3794,7 +4198,53 @@ class InstallPBIRS {
 
             write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
-            Start-Process $pbirsSetup $PBIRSargs -Wait
+            # PowerBIReportServer.exe is a WiX/Burn bootstrapper bundle, so it
+            # has the same silent-success failure mode as adksetup: a stale
+            # dependency-provider registration ("WixBundleInstalled = 1") from
+            # a prior failed install makes the bundle exit 0 in a few seconds
+            # without doing real work. Verify the install actually happened by
+            # checking for the SSRS subfolder (the bundle always creates that;
+            # the parent InstallPath was already created by us via New-Item).
+            # If missing, force /uninstall to clear the provider key and retry
+            # once before giving up.
+            $verifyPbirs = Join-Path $this.InstallPath 'SSRS'
+            $pbirsAttempt = 0
+            $pbirsMaxAttempts = 2
+            $pbirsExit = -1
+            while ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                $pbirsAttempt++
+                Write-Status ("PBIRS install attempt $pbirsAttempt/$pbirsMaxAttempts (Start-Process -Wait, may take several minutes)...")
+                $pbirsProc = Start-Process -FilePath $pbirsSetup -ArgumentList $PBIRSargs -Wait -PassThru
+                $pbirsExit = $pbirsProc.ExitCode
+                Write-Status ("PBIRS bootstrapper exit code: $pbirsExit (0x{0:x})" -f $pbirsExit)
+                if ($pbirsExit -eq 0 -and (Test-Path -LiteralPath $verifyPbirs)) {
+                    Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                    break
+                }
+                if ($pbirsExit -eq 0) {
+                    Write-Status "PBIRS bootstrapper reported success but expected install path missing: $verifyPbirs"
+                    if (Test-Path -LiteralPath 'C:\staging\PBI.log') {
+                        try {
+                            $pbirsTail = Get-Content -LiteralPath 'C:\staging\PBI.log' -Tail 15 -ErrorAction SilentlyContinue
+                            if ($pbirsTail) { Write-Status ("PBIRS log tail:`n{0}" -f ($pbirsTail -join "`n")) }
+                        } catch { }
+                    }
+                }
+                if ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                    Write-Status "Running PBIRS /uninstall /quiet to clear stale Burn registration before retry."
+                    try {
+                        $unArgs = "/uninstall /quiet /Log C:\staging\PBI-uninstall.log"
+                        $unProc = Start-Process -FilePath $pbirsSetup -ArgumentList $unArgs -Wait -PassThru
+                        Write-Status ("PBIRS /uninstall returned $($unProc.ExitCode).")
+                    } catch {
+                        Write-Status ("PBIRS /uninstall threw: $($_.Exception.Message) (continuing to retry install)")
+                    }
+                    Start-Sleep -Seconds 5
+                }
+            }
+            if (-not (Test-Path -LiteralPath $verifyPbirs)) {
+                throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+            }
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
@@ -3884,9 +4334,9 @@ class InstallPBIRS {
                 $rsconfig.SetServiceState($true, $true, $true)
             }
             Write-Status ("Restart PowerBIReportServer Service")
-            Start-Sleep -seconds 10
+            Start-Sleep -Seconds 3
             Restart-Service -Name "PowerBIReportServer" -Force
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 5
             Write-Status ("Calling Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
             try { Initialize-Rs -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer } catch {}
             Write-Status ("Restart PowerBIReportServer Service")
@@ -3936,72 +4386,6 @@ class InstallPBIRS {
 }
 
 [DscResource()]
-class ImportCertificateTemplate {
-    [DscProperty(Key)]
-    [string]$TemplateName
-
-    [DscProperty(Mandatory)]
-    [string]$DNPath
-
-    [void] Set() {
-
-        $_TemplateName = $this.TemplateName
-        $_DNPath = $this.DNPath
-
-
-        Write-Status "Adding Certificate Template $_TemplateName"
-
-        $StatusLog = "C:\staging\DSC\DSC_Log.log"
-
-        $_Path = "C:\staging\DSC\CertificateTemplates\$_TemplateName.ldf"
-        if (!(Test-Path -Path $_Path -PathType Leaf)) {
-            throw "Could not find $_Path"
-        }
-        $TargetFile = "c:\temp\$_TemplateName.ldf"
-        Write-Status "TargetFile $TargetFile source: $_Path"
-        (Get-Content $_Path).Replace('DC=TEMPLATE,DC=com', $_DNPath) | Set-Content $TargetFile -Force
-        Write-Status "Running ldifde -i -k -f $TargetFile"
-        ldifde -i -k -f $TargetFile | Out-File -FilePath $StatusLog -Append
-    }
-
-    [bool] Test() {
-
-        $_TemplateName = $this.TemplateName
-        try {
-            $ConfigContext = ([ADSI]"LDAP://RootDSE").configurationNamingContext
-            $ConfigContext = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$ConfigContext"
-            $filter = "(cn=$_TemplateName)"
-            $ds = New-object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$ConfigContext", $filter)
-            $found = $ds.Findone()
-            if ($found) {
-                return $true
-            }
-            return $false
-        }
-        catch {
-            Write-Verbose "$_"
-            Write-Verbose " -- Restart-Service -Name CertSvc"
-            $registryKey = "HKLM:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
-            Remove-ItemProperty -Path $registryKey -Name "Timestamp" -Force -ErrorAction SilentlyContinue
-            Restart-Service -Name CertSvc -ErrorAction SilentlyContinue
-            start-sleep -seconds 60
-            Write-Verbose " -- ADCSAdministration\get-Catemplate"
-            $count = (ADCSAdministration\get-Catemplate | Where-Object { $_.Name -eq $_TemplateName }).Count
-        }
-        if ($count -gt 0) {
-            return $true
-        }
-
-        return $false
-    }
-
-    [ImportCertificateTemplate] Get() {
-        return $this
-    }
-
-}
-
-[DscResource()]
 class RebootNow {
     [DscProperty(Key)]
     [string]$FileName
@@ -4029,6 +4413,20 @@ class RebootNow {
             return $false
         }
 
+        # Even if marker file exists, force reboot if there's a pending computer rename
+        # (handles retry scenarios where prior run was interrupted after rename but before reboot completed)
+        try {
+            $activeName = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -ErrorAction Stop).ComputerName
+            $pendingName = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -ErrorAction Stop).ComputerName
+            if ($activeName -ne $pendingName) {
+                Write-Verbose "Pending computer rename detected ($activeName -> $pendingName). Forcing reboot."
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "Could not check pending rename: $_"
+        }
+
         return $true
     }
 
@@ -4052,20 +4450,44 @@ class InstallRootCertificate {
         if (-not (Test-Path $_FileName)) {
             Write-Status "Install Root Cert"
 
-            $cmd = "certutil.exe"
-            $arg1 = "-config"
-            $arg2 = $this.CAName
-            $arg3 = "-ca.cert"
-            $arg4 = $_FileName
-            & $cmd $arg1 $arg2 $arg3 $arg4
+            # Get the full certificate chain from the CA (works for both single-tier and two-tier PKI)
+            $chainFile = "C:\Temp\ca_chain.p7b"
+            certutil.exe -config $this.CAName -ca.chain $chainFile
 
+            # Import the PKCS#7 chain and find root (self-signed) vs subordinate certs
+            $chainCerts = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+            $chainCerts.Import($chainFile)
+
+            $rootCert = $chainCerts | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
+            $subCACert = $chainCerts | Where-Object { $_.Subject -ne $_.Issuer } | Select-Object -First 1
+
+            if (-not $rootCert) {
+                Write-Status "WARNING: Could not find root CA in chain, falling back to -ca.cert"
+                certutil.exe -config $this.CAName -ca.cert $_FileName
+            }
+            else {
+                [System.IO.File]::WriteAllBytes($_FileName, $rootCert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                Write-Status "Exported root CA '$($rootCert.Subject)' to $_FileName"
+            }
+
+            # Publish root CA cert as RootCA and NtauthCA
             Write-Status "Running certutil.exe -dspublish -f $_FileName RootCA"
             certutil.exe -dspublish -f $_FileName RootCA
             Write-Status "Running certutil.exe -dspublish -f $_FileName NtauthCA"
             certutil.exe -dspublish -f $_FileName NtauthCA
-            Write-Status "Running certutil.exe -dspublish -f $_FileName SubCA"
-            certutil.exe -dspublish -f $_FileName SubCA
 
+            # If two-tier PKI, publish the subordinate CA cert as SubCA
+            if ($subCACert) {
+                $subCACertFile = "C:\Temp\subCA.cer"
+                [System.IO.File]::WriteAllBytes($subCACertFile, $subCACert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+                Write-Status "Two-tier PKI: publishing subordinate CA '$($subCACert.Subject)' as SubCA"
+                certutil.exe -dspublish -f $subCACertFile SubCA
+            }
+            else {
+                # Single-tier: the CA is the root, publish as SubCA too
+                Write-Status "Running certutil.exe -dspublish -f $_FileName SubCA"
+                certutil.exe -dspublish -f $_FileName SubCA
+            }
         }
 
 
@@ -4145,7 +4567,6 @@ class AddCertificateTemplate {
                 Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0 -SkipPublisherCheck
             }
             Write-Status "Adding Certificate Template $_TemplateName .." 
-            start-sleep -seconds 10
             Write-Verbose "Get-Command -Module PSPKI"
             Get-Command -Module PSPKI  | Out-null
             #Write-Verbose "PSPKI\Get-CertificateTemplate -Name $_TemplateName ..."

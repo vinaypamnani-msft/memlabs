@@ -76,9 +76,29 @@
             MaximumSize = $PageFileSize
         }
         
-        WriteStatus WaitDomain {
+        WriteStatus DisableWU {
             DependsOn = "[SetCustomPagingFile]PagingSettings"
-            Status    = "Waiting for domain to be ready (Trying to ping the DC)"
+            Status    = "Disabling Windows Update"
+        }
+
+        # Disable Windows Update before domain join reboot so WU doesn't fire on restart
+        Script DisableWindowsUpdate {
+            DependsOn  = "[WriteStatus]DisableWU"
+            GetScript  = { @{ Result = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue).NoAutoUpdate } }
+            TestScript = {
+                $val = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name NoAutoUpdate -ErrorAction SilentlyContinue
+                return ($val -and $val.NoAutoUpdate -eq 1)
+            }
+            SetScript  = {
+                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
+                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        WriteStatus WaitDomain {
+            DependsOn = "[Script]DisableWindowsUpdate"
+            Status    = "Waiting for domain $DomainName to be ready (Trying to ping the DC)"
         }
 
         WaitForDomainReady WaitForDomain {
@@ -99,9 +119,21 @@
             DependsOn  = "[WriteStatus]DomainJoin"
         }
 
+        # Validate secure channel after the post-JoinDomain reboot. If the machine
+        # secret drifted (e.g. JoinDomain's retry loop fired Add-Computer twice
+        # against a half-promoted DC), Reset-ComputerMachinePassword or a full
+        # rejoin recovers automatically before any downstream resource depends on
+        # AD auth.
+        TestDomainJoin TestDomainJoin {
+            DomainName = $DomainName
+            DCName     = $DCName
+            Credential = $DomainCreds
+            DependsOn  = "[JoinDomain]JoinDomain"
+        }
+
         AddNtfsPermissions AddNtfsPerms {
             Ensure    = "Present"
-            DependsOn = "[JoinDomain]JoinDomain"
+            DependsOn = "[TestDomainJoin]TestDomainJoin"
         }
 
         File ShareFolder {
@@ -123,9 +155,115 @@
             Role      = $firewallRoles
         }
 
-        WriteStatus Complete {
-            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
-            Status    = "Complete!"
+        # Pre-seed TPM protector for BitLocker VMs
+        # Windows 11 24H2 on Hyper-V 512e disks cannot add a NumericalPassword as the first protector.
+        # The ConfigMgr BLM handler calls ProtectKeyWithNumericalPassword first, which fails with 0x8007001f.
+        # Pre-adding a TPM protector works around this by ensuring the volume already has a protector.
+        if ($ThisVM.BitLocker -eq $true) {
+            WriteStatus SeedTPM {
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                Status    = "Adding TPM protector for BitLocker"
+            }
+
+            # Prevent Windows 11 24H2 automatic device encryption on first login.
+            # We want ConfigMgr BLM to manage encryption, not the OS auto-trigger.
+            Registry PreventDeviceEncryption {
+                DependsOn = "[WriteStatus]SeedTPM"
+                Ensure    = "Present"
+                Key       = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
+                ValueName = "PreventDeviceEncryption"
+                ValueType = "Dword"
+                ValueData = "1"
+            }
+
+            # Cancel the auto-device-encryption flow if it was already initiated before
+            # PreventDeviceEncryption was set. The KeyBackupMonitor flags cause
+            # UserOOBEBroker to retry encryption at every logon.
+            # Note: AutoDE\HSTI is TrustedInstaller-protected and cannot be deleted even as SYSTEM.
+            Script CancelAutoDeviceEncryption {
+                DependsOn = "[Registry]PreventDeviceEncryption"
+                GetScript  = { @{ Result = "N/A" } }
+                TestScript = {
+                    $monitor = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker\KeyBackupMonitor" -ErrorAction SilentlyContinue
+                    return (-not $monitor -or $monitor.IsKeyBackupMonitorStarted -eq 0)
+                }
+                SetScript  = {
+                    # Clear the key backup monitor that retries encryption at each logon
+                    $monPath = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker\KeyBackupMonitor"
+                    if (Test-Path $monPath) {
+                        Set-ItemProperty $monPath -Name "IsKeyBackupMonitorStarted" -Value 0 -ErrorAction SilentlyContinue
+                        Set-ItemProperty $monPath -Name "IsKeyBackupMonitorStartedLocal" -Value 0 -ErrorAction SilentlyContinue
+                    }
+                    # Remove BDESVC service trigger so it doesn't auto-start and launch fvenotify.exe
+                    sc.exe triggerinfo BDESVC delete 2>&1 | Out-Null
+                    # Stop BDESVC now (prevents fvenotify popup until ConfigMgr BLM starts it)
+                    Stop-Service BDESVC -Force -ErrorAction SilentlyContinue
+                    # Disable scheduled tasks as belt-and-suspenders
+                    Get-ScheduledTask -TaskPath "\Microsoft\Windows\BitLocker\" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.State -ne "Disabled" } |
+                        Disable-ScheduledTask -ErrorAction SilentlyContinue
+                }
+            }
+
+            Script SeedTPMProtector {
+                DependsOn  = "[Script]CancelAutoDeviceEncryption"
+                GetScript  = { @{ Result = (Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue).KeyProtector.Count } }
+                TestScript = {
+                    $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+                    if (-not $vol) { return $false }
+                    # If a TPM protector exists, we're done (encryption may be in progress or complete)
+                    $tpmProtector = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "Tpm" }
+                    return ($null -ne $tpmProtector)
+                }
+                SetScript  = {
+                    $vol = Get-BitLockerVolume -MountPoint "C:" -ErrorAction SilentlyContinue
+
+                    # If auto-device-encryption was triggered before PreventDeviceEncryption was set, cancel it
+                    if ($vol -and $vol.VolumeStatus -ne "FullyDecrypted") {
+                        manage-bde -off C: 2>&1 | Out-Null
+                        do {
+                            Start-Sleep -Seconds 2
+                            $vol = Get-BitLockerVolume -MountPoint "C:"
+                        } while ($vol.VolumeStatus -ne "FullyDecrypted")
+                    }
+
+                    # Remove any existing protectors from failed auto-encryption
+                    if ($vol -and $vol.KeyProtector.Count -gt 0) {
+                        $hasTpm = $vol.KeyProtector | Where-Object { $_.KeyProtectorType -eq "Tpm" }
+                        if (-not $hasTpm) {
+                            foreach ($kp in $vol.KeyProtector) {
+                                Remove-BitLockerKeyProtector -MountPoint "C:" -KeyProtectorId $kp.KeyProtectorId -ErrorAction SilentlyContinue
+                            }
+                        }
+                    }
+
+                    # Provision TPM ownership (Hyper-V virtual TPMs are not auto-provisioned)
+                    $initResult = Initialize-Tpm -ErrorAction SilentlyContinue
+                    if ($initResult -and $initResult.RestartRequired) {
+                        # TPM provisioning needs a reboot before the TPM can be used
+                        $global:DSCMachineStatus = 1
+                        return
+                    }
+
+                    # Start encryption with TPM protector. Using Enable-BitLocker rather than
+                    # just adding the protector because MBAM's enforcement engine requires an
+                    # interactive user session (0x800703f0) to start encryption on its own.
+                    # -SkipHardwareTest avoids a reboot before encryption begins.
+                    # BLM will later add a NumericalPassword protector and escrow it.
+                    Enable-BitLocker -MountPoint "C:" -TpmProtector -EncryptionMethod XtsAes256 -SkipHardwareTest -ErrorAction Stop
+                }
+            }
+
+            WriteStatus Complete {
+                DependsOn = "[Script]SeedTPMProtector"
+                Status    = "Complete!"
+            }
+        }
+        else {
+            WriteStatus Complete {
+                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                Status    = "Complete!"
+            }
         }
     }
 }

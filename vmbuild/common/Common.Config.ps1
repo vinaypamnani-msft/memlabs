@@ -2,6 +2,156 @@
 ### Config Functions ###
 ########################
 
+# Returns the top-level site server VM from a config (CAS preferred, else standalone
+# Primary, i.e. a Primary with no parentSiteCode). Returns $null when no top-level
+# site server is present. Used by genconfig, summary, deploy rehydration, and
+# validation to locate the canonical owner of the cmOptions block.
+function Get-TopLevelSiteServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return $null }
+    $cas = $Config.virtualMachines | Where-Object {
+        $_.role -eq 'CAS' -and -not $_.parentSiteCode
+    } | Select-Object -First 1
+    if ($cas) { return $cas }
+    return $Config.virtualMachines | Where-Object {
+        $_.role -eq 'Primary' -and -not $_.parentSiteCode
+    } | Select-Object -First 1
+}
+
+# Returns the cmOptions block for a config, whether it lives at the root
+# (legacy/in-flight) or on the top-level site server VM (post-migration shape).
+# Returns $null if neither location has it. Read-only convenience for genconfig
+# and other load-time consumers; deploy-time consumers should keep reading
+# $deployConfig.cmOptions which New-DeployConfig rehydrates.
+function Get-ConfigCmOptions {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if ($null -ne $Config.cmOptions) { return $Config.cmOptions }
+    $topLevel = Get-TopLevelSiteServer -Config $Config
+    if ($topLevel -and $topLevel.cmOptions) { return $topLevel.cmOptions }
+    # Add-to-existing fallback: a child Primary (parentSiteCode set) may carry
+    # the cmOptions block when the parent CAS lives in the existing deployment
+    # and isn't in this config. Return the first CAS/Primary that has one.
+    $anySiteServer = $Config.virtualMachines | Where-Object {
+        $_.role -in @('CAS', 'Primary') -and $_.cmOptions
+    } | Select-Object -First 1
+    if ($anySiteServer) { return $anySiteServer.cmOptions }
+    return $null
+}
+
+# Resolves the cmOptions block that should apply to a given VM, by walking up
+# its hierarchy to the top-level site server (CAS or standalone Primary) that
+# owns the canonical block. Returns $null when the VM has no hierarchy
+# affiliation (e.g. DC/DomainMember not bound to a site).
+#
+# Walks: $vm -> parentSiteCode -> ... -> top. For Passive/SiteSystem VMs which
+# only have a SiteCode (no parentSiteCode), finds the owning CAS/Primary in the
+# same SiteCode and resumes the walk from there. Cycle-guarded.
+function Resolve-VmCmOptions {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config,
+        [Parameter(Mandatory = $true)] [object] $vm
+    )
+    if ($null -ne $vm.cmOptions) { return $vm.cmOptions }
+    $current = $vm
+    $visited = @{}
+    while ($current) {
+        if ($null -ne $current.cmOptions) { return $current.cmOptions }
+        $key = "$($current.vmName)"
+        if ($visited[$key]) { return $null }
+        $visited[$key] = $true
+
+        if ($current.parentSiteCode) {
+            $current = $Config.virtualMachines | Where-Object {
+                $_.SiteCode -eq $current.parentSiteCode -and $_.Role -in 'CAS', 'Primary'
+            } | Select-Object -First 1
+            continue
+        }
+
+        if ($current.SiteCode) {
+            $owner = $Config.virtualMachines | Where-Object {
+                $_.SiteCode -eq $current.SiteCode -and $_.Role -in 'CAS', 'Primary' -and $_.vmName -ne $current.vmName
+            } | Select-Object -First 1
+            if (-not $owner) { return $null }
+            $current = $owner
+            continue
+        }
+
+        return $null
+    }
+    return $null
+}
+
+# Stamps a resolved cmOptions block onto every site-role VM (CAS/Primary/
+# Secondary/PassiveSite/SiteSystem) in the config that doesn't already carry
+# one, so DSC phases can read $ThisVM.cmOptions directly without per-hierarchy
+# guesswork. Deep-clones via JSON round-trip so later mutations don't bleed
+# across VMs.
+function Set-VmCmOptionsResolved {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object] $Config
+    )
+    if (-not $Config -or -not $Config.virtualMachines) { return }
+    $siteRoles = @('CAS', 'Primary', 'Secondary', 'PassiveSite', 'SiteSystem')
+    foreach ($vm in $Config.virtualMachines) {
+        if ($vm.Role -notin $siteRoles) { continue }
+        if ($null -ne $vm.cmOptions) { continue }
+        $resolved = Resolve-VmCmOptions -Config $Config -vm $vm
+        if (-not $resolved) { continue }
+        $clone = $resolved | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $vm | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+    }
+}
+
+# Migrates a config's root-level cmOptions onto the top-level site server VM.
+# Idempotent: a no-op when root cmOptions is already absent. Called from
+# Get-UserConfiguration after all existing root-level reads have completed.
+# When no site-server VM exists in the file to receive it (e.g. add-to-existing
+# configs that only contain PassiveSite/SiteSystem/FileServer), the root block
+# is preserved so Get-ConfigCmOptions and downstream consumers can still find
+# it.
+function Move-CmOptionsToTopLevelSiteServer {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $Config
+    )
+    if ($null -eq $Config.cmOptions) { return }
+    $topLevel = Get-TopLevelSiteServer -Config $Config
+    if (-not $topLevel) {
+        # Add-to-existing scenarios: the file may only contain a child Primary
+        # (parentSiteCode references a CAS in the existing deployment, which
+        # isn't in this file). Fall back to any CAS/Primary so the authored
+        # cmOptions are preserved instead of silently dropped.
+        $topLevel = $Config.virtualMachines | Where-Object {
+            $_.role -in @('CAS', 'Primary')
+        } | Select-Object -First 1
+    }
+    if (-not $topLevel) {
+        # No site-server VM in this file at all (e.g. PassiveSite/SiteSystem-only
+        # add-to-existing). Leave root cmOptions intact - it's still the only
+        # place it can live, and Get-ConfigCmOptions checks $Config.cmOptions
+        # first.
+        return
+    }
+    # Deep-clone via JSON round-trip so subsequent mutations of either copy
+    # don't bleed across.
+    if ($null -eq $topLevel.cmOptions) {
+        $clone = $Config.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+        $topLevel | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+    }
+    $Config.PSObject.Properties.Remove('cmOptions')
+}
+
 function Get-UserConfiguration {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
@@ -58,6 +208,19 @@ function Get-UserConfiguration {
             if ($null -eq ($config.cmOptions.UsePKI)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "UsePKI" -Value $false -Force
             }
+            # Legacy: migrate UseOfflineRootCA from cmOptions to DC-level UseOfflineRoot
+            if ($config.cmOptions.PSObject.Properties['UseOfflineRootCA']) {
+                if ($config.cmOptions.UseOfflineRootCA) {
+                    # Migrate: enable UseOfflineRoot on the first DC with InstallCA
+                    foreach ($vm in @($config.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA })) {
+                        if (-not $vm.PSObject.Properties['UseOfflineRoot'] -or -not $vm.UseOfflineRoot) {
+                            $vm | Add-Member -MemberType NoteProperty -Name 'UseOfflineRoot' -Value $true -Force
+                            break
+                        }
+                    }
+                }
+                $config.cmOptions.PSObject.Properties.Remove('UseOfflineRootCA')
+            }
             if ($null -eq ($config.cmOptions.PrePopulateObjects)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "PrePopulateObjects" -Value $true -Force
             }
@@ -67,6 +230,9 @@ function Get-UserConfiguration {
             if ($null -eq ($config.cmOptions.OfflineSUP)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSUP" -Value $false -Force
             }
+            if ($null -eq ($config.cmOptions.EnableBLM)) {
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EnableBLM" -Value $false -Force
+            }
             if ($null -eq ($config.cmOptions.Version)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value "current-branch" -Force
             }
@@ -74,6 +240,41 @@ function Get-UserConfiguration {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "Version" -Value $true -Force
             }
         }
+
+        # --- pkiOptions: migrate from per-VM InstallCA/UseOfflineRoot if missing ---
+        if (-not $config.PSObject.Properties['pkiOptions']) {
+            $enablePKI = $false
+            $issuingCAVM = ""
+            $useOfflineRoot = $false
+            $offlineRootCAVM = ""
+            # Derive from existing per-VM properties
+            $dcWithCA = $config.virtualMachines | Where-Object { $_.role -eq 'DC' -and $_.InstallCA } | Select-Object -First 1
+            if ($dcWithCA) {
+                $enablePKI = $true
+                $issuingCAVM = $dcWithCA.vmName
+                if ($dcWithCA.UseOfflineRoot) {
+                    $useOfflineRoot = $true
+                    $rootVM = $config.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' } | Select-Object -First 1
+                    if ($rootVM) { $offlineRootCAVM = $rootVM.vmName }
+                }
+            }
+            $config | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{
+                EnablePKI       = $enablePKI
+                IssuingCAVM     = $issuingCAVM
+                UseOfflineRoot  = $useOfflineRoot
+                OfflineRootCAVM = $offlineRootCAVM
+            }) -Force
+        }
+
+        # Sync: if cmOptions.UsePKI is true, ensure pkiOptions.EnablePKI is also true
+        if ($config.cmOptions -and $config.cmOptions.UsePKI -and $config.pkiOptions -and -not $config.pkiOptions.EnablePKI) {
+            $config.pkiOptions.EnablePKI = $true
+            if (-not $config.pkiOptions.IssuingCAVM) {
+                $firstDC = $config.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                if ($firstDC) { $config.pkiOptions.IssuingCAVM = $firstDC.vmName }
+            }
+        }
+
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force
@@ -81,7 +282,36 @@ function Get-UserConfiguration {
             $config.vmOptions.PsObject.properties.Remove('domainAdminName')
         }
 
+        # Determine if BLM is enabled for this domain (from config or existing site server's VM note)
+        $blmEnabledForDomain = $false
+        if ($config.cmOptions -and $config.cmOptions.EnableBLM) {
+            $blmEnabledForDomain = $true
+        }
+        elseif ($config.vmOptions.domainName) {
+            # No cmOptions.EnableBLM in this config — check existing top-level site server
+            try {
+                $existingSiteVMs = Get-List -Type VM -DomainName $config.vmOptions.domainName
+                $topLevelSite = $existingSiteVMs | Where-Object {
+                    $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+                } | Select-Object -First 1
+                if ($topLevelSite -and $topLevelSite.cmOptions.EnableBLM) {
+                    $blmEnabledForDomain = $true
+                    Write-Log "BLM enabled for domain '$($config.vmOptions.domainName)' (from existing site server '$($topLevelSite.vmName)' VM note)" -Verbose
+                }
+            }
+            catch {
+                # Non-fatal; Get-List may not be available in all contexts
+            }
+        }
+
         foreach ($vm in $config.VirtualMachines) {
+
+            # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux
+            # is flaky), so dynamicMinRam is meaningless. Strip it from configs
+            # that picked it up before the AddVM guard was in place.
+            if ($vm.osFamily -eq 'Linux' -and $vm.PSObject.Properties['dynamicMinRam']) {
+                $vm.PsObject.properties.Remove('dynamicMinRam')
+            }
 
             if ($null -ne $vm.SQLInstanceName) {
                 if ($null -eq $vm.sqlPort) {
@@ -108,11 +338,37 @@ function Get-UserConfiguration {
                 $vm.role = "SiteSystem"
             }
 
-            if ($vm.role -eq "DC") {
-                if ($null -eq $vm.InstallCA) {
-                    if ($config.cmOptions.UsePKI) {                    
-                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -force
+            # Derive InstallCA from pkiOptions (authoritative source).
+            # Applies to any domain-joined VM (DC, BDC, or member server).
+            # Client OS VMs (Windows 10/11) can never host a CA; skip them entirely.
+            $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+            if ($vm.role -notin 'StandaloneRootCA', 'WorkgroupMember', 'AADClient', 'InternetClient' -and -not $isClientOS) {
+                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI) {
+                    if ($config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force
                     }
+                    elseif ($null -eq $vm.InstallCA) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $false -Force
+                    }
+                }
+                elseif ($vm.role -eq "DC" -and $null -eq $vm.InstallCA) {
+                    # Legacy fallback: no pkiOptions yet, use cmOptions.UsePKI (DC only for compat)
+                    if ($config.cmOptions.UsePKI) {
+                        $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force
+                    }
+                }
+                # Derive UseOfflineRoot from pkiOptions
+                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI -and $config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value ([bool]$config.pkiOptions.UseOfflineRoot) -Force
+                }
+                elseif ($vm.InstallCA -and $null -eq $vm.UseOfflineRoot) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value $false -Force
+                }
+                # Flag as SubordinateCA when UseOfflineRoot is enabled.
+                # Skip forest-trust subordinates (externalDomainJoinSiteCode
+                # uses ThisParams.RootCA to subordinate to a different forest's root).
+                if ($vm.InstallCA -and $vm.UseOfflineRoot -and (-not $vm.externalDomainJoinSiteCode)) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "SubordinateCA" -Value $true -Force
                 }
             }
             #add missing Properties
@@ -148,6 +404,40 @@ function Get-UserConfiguration {
                     }
                 }
             }
+
+            # BitLocker property: auto-add when BLM is enabled and VM has TPM
+            if ($blmEnabledForDomain -and $vm.tpmEnabled) {
+                if ($null -eq $vm.BitLocker) {
+                    # Default true on client OS, false on server OS
+                    $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                    $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
+                }
+            }
+
+            # pushClient property: auto-add for DomainMember and site system VMs.
+            # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
+            # > domainDefaults.PushCMClientToClients/Servers/SiteSystems > $true.
+            $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+            if (($vm.role -eq 'DomainMember' -or $vm.role -in $siteSystemRoles) -and ($null -eq $vm.pushClient)) {
+                $pushDefault = $true
+                if ($config.cmOptions -and ($null -ne $config.cmOptions.pushClientToDomainMembers)) {
+                    # Legacy single-value migration: apply to all eligible VMs
+                    $pushDefault = [bool]$config.cmOptions.pushClientToDomainMembers
+                }
+                elseif ($config.domainDefaults) {
+                    if ($vm.role -in $siteSystemRoles) {
+                        $key = 'PushCMClientToSiteSystems'
+                    }
+                    else {
+                        $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
+                        $key = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+                    }
+                    if ($null -ne $config.domainDefaults.$key) {
+                        $pushDefault = [bool]$config.domainDefaults.$key
+                    }
+                }
+                $vm | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $pushDefault -Force
+            }
         }
 
         if ($null -ne $config.cmOptions.Version) {
@@ -178,8 +468,9 @@ function Get-UserConfiguration {
             }
         }
 
-
-
+        # Migrate root-level cmOptions onto the top-level site server VM.
+        # Runs last so the legacy-shape reads above still see $config.cmOptions.
+        Move-CmOptionsToTopLevelSiteServer -Config $config
 
         $return.Loaded = $true
         $return.Config = $config
@@ -190,7 +481,6 @@ function Get-UserConfiguration {
         Write-Log "Get-UserConfiguration Trace: $($_.ScriptStackTrace)" -LogOnly
         return $return
     }
-
 }
 
 function Get-FilesForConfiguration {
@@ -227,10 +517,11 @@ function Get-FilesForConfiguration {
 
     # Get unique items from config
     if ($config) {
+        $cfgCmOptions = Get-ConfigCmOptions -Config $config
         $operatingSystemsToGet = $config.virtualMachines.operatingSystem | Select-Object -Unique
         $sqlVersionsToGet = $config.virtualMachines.sqlVersion | Select-Object -Unique
-        $cmVersionsToGet = $config.cmOptions.version | Select-Object -Unique
-        if ($config.cmOptions.PrePopulateObjects) {
+        $cmVersionsToGet = $cfgCmOptions.version | Select-Object -Unique
+        if ($cfgCmOptions.PrePopulateObjects) {
             $OsVersionsToGet = @("Windows 11 24h2", "Windows 10 22h2")
         }
     }
@@ -242,6 +533,8 @@ function Get-FilesForConfiguration {
     foreach ($file in $Common.AzureFileList.OS) {
 
         if ($file.id -eq "vmbuildadmin") { continue }
+        # Locally-built images (e.g. Ubuntu via New-LinuxBaseImage.ps1) aren't in Azure storage.
+        if ($file.local) { continue }
         if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file.id) { continue }
         $worked = Get-FileFromStorage -File $file -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
@@ -273,20 +566,11 @@ function Get-FilesForConfiguration {
         }
     }
 
-    foreach ($file in (Get-LinuxImages).Name) {
-        if (-not $DownloadAll -and $operatingSystemsToGet -notcontains $file) { continue }
-        $worked = Download-LinuxImage $file
-        if (-not $worked) {
-            Write-Log -Verbose "$file Failed to download via Download-LinuxImage"
-            $allSuccess = $false
-        }
-    }
-
     #Check if any siteservers are in the config
     $siteServers = $null
     $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
 
-    if ($DownloadAll -or ($config.cmOptions.PrePopulateObjects -and $siteServers) ) {
+    if ($DownloadAll -or ($cfgCmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
         $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
         if (-not $worked) {
@@ -352,6 +636,23 @@ function New-DeployConfig {
     )
     try {
 
+        # Rehydrate root-level cmOptions from the top-level site server VM if needed,
+        # so downstream deploy/DSC/validation/phases consumers can keep reading
+        # $deployConfig.cmOptions without change. Per-VM is the canonical storage;
+        # root is a derived read-only mirror within this DeployConfig snapshot.
+        if ($null -eq $configObject.cmOptions) {
+            $rootCmOptions = Get-ConfigCmOptions -Config $configObject
+            if ($rootCmOptions) {
+                $configObject | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $rootCmOptions -Force
+            }
+        }
+
+        # Stamp every site-role VM with its own resolved cmOptions block so
+        # multi-hierarchy deployments (e.g. one CAS + one standalone Primary with
+        # differing version/PKI/Offline settings) get correct per-VM values in
+        # DSC phases. The root $configObject.cmOptions remains as a single-top
+        # mirror for legacy reads; new/updated DSC phases prefer $ThisVM.cmOptions.
+        Set-VmCmOptionsResolved -Config $configObject
 
         if ($null -ne ($configObject.vmOptions.domainName)) { 
             if (($configObject.vmOptions.domainName) -eq "AUTO") {
@@ -434,6 +735,17 @@ function New-DeployConfig {
                 }
             }
         }
+
+        # Add prefix to pkiOptions VM references
+        if ($configObject.pkiOptions) {
+            if ($configObject.pkiOptions.IssuingCAVM -and -not $configObject.pkiOptions.IssuingCAVM.StartsWith($configObject.vmOptions.prefix)) {
+                $configObject.pkiOptions.IssuingCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.IssuingCAVM
+            }
+            if ($configObject.pkiOptions.OfflineRootCAVM -and -not $configObject.pkiOptions.OfflineRootCAVM.StartsWith($configObject.vmOptions.prefix)) {
+                $configObject.pkiOptions.OfflineRootCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.OfflineRootCAVM
+            }
+        }
+
         # create params object
 
         $DCName = ($virtualMachines | Where-Object { $_.role -eq "DC" }).vmName
@@ -470,6 +782,7 @@ function New-DeployConfig {
         $deploy = [PSCustomObject]@{
             cmOptions       = $configObject.cmOptions
             vmOptions       = $configObject.vmOptions
+            pkiOptions      = $configObject.pkiOptions
             virtualMachines = $virtualMachines
             parameters      = $params
         }
@@ -530,6 +843,16 @@ function Add-ExistingVMsToDeployConfig {
 
     # Add DCs from other domains, if needed
     $dc = $config.virtualMachines | Where-Object { $_.role -eq "DC" }
+
+    # Add Primary to list when new VMs need BLM collection membership (Phase 8 EnableBLM)
+    $newBLMVMs = @($config.virtualMachines | Where-Object { $_.BitLocker -eq $true -and -not $_.hidden })
+    if ($newBLMVMs.Count -gt 0) {
+        $existingPrimary = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role "Primary"
+        if ($existingPrimary) {
+            $primaryName = if ($existingPrimary -is [array]) { $existingPrimary[0] } else { $existingPrimary }
+            Add-ExistingVMToDeployConfig -vmName $primaryName -configToModify $config
+        }
+    }
 
     if ($dc) {
         if ($null -ne $dc.ForestTrust -and $dc.ForestTrust -ne "NONE") {
@@ -675,6 +998,21 @@ function Add-ExistingVMsToDeployConfig {
             Add-RemoteSQLVMToDeployConfig -vmName $vm.RemoteSQLVM -configToModify $config
         }
     }
+
+    # Add existing Proxy VM to list when any non-hidden VM opts into useProxy.
+    # Phase 5 DSC (ConfigureCMProxy.ps1) needs the Proxy VM in deployConfig
+    # to apply Set-CMSiteSystemServer -UseProxy on opted-in site systems.
+    $proxyClients = @($config.virtualMachines | Where-Object { $_.useProxy -eq $true -and -not $_.Hidden })
+    if ($proxyClients.Count -gt 0) {
+        $proxyInConfig = @($config.virtualMachines | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+        if (-not $proxyInConfig) {
+            $existingProxy = Get-ExistingForDomain -DomainName $config.vmOptions.domainName -Role 'Proxy'
+            if ($existingProxy) {
+                $proxyName = if ($existingProxy -is [array]) { $existingProxy[0] } else { $existingProxy }
+                Add-ExistingVMToDeployConfig -vmName $proxyName -configToModify $config
+            }
+        }
+    }
 }
 
 function Add-ModifiedExistingVMToDeployConfig {
@@ -720,6 +1058,7 @@ function Add-ModifiedExistingVMToDeployConfig {
         "network",
         "prefix",
         "domaindefaults"
+        "pkiOptions",
         "memLabsDeployVersion",
         "memLabsVersion",
         "adminName",
@@ -1002,7 +1341,7 @@ function Get-ExistingForDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain Name")]
         [string]$DomainName,
         [Parameter(Mandatory = $false, HelpMessage = "VM Role")]
-        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary")]
+        [ValidateSet("DC", "CAS", "Primary", "SiteSystem", "DomainMember", "Secondary", "Proxy")]
         [string]$Role
     )
 
@@ -1730,7 +2069,9 @@ function Get-VMNetworkCached {
     }
 
     # if we didn't return the cache entry, get new data, and add it to cache
+    Write-Log "Get-VMNetworkCached: cache miss for $($vm.Name), calling Get-VMNetworkAdapter..." -LogOnly
     $vmNet = ($vm | Get-VMNetworkAdapter)
+    Write-Log "Get-VMNetworkCached: Get-VMNetworkAdapter returned for $($vm.Name)." -LogOnly
     $vmCacheEntry = [PSCustomObject]@{
         vmId       = $vm.vmID
         SwitchName = $vmNet.SwitchName
@@ -1754,10 +2095,106 @@ function Test-CacheValid {
     )
     $LastUpdateTime = [Datetime]::ParseExact($EntryTime, 'MM/dd/yyyy HH:mm', $null)
     $datediff = New-TimeSpan -Start $LastUpdateTime -End (Get-Date)
-    if ($datediff.Hours -lt $MaxHours) {
+    if ($datediff.TotalHours -lt $MaxHours) {
         return $true
     }
     return $false
+}
+
+function Start-VMIPRefreshJob {
+    <#
+    .SYNOPSIS
+        Starts a background ThreadJob that refreshes LastKnownIP for running VMs.
+    .DESCRIPTION
+        After the speed improvements removed the init-time Update-VMInformation
+        loop, LastKnownIP is never refreshed. This function starts a lightweight
+        background ThreadJob (PS7 only, in-process) that:
+          1. Enumerates running VMs via Get-VM
+          2. Calls Get-VMNetworkAdapter to obtain IPv4 addresses
+          3. Updates the .network.json cache files with the IP
+          4. Updates the in-memory $global:vm_List entries
+          5. Persists changes to Hyper-V VM Notes via Set-VMNote
+        The job runs at low priority and throttles itself so it doesn't
+        contend with vmms.exe during interactive use.
+    #>
+    if ($global:Common.InJob) { return }
+    if (-not (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        Write-Log "Start-VMIPRefreshJob: Start-ThreadJob not available; skipping." -LogOnly
+        return
+    }
+
+    $global:VMIPRefreshJob = Start-ThreadJob -Name "MemLabs-IPRefresh" -ScriptBlock {
+        # ThreadJob shares the process; $global:common, $global:vm_List, and
+        # all dot-sourced functions (Write-Log, Set-VMNote, etc.) are accessible.
+        try {
+            # Wait briefly for the foreground to finish populating vm_List on
+            # its first Get-List call before we start touching VMs.
+            $waitCount = 0
+            while (-not $global:vm_List -and $waitCount -lt 30) {
+                Start-Sleep -Milliseconds 500
+                $waitCount++
+            }
+            if (-not $global:vm_List) { return }
+
+            Write-Log "IPRefreshJob: Starting background IP refresh for running VMs." -LogOnly
+            $virtualMachines = Get-VM | Where-Object { $_.State -eq 'Running' }
+            $updated = 0
+
+            foreach ($vm in $virtualMachines) {
+                try {
+                    $vmNoteObject = $null
+                    if ($vm.Notes) {
+                        $vmNoteObject = $vm.Notes | ConvertFrom-Json -ErrorAction Stop
+                    }
+                    if (-not $vmNoteObject -or [string]::IsNullOrWhiteSpace($vmNoteObject.role)) {
+                        continue  # Not a MemLabs VM
+                    }
+
+                    $netAdapter = $vm | Get-VMNetworkAdapter
+                    $ipAddress = $netAdapter.IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
+
+                    if ([string]::IsNullOrWhiteSpace($ipAddress)) { continue }
+
+                    # Update .network.json cache file with IP
+                    $jsonFile = $vm.vmID.ToString() + ".network.json"
+                    $cacheFile = Join-Path $global:common.CachePath $jsonFile
+                    $cacheEntry = [PSCustomObject]@{
+                        vmId       = $vm.vmID
+                        SwitchName = $netAdapter.SwitchName
+                        IPAddress  = $ipAddress
+                        EntryAdded = (Get-Date -Format "MM/dd/yyyy HH:mm")
+                    }
+                    ConvertTo-Json $cacheEntry | Out-File $cacheFile -Force
+
+                    # Update in-memory vm_List entry
+                    $listEntry = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
+                    if ($listEntry) {
+                        $listEntry | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
+                    }
+
+                    # Persist to VM Notes if changed
+                    if ($ipAddress -ne $vmNoteObject.LastKnownIP) {
+                        if ($null -eq $vmNoteObject.LastKnownIP) {
+                            $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
+                        }
+                        else {
+                            $vmNoteObject.LastKnownIP = $ipAddress
+                        }
+                        Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
+                        $updated++
+                    }
+                }
+                catch {
+                    Write-Log "IPRefreshJob: Error updating $($vm.Name): $_" -LogOnly
+                }
+            }
+            Write-Log "IPRefreshJob: Completed. Updated $updated VM(s)." -LogOnly
+        }
+        catch {
+            Write-Log "IPRefreshJob: Fatal error: $_" -LogOnly
+        }
+    }
+    Write-Log "Start-VMIPRefreshJob: Background IP refresh job started." -LogOnly
 }
 
 function Update-VMInformation {
@@ -1787,7 +2224,7 @@ function Update-VMInformation {
         # VM will never report an IP, and this call dominates init time when many VMs are off
         # (and is the source of the "sometimes fast / sometimes slow" variability).
         $vmIsRunning = ($vm.State -eq 'Running')
-        if ($vmIsRunning -and (($datediff.Hours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP)) {
+        if ($vmIsRunning -and (($datediff.TotalHours -gt 12) -or $null -eq $vmNoteObject.LastKnownIP)) {
             $IPAddress = ($vm | Get-VMNetworkAdapter).IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1
             if (-not [string]::IsNullOrWhiteSpace($IPAddress) -and $IPAddress -ne $vmNoteObject.LastKnownIP) {
                 if ($null -eq $vmNoteObject.LastKnownIP) {
@@ -1817,7 +2254,10 @@ function Update-VMInformation {
         # Detect if we need to update VM Note, if VM Note doesn't have siteCode prop
         if ($vmNoteObject.role -in "CAS", "Primary", "PassiveSite") {
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                if ($Common.InJob) {
+                    Write-Log "Site code for $vmName is missing in VM Note; skipping PSDirect lookup (background job)." -LogOnly
+                }
+                elseif ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
                         $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\Identification -Name "Site Code" } -SuppressLog
                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
@@ -1845,7 +2285,10 @@ function Update-VMInformation {
             }
 
             if ($null -eq $vmNoteObject.siteCode -or $vmNoteObject.siteCode.ToString().Length -ne 3) {
-                if ($vmState -eq "Running" -and (-not $inProgress)) {
+                if ($Common.InJob) {
+                    Write-Log "Site code for $vmName (DP/MP) is missing in VM Note; skipping PSDirect lookup (background job)." -LogOnly
+                }
+                elseif ($vmState -eq "Running" -and (-not $inProgress)) {
                     try {
                         $siteCodeFromVM = Invoke-VmCommand -VmName $vmName -VmDomainName $vmDomain -ScriptBlock { Get-ItemPropertyValue -Path HKLM:\SOFTWARE\Microsoft\SMS\DP -Name "Site Code" } -SuppressLog
                         $siteCode = $siteCodeFromVM.ScriptBlockOutput
@@ -1923,6 +2366,12 @@ function Get-VMFromHyperV {
         memoryGB        = $memoryGB
         memoryStartupGB = $memoryStartupGB
         diskUsedGB      = [math]::Round($diskSizeGB, 2)
+    }
+
+    # If the network cache has a cached IP (written by the background IP refresh
+    # job), seed LastKnownIP so it's available before VM Notes are parsed.
+    if ($vmNet.IPAddress) {
+        $vmObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $vmNet.IPAddress -Force
     }
 
     Update-VMFromHyperV -vm $vm -vmObject $vmObject -vmNoteObject $vmNoteObject
@@ -2070,6 +2519,7 @@ function Update-VMFromHyperV {
 }
 
 $global:vm_List = $null
+$global:vm_List_LastUpdate = $null
 function Get-List {
 
     [CmdletBinding()]
@@ -2108,6 +2558,7 @@ function Get-List {
 
         if ($FlushCache.IsPresent) {
             $global:vm_List = $null
+            $global:vm_List_LastUpdate = $null
             $global:TestConfigFastCache = $null
             $global:VMStringCache = $null
             return
@@ -2127,10 +2578,19 @@ function Get-List {
         }
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
+            $global:vm_List_LastUpdate = $null
         }
 
         if ($doSmartUpdate) {
             if ($global:vm_List) {
+                # Throttle: skip the expensive Get-VM WMI call if the cache
+                # was refreshed less than 3 seconds ago. Rapid-fire menu
+                # navigation calls get-list -SmartUpdate multiple times in
+                # the same user action; the VM state won't change that fast.
+                if ($global:vm_List_LastUpdate -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
+                    # Skip refresh, use cached data as-is.
+                }
+                else {
                 try {
                     try {
                         $virtualMachines = Get-VM
@@ -2175,6 +2635,8 @@ function Get-List {
                 }
                 finally {
                 }
+                $global:vm_List_LastUpdate = Get-Date
+                } # else (throttle)
             }
         }
 
@@ -2185,9 +2647,15 @@ function Get-List {
                 if (-not $global:vm_List) {
                     Write-Log "Obtaining '$Type' list and caching it." -Verbose
                     $return = @()
+                    Write-Log "Get-List: calling Get-VM to enumerate all virtual machines..." -LogOnly
+                    Flush-LogBuffer -All
                     $virtualMachines = Get-VM
+                    Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
+                    Flush-LogBuffer -All
+                    $vmIndex = 0
                     foreach ($vm in $virtualMachines) {
-
+                        $vmIndex++
+                        Write-Log "Get-List: [$vmIndex/$($virtualMachines.Count)] Processing $($vm.Name)..." -LogOnly
                         $vmObject = Get-VMFromHyperV -vm $vm
                         if ($vmObject) {
                             $return += $vmObject
@@ -2195,6 +2663,7 @@ function Get-List {
                     }
 
                     $global:vm_List = $return
+                    $global:vm_List_LastUpdate = Get-Date
                 }
             }
             finally {
@@ -2530,11 +2999,13 @@ Function Write-OrangePoint {
         [Parameter()]
         [switch] $WriteLog,
         [Parameter()]
-        [string] $ForegroundColor
+        [string] $ForegroundColor,
+        [Parameter()]
+        [int] $indent = 2
     )
     $text = $text.Replace("WARNING: ", "")
     if (-not $NoIndent) {
-        Write-Host "  " -NoNewline
+        Write-Host "$(" " * $indent)" -NoNewline
     }
     Write-Host "[" -NoNewLine
     Write-Host2 -ForeGroundColor Orange "!" -NoNewline
@@ -2629,124 +3100,6 @@ function Convert-vmNotesToOldFormat {
 
 }
 
-Function Get-LinuxImages {
-
-    if (-not $Common.AzureFileList.Urls.Linux) {
-        Write-Log "No URL found for Linux images in AzureFileList. Cannot retrieve Linux image list." -Failure -LogOnly
-        return $null
-    }
-    
-    $linuxJson = Join-Path $Global:Common.TempPath "LinuxHyperVGallery.json"
-
-    $downloadLinuxList = {
-        $curlPaths = @()
-        $systemCurlPath = Join-Path $env:WINDIR "System32\curl.exe"
-        if (Test-Path $systemCurlPath) {
-            $curlPaths += $systemCurlPath
-        }
-
-        $resolvedCurlPath = Get-Command "curl.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-        if (-not [string]::IsNullOrWhiteSpace($resolvedCurlPath) -and ($resolvedCurlPath -notin $curlPaths) -and (Test-Path $resolvedCurlPath)) {
-            $curlPaths += $resolvedCurlPath
-        }
-
-        $chocoCurlPath = "C:\ProgramData\chocolatey\bin\curl.exe"
-        if (($chocoCurlPath -notin $curlPaths) -and (Test-Path $chocoCurlPath)) {
-            $curlPaths += $chocoCurlPath
-        }
-
-        if ($curlPaths.Count -eq 0) {
-            Write-Log "Get-LinuxImages: curl.exe not found." -Failure
-            return
-        }
-
-        $downloaded = $false
-        foreach ($curlPath in $curlPaths) {
-            & $curlPath -s -L $($Common.AzureFileList.Urls.Linux) -o $linuxJson
-            if ($LASTEXITCODE -eq 0) {
-                $downloaded = $true
-                break
-            }
-
-            Write-Log "Get-LinuxImages: '$curlPath' failed with exit code $LASTEXITCODE. Trying fallback curl path." -LogOnly
-        }
-
-        if (-not $downloaded) {
-            Write-Log "Get-LinuxImages: Failed to download Linux gallery JSON using all curl paths." -Failure
-        }
-    }
-
-    if (Test-Path $linuxJson -PathType Leaf) {
-        #Get a new copy if the existing one is over 5 hours old
-        if (Get-Childitem $linuxJson  | Where-Object { $_.LastWriteTime -lt (get-date).AddHours(-5) }) {
-            & $downloadLinuxList
-        }
-    }
-    else {
-        # Get a copy if the file doesn't exist
-        & $downloadLinuxList
-    }
-    $linux = Get-Content $linuxJson | convertfrom-json
-    return ($linux.images | Where-Object { $_.config.secureboot -ne $true })
-}
-
-Function Download-LinuxImage {
-    [CmdletBinding()]
-    param (
-        [Parameter()]
-        [string] $name
-    )
-
-    $linux = Get-LinuxImages
-
-    $image = ($linux | Where-Object { $_.name -eq $name })
-    #Download the file is hash does not match
-
-    $fileZip = $("os\" + $image.name + ".zip")
-    $fileVHDX = $($image.name + ".vhdx")
-
-    #This is where Get-FileWithHash puts the resulting file
-    $fullfileZip = Join-Path $Global:Common.AzureFilesPath $fileZip
-
-    #This is where the VHDX is going to end up
-    $fullfileVHDX = Join-Path $Global:Common.AzureImagePath $fileVHDX
-
-    $url = $image.disk.uri
-
-    $hashAlg = $($image.disk.hash.split(":")[0])
-    $expectedHash = $($image.disk.hash.Split(":")[1])
-
-    $success = Get-FileWithHash -FileName $($fileZip) -FileDisplayName $name -FileUrl $url  -hashAlg $hashAlg -ExpectedHash $expectedHash
-    if (-not $success.success) {
-        write-log -failure  "Could not download $($url)"
-        return $false
-    }
-    # If we did not download a new file, and the file already exists.. Exit
-    if (-not $success.download) {
-        if (test-path $fullfileVHDX -PathType Leaf) {
-            return $true
-        }
-    }
-
-    # If we downloaded a new file, or one didn't exist
-
-    # If we downloaded a new file, delete the old one
-    if (test-path $fullfileVHDX -PathType Leaf) {
-        Remove-Item $fullfileVHDX -force -ProgressAction SilentlyContinue
-    }
-
-    # If the intermediate file exists, delete it so we can extract a new one.
-    if (test-path $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -PathType Leaf) {
-        Remove-Item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) -force -ProgressAction SilentlyContinue
-    }
-
-    #Expand the downloaded file
-    Expand-Archive -Path $fullfileZip -DestinationPath $($Global:Common.AzureImagePath) -Force
-    # Move it to its final name
-    move-item $($Global:Common.AzureImagePath + "\" + $image.disk.archiveRelativePath) $fullfileVHDX -Force
-    return $true
-}
-
 Function Show-Summary {
     [CmdletBinding()]
     param (
@@ -2780,80 +3133,140 @@ Function Show-Summary {
 
     if ($null -ne $($deployConfig.cmOptions) -and $deployConfig.cmOptions.install -eq $true) {
 
-        if ($containsPS -or $containsSecondary) {
-            $versionInfoPrinted = $false
-            $baselineVersion = (Get-CMBaselineVersion -CMVersion $deployConfig.cmOptions.version).baselineVersion
-            if ($deployConfig.cmOptions.OfflineSCP) {
-                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-RedX "ConfigMgr $($deployConfig.cmOptions.version) selected, but due to Offline SCP $baselineVersion will be installed"
-                    $versionInfoPrinted = $true
-                }
-            }
-           
-            if (-not $versionInfoPrinted) {
-                if ($baselineVersion -ne $deployConfig.cmOptions.version) {
-                    Write-OrangePoint "ConfigMgr $baselineVersion will be installed and upgraded to $($deployConfig.cmOptions.version)"
-                }
-                else {                    
-                    Write-GreenCheck "ConfigMgr $($deployConfig.cmOptions.version) will be installed"
-                }
+        # Enumerate every top-level site server (CAS or standalone Primary, i.e.
+        # any CAS/Primary without a parentSiteCode) and report its hierarchy
+        # using *that* server's own cmOptions block. Falls back to the deploy-
+        # level cmOptions for hierarchies whose top-level VM hasn't received a
+        # per-VM block yet (mid-migration shape).
+        $topLevels = @($fixedConfig | Where-Object {
+                ($_.Role -in 'CAS', 'Primary') -and -not $_.parentSiteCode
+            })
 
+        if (-not $topLevels) {
+            # Add-to-existing: the top-level CAS/Primary lives in the already-
+            # deployed hierarchy. Check hidden existing VMs in the deployConfig
+            # first (cheap), then fall back to Get-ExistingSiteServer in the
+            # domain (Hyper-V round-trip). Surface a green confirmation rather
+            # than a misleading red X.
+            $existingTop = @($existingConfig | Where-Object {
+                    ($_.Role -in 'CAS', 'Primary') -and -not $_.parentSiteCode
+                }) | Select-Object -First 1
+            if (-not $existingTop -and $deployConfig.vmOptions.domainName) {
+                $existingTop = @(Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role 'CAS') +
+                               @(Get-ExistingSiteServer -DomainName $deployConfig.vmOptions.domainName -Role 'Primary') |
+                    Where-Object { $_ -and -not $_.ParentSiteCode } |
+                    Select-Object -First 1
             }
-           
-            if ($deployConfig.cmOptions.PrePopulateObjects) {
-                Write-GreenCheck "ConfigMgr: Scripts/apps/task sequences/etc will be pre-populated"
+            if ($existingTop) {
+                $topName = if ($existingTop.VMName) { $existingTop.VMName } else { $existingTop.vmName }
+                $topSite = if ($existingTop.SiteCode) { $existingTop.SiteCode } else { $existingTop.siteCode }
+                Write-GreenCheck "ConfigMgr will be added to existing hierarchy (top-level: $topName [$topSite])"
+            } else {
+                Write-RedX "ConfigMgr will not be installed (no top-level site server in config or existing deployment)"
+            }
+        }
+
+        foreach ($top in $topLevels) {
+            $cmo = if ($top.cmOptions) { $top.cmOptions } else { $deployConfig.cmOptions }
+            if (-not $cmo -or -not $cmo.install) {
+                Write-RedX "$($top.VMName) [$($top.SiteCode)]: ConfigMgr install disabled (cmOptions.install=false)"
+                continue
+            }
+
+            $hierarchyLabel = if ($top.Role -eq 'CAS') { "CAS hierarchy" } else { "Standalone Primary" }
+            $baselineVersion = (Get-CMBaselineVersion -CMVersion $cmo.version).baselineVersion
+
+            # Version line per top-level site server.
+            if ($cmo.OfflineSCP -and $baselineVersion -ne $cmo.version) {
+                Write-RedX "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $($cmo.version) selected, but Offline SCP forces baseline $baselineVersion"
+            }
+            elseif ($baselineVersion -ne $cmo.version) {
+                Write-OrangePoint "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $baselineVersion will be installed and upgraded to $($cmo.version)"
             }
             else {
-                Write-OrangePoint "ConfigMgr: Scripts/apps/task sequences/etc will NOT be pre-populated"
+                Write-GreenCheck "$($top.VMName) [$($top.SiteCode)] ($hierarchyLabel): ConfigMgr $($cmo.version) will be installed"
             }
 
-            $PS = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-            if ($PS) {
-                foreach ($PSVM in $PS) {
-                    if ($PSVM.ParentSiteCode) {
-                        Write-GreenCheck "ConfigMgr Primary server $($PSVM.VMName) will join a Hierarchy: $($PSVM.SiteCode) -> $($PSVM.ParentSiteCode)"
-                    }
-                    else {
-                        Write-GreenCheck "Primary server $($PSVM.VMName) with Sitecode $($PSVM.SiteCode) will be installed in a standalone configuration"
-                    }
+            # Per-hierarchy CM options. Sub-items are indented (bracket and text)
+            # so they read as children of the top-level site-server line above.
+            $subIndent = 6
+            if ($cmo.PrePopulateObjects) {
+                Write-GreenCheck -indent $subIndent "Scripts/apps/task sequences will be pre-populated"
+            }
+            else {
+                Write-OrangePoint -indent $subIndent "Scripts/apps/task sequences will NOT be pre-populated"
+            }
+
+            if ($cmo.usePKI) {
+                Write-GreenCheck -indent $subIndent "PKI: HTTPS enforced (MP/DP/SUP/RP)"
+            }
+            else {
+                Write-OrangePoint -indent $subIndent "PKI: HTTP/EHTTP will be used for all communication"
+            }
+
+            if ($cmo.OfflineSCP) {
+                Write-OrangePoint -indent $subIndent "SCP: Will be installed in OFFLINE mode"
+            }
+            if ($cmo.OfflineSUP) {
+                Write-OrangePoint -indent $subIndent "SUP: Will be installed in OFFLINE mode for the top-level site"
+            }
+            if ($cmo.EnableBLM) {
+                Write-GreenCheck -indent $subIndent "BitLocker Management enabled"
+            }
+
+            # Hierarchy children: child Primaries (CAS only), their Secondaries,
+            # Passive site servers, and per-Primary client push.
+            $childPrimaries = @()
+            if ($top.Role -eq 'CAS') {
+                $childPrimaries = @($fixedConfig | Where-Object {
+                        $_.Role -eq 'Primary' -and $_.parentSiteCode -eq $top.SiteCode
+                    })
+                foreach ($p in $childPrimaries) {
+                    Write-GreenCheck -indent $subIndent "Primary $($p.VMName) [$($p.SiteCode)] joins this hierarchy ($($p.SiteCode) -> $($top.SiteCode))"
                 }
             }
 
-            $SSVM = $fixedConfig | Where-Object { $_.Role -eq "Secondary" }
-            if ($SSVM) {
-                Write-GreenCheck -NoNewLine "Secondary Site(s) will be installed:"
-                foreach ($SS in $SSVM) {
-                    write-host -NoNewLine " $($SS.SiteCode) -> $($SS.ParentSiteCode)"
-                }
-                write-host
+            # Secondaries reporting to any Primary in this hierarchy.
+            $hierarchyPrimaryCodes = @()
+            if ($top.Role -eq 'Primary') { $hierarchyPrimaryCodes += $top.SiteCode }
+            $hierarchyPrimaryCodes += @($childPrimaries.SiteCode)
+            $secondaries = @($fixedConfig | Where-Object {
+                    $_.Role -eq 'Secondary' -and $_.parentSiteCode -in $hierarchyPrimaryCodes
+                })
+            foreach ($s in $secondaries) {
+                Write-GreenCheck -indent $subIndent "Secondary $($s.VMName) [$($s.SiteCode)] -> $($s.parentSiteCode)"
             }
-            if ($containsPS) {
-                if ($containsPassive) {
-                    $PassiveVMs = $fixedConfig | Where-Object { $_.Role -eq "PassiveSite" }
-                    foreach ($PassiveVM in $PassiveVMs) {
-                        Write-GreenCheck "(High Availability) ConfigMgr site server in passive mode $($PassiveVM.VMName) will be installed for SiteCode $($PassiveVM.SiteCode -Join ',')"
-                    }
+
+            # Passive site servers for any Primary (or CAS) in this hierarchy.
+            $hierarchyAllCodes = @($top.SiteCode) + $hierarchyPrimaryCodes | Select-Object -Unique
+            $passives = @($fixedConfig | Where-Object {
+                    $_.Role -eq 'PassiveSite' -and ($_.SiteCode -in $hierarchyAllCodes)
+                })
+            if ($passives) {
+                foreach ($pv in $passives) {
+                    Write-GreenCheck -indent $subIndent "(High Availability) Passive site server $($pv.VMName) for SiteCode $($pv.SiteCode -join ',')"
+                }
+            }
+            else {
+                Write-RedX -indent $subIndent "(High Availability) No passive site server in this hierarchy"
+            }
+
+            # Client push from every Primary in this hierarchy.
+            $pushSources = @()
+            if ($top.Role -eq 'Primary') { $pushSources += $top }
+            $pushSources += $childPrimaries
+            foreach ($cp in $pushSources) {
+                if ($cp.thisParams -and $cp.thisParams.ClientPush) {
+                    Write-GreenCheck -indent $subIndent "Client Push from $($cp.VMName): [$($cp.thisParams.ClientPush -join ',')]"
                 }
                 else {
-                    Write-RedX "(High Availability) No ConfigMgr site server in passive mode will be installed"
+                    Write-OrangePoint -indent $subIndent "Client Push from $($cp.VMName): no eligible clients (pushClient=false on all candidates, or none in network)"
                 }
             }
         }
-        else {
-            Write-RedX "ConfigMgr will not be installed"
-        }
 
-        if ($deployConfig.cmOptions.usePKI) {
-            Write-GreenCheck "PKI: HTTPS is enforced, this will make the environment HTTPS only including MP/DP/SUP and Reporting Point role"
-        }
-        else {
-            Write-OrangePoint "PKI: HTTP/EHTTP will be used for all communication"
-        }
-        if ($deployConfig.cmOptions.OfflineSCP) {
-            Write-OrangePoint "SCP: Will be installed in OFFLINE mode"
-        }
- 
-       
+        # Site-system roles (DP/MP/SUP/RP/SMSProv) -- listed globally; the role
+        # itself implies the owning hierarchy via the VM's parentSiteCode.
         $testSystem = $fixedConfig | Where-Object { $_.InstallDP -or $_.enablePullDP }
         if ($testSystem) {
             Write-GreenCheck "DP role: $($testSystem.vmName -Join ",")"
@@ -2867,9 +3280,6 @@ Function Show-Summary {
         $testSystem = $fixedConfig | Where-Object { $_.installSUP }
         if ($testSystem) {
             Write-GreenCheck "SUP role: $($testSystem.vmName -Join ",")"
-            if ($deployConfig.cmOptions.OfflineSUP) {
-                Write-OrangePoint "SUP: Will be installed in OFFLINE mode for the top-level site"
-            }
         }
 
         $testSystem = $fixedConfig | Where-Object { $_.installRP }
@@ -2877,27 +3287,10 @@ Function Show-Summary {
             Write-GreenCheck "RP role: $($testSystem.vmName -Join ",")"
         }
 
-
-        if ($containsMember) {
-            if ($containsPS -and $deployConfig.cmOptions.pushClientToDomainMembers -and $deployConfig.cmOptions.install -eq $true) {
-                $PSVMs = $fixedConfig | Where-Object { $_.Role -eq "Primary" }
-                foreach ($PSVM in $PSVMs) {
-                    if ($PSVM.thisParams.ClientPush) {
-                        Write-GreenCheck "Client Push: Yes $($PSVM.VMname) : [$($PSVM.thisParams.ClientPush -join ",")]"
-                    }
-                    else {
-                        Write-OrangePoint "Client Push is enabled for $($PSVM.VMname) , but no eligible clients found"
-                    }
-                }
-            }
-            else {
-                Write-RedX "Client Push: No"
-            }
+        $testSystem = $fixedConfig | Where-Object { $_.installSMSProv }
+        if ($testSystem) {
+            Write-GreenCheck "SMS Provider role: $($testSystem.vmName -Join ",")"
         }
-        else {
-            #Write-Host " [Client Push: N/A]"
-        }
-
     }
     else {
         Write-Verbose "deployConfig.cmOptions.install = $($deployConfig.cmOptions.install)"
@@ -2968,7 +3361,7 @@ Function Show-Summary {
     },
     @{Label = "Roles"; Expression = {
             $roles = @()
-            if ($_.InstallCA) { $roles += "CA" }
+            if ($_.InstallCA -or $_.Role -eq 'StandaloneRootCA') { $roles += "CA" }
             if ($_.InstallSUP) { $roles += "SUP" }
             if ($_.InstallRP) { $roles += "RP" }
             if ($_.InstallMP) { $roles += "MP" }

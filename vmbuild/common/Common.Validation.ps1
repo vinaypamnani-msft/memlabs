@@ -12,10 +12,28 @@
 
     if ($Failure.IsPresent) {
         $ReturnObject.Failures += 1
+        # Log every failure with caller context so we can correlate menu
+        # errors back to the validation site (and time) that produced them.
+        try {
+            $caller = (Get-PSCallStack | Select-Object -Skip 1 -First 1)
+            $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+            $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+            Write-Log "[ValidationFailure] $Message  (from $callerName`:$callerLine)" -LogOnly
+        } catch {
+            Write-Log "[ValidationFailure] $Message" -LogOnly
+        }
     }
 
     if ($Warning.IsPresent) {
         $ReturnObject.Warnings += 1
+        try {
+            $caller = (Get-PSCallStack | Select-Object -Skip 1 -First 1)
+            $callerName = if ($caller) { $caller.FunctionName } else { '<unknown>' }
+            $callerLine = if ($caller) { $caller.ScriptLineNumber } else { 0 }
+            Write-Log "[ValidationWarning] $Message  (from $callerName`:$callerLine)" -LogOnly
+        } catch {
+            Write-Log "[ValidationWarning] $Message" -LogOnly
+        }
     }
 }
 
@@ -189,33 +207,165 @@ function Test-ValidCmOptions {
         [object] $ReturnObject
     )
 
+    # Resolve cmOptions wherever it lives now (root, top-level site server, or any
+    # CAS/Primary in add-to-existing configs). After Move-CmOptionsToTopLevelSiteServer
+    # the block no longer lives at $ConfigObject.cmOptions for new configs.
+    $cmOptions = Get-ConfigCmOptions -Config $ConfigObject
+    if (-not $cmOptions) {
+        Add-ValidationMessage -Message "CM Options Validation: no cmOptions block found on the config or on any CAS/Primary VM." -ReturnObject $ReturnObject -Failure
+        return
+    }
+
     # version
-    if ($Common.Supported.CMVersions -notcontains $ConfigObject.cmOptions.version) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($ConfigObject.cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
+    if ($Common.Supported.CMVersions -notcontains $cmOptions.version) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions contains invalid CM Version [$($cmOptions.version)]. Must be one of [$($Common.Supported.CMVersions -join ',')]." -ReturnObject $ReturnObject -Failure
     }
 
     # install
-    if ($ConfigObject.cmOptions.install -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($ConfigObject.cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    if ($cmOptions.install -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.install has an invalid value [$($cmOptions.install)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    # pushClientToDomainMembers
-    if ($ConfigObject.cmOptions.pushClientToDomainMembers -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.pushClientToDomainMembers has an invalid value [$($ConfigObject.cmOptions.pushClientToDomainMembers)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    # usePKI
+    if ($cmOptions.usePKI -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    # pushClientToDomainMembers
-    if ($ConfigObject.cmOptions.usePKI -isnot [bool]) {
-        Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI has an invalid value [$($ConfigObject.cmOptions.usePKI)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
+    # EnableBLM
+    if ($null -ne $cmOptions.EnableBLM -and $cmOptions.EnableBLM -isnot [bool]) {
+        Add-ValidationMessage -Message "CM Options Validation: cmOptions.EnableBLM has an invalid value [$($cmOptions.EnableBLM)]. Value must be either 'true' or 'false' without any quotes." -ReturnObject $ReturnObject -Failure
     }
 
-    if ($ConfigObject.cmOptions.usePKI) {
-        foreach ($vm in $ConfigObject.virtualMachines) {
-            if ($vm.role -eq "DC" ) {
-                if (-not $vm.InstallCA) {
-                    Add-ValidationMessage -Message "CM Options Validation: cmOptions.usePKI is enabled but no CA is specified for DC [$($vm.vmName)]." -ReturnObject $ReturnObject -Failure
+    if ($cmOptions.EnableBLM) {
+        # BLM requires ConfigMgr 2002 or later
+        $blmMinVersion = "2002"
+        $cmVer = $cmOptions.Version
+        if ($cmVer -and $cmVer -ne "current-branch" -and $cmVer -ne "tech-preview" -and $cmVer -lt $blmMinVersion) {
+            Add-ValidationMessage -Message "CM Options Validation: BitLocker Management requires ConfigMgr version 2002 or later. Current version is [$cmVer]." -ReturnObject $ReturnObject -Failure
+        }
+
+        # Warn if no client VMs have tpmEnabled
+        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -in ("DomainMember", "InternetClient", "AADClient") -and -not $_.Hidden }
+        if ($clientVMs) {
+            $noTPM = $clientVMs | Where-Object { $_.tpmEnabled -eq $false }
+            if ($noTPM) {
+                Add-ValidationMessage -Message "BLM Warning: The following client VMs have tpmEnabled=false and will require a startup password for BitLocker: $($noTPM.vmName -join ', '). Consider enabling vTPM for unattended encryption." -ReturnObject $ReturnObject -Warning
+            }
+        }
+    }
+
+    if ($cmOptions.usePKI) {
+        # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
+        if (-not $ConfigObject.pkiOptions) {
+            $ConfigObject | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{
+                EnablePKI       = $true
+                IssuingCAVM     = ""
+                UseOfflineRoot  = $false
+                OfflineRootCAVM = ""
+            }) -Force
+        }
+        if (-not $ConfigObject.pkiOptions.EnablePKI) {
+            $ConfigObject.pkiOptions.EnablePKI = $true
+        }
+        if ($ConfigObject.pkiOptions.EnablePKI) {
+            $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+            if ($caVM) {
+                $caVMExists = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
+                if (-not $caVMExists) {
+                    Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
                 }
-            }            
+            }
+        }
+    }
+
+    # Validate pkiOptions
+    if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
+        # Validate IssuingCAVM references a real VM
+        $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+        if ($caVM) {
+            $caVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
+            if (-not $caVMObj) {
+                Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+            }
+        }
+    }
+
+    # Validate UseOfflineRoot / StandaloneRootCA
+    $rootCAVMs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "StandaloneRootCA" })
+    $offlineRootEnabled = $ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.UseOfflineRoot
+    if ($rootCAVMs.Count -gt 1) {
+        Add-ValidationMessage -Message "VM Validation: Only one StandaloneRootCA VM is allowed per configuration. Found $($rootCAVMs.Count)." -ReturnObject $ReturnObject -Failure
+    }
+    if ($rootCAVMs.Count -ge 1 -and -not $offlineRootEnabled) {
+        Add-ValidationMessage -Message "VM Validation: StandaloneRootCA role requires UseOfflineRoot to be enabled in PKI Settings." -ReturnObject $ReturnObject -Failure
+    }
+    if ($offlineRootEnabled -and $rootCAVMs.Count -eq 0) {
+        Add-ValidationMessage -Message "VM Validation: pkiOptions.UseOfflineRoot is enabled but no StandaloneRootCA VM is defined." -ReturnObject $ReturnObject -Failure
+    }
+
+    # Validate Proxy role -- at most one per configuration (a single domain
+    # may only host one Squid forward proxy; clients use it via useProxy).
+    $proxyVMs = @($ConfigObject.virtualMachines | Where-Object { $_.role -eq "Proxy" })
+    if ($proxyVMs.Count -gt 1) {
+        Add-ValidationMessage -Message "VM Validation: Only one Proxy VM is allowed per configuration. Found $($proxyVMs.Count)." -ReturnObject $ReturnObject -Failure
+    }
+    foreach ($pvm in $proxyVMs) {
+        if (-not (Test-VmIsLinux -Vm $pvm)) {
+            Add-ValidationMessage -Message "VM Validation: Proxy VM [$($pvm.vmName)] must be Linux (osFamily=Linux or operatingSystem like 'Ubuntu*'). Got osFamily=[$($pvm.osFamily)] operatingSystem=[$($pvm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    # Cross-domain enforcement: a domain may host at most one Proxy. If the
+    # new config adds a Proxy and the domain already has one deployed (i.e.
+    # not in this new config), reject -- two proxies would race for the
+    # static .2 address and clients would have ambiguous routing.
+    $newProxiesNotHidden = @($proxyVMs | Where-Object { -not $_.hidden })
+    if ($newProxiesNotHidden.Count -ge 1 -and $ConfigObject.vmOptions.domainName) {
+        $existingProxies = $null
+        try {
+            $existingProxies = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName |
+                    Where-Object { $_.role -eq 'Proxy' -and ($newProxiesNotHidden.vmName -notcontains $_.vmName) })
+        }
+        catch { $existingProxies = @() }
+        if ($existingProxies.Count -gt 0) {
+            $existingNames = ($existingProxies | Select-Object -ExpandProperty vmName) -join ', '
+            $newNames = ($newProxiesNotHidden | Select-Object -ExpandProperty vmName) -join ', '
+            Add-ValidationMessage -Message "VM Validation: Domain [$($ConfigObject.vmOptions.domainName)] already has a Proxy VM [$existingNames]. Only one Proxy per domain is allowed; remove [$newNames] from the config or delete the existing proxy first." -ReturnObject $ReturnObject -Failure
+        }
+    }
+
+    # If any VM is opted-in to use the proxy (per-VM useProxy=true), a
+    # reachable Proxy VM must exist -- either in this config or already
+    # deployed (hidden) in the same domain. Otherwise clients get
+    # configured to point at a host that doesn't exist and the host-side
+    # ACLs deny-all their Internet egress. domainDefaults.UseProxyFor*
+    # are seed-only hints for Add-NewVMForRole and are never consulted
+    # at runtime / validation -- per-VM useProxy is the sole source of
+    # truth.
+    if (Get-Command Test-VmUsesProxy -ErrorAction SilentlyContinue) {
+        $optedIn = @($ConfigObject.virtualMachines | Where-Object {
+                -not $_.hidden -and (Test-VmUsesProxy -Vm $_ -DeployConfig $ConfigObject)
+            })
+        if ($optedIn.Count -gt 0 -and $proxyVMs.Count -eq 0) {
+            $existingProxy = $null
+            try {
+                $existingProxy = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName |
+                        Where-Object { $_.role -eq 'Proxy' })
+            }
+            catch { $existingProxy = $null }
+            if (-not $existingProxy -or $existingProxy.Count -eq 0) {
+                $names = ($optedIn | Select-Object -ExpandProperty vmName) -join ', '
+                Add-ValidationMessage -Message "VM Validation: one or more VMs have useProxy=true but no Proxy VM exists in this config or the existing '$($ConfigObject.vmOptions.domainName)' domain. Affected VM(s): $names. Add a Linux VM with role=Proxy, or set useProxy=false on the affected VMs." -ReturnObject $ReturnObject -Failure
+            }
+        }
+    }
+    if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
+        $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $ConfigObject.pkiOptions.OfflineRootCAVM }
+        if (-not $rootVMObj) {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+        }
+        elseif ($rootVMObj.role -ne 'StandaloneRootCA') {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not have the StandaloneRootCA role." -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -245,7 +395,8 @@ function Test-MachineNameExists {
 function Test-ValidMachineName {
     param (
         [string] $name,
-        [object] $ReturnObject
+        [object] $ReturnObject,
+        [switch] $LinuxName
     )
 
     if (-not $name) {
@@ -255,8 +406,14 @@ function Test-ValidMachineName {
     write-log "Testing $name" -Verbose
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>_') + '\]' + '\"'+'\s')]"
 
-    if ($name.Length -gt 15) {
+    # 15-char limit is a Windows NetBIOS / AD sAMAccountName constraint.
+    # Linux VMs are not subject to it (hostname limit is 64).
+    if (-not $LinuxName -and $name.Length -gt 15) {
         Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Windows computer name cannot be more than 15 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
+    }
+
+    if ($LinuxName -and $name.Length -gt 64) {
+        Add-ValidationMessage -Message "VM Validation: [$vmName] has invalid name: $name. Linux hostname cannot be more than 64 characters long (Currently $($name.Length))." -ReturnObject $ReturnObject -Warning
     }
 
     if ($name -match $pattern) {
@@ -264,11 +421,11 @@ function Test-ValidMachineName {
     }
 
     if ($name.EndsWith(".")) {
-        Add-ValidationMessage -Message "VM Validation: [$vmName] can not end with '.'." -ReturnObject $ReturnObject -Failure
+        Add-ValidationMessage -Message "VM Validation: [$vmName] cannot end with '.'." -ReturnObject $ReturnObject -Failure
     }
     
     if ($name -eq $env:COMPUTERNAME) {
-        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Can not be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
+        Add-ValidationMessage -Message "VM Validation: Domain Name [$name] is invalid. Cannot be the same name as the Host VM [$($env:COMPUTERNAME)]." -ReturnObject $ReturnObject -Warning
     }
 }
 
@@ -282,7 +439,7 @@ function Test-ValidUserName {
         return
     }
     if ($name -in "Administrator", "vmBuildAdmin" , "default" , "cm_svc" , "guest") {
-        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] can not be a Reserved Name, as these accounts exist by default and can not be added" -ReturnObject $return -Warning
+        Add-ValidationMessage -Message "User Validation: $($vmName) User [$name] cannot be a Reserved Name, as these accounts exist by default and cannot be added" -ReturnObject $return -Warning
     }
     $pattern = "[$([Regex]::Escape('/\[:;|=,@+*?<>') + '\]' + '\"'+'\s')]"
     if ($name -match $pattern) {
@@ -302,9 +459,7 @@ function Test-ValidVmSupported {
     param (
         [object] $VM,
         [object] $ConfigObject,
-        [object] $ReturnObject,
-        [Parameter(Mandatory = $false)]
-        [object] $LinuxImageNames
+        [object] $ReturnObject
     )
 
     if (-not $VM) {
@@ -316,7 +471,8 @@ function Test-ValidVmSupported {
     if (-not ($vmName.StartsWith( $($ConfigObject.vmOptions.prefix) ) ) ) {
         $vmName = $($ConfigObject.vmOptions.prefix) + $vmName
     }
-    Test-ValidMachineName $vmName -ReturnObject $ReturnObject
+    $isLinuxVm = Test-VmIsLinux -Vm $VM
+    Test-ValidMachineName $vmName -ReturnObject $ReturnObject -LinuxName:$isLinuxVm
 
     if ($VM.remoteSQLVM) {
         Test-ValidMachineName $VM.remoteSQLVM -ReturnObject $ReturnObject
@@ -374,14 +530,34 @@ function Test-ValidVmSupported {
 
     # Supported OS
     if ($VM.role -ne "OSDClient") {
-        if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
-            # Only consult Linux image list if needed; expensive (disk read of JSON)
-            if ($null -eq $LinuxImageNames) {
-                $LinuxImageNames = (Get-LinuxImages).Name
-            }
-            if ($LinuxImageNames -notcontains $vm.operatingSystem) {
+        # Linux VMs (e.g. role=Proxy / osFamily=Linux) use locally-built
+        # base images via baseimagestaging\New-LinuxBaseImage.ps1 and may
+        # not appear in the active _fileList*.json OS list. Skip the Azure
+        # supported-OS check for them; the Linux deploy path handles the
+        # base-image check separately.
+        # Inline check (don't depend on Test-VmIsLinux being loaded yet).
+        $isLinuxVm = $false
+        $linuxReason = $null
+        $vmRoleStr = if ($null -ne $VM.role) { [string]$VM.role } else { '' }
+        $vmOsStr = if ($null -ne $VM.operatingSystem) { [string]$VM.operatingSystem } else { '' }
+        $vmOsFamilyStr = $null
+        if ($VM.PSObject.Properties.Name -contains 'osFamily') { $vmOsFamilyStr = [string]$VM.osFamily }
+
+        if ($vmRoleStr -ieq 'Proxy') { $isLinuxVm = $true; $linuxReason = 'role=Proxy' }
+        elseif ($vmOsFamilyStr -ieq 'Linux') { $isLinuxVm = $true; $linuxReason = 'osFamily=Linux' }
+        elseif ($vmOsStr -like 'Ubuntu*' -or $vmOsStr -like 'Debian*' -or $vmOsStr -like 'Linux*') { $isLinuxVm = $true; $linuxReason = "operatingSystem=$vmOsStr" }
+        elseif (Get-Command -Name Test-VmIsLinux -ErrorAction SilentlyContinue) {
+            if (Test-VmIsLinux -Vm $VM) { $isLinuxVm = $true; $linuxReason = 'Test-VmIsLinux' }
+        }
+
+        if (-not $isLinuxVm) {
+            if ($Common.Supported.OperatingSystems -notcontains $vm.operatingSystem) {
+                Write-Log "[Test-ValidVmSupported] [$vmName] failing OS check: role=[$vmRoleStr] osFamily=[$vmOsFamilyStr] operatingSystem=[$vmOsStr]" -LogOnly
                 Add-ValidationMessage -Message "VM Validation: [$vmName] does not contain a supported operatingSystem [$($vm.operatingSystem)]." -ReturnObject $ReturnObject -Failure
             }
+        }
+        else {
+            Write-Log "[Test-ValidVmSupported] [$vmName] bypassing supported-OS check ($linuxReason)" -LogOnly
         }
     }
 
@@ -395,19 +571,15 @@ function Test-ValidVmSupported {
         # Supported DSC Roles for Existing Scenario
         if ($Common.Supported.RolesForExisting -notcontains $vm.role -and $vm.role -ne "DC") {
             # DC is caught in Test-ValidDC
-            if ($vm.role -ne "Linux") {
-                $supportedRoles = $Common.Supported.RolesForExisting -join ", "
-                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
-            }
+            $supportedRoles = $Common.Supported.RolesForExisting -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for existing environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
     else {
         # Supported DSC Roles
         if ($Common.Supported.Roles -notcontains $vm.role) {
-            if ($vm.role -ne "Linux") {
-                $supportedRoles = $Common.Supported.Roles -join ", "
-                Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
-            }
+            $supportedRoles = $Common.Supported.Roles -join ", "
+            Add-ValidationMessage -Message "VM Validation: [$vmName] contains an unsupported role [$($vm.role)] for a new environment. Supported values are: $supportedRoles" -ReturnObject $ReturnObject -Failure
         }
     }
 
@@ -955,7 +1127,7 @@ function Test-SingleRole {
             Add-ValidationMessage -Message "$vmRole Validation: Multiple virtual Machines with $vmRole Role specified in configuration. Only single $vmRole role is supported." -ReturnObject $ReturnObject -Warning
         }
         else {
-            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role can not be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "$vmRole Validation: Multiple machines with $vmRole role cannot be deployed at the same time. You can add more $vmRole machines to your domain after it is deployed." -ReturnObject $ReturnObject -Warning
         }
         return $false
     }
@@ -993,14 +1165,6 @@ function Test-ValidDiskSpace {
             return
         }
 
-        $linuxImageNames = $null
-        try {
-            $linuxImageNames = @((Get-LinuxImages).Name)
-        }
-        catch {
-            $linuxImageNames = @()
-        }
-
         $totalRequiredBytes = [int64]0
         $assumedSizeBytes = [int64]16GB
         $unknownSizeVms = @()
@@ -1014,9 +1178,6 @@ function Test-ValidDiskSpace {
             $imageFile = $Common.AzureFileList.OS | Where-Object { $_.id -eq $os } | Select-Object -First 1
             if ($imageFile -and $imageFile.filename) {
                 $sourcePath = Join-Path $Common.AzureFilesPath $imageFile.filename
-            }
-            elseif ($linuxImageNames -contains $os) {
-                $sourcePath = Join-Path $Common.AzureImagePath ($os + ".vhdx")
             }
 
             $size = $null
@@ -1107,9 +1268,9 @@ function Test-Configuration {
         [Parameter(Mandatory = $false, HelpMessage = "Fast Mode")]
         [switch]$Fast,
         [Parameter(Mandatory = $false, HelpMessage = "Final Test")]
-        [switch]$Final
-        #[Parameter(Mandatory = $false, ParameterSetName = "ConfigObject", HelpMessage = "Should we flush the cache to get accurate results?")]
-        #[bool] $fast = $false
+        [switch]$Final,
+        [Parameter(Mandatory = $false, HelpMessage = "Start phase for the deployment; URLs only needed by earlier phases are skipped.")]
+        [int]$StartPhase = 0
     )
     #Get-PSCallStack | out-host
 
@@ -1138,8 +1299,20 @@ function Test-Configuration {
                 $sha.Dispose()
             }
             if ($global:TestConfigFastCache -and $global:TestConfigFastCache.Key -eq $fastCacheKey) {
-                Write-Log -Verbose "Test-Configuration: returning cached -Fast result (hash $($fastCacheKey.Substring(0,12)))"
-                return $global:TestConfigFastCache.Value
+                $cachedFailures = 0
+                try { $cachedFailures = [int]$global:TestConfigFastCache.Value.Failures } catch { }
+                if ($cachedFailures -gt 0) {
+                    # Self-heal: a cached failure may be a ghost from a prior run
+                    # under different validator logic. Drop the entry and fall
+                    # through to a fresh validation pass; if the failure is
+                    # real, the re-run reproduces it and re-caches it below.
+                    Write-Log "[Test-Configuration] cache HIT with Failures=$cachedFailures (hash $($fastCacheKey.Substring(0,12))) - invalidating cache and re-running validators to confirm" -LogOnly
+                    $global:TestConfigFastCache = $null
+                }
+                else {
+                    Write-Log "[Test-Configuration] cache HIT (hash $($fastCacheKey.Substring(0,12))) Failures=0 - returning prior TestObject without re-running validators" -LogOnly
+                    return $global:TestConfigFastCache.Value
+                }
             }
         }
         catch {
@@ -1251,14 +1424,6 @@ function Test-Configuration {
 
         # VM Validations
         # ==============
-        # Cache Linux image names once for the entire validation pass — Get-LinuxImages reads JSON from disk.
-        $linuxImageNamesCache = $null
-        try {
-            $linuxImageNamesCache = @((Get-LinuxImages).Name)
-        }
-        catch {
-            $linuxImageNamesCache = @()
-        }
 
         $i = 8
         foreach ($vm in $deployConfig.virtualMachines) {
@@ -1269,7 +1434,7 @@ function Test-Configuration {
             }
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Vm $($vm.vmName)" -PercentComplete $i
             # Supported values
-            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return -LinuxImageNames $linuxImageNamesCache
+            Test-ValidVmSupported -VM $vm -ConfigObject $deployConfig -ReturnObject $return
 
             # Valid Memory
             Test-ValidVmMemory -VM $vm -ReturnObject $return
@@ -1327,7 +1492,7 @@ function Test-Configuration {
                     }
 
                     if ($vm.sqlport -in 21, 80, 135, 139, 443, 445, 860, 1434, 2382, 2383, 2393, 2394, 2725, 3260, 3389, 4022, 5022, 7022) {
-                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort can not use OS reserved port #" -ReturnObject $return -Warning
+                        Add-ValidationMessage -Message "SQL Validation: [$($vm.vmName)] sqlPort cannot use OS reserved port #" -ReturnObject $return -Warning
                     }
                 }
                 # Minimum SQL Memory
@@ -1364,7 +1529,7 @@ function Test-Configuration {
                                 $list2 = Get-List2 -deployConfig $deployConfig
                                 $existingSUP = $list2 | Where-Object { $_.InstallSUP -and $_.SiteCode -eq $Parent.SiteCode }
                                 if (-not $existingSUP) {                                                       
-                                    Add-ValidationMessage -Message "$vmName SUP role can not be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
+                                    Add-ValidationMessage -Message "$vmName SUP role cannot be installed on downlevel sites until the parent site ($($Parent.SiteCode)) has a SUP" -ReturnObject $return -Failure
                                 }
                             }
                             else {
@@ -1480,7 +1645,11 @@ function Test-Configuration {
                 }
 
                 # CAS with Primary, without parentSiteCode
-                if ($containsCS) {
+                # Only validate when this Primary actually claims a parent;
+                # a Primary with no parentSiteCode is a standalone top-level
+                # hierarchy and is allowed to coexist with a CAS in the same
+                # config (each owns its own cmOptions block).
+                if ($containsCS -and $psParentSiteCode) {
                     if ($psParentSiteCode -notin $CSVMs.siteCode) {
                         $casSiteCodesList = ($CSVMs.siteCode -join ",")
                         Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] specified with CAS, but parentSiteCode [$psParentSiteCode] does not match any CAS Site Code [$casSiteCodesList]." -ReturnObject $return -Warning
@@ -1622,11 +1791,82 @@ function Test-Configuration {
             Write-Log -SubActivity "Testing URLS"
 
             if (-not $Common.AzureFileList.Urls) {
-                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error                
+                Add-ValidationMessage -Message "Deployment Validation: No URLs found to test." -ReturnObject $return -Error
             }
             else {
+                # Build the set of URL keys actually needed by this deployment,
+                # taking StartPhase into account so we skip URLs for phases already done.
+                # Phase usage: DotNet=2, VCredist/SQLClient/OleDB/SSMS/ADK/ADKPE=3,
+                #              hallengren=4, PBIRS=7, ReportBuilder/PMPC/ODBC/ADK/ADKPE=8
+                $requiredUrlKeys = @()
+
+                # Phase 2: DotNet
+                if ($StartPhase -le 2) {
+                    $requiredUrlKeys += 'DotNet'
+                }
+
+                # Phase 3: VCredist, VCredistX86, SQLClient, OleDB, ODBC, SSMS, ADK, ADKPE
+                if ($StartPhase -le 3) {
+                    $requiredUrlKeys += @('VCredist', 'VCredistX86', 'SQLClient', 'OleDB', 'ODBC')
+
+                    $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion }
+                    $hasSSMS = $deployConfig.virtualMachines | Where-Object { $_.installSSMS -eq $true }
+                    if ($hasSQL -or $hasSSMS) {
+                        $requiredUrlKeys += 'SSMS'
+                    }
+
+                    $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
+                    if ($hasSiteServers) {
+                        $requiredUrlKeys += @('ADK', 'ADKPE')
+                    }
+                }
+
+                # Phase 4: hallengren
+                if ($StartPhase -le 4) {
+                    if (-not $hasSQL) { $hasSQL = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion } }
+                    if ($hasSQL) {
+                        $requiredUrlKeys += 'hallengren'
+                    }
+                }
+
+                # Phase 7: PBIRS
+                if ($StartPhase -le 7) {
+                    $hasRP = $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }
+                    if ($hasRP) {
+                        $requiredUrlKeys += 'PBIRS'
+                    }
+                }
+
+                # Phase 8: ReportBuilder, PMPC, ODBC, ADK/ADKPE (also used here)
+                if ($StartPhase -le 8) {
+                    $hasSiteServers = $containsCS -or $containsPS -or $containsPassive
+                    $hasSecondary = $containsSecondary
+
+                    if ($hasSiteServers -or $hasSecondary) {
+                        $requiredUrlKeys += 'ReportBuilder'
+                    }
+                    # ADK/ADKPE are also installed in Phase 8 for CAS/Primary/Passive
+                    if ($hasSiteServers) {
+                        $requiredUrlKeys += @('ADK', 'ADKPE')
+                    }
+                    # ODBC also used in Phase 8 for Secondary/CAS/Primary
+                    if ($hasSiteServers -or $hasSecondary) {
+                        $requiredUrlKeys += 'ODBC'
+                    }
+                    $hasPMPC = $deployConfig.virtualMachines | Where-Object { $_.InstallPatchMyPC -eq $true }
+                    if ($hasPMPC) {
+                        $requiredUrlKeys += 'PMPC'
+                    }
+                }
+
+                # BgInfo is only used during base image creation, skip during deployment.
+
+                # De-duplicate
+                $requiredUrlKeys = $requiredUrlKeys | Select-Object -Unique
+
                 $Common.AzureFileList.Urls | ForEach-Object {
                     $_.psobject.properties | ForEach-Object {
+                        if ($_.name -notin $requiredUrlKeys) { return }
                         try {
                             if (-not (Test-URL -url $_.value -name $_.name )) {
                                 Add-ValidationMessage -Message "Deployment Validation: URL $($_.value) for $($_.name) is not working. This may cause deployment failures" -ReturnObject $return -Warning
@@ -1638,29 +1878,39 @@ function Test-Configuration {
                     }
                 }
             }
-           
 
-            foreach ($version in $common.AzureFileList.CmVersions) {
-                if (-not $version.filename) {
-                    try {
-                        if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
-                            Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+            # CM download URLs: only test the version this deployment uses (Phase 8).
+            if ($StartPhase -le 8) {
+                $cmVersionNeeded = $deployConfig.cmOptions.version
+                foreach ($version in $common.AzureFileList.CmVersions) {
+                    if (-not $version.filename) {
+                        if (-not $cmVersionNeeded) { continue }
+                        if ($cmVersionNeeded -notin $version.versions) { continue }
+                        try {
+                            if (-not (Test-URL -url $version.downloadurl -name $version.baselineVersion )) {
+                                Add-ValidationMessage -Message "Deployment Validation: URL $($version.downloadurl) for CM Version $($version.baselineVersion) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                            }
                         }
-                    }
-                    catch {
-                        Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                        catch {
+                            Add-ValidationMessage -Message "Error occurred while testing URL $($version.downloadurl) for CM Version $($version.baselineVersion): $($_.Exception.Message)" -ReturnObject $return -Error
+                        }
                     }
                 }
             }
 
-            foreach ($sql in $common.AzureFileList.ISO) {
-                try {
-                    if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
-                        Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+            # SQL CU URLs: only test versions used by VMs in the deployment (Phase 4).
+            if ($StartPhase -le 4) {
+                $sqlVersionsNeeded = @($deployConfig.virtualMachines.sqlVersion | Where-Object { $_ } | Select-Object -Unique)
+                foreach ($sql in $common.AzureFileList.ISO) {
+                    if ($sqlVersionsNeeded.Count -eq 0 -or $sql.id -notin $sqlVersionsNeeded) { continue }
+                    try {
+                        if (-not (Test-URL -url $sql.cuUrl -name $sql.id )) {
+                            Add-ValidationMessage -Message "Deployment Validation: CU URL $($sql.cuUrl) for SQL Version $($sql.id) is not working. This may cause deployment failures" -ReturnObject $return -Warning
+                        }
                     }
-                }
-                catch {
-                    Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                    catch {
+                        Add-ValidationMessage -Message "Error occurred while testing CU URL $($sql.cuUrl) for SQL Version $($sql.id): $($_.Exception.Message)" -ReturnObject $return -Error
+                    }
                 }
             }
 
@@ -1706,7 +1956,7 @@ function Test-Configuration {
             $deployConfigEx = ConvertTo-DeployConfigEx -deployConfig $deployConfig
             $return.DeployConfig = $deployConfigEx
 
-            # Disk space validation for VHDX copies (slow: hits Get-LinuxImages cache, disk I/O for file sizes, drive query)
+            # Disk space validation for VHDX copies (slow: disk I/O for file sizes, drive query)
             Write-Progress2 -Activity "Validating Configuration" -Status "Checking Disk Space" -PercentComplete 92
             Test-ValidDiskSpace -ConfigObject $deployConfig -ReturnObject $return
         }

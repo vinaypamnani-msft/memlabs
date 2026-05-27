@@ -1,16 +1,45 @@
-function Install-HyperV {
-    if ((get-windowsFeature -name Hyper-V).InstallState -ne 'Installed') {  
-
-        Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
-
-        Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
-
-        if ((get-windowsFeature -name Hyper-V).InstallState -eq 'Installed') {
-            Write-Log "Hyper-V and management tools installed successfully." -Success
+﻿function Install-HyperV {
+    # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
+    # ServerManager that shows "Collecting data..." and can stall for minutes.
+    # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.
+    $hvCacheFile = Join-Path $Common.CachePath "hyperv-feature-state.json"
+    $hvInstalled = $false
+    if (Test-Path $hvCacheFile) {
+        try {
+            $hvCache = Get-Content $hvCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($hvCache -and $hvCache.Installed -eq $true) {
+                $hvAge = ((Get-Date) - [DateTime]::Parse($hvCache.CheckedUtc)).TotalHours
+                if ($hvAge -le 24) {
+                    $hvInstalled = $true
+                    Write-Log "Install-HyperV: Hyper-V already installed (cached, age=$([Math]::Round($hvAge,1))h)." -LogOnly
+                }
+            }
         }
-        else {
-            Write-Log "Failed to install Hyper-V and management tools." -Failure
+        catch {}
+    }
+    if (-not $hvInstalled) {
+        Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
+        if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
+
+            Install-WindowsFeature -Name 'Hyper-V', 'Hyper-V-Tools', 'Hyper-V-PowerShell' -IncludeAllSubFeature -IncludeManagementTools
+
+            Install-WindowsFeature -Name 'DHCP', 'RSAT-DHCP' -IncludeAllSubFeature -IncludeManagementTools
+
+            if ((Get-WindowsFeature -Name Hyper-V).InstallState -eq 'Installed') {
+                Write-Log "Hyper-V and management tools installed successfully." -Success
+            }
+            else {
+                Write-Log "Failed to install Hyper-V and management tools." -Failure
+            }
         }
+        # Cache the result (installed)
+        try {
+            [PSCustomObject]@{
+                CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                Installed  = $true
+            } | ConvertTo-Json | Set-Content -Path $hvCacheFile -Encoding UTF8
+        }
+        catch {}
     }
 
     if ((get-service -name vmms).Status -ne "Running") {
@@ -271,6 +300,9 @@ function Start-VM2 {
             until ($i -gt $retryCount -or $running)
 
             if ($running) {
+                # Invalidate the Get-List cache so the next SmartUpdate
+                # sees the updated state without waiting for the throttle.
+                $global:vm_List_LastUpdate = $null
                 Write-Log "${Name}: VM was started." -LogOnly
                 if ($Passthru.IsPresent) {
                     return $true
@@ -318,6 +350,38 @@ function Start-VM2 {
         }
     }
 }
+function Test-TcpPort {
+    # Hard-timeout TCP probe using TcpClient + WaitHandle. Test-NetConnection can hang
+    # well past its own timeouts (DNS reverse lookups, ICMP fallbacks, etc.), so avoid it.
+    param(
+        [Parameter(Mandatory)] [string]$ComputerName,
+        [Parameter(Mandatory)] [int]$Port,
+        [int]$TimeoutMs = 3000,
+        [int]$Retries = 3,
+        [int]$RetryDelayMs = 1000
+    )
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        $client = $null
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            $iar = $client.BeginConnect($ComputerName, $Port, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                try {
+                    $client.EndConnect($iar)
+                    if ($client.Connected) { return $true }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally {
+            if ($client) { try { $client.Close() } catch { } }
+        }
+        if ($attempt -lt $Retries) { Start-Sleep -Milliseconds $RetryDelayMs }
+    }
+    return $false
+}
+
 function Test-VmResponsive {
     param(
         [string]$VmName,
@@ -346,17 +410,10 @@ function Test-VmResponsive {
             return $false
         }
         
-        # Test RDP port with timeout using job
-        $job = Start-Job -ScriptBlock {
-            param($computerName)
-            Test-NetConnection -ComputerName $computerName -Port 3389 -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -InformationLevel Quiet
-        } -ArgumentList $VmName
-        
-        $testNet = Wait-Job -Job $job -Timeout $TimeoutSeconds | Receive-Job
-        Remove-Job -Job $job -Force
-        
-        if ($null -eq $testNet -or -not $testNet) {
-            Write-Log "VM $VmName RDP port test failed or timed out" -Warning
+        # Test RDP port with hard timeout + retry (Test-NetConnection can hang indefinitely)
+        $tcpTimeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000 / 3)
+        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
+            Write-Log "VM $VmName RDP port test failed after retries" -Warning
             return $false
         }
         
@@ -375,49 +432,51 @@ function Restart-UnresponsiveVm {
         [int]$WaitTimeSeconds = 60
     )
     
-    Write-Log "Attempting to restart unresponsive VM: $VmName" -Warning
-    
-    try {
-        # Try graceful shutdown first
-        Write-Log "Attempting graceful shutdown of $VmName..."
-        Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
-        Start-Sleep -Seconds 10
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        Write-Log "Attempting to restart unresponsive VM: $VmName (attempt $attempt of $MaxRetries)" -Warning
         
-        # Force stop if still running
-        $vm = Get-VM2 -Name $VmName
-        if ($vm.State -ne 'Off') {
-            Write-Log "Forcing stop of $VmName..."
-            Stop-VM2 -Name $VmName -Force -TurnOff
-            Start-Sleep -Seconds 5
-        }
-        
-        # Start the VM
-        Write-Log "Starting $VmName..."
-        Start-VM2 -Name $VmName
-        
-        # Wait for VM to boot and become responsive
-        Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
-        $startTime = Get-Date
-        $isResponsive = $false
-        
-        while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+        try {
+            # Try graceful shutdown first
+            Write-Log "Attempting graceful shutdown of $VmName..."
+            Stop-VM2 -Name $VmName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
             Start-Sleep -Seconds 10
             
-            if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
-                $isResponsive = $true
-                Write-Log "$VmName is now responsive"
-                break
+            # Force stop if still running
+            $vm = Get-VM2 -Name $VmName
+            if ($vm.State -ne 'Off') {
+                Write-Log "Forcing stop of $VmName..."
+                Stop-VM2 -Name $VmName -Force -TurnOff
+                Start-Sleep -Seconds 5
             }
             
-            Write-Log "Still waiting for $VmName to respond..."
+            # Start the VM
+            Write-Log "Starting $VmName..."
+            Start-VM2 -Name $VmName
+            
+            # Wait for VM to boot and become responsive
+            Write-Log "Waiting for $VmName to become responsive (up to $WaitTimeSeconds seconds)..."
+            $startTime = Get-Date
+            
+            while (((Get-Date) - $startTime).TotalSeconds -lt $WaitTimeSeconds) {
+                Start-Sleep -Seconds 10
+                
+                if (Test-VmResponsive -VmName $VmName -TimeoutSeconds 15) {
+                    Write-Log "$VmName is now responsive"
+                    return $true
+                }
+                
+                Write-Log "Still waiting for $VmName to respond..."
+            }
+            
+            Write-Log "VM $VmName did not become responsive within $WaitTimeSeconds seconds" -Warning
         }
-        
-        return $isResponsive
+        catch {
+            Write-Log "Error restarting VM ${VmName}: $_" -Error
+        }
     }
-    catch {
-        Write-Log "Error restarting VM ${VmName}: $_" -Error
-        return $false
-    }
+    
+    Write-Log "VM $VmName failed to become responsive after $MaxRetries attempts" -Error
+    return $false
 }
 
 function Stop-VM2 {
@@ -799,7 +858,7 @@ function Checkpoint-VM2 {
             Checkpoint-VM -VM $vm -SnapshotName $SnapshotName -ErrorAction Stop
         }
         catch {
-            start-sleep -Seconds 20
+            start-sleep -Seconds 10
             $snapshots = Get-VMSnapshot -VM $vm
             foreach ($snapshot in $snapshots) {
                 if ($snapshot.Name -eq $SnapshotName) {
@@ -811,3 +870,560 @@ function Checkpoint-VM2 {
     }
     return [System.Management.Automation.Internal.AutomationNull]::Value
 }
+
+function Restore-DynamicMemory {
+    <#
+    .SYNOPSIS
+        Restores dynamic memory settings on all VMs after deployment completes.
+    .DESCRIPTION
+        During deployment, VMs run with dynamic memory but min pinned at 99% of max.
+        This function lowers the min back to the configured dynamicMinRam value.
+        Since dynamic memory is already enabled, this works on running VMs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $domain = $DeployConfig.vmOptions.domainName
+
+    # Linux VMs are pinned static (no balloon driver dependency); skip them.
+    $vmsToRestore = @($DeployConfig.virtualMachines | Where-Object {
+        $_.dynamicMinRam -and ($_.dynamicMinRam / 1) -ne 0 -and (($_.dynamicMinRam / 1) -lt ($_.memory / 1)) -and -not (Test-VmIsLinux -Vm $_)
+    })
+
+    if ($vmsToRestore.Count -eq 0) {
+        Write-Log "[Phase 11] No VMs have dynamic memory configured for domain '$domain'; skipping restore" -LogOnly
+        return
+    }
+
+    # Drop VMs that no longer exist - typically rolled back by a failed/cancelled
+    # Phase 1 (VM_Create removes its half-built VM on failure). Restoring memory
+    # on a missing VM is a no-op and just generates noise.
+    $missing = @($vmsToRestore | Where-Object { -not (Get-VM2 -Name $_.vmName -ErrorAction SilentlyContinue) })
+    if ($missing.Count -gt 0) {
+        Write-Log "[Phase 11] Skipping $($missing.Count) VM(s) that no longer exist (likely rolled back by failed Phase 1): $($missing.vmName -join ', ')" -LogOnly
+        $vmsToRestore = @($vmsToRestore | Where-Object { $_.vmName -notin $missing.vmName })
+    }
+
+    if ($vmsToRestore.Count -eq 0) {
+        Write-Log "[Phase 11] No live VMs need dynamic memory restored for domain '$domain'; skipping" -LogOnly
+        return
+    }
+
+    # Only now (after we know there's work) emit the visible Activity header.
+    Write-Log "[Phase 11] Restoring dynamic memory settings for domain '$domain'..." -Activity
+    Write-Log "[Phase 11] Restoring dynamic memory on $($vmsToRestore.Count) VM(s)..." -SubActivity
+
+    # Per-VM work is a couple of Hyper-V cmdlet calls (Get-VM, Set-VMMemory).
+    # No Common.ps1 dot-source needed. Just fan out via ThreadJob so 20 VMs
+    # don't take 20*per-call time when called from the finally block. Throttle
+    # at 8 to avoid hammering VMMS with too many concurrent reconfigs.
+    $useThreadJob = (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue) -ne $null
+
+    $restoreWorker = {
+        param($vmConfig)
+        $vmName = $vmConfig.vmName
+        $messages = New-Object System.Collections.Generic.List[object]
+        try {
+            $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+            if (-not $vm) {
+                $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: VM not found, skipping (likely rolled back by failed Phase 1)" })
+                return @{ VmName = $vmName; Messages = $messages }
+            }
+
+            $minBytes = ($vmConfig.dynamicMinRam / 1)
+            $maxBytes = ($vmConfig.memory / 1)
+
+            $priority = 25
+            $buffer = 10
+            $role = $vmConfig.role
+            if ($vmConfig.SqlVersion -and $role -eq "DomainMember") { $role = "SqlServer" }
+            if ($role -in ("DC", "SqlServer", "Primary", "SQLAO", "CAS")) {
+                $priority = 50
+                $buffer = 20
+            }
+
+            if ($vm.DynamicMemoryEnabled) {
+                $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" })
+                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+            }
+            else {
+                $wasRunning = $vm.State -eq 'Running'
+                if ($wasRunning) {
+                    $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Stopping VM (static memory, must stop to enable dynamic)" })
+                    $vm | Stop-VM -Force -ErrorAction Stop
+                }
+                $vm | Set-VMMemory -DynamicMemoryEnabled $true -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+                if ($wasRunning) {
+                    $vm | Start-VM -ErrorAction Stop
+                    $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Restarted with dynamic memory" })
+                }
+            }
+        }
+        catch {
+            $messages.Add(@{ Level = 'Warning'; Text = "[Phase 11]   $vmName`: Failed to restore dynamic memory: $_" })
+        }
+        return @{ VmName = $vmName; Messages = $messages }
+    }
+
+    if ($useThreadJob) {
+        $jobs = foreach ($vmConfig in $vmsToRestore) {
+            Start-ThreadJob -ScriptBlock $restoreWorker -ArgumentList $vmConfig -ThrottleLimit 8
+        }
+        $results = $jobs | Wait-Job | Receive-Job
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        foreach ($r in $results) {
+            foreach ($m in $r.Messages) {
+                switch ($m.Level) {
+                    'Warning' { Write-Log $m.Text -Warning }
+                    'LogOnly' { Write-Log $m.Text -LogOnly }
+                    default   { Write-Log $m.Text }
+                }
+            }
+        }
+    }
+    else {
+        foreach ($vmConfig in $vmsToRestore) {
+            $r = & $restoreWorker $vmConfig
+            foreach ($m in $r.Messages) {
+                switch ($m.Level) {
+                    'Warning' { Write-Log $m.Text -Warning }
+                    'LogOnly' { Write-Log $m.Text -LogOnly }
+                    default   { Write-Log $m.Text }
+                }
+            }
+        }
+    }
+
+    Write-Log "[Phase 11] Dynamic memory restore complete" -Success
+}
+
+
+# region Proxy enforcement (Phase 6) --------------------------------------
+#
+# Enforces "you must use the proxy" at the Hyper-V vSwitch layer via
+# VMNetworkAdapter Extended ACLs. We deny outbound TCP 80/443 and outbound
+# DNS (53/UDP+TCP) to any destination, then allow:
+#   - intra-lab subnet (so AD/SMB/CM/SQL keep working)
+#   - the Linux Proxy VM on TCP/3128
+#   - the DC on UDP+TCP 53 (legit DNS path)
+#
+# Why port ACLs and not Windows Firewall on the host: with Hyper-V Internal +
+# New-NetNat the host firewall sees post-NAT traffic (source = host) so it
+# can't filter by originating VM. Port ACLs sit on the VM's vNIC pre-NAT and
+# can match the VM as source. They survive VM reboots and are removed
+# automatically when the VM is removed, so no cleanup hook is needed in
+# Remove-Lab.
+#
+# Weight ordering: Hyper-V evaluates highest weight first. We pick the band
+# 5000-5099 so we can wipe-and-replace only our own rules without touching
+# anything else (currently nothing else in memlabs uses extended ACLs).
+
+$global:MemLabsProxyAclWeightMin = 5000
+$global:MemLabsProxyAclWeightMax = 5099
+
+function Clear-VmProxyEnforcement {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName
+    )
+    try {
+        $existing = Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue
+        if (-not $existing) { return }
+        # Pipe filtered ACLs straight into Remove so each rule is removed by
+        # full identity (Direction+Weight+RemoteIP+Protocol+Port). Removing
+        # by Direction+Weight alone is ambiguous when several rules share a
+        # weight (e.g. one Allow per lab subnet at weight 5099), and can
+        # leave stragglers that then collide on re-add with 0x800700B7.
+        $existing |
+            Where-Object { $_.Weight -ge $global:MemLabsProxyAclWeightMin -and $_.Weight -le $global:MemLabsProxyAclWeightMax } |
+            Remove-VMNetworkAdapterExtendedAcl -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Log "[Proxy] $VmName`: Failed to clear existing enforcement ACLs: $_" -Warning
+    }
+}
+
+function Set-VmProxyEnforcement {
+    <#
+    .SYNOPSIS
+        Apply Hyper-V port-ACL "must use proxy" enforcement to a Windows VM.
+
+    .DESCRIPTION
+        Adds extended ACLs on the VM's network adapter that allow ALL traffic
+        to/from any known memlabs lab subnet (so AD, SMB, CM, SQL, and
+        inter-domain hierarchy traffic stay native), then deny outbound
+        TCP 80/443 and DNS (UDP+TCP 53) to anything else. Net effect: free
+        movement inside the lab, but any attempt to reach the public
+        Internet on web or DNS ports is blocked -- forcing HTTP/HTTPS
+        through the Squid proxy.
+
+        Idempotent: removes any prior memlabs proxy ACLs (weight band
+        5000-5099) before re-adding.
+
+    .PARAMETER VmName
+        The Windows VM whose vNIC ACLs are being managed.
+
+    .PARAMETER LabSubnets
+        Array of /24 subnet base addresses (e.g. "192.168.1.0") covering
+        every memlabs network the VM is allowed to reach freely. Typically
+        produced by combining this deployConfig's vmOptions.network with
+        the output of Get-NetworkList so cross-domain hierarchies still
+        work.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [string]$VmName,
+        [Parameter(Mandatory = $true)] [string[]]$LabSubnets
+    )
+
+    # Normalize -> "x.y.z.0/24", dedupe.
+    $cidrs = @($LabSubnets |
+        Where-Object { $_ } |
+        ForEach-Object {
+            $s = $_.Trim()
+            if ($s -match '/\d+$') { $s } else { "$s/24" }
+        } |
+        Select-Object -Unique)
+
+    if (-not $cidrs -or $cidrs.Count -eq 0) {
+        Write-Log "[Proxy] $VmName`: No lab subnets provided; skipping enforcement (would be wide-open deny)" -Warning
+        return $false
+    }
+
+    Clear-VmProxyEnforcement -VmName $VmName
+
+    # Helper: Add-VMNetworkAdapterExtendedAcl can return 0x800700B7 when an
+    # identical rule somehow survived the clear (e.g. switch port settings
+    # cached the rule across a clear/add race). Treat that as benign --
+    # the rule we wanted is already in place.
+    $addAcl = {
+        param([hashtable]$params)
+        try {
+            Add-VMNetworkAdapterExtendedAcl @params -ErrorAction Stop | Out-Null
+        }
+        catch {
+            if ($_.Exception.Message -match '0x800700B7|already exists') {
+                # Don't swallow silently -- if this fires it means a previous
+                # rule with the same (Direction + Weight + Protocol) key is
+                # still on the vNIC. Hyper-V's extended-ACL identity does
+                # NOT include RemotePort, so two deny rules at the same
+                # weight/direction/protocol but different ports will collide
+                # and the second silently lose. Warn loudly so the next
+                # diagnostic round-trip catches it.
+                Write-Log "[Proxy] $VmName`: ACL add returned 'already exists' -- prior rule at same Weight+Direction+Protocol survived clear, NEW RULE LOST: $($params | Out-String)" -Warning
+                return
+            }
+            throw
+        }
+    }
+
+    try {
+        # --- High-priority ALLOW rules (weight band 5090-5099) ---
+        # Allow all traffic both directions to/from any known lab subnet.
+        # Catches intra-subnet AD/SMB/SQL/CM, cross-subnet hierarchy traffic
+        # (CAS<->Primary across separate networks), and the Linux proxy +
+        # DCs which always live in one of these subnets.
+        #
+        # Each (subnet, direction) gets a unique weight: Hyper-V's
+        # extended-ACL identity is (Direction + Weight + Protocol) and does
+        # NOT include RemoteIPAddress, so multiple Allow rules sharing
+        # Direction+Weight+Protocol collide -- only the first lands and the
+        # rest are silently dropped (would block cross-subnet traffic).
+        # Band 5020-5099 keeps us inside the 5000-5099 cleanup window
+        # (deny rules occupy 5000-5003); 80 slots = 40 (subnet, direction)
+        # pairs = 40 subnets per direction. Memlabs host-wide subnet union
+        # is rarely more than a handful, so warn well before we'd overflow.
+        $maxSubnets = 40
+        if ($cidrs.Count -gt $maxSubnets) {
+            Write-Log "[Proxy] $VmName`: $($cidrs.Count) lab subnets exceeds cap ($maxSubnets); only first $maxSubnets will be allowed" -Warning
+        }
+        $w = 5099
+        foreach ($cidr in ($cidrs | Select-Object -First $maxSubnets)) {
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = $w }
+            & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = $w - 1 }
+            $w -= 2
+        }
+
+        # --- Low-priority DENY rules (weights 5000-5004, one per rule) ---
+        # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
+        # The proxy itself reaches the Internet via the host NAT, so clients
+        # MUST go through the proxy for any web traffic.
+        #
+        # Each rule gets a unique weight: Hyper-V's extended-ACL identity
+        # key is (Direction + Weight + Protocol), NOT including RemotePort.
+        # If two rules share weight+direction+protocol, the second add fires
+        # 0x800700B7 ("already exists") which our addAcl helper benignly
+        # swallows -- and you end up with only the FIRST port enforced
+        # (e.g. TCP/80 deny lands, TCP/443 deny silently lost).
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5004 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5003 }
+
+        # Block QUIC/HTTP3 (UDP 443). Without this, Chromium-based browsers
+        # (Edge, Chrome) bypass the proxy entirely for domains in the QUIC
+        # preload list (e.g. Google) -- connecting directly over UDP 443,
+        # which the TCP-only deny above doesn't catch. Symptoms: Google
+        # works but doesn't appear in Squid logs; non-preloaded domains
+        # (Bing, microsoft.com) fail because Edge tries TCP 443 first
+        # (blocked), and never attempts QUIC without a prior Alt-Svc header.
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'UDP'; Weight = 5002 }
+
+        # Block outbound DNS to non-lab resolvers (lab DCs are covered by
+        # the lab-subnet allow above).
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5001 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
+
+        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
+        return $true
+    }
+    catch {
+        Write-Log "[Proxy] $VmName`: Failed to apply enforcement ACLs: $_" -Warning
+        return $false
+    }
+}
+
+function Set-VmProxyEnforcementForConfig {
+    <#
+    .SYNOPSIS
+        Apply Hyper-V proxy enforcement to every opted-in VM in a deploy
+        configuration.
+
+    .DESCRIPTION
+        Mirrors Set-WindowsClientProxyForConfig: enumerates the deployConfig,
+        filters via Test-VmUsesProxy, builds a union of every known memlabs
+        lab subnet (this deploy's vmOptions.network + every VM's .network +
+        Get-NetworkList for cross-domain hierarchies), then calls
+        Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
+        opted-in clients exist.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)] [object]$deployConfig
+    )
+
+    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+    $clients = @($deployConfig.virtualMachines | Where-Object { Test-VmUsesProxy -Vm $_ -DeployConfig $deployConfig })
+
+    if (-not $clients) { return $true }
+    if (-not $proxyVm) {
+        # Add-to-existing case: Proxy lives in the existing hierarchy.
+        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+        if ($existingProxyName) {
+            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+            Write-Log "[Proxy] Using existing Proxy VM '$existingProxyName' from domain '$($deployConfig.vmOptions.domainName)' for enforcement"
+        }
+    }
+    if (-not $proxyVm) {
+        Write-Log "[Proxy] $($clients.Count) VM(s) opted-in but no Proxy VM in config or domain; skipping enforcement" -Warning
+        return $false
+    }
+
+    # Union all known lab subnets so inter-domain hierarchy traffic isn't blocked.
+    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
+    if ($deployConfig.vmOptions.network) { [void]$subnetSet.Add($deployConfig.vmOptions.network) }
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
+    }
+    try {
+        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
+        foreach ($n in $allKnown) { if ($n) { [void]$subnetSet.Add($n) } }
+    }
+    catch {
+        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with config-only subnet set" -Warning
+    }
+    $labSubnets = @($subnetSet)
+    Write-Log "[Proxy] Lab subnets allowed past enforcement: $($labSubnets -join ', ')"
+
+    $ok = $true
+    foreach ($vm in $clients) {
+        $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+        if (-not $r) { $ok = $false }
+    }
+    return $ok
+}
+
+function Get-VmProxyEnforcementSubnets {
+    <#
+    .SYNOPSIS
+        Build the global union of every memlabs lab subnet currently known
+        to the host, normalized for use as Set-VmProxyEnforcement -LabSubnets.
+
+    .DESCRIPTION
+        Combines Get-NetworkList (every lab's subnet stored in cached VM
+        metadata) with optional extras from an in-flight deployConfig
+        (vmOptions.network + any per-VM .network overrides) so that the
+        very deploy that's invoking us can also feed its brand-new subnets
+        into the union before those subnets show up in Get-NetworkList.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)] [object]$deployConfig
+    )
+
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    try {
+        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
+        foreach ($n in $allKnown) { if ($n) { [void]$set.Add($n) } }
+    }
+    catch {
+        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with deploy-only subnet set" -Warning
+    }
+    if ($deployConfig) {
+        if ($deployConfig.vmOptions -and $deployConfig.vmOptions.network) {
+            [void]$set.Add($deployConfig.vmOptions.network)
+        }
+        if ($deployConfig.virtualMachines) {
+            foreach ($vm in $deployConfig.virtualMachines) {
+                if ($vm.network) { [void]$set.Add($vm.network) }
+            }
+        }
+    }
+    return @($set)
+}
+
+function Set-VmProxyEnforcementForAllLabs {
+    <#
+    .SYNOPSIS
+        Reconcile Hyper-V proxy enforcement ACLs across every memlabs VM
+        on the host, not just the VMs in the current deployConfig.
+
+    .DESCRIPTION
+        Adding a new domain / new subnet / new lab on a host that already
+        hosts other proxy-enforced labs changes the "allowed lab subnet"
+        union. The per-deploy Set-VmProxyEnforcementForConfig only touches
+        VMs in the new deployConfig, so VMs in OTHER labs keep ACLs frozen
+        at their original deploy time and would deny traffic to the new
+        subnet (which the user almost certainly wants to permit, e.g. for
+        a freshly added second hierarchy). Similarly when a lab is removed,
+        the surviving labs keep stale allow rules for the gone subnet.
+
+        This function:
+          1. Builds the current global subnet union (Get-NetworkList +
+             optional in-flight deployConfig extras).
+          2. Enumerates every memlabs VM on the host via Get-List -Type VM.
+          3. For each VM with useProxy=true in its VM Note (Windows, not
+             role-excluded) -> re-stamps ACLs against the global union.
+          4. For each opted-out VM that still has stale ACLs in the
+             memlabs weight band (5000-5099) -> clears them.
+
+        Safe to call repeatedly; per-VM failures are logged and never
+        abort the sweep.
+
+    .PARAMETER deployConfig
+        Optional. If supplied, its subnets are folded into the union so
+        the current deploy's brand-new networks are honored before
+        Get-NetworkList sees them.
+
+    .PARAMETER WhatIf
+        Standard PowerShell switch; reports the intended actions without
+        touching any ACLs.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param (
+        [Parameter(Mandatory = $false)] [object]$deployConfig
+    )
+
+    $labSubnets = Get-VmProxyEnforcementSubnets -deployConfig $deployConfig
+    if (-not $labSubnets -or $labSubnets.Count -eq 0) {
+        Write-Log "[Proxy] Reconcile: no lab subnets known; skipping (would be wide-open deny)" -Warning
+        return $false
+    }
+
+    try {
+        $allVms = @(Get-List -Type VM)
+    }
+    catch {
+        Write-Log "[Proxy] Reconcile: Get-List -Type VM failed: $_" -Warning
+        return $false
+    }
+
+    if (-not $allVms -or $allVms.Count -eq 0) {
+        Write-Log "[Proxy] Reconcile: no memlabs VMs found on host; nothing to do"
+        return $true
+    }
+
+    # Cache-race guard: fold every enumerated VM's own subnet into the union
+    # BEFORE we start stamping. Get-NetworkList reads cached VM Notes; if a
+    # parallel deploy in another domain is mid-flight (Notes not yet written,
+    # or our cache is stale), Get-NetworkList can return a partial view that
+    # OMITS that domain's subnet. Without this guard we'd then re-stamp the
+    # other domain's VMs with an allow-list missing their OWN subnet,
+    # blocking their intra-lab AD / SQL / SMB / CM traffic the moment we
+    # finished applying ACLs.
+    #
+    # The Get-List -Type VM call above iterates the same VM objects we're
+    # about to touch, so any subnet we could harm by omission is right
+    # here for us to add.
+    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($s in $labSubnets) { if ($s) { [void]$subnetSet.Add($s) } }
+    foreach ($vm in $allVms) {
+        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
+    }
+    $labSubnets = @($subnetSet)
+    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
+
+    # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
+    # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
+    # have no extended ACLs to manage.
+    $hardExclude = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+
+    $applied = 0; $cleared = 0; $skipped = 0; $failed = 0
+    foreach ($vm in $allVms) {
+        if (-not $vm.vmName) { continue }
+        if ($vm.role -in $hardExclude) { $skipped++; continue }
+        # OperatingSystem comes from deployedOS in VM Note; Linux distros contain "Linux" / "Ubuntu".
+        if ($vm.OperatingSystem -and ($vm.OperatingSystem -match 'Linux|Ubuntu|Debian|CentOS|RHEL|Fedora')) {
+            $skipped++; continue
+        }
+
+        $optedIn = $false
+        if ($vm.PSObject.Properties.Name -contains 'useProxy') {
+            $optedIn = [bool]$vm.useProxy
+        }
+
+        try {
+            if ($optedIn) {
+                # Safety net: never stamp a VM whose own subnet isn't in the
+                # final allow list -- doing so would deny its intra-lab AD /
+                # SQL / SMB traffic. Should never fire after the union-fold
+                # guard above, but is cheap insurance against a regression
+                # or a VM with a missing/blank .network property.
+                if ($vm.network -and ($labSubnets -notcontains $vm.network)) {
+                    Write-Log "[Proxy] Reconcile: $($vm.vmName): own subnet '$($vm.network)' not in union ($($labSubnets -join ', ')); refusing to stamp (would break intra-lab traffic)" -Warning
+                    $failed++
+                    continue
+                }
+                if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
+                    $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+                    if ($r) { $applied++ } else { $failed++ }
+                }
+            }
+            else {
+                # Not opted-in: clear any stale ACLs from a prior deploy where
+                # useProxy was true. Cheap no-op if the VM has none.
+                $existing = Get-VMNetworkAdapterExtendedAcl -VMName $vm.vmName -ErrorAction SilentlyContinue
+                $stale = @($existing | Where-Object {
+                        $_.Weight -ge $global:MemLabsProxyAclWeightMin -and
+                        $_.Weight -le $global:MemLabsProxyAclWeightMax
+                    })
+                if ($stale.Count -gt 0) {
+                    if ($PSCmdlet.ShouldProcess($vm.vmName, "Clear stale proxy enforcement ACLs ($($stale.Count) rules)")) {
+                        Clear-VmProxyEnforcement -VmName $vm.vmName
+                        $cleared++
+                        Write-Log "[Proxy] Reconcile: $($vm.vmName): cleared $($stale.Count) stale ACL(s) (useProxy=false/missing)"
+                    }
+                }
+            }
+        }
+        catch {
+            $failed++
+            Write-Log "[Proxy] Reconcile: $($vm.vmName): unexpected error: $_" -Warning
+        }
+    }
+
+    Write-Log "[Proxy] Reconcile complete: $applied applied, $cleared cleared, $skipped skipped (excluded/Linux), $failed failed"
+    return ($failed -eq 0)
+}
+# endregion Proxy enforcement ---------------------------------------------

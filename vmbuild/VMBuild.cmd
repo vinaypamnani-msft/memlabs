@@ -36,6 +36,43 @@ REM ============================================================
 @ECHO ON
 git config --global --add safe.directory E:\Memlabs
 git config --global --add safe.directory E:/memlabs
+@ECHO OFF
+
+REM ------------------------------------------------------------
+REM Detect if the current branch has been deleted from origin
+REM (e.g. a feature branch that was merged + pruned). If so,
+REM switch back to develop before pulling.
+REM ------------------------------------------------------------
+git fetch --prune origin 2>NUL
+FOR /F "tokens=*" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>NUL') DO SET CURBRANCH=%%B
+IF NOT "%CURBRANCH%"=="" (
+    IF /I NOT "%CURBRANCH%"=="develop" (
+        IF /I NOT "%CURBRANCH%"=="main" (
+            IF /I NOT "%CURBRANCH%"=="master" (
+                git ls-remote --exit-code --heads origin "%CURBRANCH%" >NUL 2>&1
+                IF ERRORLEVEL 1 (
+                    ECHO.
+                    ECHO ============================================================
+                    ECHO  Branch "%CURBRANCH%" no longer exists on origin.
+                    ECHO  Switching back to develop...
+                    ECHO ============================================================
+                    @ECHO ON
+                    git checkout develop
+                    @ECHO OFF
+                    IF ERRORLEVEL 1 (
+                        ECHO.
+                        ECHO WARNING: Failed to checkout develop. You may have uncommitted
+                        ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
+                        ECHO Press any key to continue with current branch...
+                        PAUSE > NUL
+                    )
+                )
+            )
+        )
+    )
+)
+
+@ECHO ON
 git pull
 @ECHO OFF
 IF ERRORLEVEL 1 (
@@ -78,11 +115,16 @@ IF ERRORLEVEL 1 (
 )
 
 REM ============================================================
+REM Prune logs / temp / cache older than 7 days
+REM ============================================================
+powershell -NoLogo -NonInteractive -ExecutionPolicy Bypass -File ".\Clean-OldLogs.ps1"
+IF ERRORLEVEL 1 (
+    ECHO WARNING: Clean-OldLogs reported an error.
+)
+
+REM ============================================================
 REM Determine launch prerequisites after maintenance
 REM ============================================================
-SET WT=0
-where /q wt
-IF NOT ERRORLEVEL 1 SET WT=1
 
 REM Use quoted %ProgramFiles% to avoid "C:\Program not found"
 SET PS7="%ProgramFiles%\PowerShell\7\pwsh.exe"
@@ -101,7 +143,7 @@ REM ============================================================
 :PS7
 timeout 1
 IF "%~1"=="" (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (
@@ -109,7 +151,7 @@ IF "%~1"=="" (
         IF ERRORLEVEL 1 GOTO LAUNCHPS7_FAILED
     )
 ) ELSE (
-    IF "%WT%"=="1" (
+    IF DEFINED WT_SESSION (
         wt -w 0 nt -d . %PS7% -NoExit -ExecutionPolicy Bypass -NoLogo -Command "./New-Lab.ps1 -Configuration %1"
         IF ERRORLEVEL 1 GOTO LAUNCHWT_FAILED
     ) ELSE (

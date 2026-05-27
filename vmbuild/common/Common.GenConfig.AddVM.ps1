@@ -171,7 +171,15 @@ function Add-NewVMForRole {
     Write-Verbose "[Add-NewVMForRole] Start Role: $Role Domain: $Domain Config: $ConfigToModify OS: $OperatingSystem SiteCode: $SiteCode ParentSiteCode: $parentSiteCode Network: $network"
 
     if ([string]::IsNullOrWhiteSpace($OperatingSystem)) {
-        if ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
+        if ($role -eq "Proxy") {
+            # Proxy is always Linux (Ubuntu) -- no OS choice.
+            $OperatingSystem = "Ubuntu Server 24.04 LTS"
+        }
+        elseif ($role -eq "LinuxServer") {
+            # Generic Linux server: same base image as Proxy, DHCP networking.
+            $OperatingSystem = "Ubuntu Server 24.04 LTS"
+        }
+        elseif ($role -eq "WorkgroupMember" -or $role -eq "AADClient" -or $role -eq "InternetClient") {
             $OSList = Get-SupportedOperatingSystemsForRole -role $role
             if (-not $OSList -or $OSList.Count -eq 0) {
                 Write-Host
@@ -200,42 +208,27 @@ function Add-NewVMForRole {
             }
         }
         else {
-            if ($role -eq "Linux") {
-                $OSList = Get-SupportedOperatingSystemsForRole -role $role
-                if ($null -eq $OSList ) {
-                    $OperatingSystem = "Linux Unknown"
-                }
-                else {
-                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                    $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false
-                    if ($OperatingSystem -eq "ESCAPE") {
-                        return
-                    }
+            $OSList = Get-SupportedOperatingSystemsForRole -role $role
+            if ($role.Contains("Client")) {
+                $DefaultOperatingSystem = "Windows 10 Latest (64-bit)"
+                if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
                 }
             }
             else {
-                $OSList = Get-SupportedOperatingSystemsForRole -role $role
-                if ($role.Contains("Client")) {
-                    $DefaultOperatingSystem = "Windows 10 Latest (64-bit)"
-                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
-                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultClientOS
-                    }
+                $DefaultOperatingSystem = "Server 2022"
+                if ($ConfigToModify.domainDefaults.DefaultClientOS) {
+                    $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
                 }
-                else {
-                    $DefaultOperatingSystem = "Server 2022"
-                    if ($ConfigToModify.domainDefaults.DefaultClientOS) {
-                        $operatingSystem = $ConfigToModify.domainDefaults.DefaultServerOS
-                    }
-                }
-                if ($null -ne $OSList) {
-                    if (-not $OperatingSystem) {                        
-                        Write-Log -Verbose "No Default OS defined" 
-                        Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
-                        $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $DefaultOperatingSystem
-                        if ($OperatingSystem -eq "ESCAPE") {
-                            $OperatingSystem = $DefaultOperatingSystem
-                            return
-                        }
+            }
+            if ($null -ne $OSList) {
+                if (-not $OperatingSystem) {                        
+                    Write-Log -Verbose "No Default OS defined" 
+                    Write-Log -Activity "OS Version selection for new '$role' VM" -NoNewLine
+                    $OperatingSystem = Get-Menu2 -MenuName "OS Version selection for new '$role' VM" -prompt "Select OS Version for new $role VM" -optionArray $OSList -Test:$false -CurrentValue $DefaultOperatingSystem
+                    if ($OperatingSystem -eq "ESCAPE") {
+                        $OperatingSystem = $DefaultOperatingSystem
+                        return
                     }
                 }
             }
@@ -270,31 +263,69 @@ function Add-NewVMForRole {
         $installSSMS = $false
     }
 
-    if ($role -eq "Linux") {
-        $virtualMachine = [PSCustomObject]@{
-            vmName          = $null
-            role            = $actualRoleName
-            operatingSystem = $OperatingSystem
-            memory          = $memory
-            virtualProcs    = $vprocs
-            vmGeneration    = 1
-        }
+    $virtualMachine = [PSCustomObject]@{
+        vmName          = $null
+        role            = $actualRoleName
+        operatingSystem = $OperatingSystem
+        memory          = $memory
+        virtualProcs    = $vprocs
+        tpmEnabled      = $true
     }
-    else {
-        $virtualMachine = [PSCustomObject]@{
-            vmName          = $null
-            role            = $actualRoleName
-            operatingSystem = $OperatingSystem
-            memory          = $memory
-            virtualProcs    = $vprocs
-            tpmEnabled      = $true
-        }
+
+    if ($role -eq "Proxy") {
+        # Linux VM: no TPM, fixed lightweight footprint, osFamily marker so
+        # Test-VmIsLinux short-circuits the Windows create/validation paths.
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "1GB"
+        $virtualMachine.virtualProcs = 1
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional xrdp + lightweight desktop for graphical login. When true,
+        # New-LinuxVirtualMachine installs xrdp/xfce4 via cloud-init and the
+        # RDCMan file includes an entry that auto-logs in as vmbuildadmin
+        # using the same LocalAdmin password as the rest of the lab.
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
+    }
+
+    if ($role -eq "LinuxServer") {
+        # Generic Linux VM: no TPM, DHCP networking (default in New-LinuxSeedIso),
+        # slightly larger footprint than Proxy since it's a general-purpose box.
+        # osFamily=Linux makes Test-VmIsLinux short-circuit the Windows create/
+        # validation paths the same way it does for Proxy.
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "2GB"
+        $virtualMachine.virtualProcs = 2
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional xrdp + xfce4 desktop (same toggle as Proxy).
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'enableRDP' -Value $false -Force
+        # Optional realmd/SSSD join to the lab AD domain on first boot.
+        # When true, New-LinuxVirtualMachine adds realmd packages + a
+        # `realm join` runcmd to the cloud-init seed ISO. Default false
+        # so the VM stands alone unless the user opts in.
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
+    }
+
+    if ($role -eq "LinuxClient") {
+        # Ubuntu Desktop workstation: real GNOME/GDM3/NetworkManager image
+        # (UbuntuDesktop2404.vhdx) targeted at MDM/EDR testing (Intune for
+        # Linux, Defender for Endpoint, Landscape, etc.). Heavier footprint
+        # than LinuxServer since GNOME wants ~3GB to be usable, and the
+        # baked-in xrdp/xorgxrdp service means RDP into a real Ubuntu
+            # session works out of the box (no enableRDP cloud-init toggle
+            # needed -- the existing toggle installs xfce4 which would clash
+            # with GNOME on this image).
+        $virtualMachine.PSObject.Properties.Remove('tpmEnabled')
+        $virtualMachine.memory = "4GB"
+        $virtualMachine.virtualProcs = 4
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'osFamily' -Value 'Linux' -Force
+        # Optional realmd/SSSD join to the lab AD domain on first boot
+        # (same helper as LinuxServer).
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'joinDomain' -Value $false -Force
     }
 
     if ($network) {
         $virtualMachine | Add-Member -MemberType NoteProperty -Name 'network' -Value $network -force
     }
-    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Linux")) {
+    if ($role -notin ("OSDClient", "AADClient", "DC", "BDC", "Proxy", "LinuxServer", "LinuxClient")) {
         #Match Windows 10 or 11
         if ($operatingSystem.Contains("Windows 1")) {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'useFakeWSUSServer' -Value $false -force
@@ -386,7 +417,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
+            if ($enableSUP) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+            }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr CAS" -force
             $virtualMachine.Memory = "10GB"
@@ -418,7 +453,11 @@ function Add-NewVMForRole {
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
             $newSiteCode = Get-NewSiteCode $Domain -Role $actualRoleName -ConfigToCheck $ConfigToModify
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteCode' -Value $newSiteCode -force
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $false -force
+            $enableSUP = if ($ConfigToModify.domainDefaults.EnableSUPOnSiteServers) { $true } else { $false }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installSUP' -Value $enableSUP -force
+            if ($enableSUP) {
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'wsusContentDir' -Value "E:\WSUS" -force
+            }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installRP' -Value $false -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'siteName' -Value "ConfigMgr Primary Site" -force
 
@@ -471,6 +510,10 @@ function Add-NewVMForRole {
         "WorkgroupMember" {}
         "InternetClient" {}
         "AADClient" {}
+        "StandaloneRootCA" {
+            $virtualMachine.Memory = "2GB"
+            $virtualMachine.virtualProcs = 2
+        }
         "DomainMember" {
             if ($OperatingSystem -notlike "*Server*") {
                 $users = get-list2 -DeployConfig $oldConfig | Where-Object { $_.domainUser } | Select-Object -ExpandProperty domainUser -Unique
@@ -584,7 +627,6 @@ function Add-NewVMForRole {
         }
         "DC" {
             $virtualMachine.memory = "4GB"
-            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'InstallCA' -Value $true -force
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'ForestTrust' -Value "NONE" -force
             $virtualMachine.tpmEnabled = $false
         }
@@ -611,12 +653,63 @@ function Add-NewVMForRole {
     if ($null -eq $ConfigToModify.VirtualMachines) {
         $ConfigToModify | Add-Member -MemberType NoteProperty -Name "VirtualMachines" -Value @() -Force
     }
-    
-    if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value "1GB" -force
+
+    # Add BitLocker property if BLM is enabled and VM has TPM + client OS
+    if ($virtualMachine.tpmEnabled -and $ConfigToModify.cmOptions -and $ConfigToModify.cmOptions.EnableBLM) {
+        $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
     }
-    else {
-        $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
+
+    # Add pushClient property for DomainMember and site system VMs.
+    # Default from domainDefaults:
+    #   client OS DomainMember        -> PushCMClientToClients
+    #   server OS DomainMember (+SQL) -> PushCMClientToServers
+    #   site system roles             -> PushCMClientToSiteSystems
+    $siteSystemRoles = @('Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    if ($role -eq 'DomainMember' -or $role -in $siteSystemRoles) {
+        if ($role -in $siteSystemRoles) {
+            $defaultKey = 'PushCMClientToSiteSystems'
+        }
+        else {
+            $isClientOS = $virtualMachine.operatingSystem -and $virtualMachine.operatingSystem -like "Windows 1*"
+            $defaultKey = if ($isClientOS) { 'PushCMClientToClients' } else { 'PushCMClientToServers' }
+        }
+        $defaultVal = $true
+        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$defaultKey)) {
+            $defaultVal = [bool]$ConfigToModify.domainDefaults.$defaultKey
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "pushClient" -Value $defaultVal -Force
+    }
+
+    # Add useProxy property for Windows VMs that can sensibly route through
+    # the domain's Squid proxy. Excludes the Proxy VM itself, DCs (DNS for the
+    # domain itself), and StandaloneRootCA (offline, no networking).
+    # Default is seeded from one of two domainDefaults keys depending on the
+    # VM's purpose:
+    #   ConfigMgr site-system roles -> UseProxyForCM
+    #   everything else (clients, plain DomainMembers) -> UseProxyForClients
+    $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+    if ($role -notin $proxyExcluded -and -not (Test-VmIsLinux -Vm $virtualMachine)) {
+        $cmRoles = @('CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite', 'WSUS', 'SQLAO', 'FileServer')
+        $useProxyKey = if ($role -in $cmRoles) { 'UseProxyForCM' } else { 'UseProxyForClients' }
+        $useProxyDefault = $false
+        if ($ConfigToModify.domainDefaults -and ($null -ne $ConfigToModify.domainDefaults.$useProxyKey)) {
+            $useProxyDefault = [bool]$ConfigToModify.domainDefaults.$useProxyKey
+        }
+        $virtualMachine | Add-Member -MemberType NoteProperty -Name "useProxy" -Value $useProxyDefault -Force
+    }
+
+    # Linux VMs run with static memory (Hyper-V Dynamic Memory on Linux is
+    # flaky), so dynamicMinRam is meaningless for them -- don't add it.
+    if (-not (Test-VmIsLinux -Vm $virtualMachine)) {
+        if ($ConfigToModify.domainDefaults.UseDynamicMemory) {
+            # SQL workloads need a higher floor; ConfigMgr SQL min server memory is 4GB
+            $defaultMin = if ($virtualMachine.sqlVersion) { "4GB" } else { "1GB" }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $defaultMin -force
+        }
+        else {
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'dynamicMinRam' -Value $virtualMachine.memory -force
+        }
     }
 
     # Before adding, check if a VM with this name already exists
@@ -633,20 +726,38 @@ function Add-NewVMForRole {
     $ConfigToModify.virtualMachines += $virtualMachine
 
     if ($role -eq "Primary" -or $role -eq "CAS" -or $role -eq "PassiveSite" -or $role -eq "SiteSystem" -or $role -eq "Secondary") {
-        if ($null -eq $ConfigToModify.cmOptions) {
-            $latestVersion = Get-CMLatestBaselineVersion
-            $newCmOptions = [PSCustomObject]@{
-                Version                   = $latestVersion
-                Install                   = $true
-                PushClientToDomainMembers = $true
-                PrePopulateObjects        = $true
-                EVALVersion               = $false
-                #InstallSCP                = $true
-                OfflineSCP                = $false
-                OfflineSUP                = $false
-                UsePKI                    = $false
+        # Post-migration shape: cmOptions live on each top-level site server VM
+        # (CAS, or standalone Primary). Attach a block to the newly added VM
+        # only when it is itself a top-level (CAS or Primary with no
+        # parentSiteCode). When another top-level already exists in the
+        # config, clone its cmOptions so the new hierarchy starts with the
+        # same Version / PKI / BLM settings. Otherwise create defaults.
+        # Child Primary under a CAS, SiteSystem, PassiveSite, and Secondary
+        # all inherit at deploy time via New-DeployConfig rehydration.
+        $isTopLevelAdd = ($role -in 'CAS', 'Primary') -and (-not $virtualMachine.parentSiteCode)
+        if ($isTopLevelAdd -and -not $virtualMachine.cmOptions) {
+            $existingTopLevel = $ConfigToModify.virtualMachines | Where-Object {
+                $_.vmName -ne $virtualMachine.vmName -and
+                $_.role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
+            } | Select-Object -First 1
+            if ($existingTopLevel) {
+                $newCmOptions = $existingTopLevel.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
             }
-            $ConfigToModify | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
+            else {
+                $latestVersion = Get-CMLatestBaselineVersion
+                $newCmOptions = [PSCustomObject]@{
+                    Version                   = $latestVersion
+                    Install                   = $true
+                    PrePopulateObjects        = $true
+                    EVALVersion               = $false
+                    #InstallSCP                = $true
+                    OfflineSCP                = $false
+                    OfflineSUP                = $false
+                    UsePKI                    = $false
+                    EnableBLM                 = $false
+                }
+            }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force
         }
     }
 
@@ -731,5 +842,219 @@ function Add-NewVMForRole {
     Write-verbose "[Add-NewVMForRole] Config: $ConfigToModify"
     if ($ReturnMachineName) {
         return $machineName
+    }
+}
+
+function Add-OfflineRootCAVMIfMissing {
+    # When pkiOptions.UseOfflineRoot is enabled but no Standalone Offline
+    # Root CA exists - neither in the in-memory config nor already deployed
+    # in the target domain - auto-add one so the user doesn't have to.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.vmOptions -or -not $ConfigToModify.vmOptions.domainName) { return }
+
+    # Only proceed if pkiOptions.UseOfflineRoot is enabled
+    $pkiOpts = $ConfigToModify.pkiOptions
+    if (-not $pkiOpts -or -not $pkiOpts.UseOfflineRoot) { return }
+
+    $existsInConfig = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' }).Count -gt 0
+    if ($existsInConfig) { return }
+
+    $domainName = $ConfigToModify.vmOptions.domainName
+    try {
+        $existsInDomain = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | Where-Object { $_.role -eq 'StandaloneRootCA' }).Count -gt 0
+        if ($existsInDomain) { return }
+    } catch {}
+
+    write-log "[OfflineRootCA] pkiOptions.UseOfflineRoot enabled but no StandaloneRootCA VM found - auto-adding one to domain $domainName"
+    $existingNames = @($ConfigToModify.virtualMachines | ForEach-Object { $_.vmName })
+    $rootOS = if ($ConfigToModify.domainDefaults.DefaultServerOS) { $ConfigToModify.domainDefaults.DefaultServerOS } else { 'Server 2022' }
+    Add-NewVMForRole -Role 'StandaloneRootCA' -Domain $domainName -ConfigToModify $ConfigToModify -OperatingSystem $rootOS -Quiet:$true | Out-Null
+    # Tag the VM we just added so Remove-OfflineRootCAVMIfAutoAdded can
+    # safely auto-remove it later if the user toggles UseOfflineRoot off.
+    # We never tag a user-created VM, so manual additions are preserved.
+    $newVM = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'StandaloneRootCA' -and $existingNames -notcontains $_.vmName } | Select-Object -First 1
+    if ($newVM) {
+        $newVM | Add-Member -MemberType NoteProperty -Name '_autoAddedByOfflineRootCA' -Value $true -Force
+        # Also update pkiOptions.OfflineRootCAVM if not already set
+        if ($pkiOpts -and -not $pkiOpts.OfflineRootCAVM) {
+            $pkiOpts.OfflineRootCAVM = $newVM.vmName
+        }
+        # Drop any stale validation messages referencing this newly-added VM
+        # (see Add-ProxyVMIfMissing for the carryOver-staleness rationale).
+        Clear-StaleValidationMessagesForVM -VmName $newVM.vmName
+    }
+}
+
+function Clear-StaleValidationMessagesForVM {
+    # Removes any entries from $global:GenConfigErrorMessages and
+    # $global:PendingValidationErrors whose Message references the given VM
+    # name. Called whenever an auto-add/auto-remove mutates the config so
+    # stale messages from a previous validation pass (different config shape)
+    # don't surface to the user via the carryOver mechanism in genconfig.ps1.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $VmName
+    )
+
+    if (-not $VmName) { return }
+    $needle = "[$VmName]"
+
+    if ($global:GenConfigErrorMessages) {
+        $kept = @($global:GenConfigErrorMessages | Where-Object { $_.Message -notlike "*$needle*" })
+        if ($kept.Count -ne $global:GenConfigErrorMessages.Count) {
+            Write-Log "[Clear-StaleValidationMessagesForVM] Dropped $($global:GenConfigErrorMessages.Count - $kept.Count) stale msg(s) for $VmName from GenConfigErrorMessages" -LogOnly
+            $global:GenConfigErrorMessages = $kept
+        }
+    }
+    if ($global:PendingValidationErrors) {
+        $kept = @($global:PendingValidationErrors | Where-Object { $_.Message -notlike "*$needle*" })
+        if ($kept.Count -ne $global:PendingValidationErrors.Count) {
+            Write-Log "[Clear-StaleValidationMessagesForVM] Dropped $($global:PendingValidationErrors.Count - $kept.Count) stale msg(s) for $VmName from PendingValidationErrors" -LogOnly
+            $global:PendingValidationErrors = $kept
+        }
+    }
+}
+
+function Remove-OfflineRootCAVMIfAutoAdded {
+    # Counterpart to Add-OfflineRootCAVMIfMissing: when pkiOptions.UseOfflineRoot
+    # is disabled, remove any StandaloneRootCA VM that we previously auto-added.
+    # We only remove VMs tagged with _autoAddedByOfflineRootCA, so user-created
+    # Root CA VMs are preserved. We also skip removal if the VM is already
+    # deployed in the domain.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.virtualMachines) { return }
+
+    # Only auto-remove when pkiOptions.UseOfflineRoot is disabled
+    $pkiOpts = $ConfigToModify.pkiOptions
+    $offlineRootEnabled = $pkiOpts -and $pkiOpts.UseOfflineRoot
+    if ($offlineRootEnabled) { return }
+
+    $domainName = if ($ConfigToModify.vmOptions) { $ConfigToModify.vmOptions.domainName } else { $null }
+    $deployedNames = @()
+    if ($domainName) {
+        try {
+            $deployedNames = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | ForEach-Object { $_.vmName })
+        } catch {}
+    }
+
+    $toRemove = @($ConfigToModify.virtualMachines | Where-Object {
+        $_.role -eq 'StandaloneRootCA' -and
+        $_.PSObject.Properties['_autoAddedByOfflineRootCA'] -and
+        $_._autoAddedByOfflineRootCA -and
+        ($deployedNames -notcontains $_.vmName)
+    })
+    foreach ($vm in $toRemove) {
+        write-log "[OfflineRootCA] UseOfflineRoot disabled - auto-removing previously auto-added StandaloneRootCA VM '$($vm.vmName)'"
+        Remove-VMFromConfig -vmName $vm.vmName -ConfigToModify $ConfigToModify
+    }
+}
+
+function Test-ConfigNeedsProxy {
+    # Returns $true iff any non-hidden VM in the config has useProxy=$true.
+    # domainDefaults.UseProxyFor* are seed-only hints used by Add-NewVMForRole
+    # to populate the per-VM useProxy at creation time; they are NOT consulted
+    # here. If every VM has useProxy=$false, the config does not need a proxy,
+    # regardless of what the domain default says.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigToModify
+    )
+
+    foreach ($vm in @($ConfigToModify.virtualMachines)) {
+        if ($vm.hidden) { continue }
+        if ($vm.PSObject.Properties.Name -contains 'useProxy' -and [bool]$vm.useProxy) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-ProxyVMIfMissing {
+    # When the in-memory config opts into the proxy (domainDefaults.UseProxyFor*
+    # or any per-VM useProxy=$true) but no Proxy VM exists -- neither in the
+    # config nor already deployed in the target domain -- auto-add a Linux
+    # Proxy VM so the user doesn't have to. Counterpart to
+    # Remove-ProxyVMIfAutoAdded.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.vmOptions -or -not $ConfigToModify.vmOptions.domainName) { return }
+    if (-not (Test-ConfigNeedsProxy -ConfigToModify $ConfigToModify)) { return }
+
+    $existsInConfig = @($ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+    if ($existsInConfig) { return }
+
+    $domainName = $ConfigToModify.vmOptions.domainName
+    try {
+        $existsInDomain = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | Where-Object { $_.role -eq 'Proxy' }).Count -gt 0
+        if ($existsInDomain) { return }
+    } catch {}
+
+    write-log "[Proxy] Proxy is enabled (domainDefaults or per-VM useProxy) but no Proxy VM found - auto-adding one to domain $domainName"
+    $existingNames = @($ConfigToModify.virtualMachines | ForEach-Object { $_.vmName })
+    Add-NewVMForRole -Role 'Proxy' -Domain $domainName -ConfigToModify $ConfigToModify -Quiet:$true | Out-Null
+    # Tag the VM we just added so Remove-ProxyVMIfAutoAdded can safely
+    # auto-remove it later if the user disables proxy. User-created Proxy
+    # VMs are never tagged, so manual additions are preserved.
+    $newVM = $ConfigToModify.virtualMachines | Where-Object { $_.role -eq 'Proxy' -and $existingNames -notcontains $_.vmName } | Select-Object -First 1
+    if ($newVM) {
+        $newVM | Add-Member -MemberType NoteProperty -Name '_autoAddedByProxy' -Value $true -Force
+        # Drop any stale validation messages that reference this newly-added
+        # VM name. They can only have come from a previous validation pass
+        # (different config shape) and would mislead the user.
+        Clear-StaleValidationMessagesForVM -VmName $newVM.vmName
+    }
+}
+
+function Remove-ProxyVMIfAutoAdded {
+    # Counterpart to Add-ProxyVMIfMissing: when nothing in the config opts
+    # into the proxy any longer, remove any Proxy VM that we previously
+    # auto-added. Only removes VMs tagged with _autoAddedByProxy and not
+    # already deployed in the domain, so user-created Proxy VMs are preserved.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [object] $ConfigToModify = $global:config
+    )
+
+    if (-not $ConfigToModify) { return }
+    if (-not $ConfigToModify.virtualMachines) { return }
+    if (Test-ConfigNeedsProxy -ConfigToModify $ConfigToModify) { return }
+
+    $domainName = if ($ConfigToModify.vmOptions) { $ConfigToModify.vmOptions.domainName } else { $null }
+    $deployedNames = @()
+    if ($domainName) {
+        try {
+            $deployedNames = @(Get-List -Type VM -DomainName $domainName -ErrorAction SilentlyContinue | ForEach-Object { $_.vmName })
+        } catch {}
+    }
+
+    $toRemove = @($ConfigToModify.virtualMachines | Where-Object {
+        $_.role -eq 'Proxy' -and
+        $_.PSObject.Properties['_autoAddedByProxy'] -and
+        $_._autoAddedByProxy -and
+        ($deployedNames -notcontains $_.vmName)
+    })
+    foreach ($vm in $toRemove) {
+        write-log "[Proxy] Proxy no longer enabled - auto-removing previously auto-added Proxy VM '$($vm.vmName)'"
+        Remove-VMFromConfig -vmName $vm.vmName -ConfigToModify $ConfigToModify
     }
 }

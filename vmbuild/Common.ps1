@@ -401,6 +401,11 @@ function Register-LogBufferExitFlush {
     try {
         Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
             try {
+                # Stop the background flush timer before final flush
+                if ($global:LogFlushTimer) {
+                    $global:LogFlushTimer.Dispose()
+                    $global:LogFlushTimer = $null
+                }
                 foreach ($p in @($global:LogBuffers.Keys)) {
                     $entry = $global:LogBuffers[$p]
                     if ($entry -and $entry.Builder.Length -gt 0) {
@@ -417,6 +422,64 @@ function Register-LogBufferExitFlush {
     catch {
         # Non-fatal; we still flush at size/age thresholds and on important
         # messages, so worst case is a few buffered lines lost on abrupt exit.
+    }
+
+    # Start a background timer that flushes log buffers on a threadpool thread.
+    # This ensures entries reach disk even when the main thread is blocked in a
+    # long-running CIM call (Get-VM, Get-VMNetworkAdapter, Set-VM, etc.).
+    # IMPORTANT: The callback must be pure .NET (no PowerShell ScriptBlocks) —
+    # threadpool threads have no Runspace and will crash the process otherwise.
+    # NOTE: Skip on PS5 — the TimerCallback cast from a static method doesn't
+    # work reliably, and this is not needed for short-lived DSC zip generation.
+    if (-not $global:LogFlushTimer -and $PSVersionTable.PSVersion.Major -ge 7) {
+        # Compile a tiny C# class that holds the flush logic. This runs on the
+        # threadpool without needing a PowerShell Runspace.
+        if (-not ([System.Management.Automation.PSTypeName]'MemLabs.LogFlusher').Type) {
+            $smaAssembly = [System.Management.Automation.PSObject].Assembly.Location
+            Add-Type -Language CSharp -ReferencedAssemblies @($smaAssembly) -TypeDefinition @'
+using System;
+using System.Collections;
+using System.IO;
+using System.Management.Automation;
+using System.Text;
+
+namespace MemLabs {
+    public static class LogFlusher {
+        public static void Flush(object state) {
+            try {
+                var buffers = state as Hashtable;
+                if (buffers == null) return;
+                // Snapshot keys to avoid modification during enumeration
+                var keys = new object[buffers.Count];
+                buffers.Keys.CopyTo(keys, 0);
+                foreach (var key in keys) {
+                    var path = key as string;
+                    if (path == null) continue;
+                    var pso = buffers[key] as PSObject;
+                    if (pso == null) continue;
+                    var builderProp = pso.Properties["Builder"];
+                    if (builderProp == null) continue;
+                    var sb = builderProp.Value as StringBuilder;
+                    if (sb == null || sb.Length == 0) continue;
+                    string text = sb.ToString();
+                    sb.Length = 0;
+                    var flushProp = pso.Properties["LastFlushUtc"];
+                    if (flushProp != null) flushProp.Value = DateTime.UtcNow;
+                    File.AppendAllText(path, text, Encoding.UTF8);
+                }
+            } catch { }
+        }
+    }
+}
+'@
+        }
+        [System.Threading.TimerCallback]$flushCallback = [MemLabs.LogFlusher]::Flush
+        $global:LogFlushTimer = [System.Threading.Timer]::new(
+            $flushCallback,
+            $global:LogBuffers,  # state object passed to callback
+            2000,                # initial delay (ms)
+            2000                 # period (ms) — flush every 2 seconds
+        )
     }
 }
 
@@ -804,39 +867,16 @@ function Get-File {
 
     # Display name for source
     $sourceDisplay = $Source
-    $bearerToken = $null
 
     # ---- Add auth if source is a storage URL ----
     if ($Source -and $StorageConfig.StorageLocation -and $Source -like "$($StorageConfig.StorageLocation)*") {
         $sourceDisplay = Split-Path $sourceDisplay -Leaf
 
-        if ($StorageConfig.UseBearerAuth) {
-            # Bearer auth — URL stays clean, token injected via curl headers
-            $bearerToken = Get-StorageToken
-            if ($null -eq $bearerToken) {
-                Write-Log "Get-File: Failed to get bearer token from Get-StorageToken." -Failure
-                return $false
-            }
+        # SAS auth — append token as query string
+        $Source = "$Source`?$($StorageConfig.StorageToken)"
 
-            # BITS does not support custom auth headers — force curl
-            if ($UseBITS.IsPresent) {
-                Write-Log "Get-File: UseBITS is not supported with bearer auth, falling back to curl." -LogOnly
-                $UseBITS = $false
-            }
-
-            # CDN edge nodes do not honour Azure bearer tokens — skip
-            if ($UseCDN.IsPresent) {
-                Write-Log "Get-File: UseCDN is not supported with bearer auth, ignoring." -LogOnly
-            }
-
-        }
-        else {
-            # SAS auth — append token as query string
-            $Source = "$Source`?$($StorageConfig.StorageToken)"
-
-            if ($UseCDN.IsPresent) {
-                $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
-            }
+        if ($UseCDN.IsPresent) {
+            $Source = $Source.Replace("blob.core.windows.net", "azureedge.net")
         }
     }
 
@@ -856,11 +896,6 @@ function Get-File {
     if (-not $Action) {
         Write-Log "Get-File: Action must be specified." -Failure
         return $false
-    }
-
-    # Copying implies a local path — bearer auth on a local copy makes no sense
-    if ($Action -eq "Copying" -and $StorageConfig.UseBearerAuth -and $bearerToken) {
-        Write-Log "Get-File: Action 'Copying' should not be used with bearer auth. Use 'Downloading' instead." -Warning
     }
 
     # ---- Build transfer arguments ----
@@ -928,8 +963,6 @@ function Get-File {
         # ---- Perform transfer ----
         if ($Action -eq "Downloading") {
             if ($UseBITS) {
-                # Note: UseBITS is forced to $false earlier when bearer auth is active
-                # so this block will never run with a bearer token
                 try {
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
                 }
@@ -941,9 +974,6 @@ function Get-File {
                 }
             }
             else {
-                if ($StorageConfig.UseBearerAuth -and $bearerToken) {
-                    $HashArguments["BearerToken"] = $bearerToken.AccessToken
-                }
                 $worked = Start-CurlTransfer @HashArguments -Silent:$Silent
                 if (-not $worked) {
                     Write-Log "Get-File: Failed to download '$sourceDisplay' using curl." -Failure
@@ -1213,8 +1243,6 @@ function Start-CurlTransfer {
         [Parameter(Mandatory = $false)]
         [string] $DisplayName,
         [Parameter(Mandatory = $false)]
-        [string] $BearerToken,
-        [Parameter(Mandatory = $false)]
         [switch]$Silent
     )
 
@@ -1237,15 +1265,6 @@ function Start-CurlTransfer {
         return $false
     }
 
-    # ---- Build auth headers ----
-    $authArgs = @()
-    if (-not [string]::IsNullOrWhiteSpace($BearerToken)) {
-        $authArgs = @(
-            "-H", "Authorization: Bearer $BearerToken",
-            "-H", "x-ms-version: 2020-04-08"
-        )
-    }
-
     $maxRetries = 10
     $retryCount = 0
     $success = $false
@@ -1258,9 +1277,6 @@ function Start-CurlTransfer {
         $curlArguments = @("-L", "-C", "-")
         if ($Silent) {
             $curlArguments = @("-s") + $curlArguments
-        }
-        if ($authArgs.Count -gt 0) {
-            $curlArguments += $authArgs
         }
         $curlArguments += @("-o", $Destination, "$Source")
 
@@ -1445,10 +1461,15 @@ Function Set-Window {
     )
     Begin {
         Try {
+            # Verify the type exists AND has the FindWindow method (may be stale from prior session)
             [void][Window]
+            if (-not [Window].GetMethod('FindWindow')) { throw "stale" }
         }
         Catch {
-            Add-Type @"
+            # Remove stale type if loaded without FindWindow (can't unload, but -IgnoreWarnings
+            # allows re-add in some scenarios). Use a uniquely-named type to avoid conflicts.
+            try {
+                Add-Type @"
               using System;
               using System.Runtime.InteropServices;
               public class Window {
@@ -1456,8 +1477,18 @@ Function Set-Window {
                 [return: MarshalAs(UnmanagedType.Bool)]
                 public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
-                [DllImport("User32.dll")]
+                [DllImport("user32.dll")]
                 public extern static bool MoveWindow(IntPtr handle, int x, int y, int width, int height, bool redraw);
+
+                [DllImport("user32.dll")]
+                [return: MarshalAs(UnmanagedType.Bool)]
+                public static extern bool IsWindowVisible(IntPtr hWnd);
+
+                [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+                public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+                [DllImport("kernel32.dll")]
+                public static extern IntPtr GetConsoleWindow();
               }
               public struct RECT
               {
@@ -1467,20 +1498,64 @@ Function Set-Window {
                 public int Bottom;      // y position of lower-right corner
               }
 "@
+            }
+            catch {
+                # Type already exists and can't be replaced in this session - that's OK,
+                # FindWindow strategy will gracefully fall through to other strategies.
+            }
         }
     }
     Process {
         $Rectangle = New-Object RECT
         $Handle = (Get-Process -id $ProcessID).MainWindowHandle
+        if ($Handle -eq [IntPtr]::Zero) {
+            # Console apps (cmd/pwsh) don't own their window - conhost.exe does.
+            # GetConsoleWindow() returns the console window handle.
+            $Handle = [Window]::GetConsoleWindow()
+            if ($Handle -eq [IntPtr]::Zero) {
+                Write-Log "Set-Window: PID $ProcessID has no MainWindowHandle and GetConsoleWindow returned 0. Skipping." -LogOnly -Warning
+                return
+            }
+            # On Windows 11 with default terminal = Windows Terminal, GetConsoleWindow
+            # returns the HIDDEN pseudoconsole (conpty) window. MoveWindow on it corrupts
+            # state (window becomes undraggable) without any visible effect.
+            if (-not [Window]::IsWindowVisible($Handle)) {
+                Write-Log "Set-Window: PID $ProcessID GetConsoleWindow handle=$Handle is NOT visible (pseudoconsole). Skipping MoveWindow." -LogOnly -Warning
+                return
+            }
+            Write-Log "Set-Window: PID $ProcessID MainWindowHandle=0, using GetConsoleWindow handle=$Handle (visible=true)" -LogOnly
+        }
+
         $Return = [Window]::GetWindowRect($Handle, [ref]$Rectangle)
+        $beforeW = $Rectangle.Right - $Rectangle.Left
+        $beforeH = $Rectangle.Bottom - $Rectangle.Top
+        Write-Log "Set-Window: PID $ProcessID Handle=$Handle BEFORE=${beforeW}x${beforeH} at ($($Rectangle.Left),$($Rectangle.Top))" -LogOnly
         If (-NOT $PSBoundParameters.ContainsKey('Width')) {
             $Width = $Rectangle.Right - $Rectangle.Left
         }
         If (-NOT $PSBoundParameters.ContainsKey('Height')) {
             $Height = $Rectangle.Bottom - $Rectangle.Top
         }
+        Write-Log "Set-Window: PID $ProcessID requesting MoveWindow($Handle, $X, $Y, $Width, $Height)" -LogOnly
         If ($Return) {
             $Return = [Window]::MoveWindow($Handle, $x, $y, $Width, $Height, $True)
+            if (-not $Return) {
+                Write-Log "Set-Window: MoveWindow returned FALSE for PID $ProcessID (Handle=$Handle). LastError=$([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -LogOnly -Warning
+            }
+            else {
+                # Verify the window actually moved
+                $VerifyRect = New-Object RECT
+                $null = [Window]::GetWindowRect($Handle, [ref]$VerifyRect)
+                $afterW = $VerifyRect.Right - $VerifyRect.Left
+                $afterH = $VerifyRect.Bottom - $VerifyRect.Top
+                Write-Log "Set-Window: PID $ProcessID AFTER=${afterW}x${afterH} at ($($VerifyRect.Left),$($VerifyRect.Top))" -LogOnly
+                if ($afterW -eq $beforeW -and $afterH -eq $beforeH) {
+                    Write-Log "Set-Window: WARNING - window dimensions unchanged after MoveWindow! Window may be locked or handle is stale." -LogOnly -Warning
+                }
+            }
+        }
+        else {
+            Write-Log "Set-Window: GetWindowRect failed for PID $ProcessID (Handle=$Handle)." -LogOnly -Warning
         }
         If ($PSBoundParameters.ContainsKey('Passthru')) {
             $Rectangle = New-Object RECT
@@ -1661,15 +1736,23 @@ function Test-NetworkSwitch {
         $interfaceAlias = $adapter.InterfaceAlias
         $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
 
-        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-        if ($currentIp.IPAddress -ne $desiredIp) {
-            Write-Log "$interfaceAlias IP is '$($currentIp.IPAddress)'. Changing it to $desiredIp."
-            New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 | Out-Null
+        $currentIps = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue)
+        $hasDesired = $currentIps | Where-Object { $_.IPAddress -eq $desiredIp }
+        if (-not $hasDesired) {
+            Write-Log "$interfaceAlias IP is '$($currentIps.IPAddress -join ', ')'. Changing it to $desiredIp."
+            # Remove any existing IPv4 addresses first; New-NetIPAddress cannot
+            # replace an existing address on the same subnet and would either
+            # fail or leave two IPs that confuse later validation.
+            foreach ($staleIp in $currentIps) {
+                Remove-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $staleIp.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            New-NetIPAddress -InterfaceAlias $interfaceAlias -IPAddress $desiredIp -PrefixLength 24 -ErrorAction SilentlyContinue | Out-Null
             Start-Sleep -Seconds 5 # Sleep to make sure IP changed
         }
 
-        $currentIp = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue
-        if ($currentIp.IPAddress -ne $desiredIp) {
+        $currentIps = @(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue)
+        $hasDesired = $currentIps | Where-Object { $_.IPAddress -eq $desiredIp }
+        if (-not $hasDesired) {
             Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
             return $false
         }
@@ -1697,16 +1780,52 @@ function Test-NoRRAS {
 
     $router = (Get-ItemProperty -Path HKLM:\system\CurrentControlSet\services\Tcpip\Parameters).IpEnableRouter
     $routingFeatureInstalled = $false
-    if (Get-Command -Name "Get-WindowsFeature" -ErrorAction SilentlyContinue) {
+
+    # Cache the Get-WindowsFeature result — ServerManager cmdlets ("Collecting
+    # data...") can block for 30-120s on every invocation. The Routing feature
+    # state only changes after explicit install/uninstall, so a cached result
+    # is safe until the next reboot or feature change.
+    $rrasCacheFile = Join-Path $Common.CachePath "rras-feature-state.json"
+    $rrasCacheValid = $false
+    if (Test-Path $rrasCacheFile) {
         try {
-            $routingFeatureInstalled = [bool](Get-WindowsFeature Routing).Installed
+            $rrasCache = Get-Content $rrasCacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($rrasCache -and $null -ne $rrasCache.RoutingInstalled) {
+                $rrasCacheAge = ((Get-Date) - [DateTime]::Parse($rrasCache.CheckedUtc)).TotalHours
+                if ($rrasCacheAge -le 24) {
+                    $routingFeatureInstalled = [bool]$rrasCache.RoutingInstalled
+                    $rrasCacheValid = $true
+                    Write-Log "Test-NoRRAS: Using cached Routing feature state (installed=$routingFeatureInstalled, age=$([Math]::Round($rrasCacheAge,1))h)." -LogOnly
+                }
+            }
         }
         catch {
-            Write-Log "Test-NoRRAS: Get-WindowsFeature failed; continuing with router-state checks only. $_" -Warning
+            Write-Log "Test-NoRRAS: Failed reading RRAS cache: $_" -LogOnly
         }
     }
-    else {
-        Write-Log "Test-NoRRAS: Get-WindowsFeature is unavailable; continuing with router-state checks only." -Warning
+
+    if (-not $rrasCacheValid) {
+        if (Get-Command -Name "Get-WindowsFeature" -ErrorAction SilentlyContinue) {
+            try {
+                Write-Log "Test-NoRRAS: Calling Get-WindowsFeature Routing (ServerManager — can be slow)..." -LogOnly
+                $routingFeatureInstalled = [bool](Get-WindowsFeature Routing).Installed
+                Write-Log "Test-NoRRAS: Get-WindowsFeature returned. Routing installed = $routingFeatureInstalled" -LogOnly
+                # Cache the result
+                try {
+                    [PSCustomObject]@{
+                        CheckedUtc       = (Get-Date).ToUniversalTime().ToString("o")
+                        RoutingInstalled = $routingFeatureInstalled
+                    } | ConvertTo-Json | Set-Content -Path $rrasCacheFile -Encoding UTF8
+                }
+                catch {}
+            }
+            catch {
+                Write-Log "Test-NoRRAS: Get-WindowsFeature failed; continuing with router-state checks only. $_" -Warning
+            }
+        }
+        else {
+            Write-Log "Test-NoRRAS: Get-WindowsFeature is unavailable; continuing with router-state checks only." -Warning
+        }
     }
 
     if ($routingFeatureInstalled -or $router -eq 0) {
@@ -1888,13 +2007,12 @@ function Test-DHCPScope {
     try {
 
         write-log -logonly "Test-DHCPScope called with ScopeID: $ScopeID ScopeName: $ScopeName DomainName: $DomainName DNSSERVER: $DNSServer"
-        # Define Lease Time
-        $leaseTimespan = New-TimeSpan -Days 16
-        $DomainScope = $true
-        if (-not $DomainName) {
-            $leaseTimespan = New-TimeSpan -Days 365
-            $DomainScope = $false
-        }
+        # Define Lease Time. Use 365 days for all scopes -- lab VMs on
+        # small subnets rarely churn, and Linux VMs (which lack LLMNR) are
+        # referenced by IP in RDCMan, so a short lease would break those
+        # entries when the IP changes.
+        $leaseTimespan = New-TimeSpan -Days 365
+        $DomainScope = [bool]$DomainName
 
         # Install DHCP, if not found
 
@@ -1967,6 +2085,7 @@ function Test-DHCPScope {
         }
 
         $DHCPDefaultGateway = $network + ".200"
+        # Proxy VM (Linux) gets a static .2 via cloud-init; not in the DHCP pool.
         $DHCPScopeStart = $network + ".20"
         $DHCPScopeEnd = $network + ".199"
 
@@ -2071,6 +2190,8 @@ function New-VmNote {
         [Parameter(Mandatory = $false)]
         [bool]$InProgress,
         [Parameter(Mandatory = $false)]
+        [int]$Phase,
+        [Parameter(Mandatory = $false)]
         [switch]$UpdateVersion,
         [Parameter(Mandatory = $false)]
         [bool]$Force = $false
@@ -2098,6 +2219,18 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
+        # Track the last phase that completed successfully on this VM
+        if ($Successful -and $Phase -gt 0) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $Phase -Force
+        }
+        else {
+            # Preserve existing lastPhaseComplete from previous successful phase
+            $existingNote = Get-VMNote -VMName $VmName
+            if ($existingNote -and $existingNote.lastPhaseComplete) {
+                $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingNote.lastPhaseComplete -Force
+            }
+        }
+
         if ($UpdateVersion.IsPresent) {
             $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $Common.MemLabsVersion -Force
         }
@@ -2113,6 +2246,19 @@ function New-VmNote {
         if ($null -ne $DeployConfig.domainDefaults -and $ThisVm.role -eq "DC") {
             Write-Log "Writing out domainDefaults Value: $($DeployConfig.domainDefaults.DeploymentType)"
             $vmNote | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $($DeployConfig.domainDefaults) -Force
+        }
+
+        # Store pkiOptions on the DC so new deployments to this domain can detect PKI state
+        if ($null -ne $DeployConfig.pkiOptions -and $ThisVm.role -eq "DC") {
+            Write-Log "Writing out pkiOptions on DC (EnablePKI: $($DeployConfig.pkiOptions.EnablePKI))"
+            $vmNote | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value $($DeployConfig.pkiOptions) -Force
+        }
+
+        # Store cmOptions on the top-level site server (CAS or standalone Primary) so new
+        # deployments to this domain can detect features like EnableBLM from the VM note.
+        if ($null -ne $DeployConfig.cmOptions -and $ThisVm.role -in @('CAS', 'Primary') -and -not $ThisVm.parentSiteCode) {
+            Write-Log "Writing out cmOptions on top-level site server (EnableBLM: $($DeployConfig.cmOptions.EnableBLM))"
+            $vmNote | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $($DeployConfig.cmOptions) -Force
         }
 
         Set-VMNote -vmName $vmName -vmNote $vmNote -force:$Force
@@ -2962,6 +3108,8 @@ function Wait-ForVm {
         [Parameter(Mandatory = $false)]
         [switch]$Quiet,
         [Parameter(Mandatory = $false)]
+        [switch]$SkipDiskTest,
+        [Parameter(Mandatory = $false)]
         [switch]$WhatIf
     )
 
@@ -3150,10 +3298,7 @@ function Wait-ForVm {
 
     if ($PathToVerify) {
 
-        if (-not $global:DSC_Copied) {
-            $global:DSC_Copied = @()
-        }
-        if (-not ($VmName -in $global:DSC_Copied)) {
+        if (-not $SkipDiskTest.IsPresent) {
             #If we already copied a DSC at least once, Disks are valid. Run if this is the first time.
             Write-Progress2 "Testing Disks" -Status "Testing Disks" -percentcomplete 0 -force
             if ((Get-VMHardDiskDrive -VMName $VmName).Count -eq 0) {
@@ -3172,7 +3317,7 @@ function Wait-ForVm {
         $vmTest = Get-VM2 -Fallback -Name $VmName
         if ($vmTest.State -ne "Running") {
             start-vm2 -name $vmName
-            start-sleep -seconds 30
+            start-sleep -seconds 15
         }
         if (-not $vmTest) {
             Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
@@ -3184,17 +3329,22 @@ function Wait-ForVm {
         $restarted = $false
         do {
             $count++
-            Start-Sleep -Seconds 5
+            if ($count -gt 1) {
+                Start-Sleep -Seconds 3
+            }
             try {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $msg
             }
             catch {}
-            $vmTest = Get-VM2 -Fallback -Name $VmName
-            if ($vmTest.State -ne "Running") {
-                stop-vm2 -name $vmName
-                start-sleep -seconds 30
-                start-vm2 -name $vmName
-                start-sleep -seconds 30
+            # Only check VM state every 3rd iteration or on first attempt
+            if ($count -eq 1 -or $count % 3 -eq 0) {
+                $vmTest = Get-VM2 -Fallback -Name $VmName
+                if ($vmTest.State -ne "Running") {
+                    stop-vm2 -name $vmName
+                    start-sleep -seconds 15
+                    start-vm2 -name $vmName
+                    start-sleep -seconds 20
+                }
             }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
@@ -3203,7 +3353,7 @@ function Wait-ForVm {
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
-            else {
+            elseif ($count -gt 1) {
                 $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path "C:\" } -SuppressLog
                 $readytest = $true -eq $outtest.ScriptBlockOutput
 
@@ -3216,9 +3366,9 @@ function Wait-ForVm {
                         if (-not $restarted) {
                             Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
                             stop-vm2 -name $vmName
-                            start-sleep -seconds 30
+                            start-sleep -seconds 15
                             start-vm2 -name $vmName
-                            start-sleep -seconds 30
+                            start-sleep -seconds 20
                             $restarted = $true
                         }
                     }
@@ -3503,7 +3653,7 @@ function Get-VmSession {
         $ps = $null
         $failCount++
         if ($failCount -gt 2) {
-            start-sleep -seconds 15
+            start-sleep -seconds 5
         }
 
         if ($failCount -gt 3) {
@@ -3518,7 +3668,7 @@ function Get-VmSession {
                 Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
                 $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-                $cacheKey = $VmName + "-WORKGROUP"
+                $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
                 $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
@@ -3528,7 +3678,15 @@ function Get-VmSession {
 
                         $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
                         $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$($VM.Domain)"
+                        $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                    }
+                    # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
+                    if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+                        $username4 = "$VmDomainName\Administrator"
+                        $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
+                        $cacheKey = $VmName + "-$VmDomainName-Administrator"
+                        Write-Log "$VmName`: Falling back to $username4." -Verbose
                         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
                     if (-not $ps) {
@@ -3755,8 +3913,9 @@ function Install-Tools {
         $ToolName = $ToolName | ForEach-Object { $_ }
         $TotalCount = $ToolName.Count
         $success = $true
-        if ($vm.role -eq "OSDClient") { continue } # no injecting inside OSD client
-        if ($vm.vmbuild -eq $false) { continue } # don't touch VM's we didn't create
+        # Benign skips: not a failure of injection, just nothing to do for this VM.
+        if ($vm.role -eq "OSDClient") { return $true } # no injecting inside OSD client
+        if ($vm.vmbuild -eq $false) { return $true } # don't touch VM's we didn't create
 
         $vmName = $vm.vmName
         Write-Log "$vmName`: Injecting Tools $($ToolName -join ",") to C:\tools directory inside the VM" -Activity
@@ -3764,16 +3923,21 @@ function Install-Tools {
         # Get VM Session
         if ($vm.State -ne "Running") {
             Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
-            continue
+            return $false
         }
 
         $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
         if (-not $ps) {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
-            continue
+            return $false
         }
         if (-not $Force) {
             $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
+        }
+        if (-not ($Force -or $out.ScriptBlockOutput -ne $true)) {
+            # Tools already present and -Force not specified: nothing to do, this is success.
+            Write-Log "$vmName`: Tools already present (Fix-PostInstall.ps1 exists). Skipping inject." -Verbose
+            return $true
         }
         if ($Force -or $out.ScriptBlockOutput -ne $true) {
             $i = 0
@@ -3893,8 +4057,6 @@ function Install-Tools {
         }
     }
 
-
-    $success = ($result.Failed -eq 0)
     return $success
 }
 
@@ -3913,7 +4075,7 @@ function Copy-ToolToVM {
     $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
     if ($vm.State -ne "Running") {
         Write-Log "$vmName`: VM is not running. Start the VM and try again." -Warning
-        continue
+        return $false
     }
 
     $ps = Get-VmSession -VmName $vm.vmName -VmDomainName $vm.domain
@@ -3922,7 +4084,8 @@ function Copy-ToolToVM {
         return $false
     }
 
-    $success = $true
+    # --- Build list of source paths to bundle ---
+    $zipEntries = @()
     foreach ($ToolItem in $Tool) {
         if ($ToolItem.NoUpdate -eq $true) {
             Write-Log "$vmName`: Skipped injecting '$($ToolItem.Name) since it's marked NoUpdate." -Verbose
@@ -3935,69 +4098,107 @@ function Copy-ToolToVM {
         }
         $fileTargetRelative = Join-Path $ToolItem.Target $toolFileName
 
-        Write-Log "$vmName`: toolFileName = $toolFileName fileTargetRelative = $fileTargetRelative" -LogOnly
-
         if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $ToolItem.ExtractFolderIfZip) {
-            Write-Log "$vmName`: File is marked to extract '$($ToolItem.Name) since ExtractFolderIfZip is true" -Verbose
             $fileTargetRelative = $ToolItem.Target
         }
 
         $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
-        $fileTargetPathInVM = Join-Path "C:\" $fileTargetRelative
-        $DirTargetPathInVM = Join-Path "C:\" $ToolItem.Target
-
-        $isContainer = $false
-        if ((Get-Item $toolPathHost) -is [System.IO.DirectoryInfo]) {
-            $isContainer = $true
-            $fileTargetPathInVM = "C:\tools"
-        }
 
         if ($ToolItem.Name -eq "WMI Explorer") {
-            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe" # special case, since we extract the file directly in tools folder
-            $fileTargetPathInVM = Join-Path "C:\$fileTargetRelative" "WmiExplorer.exe"
-            $DirTargetPathInVM = "C:\$fileTargetRelative"
+            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe"
+            $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
         }
 
-        Write-Log "$vmName`: Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
+        if (-not (Test-Path $toolPathHost)) {
+            Write-Log "$vmName`: Source path not found for '$($ToolItem.Name)': $toolPathHost" -Warning
+            continue
+        }
 
-        if ($Fast) {
-            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName) (Fast mode)" -Log -percentcomplete $percent
+        $zipEntries += [PSCustomObject]@{
+            Name             = $ToolItem.Name
+            SourcePath       = $toolPathHost
+            TargetRelative   = $fileTargetRelative
+        }
+    }
+
+    if ($zipEntries.Count -eq 0) {
+        Write-Log "$vmName`: No tools to inject." -Verbose
+        return $true
+    }
+
+    # --- Create a single zip bundle on the host ---
+    $zipStagingDir = Join-Path $Common.TempPath "toolzip-$VMName"
+    if (Test-Path $zipStagingDir) { Remove-Item $zipStagingDir -Recurse -Force }
+    New-Item -Path $zipStagingDir -ItemType Directory -Force | Out-Null
+
+    foreach ($entry in $zipEntries) {
+        $dest = Join-Path $zipStagingDir $entry.TargetRelative
+        $destDir = Split-Path $dest -Parent
+        if (-not (Test-Path $destDir)) {
+            New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+        }
+        if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+            Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
         }
         else {
-            Write-Progress2 "Injecting tool" -Status "Injecting $($ToolItem.Name) to $($vm.vmName)" -Log -percentcomplete $percent
+            Copy-Item -Path $entry.SourcePath -Destination $dest -Force
         }
-        try {
-            $progressPref = $ProgressPreference
-            $ProgressPreference = "SilentlyContinue"
-            try {
-                Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock { New-Item -ItemType Directory -Force -Path $using:DirTargetPathInVM }
+    }
+
+    $zipPath = Join-Path $Common.TempPath "tools-$VMName.zip"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+    Write-Log "$vmName`: Creating tools bundle ($($zipEntries.Count) tools)..." -LogOnly
+    $progressPref = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Compress-Archive -Path "$zipStagingDir\*" -DestinationPath $zipPath -Force
+    }
+    finally {
+        $ProgressPreference = $progressPref
+    }
+
+    $zipSizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    Write-Log "$vmName`: Copying tools bundle (${zipSizeMB} MB, $($zipEntries.Count) tools) to VM..."
+    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${zipSizeMB} MB) to $VMName" -Log
+
+    # --- Copy the single zip to the VM and expand ---
+    $success = $true
+    $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        if ($Fast) {
+            Copy-Item -ToSession $ps -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+        else {
+            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+        }
+
+        # Expand inside the VM
+        if (-not $WhatIf) {
+            $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
+                Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
+                Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
             }
-            catch {}
-            if ($isContainer) {
-                if ($Fast) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-                else {
-                    Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
+            if ($expandResult.ScriptBlockFailed) {
+                Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
+                $success = $false
             }
-            else {
-                if ($Fast) {
-                    Copy-Item -ToSession $ps -Path $toolPathHost -Destination $fileTargetPathInVM -Recurse -Container -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-                else {
-                    Copy-ItemSafe -VMName $vm.vmName -VMDomainName $vm.domain -Path $toolPathHost -Destination $fileTargetPathInVM -Force -WhatIf:$WhatIf -ErrorAction Stop
-                }
-            }
-            Write-Log "$vmName`: Done Injecting '$($ToolItem.Name)' from HOST ($fileTargetRelative) to VM ($fileTargetPathInVM)."
         }
-        catch {
-            Write-Log "$vmName`: Failed to inject '$($ToolItem.Name)'. $_" -Failure
-            $success = $false
+
+        if ($success) {
+            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle." -Success
         }
-        finally {
-            $ProgressPreference = $progressPref
-        }
+    }
+    catch {
+        Write-Log "$vmName`: Failed to copy tools bundle to VM. $_" -Failure
+        $success = $false
+    }
+    finally {
+        $ProgressPreference = $progressPref
+        # Cleanup host temp files
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $success
 }
@@ -4488,7 +4689,11 @@ function Set-SupportedOptions {
         "SQLAO",
         "WSUS",
         "DC",
-        "BDC"
+        "BDC",
+        "StandaloneRootCA",
+        "Proxy",
+        "LinuxServer",
+        "LinuxClient"
     )
 
     $rolesForExisting = @(
@@ -4505,10 +4710,14 @@ function Set-SupportedOptions {
         "FileServer",
         "SQLAO",
         "WSUS",
-        "BDC"
+        "BDC",
+        "StandaloneRootCA",
+        "Proxy",
+        "LinuxServer",
+        "LinuxClient"
     )
 
-    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs")
+    $updatablePropList = @("InstallCA", "InstallRP", "InstallMP", "InstallDP", "InstallSUP", "InstallSSMS", "InstallSMSProv", "memory", "dynamicMinRam", "virtualProcs", "useProxy")
     $propsToUpdate = $updatablePropList
     $propsToUpdate += "wsusContentDir"
 
@@ -4787,13 +4996,16 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Config.ps1
 . $PSScriptRoot\common\Common.Phases.ps1
 . $PSScriptRoot\common\Common.Validation.ps1
+. $PSScriptRoot\common\Common.Validation.Functional.ps1
 . $PSScriptRoot\common\Common.RdcMan.ps1
+. $PSScriptRoot\common\Common.mRemoteNG.ps1
 . $PSScriptRoot\common\Common.Remove.ps1
 . $PSScriptRoot\common\Common.Maintenance.ps1
 . $PSScriptRoot\common\Common.ScriptBlocks.ps1
 . $PSScriptRoot\common\Common.GenConfig.ps1
 . $PSScriptRoot\common\Common.GenConfig.NewDomain.ps1
 . $PSScriptRoot\common\Common.GenConfig.CmMenus.ps1
+. $PSScriptRoot\common\Common.GenConfig.PKIMenus.ps1
 . $PSScriptRoot\common\Common.GenConfig.Existing.ps1
 . $PSScriptRoot\common\Common.GenConfig.ConfigFiles.ps1
 . $PSScriptRoot\common\Common.GenConfig.Summary.ps1
@@ -4801,11 +5013,14 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.GenConfig.Validation.ps1
 . $PSScriptRoot\common\Common.GenConfig.AddVM.ps1
 . $PSScriptRoot\common\Common.GenConfig.VMList.ps1
+. $PSScriptRoot\common\Common.GenConfig.DiskMenu.ps1
 . $PSScriptRoot\common\Common.GenConfig.Help.ps1
 . $PSScriptRoot\common\Common.Health.ps1
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
+. $PSScriptRoot\common\Common.Linux.ps1
 . $PSScriptRoot\common\Common.snapshots.ps1
+. $PSScriptRoot\common\Common.PKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
 
 
@@ -4848,16 +5063,29 @@ if (-not $Common.Initialized) {
     $effectiveSkipEnvironmentDetection = $profileSkipEnvironmentDetection -or $SkipEnvironmentDetection.IsPresent
     $effectiveSkipHostPreparation = $profileSkipHostPreparation -or $SkipHostPreparation.IsPresent
 
+    # Jobs inherit context from the parent process; skip expensive probes
+    # that are irrelevant inside Start-Job / ThreadJob workers.
+    if ($InJob) {
+        $effectiveSkipEnvironmentDetection = $true
+        if (-not $GetLatestHotfixVersion) {
+            $effectiveSkipMaintenanceRefresh = $true
+        }
+        $effectiveSkipHostPreparation = $true
+        $effectiveSkipVmCacheRefresh = $true
+    }
+
     try {
         Write-Progress2 "MemLabs initializing" -Status "Starting..." -PercentComplete 0
         $Global:ProgressPreference = 'SilentlyContinue'
-        try {
-            $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
-            if ($currentProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::High) {
-                $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+        if (-not $InJob) {
+            try {
+                $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+                if ($currentProcess.PriorityClass -ne [System.Diagnostics.ProcessPriorityClass]::High) {
+                    $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+                }
             }
+            catch {}
         }
-        catch {}
     }
     catch {}
     finally {
@@ -4882,7 +5110,11 @@ if (-not $Common.Initialized) {
         $gitBranchCacheFile = Join-Path $startupCachePath "git-branch-context.json"
 
         $image = (Join-Path $PSScriptRoot "MemLabs.png")
-        if (-not $PSBoundParameters.ContainsKey('DevBranch')) {
+        if ($InJob -and -not $PSBoundParameters.ContainsKey('DevBranch')) {
+            # Jobs don't need git status; default to non-dev branch
+            $devBranch = $false
+        }
+        elseif (-not $PSBoundParameters.ContainsKey('DevBranch')) {
             Write-Progress2 "MemLabs initializing" -Status "Checking Git Status" -PercentComplete 2
             write-log "$($env:ComputerName) is running git branch from $($pwd.Path)" -LogOnly
             $devBranch = $false
@@ -5160,8 +5392,8 @@ if (-not $Common.Initialized) {
             $breakPrefix = "-----"
         }
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260420.0"
-            LatestHotfixVersion         = "260420.0"
+            MemLabsVersion              = "260522.0"
+            LatestHotfixVersion         = "260522.0"
             PS7                         = $PS7
             Initialized                 = $true
             InJob                       = $InJob
@@ -5184,6 +5416,7 @@ if (-not $Common.Initialized) {
             LogPath                     = Join-Path $logsPath "VMBuild.log"                                         # Log File
             CrashLogsPath               = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
             RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
+            MRemoteNGFilePath           = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"                # mRemoteNG File
             VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
             DevBranch                   = $devBranch                                                                # Git dev branch
             Supported                   = $null                                                                     # Supported Configs
@@ -5205,7 +5438,6 @@ if (-not $Common.Initialized) {
         $global:StorageConfig = [PSCustomObject]@{
             StorageLocation = $null
             StorageToken    = $null
-            UseBearerAuth   = $false
         }
         $global:DSC_Copied = @()
 
@@ -5302,11 +5534,17 @@ if (-not $Common.Initialized) {
         ### Set supported options
         Set-BackgroundImage $image "right" (50 - 13) "uniform" -InJob:$InJob
         Write-Progress2 "MemLabs initializing" -Status "Gathering Supported Options" -PercentComplete 13
-        Set-SupportedOptions
+        Write-Log "Init: Setting supported options..." -LogOnly
+        Flush-LogBuffer -All
+        if (-not $InJob) {
+            Set-SupportedOptions
+        }
 
         # Generate cache
         $i = 14
         if (-not $InJob.IsPresent) {
+            Write-Log "Init: Starting host preparation (DHCP, registry, cache cleanup)..." -LogOnly
+            Flush-LogBuffer -All
 
             if (-not $effectiveSkipHostPreparation) {
                 try {
@@ -5342,51 +5580,23 @@ if (-not $Common.Initialized) {
             Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
 
             if (-not $InJob) {
-                if (-not $effectiveSkipVmCacheRefresh) {
-                    if ($WarmVmCacheInBackground) {
-                        Write-Progress2 "MemLabs initializing" -Status "Starting Background VM Cache Warmup" -PercentComplete $i
-                        Start-Job -Name "MemLabs-VMCacheWarmup" -ScriptBlock {
-                            param($scriptRoot, $devBranch)
-                            Set-Location $scriptRoot
-                            . (Join-Path $scriptRoot "Common.ps1") -InJob -DevBranch:$devBranch -SkipStorageInit -SkipMaintenanceRefresh -SkipEnvironmentDetection -SkipVmCacheRefresh
-                            $list = Get-List -Type VM -ResetCache
-                            # Batch fetch all Hyper-V VMs once instead of one Get-VM call per VM.
-                            $allVMs = @{}
-                            foreach ($hv in (Get-VM)) { $allVMs[$hv.Id.Guid] = $hv }
-                            foreach ($vm in $list) {
-                                $vm2 = $allVMs[$vm.vmId.Guid]
-                                if (-not $vm2) { $vm2 = Get-VM -Id $vm.vmId -ErrorAction SilentlyContinue }
-                                if ($vm2) { Update-VMInformation -vm $vm2 }
-                            }
-                        } -ArgumentList $PSScriptRoot, $devBranch | Out-Null
-                    }
-                    else {
-                        Write-Progress2 "MemLabs initializing" -Status "Reset Cache" -PercentComplete $i
-                        $list = Get-List -Type VM -ResetCache
-                        # Batch fetch all Hyper-V VMs once instead of one Get-VM call per VM.
-                        # Get-VM is an expensive WMI round trip; doing it N times in a loop is the
-                        # dominant cost of VM cache update on hosts with many VMs.
-                        $allVMs = @{}
-                        foreach ($hv in (Get-VM)) { $allVMs[$hv.Id.Guid] = $hv }
-                        foreach ($vm in $list) {
-                            $i++
-                            if ($i -ge 98) {
-                                $i = 98
-                            }
-                            Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
-                            Write-Progress2 "MemLabs initializing" -Status "Updating VM Cache" -PercentComplete $i
-                            $vm2 = $allVMs[$vm.vmId.Guid]
-                            if (-not $vm2) { $vm2 = Get-VM -id $vm.vmId -ErrorAction SilentlyContinue }
-                            if ($vm2) { Update-VMInformation -vm $vm2 }
-                        }
-                    }
-                }
-                else {
-                    Write-Log "Skipping VM cache refresh during initialization." -LogOnly
-                }
+                # The background Start-Job warmup was removed: it runs in a
+                # separate process so its $global:vm_List is never shared with
+                # the foreground. The extra Get-VM + Get-VMNetworkAdapter calls
+                # serialize behind vmms.exe and cause the foreground's first
+                # Get-List call (in Test-NoRRAS → Test-Networks) to stall for
+                # minutes. The foreground populates its own cache on first use.
+                Write-Progress2 "MemLabs initializing" -Status "Skipping background VM warmup (foreground will populate on demand)" -PercentComplete $i
+                Write-Log "Init: Skipping background VM cache warmup; foreground will populate on first Get-List call." -LogOnly
+                Flush-LogBuffer -All
                 $i++
                 Set-BackgroundImage $image "right" (50 - $i) "uniform" -InJob:$InJob
                 Write-Progress2 "MemLabs initializing" -Status "Finalizing" -PercentComplete $i
+
+                # Start a background ThreadJob to refresh LastKnownIP for running
+                # VMs. This runs after init so it doesn't contend with the
+                # foreground's first Get-List call.
+                Start-VMIPRefreshJob
 
                 # Add HGS Registry key to allow local CA Cert
                 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\HgsClient" -Name "LocalCACertSupported" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null

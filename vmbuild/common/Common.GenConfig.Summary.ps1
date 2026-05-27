@@ -36,8 +36,22 @@
 }
 
 function get-CMOptionsSummary {
+    [CmdletBinding()]
+    param (
+        # Optional: render summary for an arbitrary cmOptions block (e.g. the one
+        # attached to a specific site server VM). When omitted, falls back to
+        # $Global:Config.cmOptions for legacy callers.
+        [Parameter(Mandatory = $false)]
+        [object] $CmOptions
+    )
     $fixedConfig = $Global:Config.virtualMachines | Where-Object { -not $_.hidden }
-    $options = $Global:Config.cmOptions
+    if ($null -eq $CmOptions) {
+        $options = $Global:Config.cmOptions
+    }
+    else {
+        $options = $CmOptions
+    }
+    if ($null -eq $options) { return "" }
 
     # Version (red if tech-preview, otherwise green). Use baseline number when SCP is Offline.
     $verText = $options.version
@@ -56,10 +70,6 @@ function get-CMOptionsSummary {
     $installColor = if ($options.install) { "ForestGreen" } else { "Tomato" }
     $installMark = if ($options.install) { "✓" } else { "✗" }
 
-    # Push Clients — green ✓ when on, tan ✗ when off (intentional, not error)
-    $pushColor = if ($options.pushClientToDomainMembers) { "ForestGreen" } else { "Tan" }
-    $pushMark = if ($options.pushClientToDomainMembers) { "✓" } else { "✗" }
-
     # Auth — PKI is the more secure choice (green); EHTTP is the default (khaki/yellow)
     $authText = if ($options.UsePKI) { "PKI" } else { "EHTTP" }
     $authColor = if ($options.UsePKI) { "ForestGreen" } else { "Khaki" }
@@ -74,7 +84,6 @@ function get-CMOptionsSummary {
         (Format-OptionToken -Color "DimGray" -Text "CM ") + (Format-OptionToken -Color $verColor -Text $verText)
         Format-OptionToken -Color $licenseColor -Text $licenseText
         (Format-OptionToken -Color "DimGray" -Text "Install ") + (Format-OptionToken -Color $installColor -Text $installMark)
-        (Format-OptionToken -Color "DimGray" -Text "Push ") + (Format-OptionToken -Color $pushColor -Text $pushMark)
         (Format-OptionToken -Color "DimGray" -Text "Auth ") + (Format-OptionToken -Color $authColor -Text $authText)
         (Format-OptionToken -Color "DimGray" -Text "SCP ") + (Format-OptionToken -Color $scpColor -Text $scpText)
     )
@@ -84,6 +93,12 @@ function get-CMOptionsSummary {
     if ($testSystem -and $options.OfflineSUP) {
         $tokens += (Format-OptionToken -Color "DimGray" -Text "SUP ") + (Format-OptionToken -Color "Tan" -Text "Offline")
     }
+
+    # BLM badge — always shown so users can tell at a glance whether BitLocker
+    # Management is on for this site server (green ✓ when on, tan ✗ when off).
+    $blmColor = if ($options.EnableBLM) { "ForestGreen" } else { "Tan" }
+    $blmMark = if ($options.EnableBLM) { "✓" } else { "✗" }
+    $tokens += (Format-OptionToken -Color "DimGray" -Text "BLM ") + (Format-OptionToken -Color $blmColor -Text $blmMark)
 
     $Output = $tokens -join $sep
 
@@ -141,215 +156,108 @@ function Get-SortedProperties {
         [object] $property
     )
 
-    $Sorted = @()
-    $members = $property | Get-Member -MemberType NoteProperty
-    if ($members.Name -contains "vmName") {
-        $sorted += "vmName"
-    }
-    if ($members.Name -contains "DeploymentType") {
-        $sorted += "DeploymentType"
-    }
-    if ($members.Name -contains "domainName") {
-        $sorted += "DomainName"
-    }
-    if ($members.Name -contains "CMVersion") {
-        $sorted += "CMVersion"
-    }
-    if ($members.Name -contains "prefix") {
-        $sorted += "Prefix"
-    }
-    if ($members.Name -contains "network") {
-        $sorted += "Network"
-    }
-    if ($members.Name -contains "DefaultServerOS") {
-        $sorted += "DefaultServerOS"
-    }
-    if ($members.Name -contains "DefaultClientOS") {
-        $sorted += "DefaultClientOS"
-    }
-    if ($members.Name -contains "DefaultSqlVersion") {
-        $sorted += "DefaultSqlVersion"
-    }
-    if ($members.Name -contains "UseDynamicMemory") {
-        $sorted += "UseDynamicMemory"
-    }
-    if ($members.Name -contains "IncludeClients") {
-        $sorted += "IncludeClients"
-    }
-    if ($members.Name -contains "IncludeSSMSOnNONSQL") {
-        $sorted += "IncludeSSMSOnNONSQL"
-    }
-    if ($members.Name -contains "adminName") {
-        $sorted += "AdminName"
-    }
-    if ($members.Name -contains "basePath") {
-        $sorted += "BasePath"
-    }
-    if ($members.Name -contains "domainUser") {
-        $sorted += "DomainUser"
-    }
-    if ($members.Name -contains "role") {
-        $sorted += "Role"
-    }
-    if ($members.Name -contains "memory") {
-        $sorted += "Memory"
-    }
-    if ($members.Name -contains "dynamicMinRam") {
-        $sorted += "DynamicMinRam"
-    }
-    if ($members.Name -contains "virtualProcs") {
-        $sorted += "VirtualProcs"
-    }
-    if ($members.Name -contains "operatingSystem") {
-        $sorted += "OperatingSystem"
-    }
-    if ($members.Name -contains "sqlVersion") {
-        $sorted += "sqlVersion"
-    }
-    if ($members.Name -contains "sqlInstanceName") {
-        $sorted += "sqlInstanceName"
-    }
-    if ($members.Name -contains "sqlInstanceDir") {
-        $sorted += "sqlInstanceDir"
-    }
-    if ($members.Name -contains "sqlPort") {
-        $sorted += "sqlPort"
-    }
-    if ($members.Name -contains "SqlAgentAccount") {
-        $sorted += "SqlAgentAccount"
-    }
-    if ($members.Name -contains "SqlServiceAccount") {
-        $sorted += "SqlServiceAccount"
-    }    
-    if ($members.Name -contains "remoteSQLVM") {
-        $sorted += "RemoteSQLVM"
-    }
-    if ($members.Name -contains "cmInstallDir") {
-        $sorted += "cmInstallDir"
-    }
-    if ($members.Name -contains "parentSiteCode") {
-        $sorted += "ParentSiteCode"
-    }
-    if ($members.Name -contains "siteCode") {
-        $sorted += "SiteCode"
-    }
-    if ($members.Name -contains "siteName") {
-        $sorted += "SiteName"
-    }
-    if ($members.Name -contains "remoteContentLibVM") {
-        $sorted += "RemoteContentLibVM"
-    }
-    if ($members.Name -contains "tpmEnabled") {
-        $sorted += "tpmEnabled"
-    }
-    if ($members.Name -contains "InstallSSMS") {
-        $sorted += "InstallSSMS"
-    }
-    if ($members.Name -contains "InstallCA") {
-        $sorted += "InstallCA"
+    # Single source of truth for the menu render order.
+    #   Key   = NoteProperty name as it appears on the object.
+    #   Value = label emitted to the caller (some are case-adjusted for display).
+    # Properties not present on the object are silently skipped. Properties
+    # present but not in this list fall through to the catch-all at the end
+    # (unless they're in $hidden).
+    $order = [ordered]@{
+        'vmName'              = 'vmName'
+        'DeploymentType'      = 'DeploymentType'
+        'domainName'          = 'DomainName'
+        'prefix'              = 'Prefix'
+        'network'             = 'Network'
+        'DefaultServerOS'     = 'DefaultServerOS'
+        'DefaultClientOS'     = 'DefaultClientOS'
+        'DefaultSqlVersion'   = 'DefaultSqlVersion'
+        'UseDynamicMemory'    = 'UseDynamicMemory'
+        'IncludeClients'      = 'IncludeClients'
+        # ConfigMgr group (positioned together so New Domain wizard can
+        # render a section header above CMVersion).
+        'CMVersion'              = 'CMVersion'
+        'IncludeSSMSOnNONSQL'    = 'IncludeSSMSOnNONSQL'
+        'EnableSUPOnSiteServers' = 'EnableSUPOnSiteServers'
+        # Client-push group (section header attaches to PushCMClientToClients).
+        'PushCMClientToClients'     = 'PushCMClientToClients'
+        'PushCMClientToServers'     = 'PushCMClientToServers'
+        'PushCMClientToSiteSystems' = 'PushCMClientToSiteSystems'
+        # Proxy Settings group (section header attaches to UseProxyForClients).
+        'UseProxyForClients'        = 'UseProxyForClients'
+        'UseProxyForCM'             = 'UseProxyForCM'
+        'adminName'           = 'AdminName'
+        'basePath'            = 'BasePath'
+        'domainUser'          = 'DomainUser'
+        'role'                = 'Role'
+        'memory'              = 'Memory'
+        'dynamicMinRam'       = 'DynamicMinRam'
+        'virtualProcs'        = 'VirtualProcs'
+        'operatingSystem'     = 'OperatingSystem'
+        'sqlVersion'          = 'sqlVersion'
+        'sqlInstanceName'     = 'sqlInstanceName'
+        'sqlInstanceDir'      = 'sqlInstanceDir'
+        'sqlPort'             = 'sqlPort'
+        'SqlAgentAccount'     = 'SqlAgentAccount'
+        'SqlServiceAccount'   = 'SqlServiceAccount'
+        'remoteSQLVM'         = 'RemoteSQLVM'
+        'cmInstallDir'        = 'cmInstallDir'
+        'parentSiteCode'      = 'ParentSiteCode'
+        'siteCode'            = 'SiteCode'
+        'siteName'            = 'SiteName'
+        # Per-VM cmOptions on top-level site servers (post-migration shape).
+        # Rendered as a colored summary; selecting it dives into the sub-menu.
+        'cmOptions'           = 'cmOptions'
+        'remoteContentLibVM'  = 'RemoteContentLibVM'
+        'tpmEnabled'          = 'tpmEnabled'
+        'BitLocker'           = 'BitLocker'
+        'InstallSSMS'         = 'InstallSSMS'
+        'pushClient'          = 'pushClient'
+        'additionalDisks'     = 'AdditionalDisks'
+        'installDP'           = 'InstallDP'
+        'enablePullDP'        = 'EnablePullDP'
+        'installMP'           = 'InstallMP'
+        'installRP'           = 'InstallRP'
+        'installSUP'          = 'InstallSUP'
+        'installSMSProv'      = 'InstallSMSProv'
+        'Version'             = 'Version'
+        'Install'             = 'Install'
+        'EVALVersion'         = 'EVALVersion'
+        'UsePKI'              = 'UsePKI'
+        'OfflineSCP'          = 'OfflineSCP'
+        'OfflineSUP'          = 'OfflineSUP'
+        'PrePopulateObjects'  = 'PrePopulateObjects'
+        'EnableBLM'           = 'EnableBLM'
     }
 
-    if ($members.Name -contains "additionalDisks") {
-        $sorted += "AdditionalDisks"
-    }
-    if ($members.Name -contains "installDP") {
-        $sorted += "InstallDP"
-    }
-    if ($members.Name -contains "enablePullDP") {
-        $sorted += "EnablePullDP"
-    }
-    if ($members.Name -contains "installMP") {
-        $sorted += "InstallMP"
-    }
-    if ($members.Name -contains "installRP") {
-        $sorted += "InstallRP"
-    }
-    if ($members.Name -contains "installSUP") {
-        $sorted += "InstallSUP"
-    }
-    if ($members.Name -contains "installSMSProv") {
-        $sorted += "InstallSMSProv"
-    }
-    if ($members.Name -contains "Version") {
-        $sorted += "Version"
-    }
-    if ($members.Name -contains "Install") {
-        $sorted += "Install"
-    }
-    if ($members.Name -contains "EVALVersion") {
-        $sorted += "EVALVersion"
-    }
-    if ($members.Name -contains "UsePKI") {
-        $sorted += "UsePKI"
-    }
-    if ($members.Name -contains "OfflineSCP") {
-        $sorted += "OfflineSCP"
-    }
-    if ($members.Name -contains "OfflineSUP") {
-        $sorted += "OfflineSUP"
-    }
-    if ($members.Name -contains "PushClientToDomainMembers") {
-        $sorted += "PushClientToDomainMembers"
-    }
-    if ($members.Name -contains "PrePopulateObjects") {
-        $sorted += "PrePopulateObjects"
-    }
-  
-    switch ($members.Name) {
-        "vmName" {  }
-        "role" {  }
-        "memory" { }
-        "dynamicMinRam" { }
-        "domainUser" {}
-        "virtualProcs" { }
-        "operatingSystem" {  }
-        "siteCode" { }
-        "siteName" { }
-        "parentSiteCode" { }
-        "sqlVersion" { }
-        "sqlInstanceName" {  }
-        "sqlInstanceDir" { }
-        "sqlPort" { }
-        "SqlAgentAccount" { }
-        "SqlServiceAccount" { }
-        "additionalDisks" { }
-        "cmInstallDir" { }
-        "DeploymentType" { }
-        "domainName" { }
-        "prefix" { }
-        "CMVersion" { }
-        "network" { }
-        "DefaultServerOS" { }
-        "DefaultClientOS" { }
-        "DefaultSqlVersion" { }
-        "UseDynamicMemory" {}
-        "IncludeClients" { }
-        "IncludeSSMSOnNONSQL" { }  
-        "adminName" { }
-        "basePath" { }
-        "remoteSQLVM" {}
-        "remoteContentLibVM" {}
-        "tpmEnabled" {}
-        "installSSMS" {}
-        "installCA" {}
-        "enablePullDP" {}
-        "installSUP" {}
-        "installDP" {}
-        "installMP" {}
-        "installRP" {}
-        "installSMSProv" {}
-        "version" {}
-        "install" {}
-        "EVALVersion" {}
-        "UsePKI" {}
-        "OfflineSCP" {}
-        "OfflineSUP" {}
-        "pushClientToDomainMembers" {}
-        "PrePopulateObjects" {}
+    # Properties that may exist on the object but must never be surfaced in
+    # the menu (legacy, internal flags, or rendered elsewhere).
+    $hidden = @(
+        'installCA'
+        'UseOfflineRoot'
+        'SubordinateCA'
+        '_autoAddedByOfflineRootCA'
+        '_autoAddedByProxy'
+        'pushClientToDomainMembers'
+        'osFamily'
+    )
 
+    $memberNames = @($property | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)
+    $sorted = @()
 
-        Default { $sorted += $_ }
+    foreach ($key in $order.Keys) {
+        if ($memberNames -contains $key) {
+            $sorted += $order[$key]
+        }
     }
+
+    # Catch-all: anything present on the object but not in $order or $hidden
+    # gets appended at the end so new properties surface without code changes.
+    foreach ($name in $memberNames) {
+        if ($order.Contains($name)) { continue }
+        if ($hidden -contains $name) { continue }
+        $sorted += $name
+    }
+
     return $sorted
 }
 
@@ -389,6 +297,9 @@ function Get-AdditionalInformationColor {
             $color = $Global:Common.Colors.GenConfigSiteCode
         }
         "ParentSiteCode" {
+            $color = $Global:Common.Colors.GenConfigSiteCode
+        }
+        "cmInstallDir" {
             $color = $Global:Common.Colors.GenConfigSiteCode
         }
         "SqlVersion" {
@@ -677,7 +588,13 @@ function get-VMString {
         }
     }
 
-    if ($virtualMachine.InstallCA) {
+    if ($virtualMachine.Role -eq 'StandaloneRootCA') {
+        $name += " [CA]"
+    }
+    elseif ($Global:Config.pkiOptions -and $Global:Config.pkiOptions.EnablePKI -and $Global:Config.pkiOptions.IssuingCAVM -eq $virtualMachine.vmName) {
+        $name += " [CA]"
+    }
+    elseif ($virtualMachine.InstallCA) {
         $name += " [CA]"
     }
 
@@ -801,6 +718,29 @@ function get-VMString {
                         $color = $ColorMap[$($siteVM.SiteCode)]
                     }
                     catch {}
+                }
+                else {
+                    # Color clients to match the Primary/Secondary site that would push the client.
+                    # Client-push assignment follows network: a Primary pushes to DomainMembers on its
+                    # own network or any of its reporting Secondaries' networks (see ClientPush logic
+                    # in Common.GenConfig.ps1). Mirror that here so the menu groups clients visually
+                    # with their owning site.
+                    $clientNetwork = if ($virtualMachine.Network) { $virtualMachine.Network } else { $config.vmOptions.Network }
+                    if ($clientNetwork) {
+                        $siteServers = $allVMs | Where-Object { $_.role -in ("Primary", "Secondary") -and $_.SiteCode }
+                        # Direct match: site server on same network as the client
+                        $owningSite = $siteServers | Where-Object { $_.Network -eq $clientNetwork } | Select-Object -First 1
+                        if (-not $owningSite) {
+                            # Indirect match: a Secondary on the client's network reports to a Primary
+                            $secondaryOnNet = $siteServers | Where-Object { $_.role -eq "Secondary" -and $_.Network -eq $clientNetwork } | Select-Object -First 1
+                            if ($secondaryOnNet -and $secondaryOnNet.parentSiteCode) {
+                                $owningSite = $siteServers | Where-Object { $_.role -eq "Primary" -and $_.SiteCode -eq $secondaryOnNet.parentSiteCode } | Select-Object -First 1
+                            }
+                        }
+                        if ($owningSite -and $ColorMap.ContainsKey($owningSite.SiteCode)) {
+                            $color = $ColorMap[$owningSite.SiteCode]
+                        }
+                    }
                 }
 
             }

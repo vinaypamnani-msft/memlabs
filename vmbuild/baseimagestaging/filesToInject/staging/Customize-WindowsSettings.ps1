@@ -70,6 +70,10 @@ if ($server) {
 
 # Common Windows Settings
 # ========================
+Update-Log "Prevent automatic device encryption (managed by ConfigMgr when needed)"
+New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker" -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker" -Name "PreventDeviceEncryption" -Value 1 -PropertyType DWORD -Force | Out-Null
+
 Update-Log "Show 'My Computer' on desktop"
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0
 

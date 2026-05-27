@@ -102,7 +102,11 @@ function Get-ValidDomainNames {
         "fabrikam.com" = "FAB-" ; "fourthcoffee.com" = "FOR-" ;
         "lamnahealthcare.com" = "LAM-"  ; "margiestravel.com" = "MGT-" ; "nodpublishers.com" = "NOD-" ;
         "proseware.com" = "PRO-" ; "relecloud.com" = "REL-" ; "fineartschool.net" = "FAS-" ; "southridgevideo.com" = "SRV-" ; "tailspintoys.com" = "TST-" ; "tailwindtraders.com" = "TWT-" ; "treyresearch.net" = "TRY-";
-        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-" ; "techpreview.com" = "CTP-" #techpreview.com is reserved for tech preview CM Installs (no longer needed)
+        "vanarsdelltd.com" = "VAN-" ; "wingtiptoys.com" = "WTT-" ; "woodgrovebank.com" = "WGB-"
+        # techpreview.com / "CTP-" intentionally omitted -- ConfigMgr Tech Preview
+        # builds are no longer supported, and leaving it in this dict caused the
+        # New Domain wizard to default to techpreview.com once shorter domains
+        # got consumed by other deployments.
     }
     foreach ($domain in (Get-DomainList)) {
         if ($domain) {
@@ -443,6 +447,9 @@ function Get-CriticalVMs {
     }
 
 
+    # Exclude Offline Root CA - it should only be started manually via Hyper-V
+    $vms = $vms | Where-Object { $_.Role -ne "StandaloneRootCA" }
+
     $return.dc += $vms | Where-Object { $_.Role -eq "DC" }
     $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "DC" }
     $vms = $vms | Where-Object { $_.Role -ne "DC" }
@@ -656,6 +663,7 @@ function Invoke-SmartStartVMs {
             }
         }
     }
+    $global:vm_List_LastUpdate = $null
     get-list -type VM -SmartUpdate | out-null
     return $failures
 }
@@ -698,6 +706,9 @@ function Invoke-StopVMs {
         get-job | remove-job | Out-Null
     }
     catch {}
+    # Invalidate the Get-List cache so the refresh below picks up
+    # the new VM states without being blocked by the throttle.
+    $global:vm_List_LastUpdate = $null
     get-list -type VM -SmartUpdate | out-null
 }
 
@@ -821,11 +832,11 @@ function ConvertTo-DeployConfigEx {
 
                 if ($thisVM.externalDomainJoinSiteCode) {
 
-                    $OtherDC = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
-                    if ($OtherDC.InstallCA) {
+                    $OtherCAVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.InstallCA })
+                    if ($OtherCAVM) {
                         #ADA-DC1.adatum.com\adatum-ADA-DC1-CA
                         $OtherDomainShort = $($ThisVM.ForestTrust).Split(".")[0]
-                        $OtherRootCA = "$($OtherDc.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherDc.VmName)-CA"
+                        $OtherRootCA = "$($OtherCAVM.VmName).$($ThisVM.ForestTrust)\$($OtherDomainShort)-$($OtherCAVM.VmName)-CA"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "RootCA" -Value $OtherRootCA -Force
                     }
 
@@ -837,7 +848,8 @@ function ConvertTo-DeployConfigEx {
                         }
                         $ExternalSiteServer = "$($RemoteSS.VmName).$($thisVM.ForestTrust)"
                         $ExternalTopLevelSiteServer = $ExternalSiteServer
-                        $otherDC = "$($OtherDc.VmName).$($ThisVM.ForestTrust)"
+                        $OtherDCVM = (Get-list -type vm -DomainName $ThisVM.ForestTrust | Where-Object { $_.Role -eq "DC" })
+                        $otherDC = "$($OtherDCVM.VmName).$($ThisVM.ForestTrust)"
                         $thisParams | Add-Member -MemberType NoteProperty -Name "OtherDC" -Value $otherDC -Force
 
                         $thisParams | Add-Member -MemberType NoteProperty -Name "ExternalSiteServer" -Value $ExternalSiteServer -Force
@@ -1012,7 +1024,13 @@ function ConvertTo-DeployConfigEx {
                 # --- ClientPush
                 $thisVMNetwork = $thisVMObject.Network
 
-                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object { $_.role -eq "DomainMember" -and -not ($_.SqlVersion) }
+                # Push to any DomainMember (incl. SQL) or site system VM that has pushClient enabled
+                # (per-VM opt-in/out). Treat null/absent as $true for back-compat with configs
+                # that haven't been re-saved.
+                $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+                $ClientNames = get-list2 -DeployConfig $deployConfig | Where-Object {
+                    $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+                }
                 $clientPush = @()
                 $clientPush += ($ClientNames | Where-Object { $_.network -eq $thisVMNetwork }).vmName
 

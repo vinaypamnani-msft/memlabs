@@ -29,29 +29,82 @@ Function Get-DomainStatsLine {
         $TotalMaxMem = [math]::Round(($ListCache | Measure-Object -Sum MemoryStartupGB).Sum)
         $TotalDiskUsed = [math]::Round(($ListCache | Measure-Object -Sum DiskUsedGB).Sum)
 
-        $stats += "[$($TotalRunningVMs.ToString().PadLeft(2," "))/$($TotalVMs.ToString().PadLeft(2," ")) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2," "))GB/$($TotalMaxMem)GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        # ANSI color codes for value highlighting
+        $esc = [char]27
+        $cBracket = "$esc[38;2;105;105;105m"   # DimGray - brackets
+        $cLabel   = "$esc[38;2;176;196;222m"   # LightSteelBlue - labels
+        $cValue   = "$esc[38;2;0;206;209m"     # DarkTurquoise - numeric values
+        $cWarn    = "$esc[38;2;255;255;0m"     # Yellow - partial anomaly
+        $cBad     = "$esc[38;2;255;69;0m"      # OrangeRed - zero/down
+        $cReset   = "$esc[0m"
+
+        # Conditional color for running VM count
+        if ($TotalRunningVMs -eq 0) {
+            $cRunning = $cBad
+        }
+        elseif ($TotalRunningVMs -lt $TotalVMs) {
+            $cRunning = $cWarn
+        }
+        else {
+            $cRunning = $cValue
+        }
+
+        # Available width for the stats portion.
+        # Menu overhead: 3 (arrow) + 5 ([N]  ) + 22 (domain pad) + 1 (space) = 31
+        # Extra margin for scrollbar/padding/cursor that reported width doesn't account for.
+        $termWidth = try { [Console]::WindowWidth } catch { 0 }
+        if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+        if ($termWidth -le 0) { $termWidth = 120 }
+        $maxWidth = $termWidth - 40
+
+        # Build parts with both plain (for measuring) and colorized versions
+        $corePlain = "[$($TotalRunningVMs.ToString().PadLeft(2))/$($TotalVMs.ToString().PadLeft(2)) Running VMs, Mem: $($TotalMem.ToString().PadLeft(2))GB/${TotalMaxMem}GB Disk: $([math]::Round($TotalDiskUsed,2))GB]"
+        $coreColor = "${cBracket}[${cRunning}$($TotalRunningVMs.ToString().PadLeft(2))${cLabel}/${cValue}$($TotalVMs.ToString().PadLeft(2)) ${cLabel}Running VMs, Mem: ${cValue}$($TotalMem.ToString().PadLeft(2))${cLabel}GB/${cValue}${TotalMaxMem}${cLabel}GB Disk: ${cValue}$([math]::Round($TotalDiskUsed,2))${cLabel}GB${cBracket}]${cReset}"
+
+        $rolePlain = @()
+        $roleColor = @()
         if ($ExistingCasCount -gt 0) {
-            $stats += "[CAS VMs: $ExistingCasCount] "
+            $rolePlain += "[CAS VMs: $ExistingCasCount]"
+            $roleColor += "${cBracket}[${cLabel}CAS VMs: ${cValue}$ExistingCasCount${cBracket}]${cReset}"
         }
         if ($ExistingPriCount -gt 0) {
-            $stats += "[PRI VMs: $ExistingPriCount] "
+            $rolePlain += "[PRI VMs: $ExistingPriCount]"
+            $roleColor += "${cBracket}[${cLabel}PRI VMs: ${cValue}$ExistingPriCount${cBracket}]${cReset}"
         }
         if ($ExistingSecCount -gt 0) {
-            $stats += "[SEC VMs: $ExistingSecCount] "
+            $rolePlain += "[SEC VMs: $ExistingSecCount]"
+            $roleColor += "${cBracket}[${cLabel}SEC VMs: ${cValue}$ExistingSecCount${cBracket}]${cReset}"
         }
         if ($ExistingSQLCount -gt 0) {
-            $stats += "[SQL VMs: $ExistingSQLCount] "
+            $rolePlain += "[SQL VMs: $ExistingSQLCount]"
+            $roleColor += "${cBracket}[${cLabel}SQL VMs: ${cValue}$ExistingSQLCount${cBracket}]${cReset}"
         }
-        #if ($ExistingDPMPCount -gt 0) {
-        #    $stats += "[DP VMs: $ExistingDPMPCount] "
-        #}
+
+        $networkPlain = ""
+        $networkColor = ""
+        if ($ExistingSubnetCount -gt 0) {
+            $networkPlain = "[Networks: $ExistingSubnetCount]"
+            $networkColor = "${cBracket}[${cLabel}Networks: ${cValue}$ExistingSubnetCount${cBracket}]${cReset}"
+        }
+
+        # Assemble with truncation - add parts only if they fit
+        $plainLen = $corePlain.Length
+        $stats = $coreColor
+
+        for ($i = 0; $i -lt $rolePlain.Count; $i++) {
+            if ($plainLen + 1 + $rolePlain[$i].Length -le $maxWidth) {
+                $stats += " $($roleColor[$i])"
+                $plainLen += 1 + $rolePlain[$i].Length
+            }
+            else { break }
+        }
+
+        if ($networkPlain -and ($plainLen + 1 + $networkPlain.Length -le $maxWidth)) {
+            $stats += " $networkColor"
+        }
 
         if ([string]::IsNullOrWhiteSpace($stats)) {
-            $stats = "[No ConfigMgr Roles installed] "
-        }
-
-        if ($ExistingSubnetCount -gt 0) {
-            $stats += "[Number of Networks: $ExistingSubnetCount] "
+            $stats = "${cBracket}[${cLabel}No ConfigMgr Roles installed${cBracket}]${cReset}"
         }
     }
     catch {}
@@ -68,19 +121,58 @@ function Show-ExistingNetwork2 {
 
     if ([string]::IsNullOrWhiteSpace($DomainName)) {
 
-        $domainList = @()
+        # Regex pattern to strip ANSI CSI sequences (using literal ESC char)
+        $ansiPattern = [char]27 + '\[[0-9;]*m'
+        $domainNames = Get-DomainList
 
-        foreach ($item in (Get-DomainList)) {
-            $stats = Get-DomainStatsLine -DomainName $item
-
-            $domainList += "$($item.PadRight(22," ")) $stats"
-        }
-
-        if ($domainList.Count -eq 0) {
+        if (-not $domainNames -or $domainNames.Count -eq 0) {
             return Select-NewDomainConfig
         }
 
         while ($true) {
+
+            # Recalculate terminal width and domain list on each iteration
+            # so resizing the window takes effect immediately.
+            $termWidth = try { [Console]::WindowWidth } catch { 0 }
+            if ($termWidth -le 0) { $termWidth = $host.UI.RawUI.WindowSize.Width }
+            if ($termWidth -le 0) { $termWidth = 120 }
+            $lineMaxWidth = $termWidth - 14
+
+            $domainList = @()
+            foreach ($item in $domainNames) {
+                $stats = Get-DomainStatsLine -DomainName $item
+
+                $line = "$($item.PadRight(22," ")) $stats"
+                # Measure visible width by stripping ANSI escape sequences
+                $plainLine = [regex]::Replace($line, $ansiPattern, '')
+                if ($plainLine.Length -gt $lineMaxWidth) {
+                    # Too wide - strip trailing [...] segments until it fits
+                    while ($plainLine.Length -gt $lineMaxWidth) {
+                        $lastBracket = $plainLine.LastIndexOf(' [')
+                        if ($lastBracket -le 23) { break }
+                        $plainLine = $plainLine.Substring(0, $lastBracket)
+                    }
+                    # Truncate the ANSI-colored line to match the same visible length
+                    $targetLen = $plainLine.Length
+                    $visCount = 0
+                    $cutIdx = $line.Length
+                    $inEsc = $false
+                    for ($ci = 0; $ci -lt $line.Length; $ci++) {
+                        if ($line[$ci] -eq [char]27) { $inEsc = $true }
+                        if ($inEsc) {
+                            if ($line[$ci] -eq 'm') { $inEsc = $false }
+                            continue
+                        }
+                        $visCount++
+                        if ($visCount -ge $targetLen) {
+                            $cutIdx = $ci + 1
+                            break
+                        }
+                    }
+                    $line = $line.Substring(0, $cutIdx) + "$([char]27)[0m"
+                }
+                $domainList += $line
+            }
 
             Write-log -Activity "Create new domain -or- modify existing domain"
             $customOptions = [ordered]@{ "*HF" = "Get-DomainHelpLine" }
@@ -93,7 +185,7 @@ function Show-ExistingNetwork2 {
                 $i++
                 $customOptions += [ordered]@{ "$i" = "$domain%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
                 $domainshort = $domain -Split " " | Select-Object -First 1
-                $customOptions += [ordered]@{ "H$i" = "Add additional VM's or change some settings in $domainshort" }
+                $customOptions += [ordered]@{ "H$i" = "Add additional VMs or change some settings in $domainshort" }
 
             }
 
@@ -152,7 +244,7 @@ function Show-ExistingNetwork2 {
 
     $TotalStoppedVMs = (Get-List -Type VM -Domain $domain | Where-Object { $_.State -ne "Running" -and ($_.Role -eq "CAS" -or $_.Role -eq "Primary" -or $_.Role -eq "DC") } | Measure-Object).Count
     if ($TotalStoppedVMs -gt 0) {
-        $response = Read-YesOrNoWithTimeout -Prompt "$TotalStoppedVMs Critical VM's in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
+        $response = Read-YesOrNoWithTimeout -Prompt "$TotalStoppedVMs Critical VMs in this domain are not running. Do you wish to start them now? (Y/n)" -HideHelp -Default "y"
         if ($response -and ($response.ToLowerInvariant() -eq "n" -or $response.ToLowerInvariant() -eq "no")) {
         }
         else {
@@ -216,6 +308,10 @@ function Format-Roles {
             "AADClient" { $newRoles += "$($role.PadRight($padding))`t[New VM that boots to OOBE, allowing AAD join from OOBE]" }
             "OSDClient" { $newRoles += "$($role.PadRight($padding))`t[New bare VM without any OS]" }
             "WSUS" { $newRoles += "$($role.PadRight($padding))`t[Standalone WSUS Server]" }
+            "StandaloneRootCA" { $newRoles += "$($role.PadRight($padding))`t[Offline Root CA for two-tier PKI (workgroup, powered off after setup)]" }
+            "Proxy" { $newRoles += "$($role.PadRight($padding))`t[Linux Squid forward proxy (1 per domain, Ubuntu Server 24.04)]" }
+            "LinuxServer" { $newRoles += "$($role.PadRight($padding))`t[Generic Ubuntu Server 24.04 VM (DHCP, optional domain join)]" }
+            "LinuxClient" { $newRoles += "$($role.PadRight($padding))`t[Ubuntu Desktop 24.04 workstation for MDM/EDR testing (GNOME, xrdp, optional domain join)]" }
             default { $newRoles += $role }
         }
     }
@@ -244,6 +340,21 @@ function Select-RolesForExisting {
     if ($DC) {
         $existingRoles = Select-RolesForExistingList | Where-Object { $_ -ne "DC" }
     }
+
+    # Only one Proxy is allowed per domain (config + existing combined).
+    $proxyInConfig = @($global:config.VirtualMachines | Where-Object { $_.Role -eq "Proxy" }).Count -gt 0
+    $proxyInDomain = $false
+    if (-not $proxyInConfig -and $global:config.vmOptions.domainName) {
+        try {
+            $proxyInDomain = @(Get-List -Type VM -DomainName $global:config.vmOptions.domainName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Role -eq "Proxy" }).Count -gt 0
+        }
+        catch { $proxyInDomain = $false }
+    }
+    if ($proxyInConfig -or $proxyInDomain) {
+        $existingRoles = $existingRoles | Where-Object { $_ -ne "Proxy" }
+    }
+
     $existingRoles2 = @()
     $CurrentValue = $null
     if ($enhance) {
@@ -265,11 +376,68 @@ function Select-RolesForExisting {
     else {
         $existingRoles2 = $existingRoles
     }
-    $existingRoles2 = Format-Roles $existingRoles2
+
+    # Group roles into sections so the picker has visual headers. Order within
+    # each group is preserved from $existingRoles2 (case-insensitive match).
+    $roleGroups = @(
+        @{ Name = "Domain Members"        ; Roles = @("DomainMember (Client)", "DomainMember (Server)") }
+        @{ Name = "SQL Servers"           ; Roles = @("SqlServer", "SQLAO") }
+        @{ Name = "Workgroup / Isolated"  ; Roles = @("WorkgroupMember", "InternetClient", "AADClient", "OSDClient", "LinuxClient") }
+        @{ Name = "Configuration Manager" ; Roles = @("CAS", "CAS and Primary", "Primary", "Secondary", "SiteSystem") }
+        @{ Name = "Infrastructure"        ; Roles = @("DC", "BDC", "FileServer", "WSUS", "StandaloneRootCA", "Proxy", "LinuxServer") }
+    )
+
+    # Build an ordered list of roles bucketed by group, plus an "Other" bucket
+    # for anything not explicitly classified (defensive against new roles).
+    $orderedRoles = @()
+    $orderedGroupForRole = @{}
+    $remaining = [System.Collections.ArrayList]@($existingRoles2)
+    foreach ($group in $roleGroups) {
+        foreach ($role in $group.Roles) {
+            $match = $remaining | Where-Object { $_ -ieq $role } | Select-Object -First 1
+            if ($match) {
+                $orderedRoles += $match
+                $orderedGroupForRole[$match] = $group.Name
+                $remaining.Remove($match) | Out-Null
+            }
+        }
+    }
+    foreach ($leftover in $remaining) {
+        $orderedRoles += $leftover
+        $orderedGroupForRole[$leftover] = "Other"
+    }
+
+    # Format role labels (adds the [description] suffix used by Get-Menu2).
+    $orderedRolesFormatted = Format-Roles $orderedRoles
+
+    # Pre-build menuItems with *B header rows interleaved between groups.
+    $menuItems = [System.Collections.ArrayList]@()
+    $currentGroup = $null
+    $headerIndex = 0
+    for ($i = 0; $i -lt $orderedRoles.Count; $i++) {
+        $role = $orderedRoles[$i]
+        $formatted = $orderedRolesFormatted[$i]
+        $group = $orderedGroupForRole[$role]
+        if ($group -ne $currentGroup) {
+            $headerIndex++
+            $null = New-MenuItem -MenuItems ([ref]$menuItems) -ItemName "*B$headerIndex" `
+                -Text "$group%$($Global:Common.Colors.GenConfigHeader)"
+            $currentGroup = $group
+        }
+        $itemNumber = $i + 1
+        $null = New-MenuItem -MenuItems ([ref]$menuItems) -ItemName "$itemNumber" `
+            -Text $formatted -Selectable `
+            -Color1 $Global:Common.Colors.GenConfigNormal `
+            -Color2 $Global:Common.Colors.GenConfigDefaultNumber
+    }
+
+    # Default selection: first selectable item (matches prior behavior, since
+    # CurrentValue="DomainMember" never matched the "(Client)/(Server)" labels).
+    $firstSelectable = $menuItems | Where-Object { $_.Selectable } | Select-Object -First 1
+    if ($firstSelectable) { $firstSelectable.Selected = $true }
 
     $OptionArray = @{ "H" = $ha_Text }
-    $OptionArray += @{  "L" = "Add Linux VM from Hyper-V Gallery" }
-    $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($existingRoles2) -CurrentValue $CurrentValue -additionalOptions $OptionArray -test:$false
+    $role = Get-Menu2 -MenuName "Add a VM to the domain - Role Selection" -Prompt "Select Role to Add" -OptionArray $($orderedRolesFormatted) -menuItems $menuItems -additionalOptions $OptionArray -test:$false
 
     if ($role -eq "ESCAPE") {
         return
@@ -719,16 +887,19 @@ function Select-ExistingSubnets {
             else {
                 Write-Log -Activity -NoNewLine "Select a network"
                 if ($CurrentNetworkIsValid) {
-                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue -Split
+                    $response = Get-Menu2 -MenuName "Existing Network Selection" -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -CurrentValue $CurrentValue -Split
                 }
                 else {
-                    $response = Get-Menu -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -Split
+                    $response = Get-Menu2 -MenuName "Existing Network Selection" -Prompt "Select existing network" -OptionArray $subnetListModified -AdditionalOptions $customOptions -test:$false -Split
                 }
             }
             write-Verbose "[Select-ExistingSubnets] Get-menu response $response"
             if ([string]::IsNullOrWhiteSpace($response)) {
                 Write-Verbose "[Select-ExistingSubnets] Subnet response = null"
                 continue
+            }
+            if ($response -eq "ESCAPE") {
+                return $null
             }
             write-Verbose "response $response"
 
@@ -754,7 +925,11 @@ function Select-ExistingSubnets {
                         $subnetlistEnhanced = Get-EnhancedSubnetList -subnetList $subnetList -Domain $domain
                     }
                     Write-Log -Activity -NoNewLine "New Network menu"
-                    $network = Get-Menu -Prompt "Select New Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1) -Split
+                    $network = Get-Menu2 -MenuName "New Network Selection" -Prompt "Select New Network" -OptionArray $subnetlistEnhanced -additionalOptions $customOptions -Test:$false -CurrentValue $($subnetList | Select-Object -First 1) -Split
+                    if ($network -eq "ESCAPE") {
+                        $network = $null
+                        break
+                    }
                     if ($network -and ($network.ToLowerInvariant() -eq "c")) {
                         $network = Read-Host2 -Prompt "Enter Custom Subnet (eg 192.168.1.0):"
                     }
@@ -790,6 +965,14 @@ function New-UserConfig {
     $adminUser = $DC.adminName
 
     $domainDefaults = $DC.domainDefaults
+    $existingPkiOptions = $DC.pkiOptions
+
+    # Import cmOptions from existing top-level site server (CAS or standalone Primary)
+    $allDomainVMs = Get-List -Type VM -DomainName $Domain
+    $topLevelSite = $allDomainVMs | Where-Object {
+        $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+    } | Select-Object -First 1
+    $existingCmOptions = $topLevelSite.cmOptions
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -813,6 +996,12 @@ function New-UserConfig {
     $configGenerated = [PSCustomObject]@{
         #cmOptions       = $newCmOptions
         vmOptions       = $vmOptions
+        pkiOptions      = [PSCustomObject]@{
+            EnablePKI       = $false
+            IssuingCAVM     = ""
+            UseOfflineRoot  = $false
+            OfflineRootCAVM = ""
+        }
         virtualMachines = $()
 
     }
@@ -820,6 +1009,34 @@ function New-UserConfig {
     if ($domainDefaults) {
         $configGenerated | Add-Member -MemberType NoteProperty -Name "domainDefaults" -Value $domainDefaults -force
     }
+
+    # Import cmOptions from existing site server so new VMs inherit EnableBLM, UsePKI, etc.
+    if ($existingCmOptions) {
+        $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $existingCmOptions -force
+    }
+
+    # Import PKI settings from existing DC so new VMs inherit CA configuration
+    if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) {
+        $configGenerated.pkiOptions = $existingPkiOptions
+    }
+    else {
+        # Fallback for labs deployed before pkiOptions was stored on DC note:
+        # Derive from per-VM InstallCA property (same logic as Common.Config.ps1 migration)
+        $caVM = $allDomainVMs | Where-Object { $_.InstallCA -eq $true } | Select-Object -First 1
+        if ($caVM) {
+            $configGenerated.pkiOptions.EnablePKI = $true
+            $configGenerated.pkiOptions.IssuingCAVM = $caVM.vmName
+        }
+        # Detect offline root from UseOfflineRoot property OR existence of StandaloneRootCA VM
+        $offlineRoot = $allDomainVMs | Where-Object { $_.role -eq "StandaloneRootCA" } | Select-Object -First 1
+        if ($offlineRoot -or ($caVM -and $caVM.UseOfflineRoot)) {
+            $configGenerated.pkiOptions.UseOfflineRoot = $true
+            if ($offlineRoot) {
+                $configGenerated.pkiOptions.OfflineRootCAVM = $offlineRoot.vmName
+            }
+        }
+    }
+
     return $configGenerated
 }
 function Get-ExistingConfig {

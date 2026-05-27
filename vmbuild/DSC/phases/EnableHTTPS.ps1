@@ -13,7 +13,9 @@ $DomainFullName = $deployConfig.parameters.domainName
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $isCas = $ThisVM.Role -eq "CAS"
-$DCName = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" }).vmName
+$CAVM = $deployConfig.virtualMachines | Where-Object { $_.InstallCA }
+$CAVMName = $CAVM.vmName
+$DomainShort = $DomainFullName.Split(".")[0]
 # Read Site Code from registry
 
 $SiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
@@ -67,12 +69,41 @@ if ($enabled) {
     Write-DscStatus "HTTPS Already Enabled.. Done." 
     return
 }
-$CAName = $DCName + "-CA"
+$CAName = "$DomainShort-$CAVMName-CA"
 $CertPath = "c:\temp\rootca.cer"
 
 if (-not (Test-Path $CertPath)) {
-    Get-Item  Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
-    Write-DscStatus "Exported root CA to $CertPath"
+    if ($CAVM.SubordinateCA) {
+        # Two-tier PKI: ConfigMgr validates client certs against the ROOT of the chain.
+        # Export the root CA cert, not the issuing (subordinate) CA cert.
+        $issuingCACert = Get-Item Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Select-Object -First 1
+        if ($issuingCACert) {
+            $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+            # We only need the chain structure (to find the root cert), not revocation
+            # validation. CRL is published to http://pki.<domain>/crl/ but the HTTP
+            # fetch can time out under heavy Phase 8 load. NoCheck avoids the dependency.
+            $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            $built = $chain.Build($issuingCACert)
+            if ($built -and $chain.ChainElements.Count -gt 1) {
+                $rootCert = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+                $rootCert | Export-Certificate -FilePath $CertPath -Force
+                Write-DscStatus "Exported root CA '$($rootCert.Subject)' to $CertPath (two-tier PKI)"
+            }
+            else {
+                # Fallback: export the issuing CA cert directly (same as single-tier behavior).
+                Write-DscStatus "Chain build incomplete (built=$built, elements=$($chain.ChainElements.Count)). Exporting issuing CA cert as fallback."
+                $issuingCACert | Export-Certificate -FilePath $CertPath -Force
+                Write-DscStatus "Exported issuing CA '$($issuingCACert.Subject)' to $CertPath"
+            }
+        }
+        else {
+            Write-DscStatus "WARNING: Could not find issuing CA cert matching '$CAName' in Intermediate store"
+        }
+    }
+    else {
+        Get-Item Cert:\LocalMachine\CA\* | Where-Object { $_.Subject -cmatch $CAName } | Export-Certificate -FilePath $CertPath -Force
+        Write-DscStatus "Exported root CA to $CertPath"
+    }
 }
 
 
@@ -106,7 +137,7 @@ else {
             $component.Put()
             #End Hack 
         }
-        Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Out-File $global:StatusLog -Append
+        Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Write-StatusLogEntry
 
         Start-Sleep 10
 

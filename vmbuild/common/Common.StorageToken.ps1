@@ -1,204 +1,20 @@
 ﻿#Common.StorageToken.ps1
 # NOTE: This file is dot-sourced during DSC generation which runs under
 # PowerShell 5.1. Do not use PS7+ syntax (e.g. ?? ?. ??= ternary).
+
+# Placeholder for future alternative auth methods (e.g. Managed Identity, certificate-based).
+# Currently only SAS token auth is supported.
 function Get-StorageToken {
     param(
         [int]$MinutesRemaining = 30
     )
 
-    # ---- Check cache ----
-    if ($global:TokenCache) {
-        $minutesLeft = ($global:TokenCache.ExpiresAt - [System.DateTimeOffset]::UtcNow).TotalMinutes
-        if ($minutesLeft -gt $MinutesRemaining) {
-            Write-Host "✅ Using cached token ($([math]::Round($minutesLeft)) minutes remaining)"
-            return $global:TokenCache
-        }
-        Write-Host "Cached token expiring soon ($([math]::Round($minutesLeft)) minutes left), refreshing..."
-    }
-
-    # ---- Load config ----
-    if (-not $global:common.StorageConfigLocation ) {
-        Write-Error "Get-StorageToken: `$global:common.StorageConfigLocation is not set."
-        return $null
-    }
-
-    if (-not (Test-Path $global:common.StorageConfigLocation )) {
-        Write-Error "Get-StorageToken: Config file not found at '$($global:common.StorageConfigLocation )'."
-        return $null
-    }
-
-    try {
-        $config = Get-Content $global:common.StorageConfigLocation  -Raw | ConvertFrom-Json
-    }
-    catch {
-        Write-Error "Get-StorageToken: Failed to parse config JSON at '$($global:common.StorageConfigLocation )'.`n$_"
-        return $null
-    }
-
-    foreach ($field in @("tenantId", "clientId", "pBase64", "pword", "xKey")) {
-        if (-not $config.$field) {
-            Write-Error "Get-StorageToken: Config is missing required field '$field'. Regenerate your config file."
-            return $null
-        }
-    }
-
-    # ---- Decode certificate ----
-    try {
-        $keyBytes = [Convert]::FromBase64String($config.xKey)
-        $pfxBytes = Unprotect-String $config.pBase64 $keyBytes
-        $pfxPassword = [Text.Encoding]::UTF8.GetString($(Unprotect-String $config.pword $keyBytes))
-    }
-    catch {
-        Write-Error "Get-StorageToken: Failed to decode certificate data from config.`n$_"
-        return $null
-    }
-
-    try {
-        $tempPfx = [System.IO.Path]::GetTempFileName() + ".pfx"
-        [System.IO.File]::WriteAllBytes($tempPfx, $pfxBytes)
-        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $tempPfx,
-            $pfxPassword,
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet -bor
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
-        )
-    }
-    catch {
-        Write-Error "Get-StorageToken: Failed to load certificate.`n$_"
-        return $null
-    }
-    finally {
-        Remove-Item $tempPfx -ErrorAction SilentlyContinue
-    }
-
-    if (-not $cert.HasPrivateKey) {
-        Write-Error "Get-StorageToken: Certificate has no private key. Re-export the PFX with 'Include private key' checked."
-        return $null
-    }
-
-    # ---- Check expiry ----
-    $now = [System.DateTimeOffset]::UtcNow
-    if ($now.DateTime -gt $cert.NotAfter) {
-        Write-Error @"
-Get-StorageToken: Certificate has EXPIRED ($($cert.NotAfter.ToString('yyyy-MM-dd'))).
-To fix:
-  1. Generate a new certificate with New-SelfSignedCertificate
-  2. Upload the new .cer to Azure Portal > Memlabs Data Downloader > Certificates & secrets
-  3. Run Generate-Config.ps1 with the new .pfx
-"@
-        return $null
-    }
-
-    $daysUntilExpiry = ($cert.NotAfter - $now.DateTime).Days
-    if ($daysUntilExpiry -le 30) {
-        Write-Warning "Get-StorageToken: Certificate expires in $daysUntilExpiry day(s) ($($cert.NotAfter.ToString('yyyy-MM-dd'))). Plan to renew soon."
-    }
-
-    # ---- Build JWT ----
-    try {
-        $exp = $now.AddMinutes(60)
-
-        $header = @{
-            alg = "RS256"
-            typ = "JWT"
-            x5t = [Convert]::ToBase64String($cert.GetCertHash())
-        } | ConvertTo-Json -Compress
-
-        $claims = @{
-            aud = "https://login.microsoftonline.com/$($config.tenantId)/oauth2/v2.0/token"
-            iss = $config.clientId
-            sub = $config.clientId
-            jti = [guid]::NewGuid().ToString()
-            nbf = $now.ToUnixTimeSeconds()
-            exp = $exp.ToUnixTimeSeconds()
-        } | ConvertTo-Json -Compress
-
-        $headerB64 = ConvertTo-Base64Url([Text.Encoding]::UTF8.GetBytes($header))
-        $claimsB64 = ConvertTo-Base64Url([Text.Encoding]::UTF8.GetBytes($claims))
-        $toSign = "$headerB64.$claimsB64"
-        $toSignBytes = [Text.Encoding]::UTF8.GetBytes($toSign)
-
-        Add-Type -AssemblyName System.Security
-        $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-        $rsaCng = [System.Security.Cryptography.RSACng]$rsa
-
-        $signature = ConvertTo-Base64Url($rsaCng.SignData(
-                $toSignBytes,
-                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
-            ))
-
-        $jwt = "$toSign.$signature"
-    }
-    catch {
-        Write-Error "Get-StorageToken: Failed to build or sign JWT.`n$_"
-        return $null
-    }
-
-    # ---- Acquire token ----
-    # Temporarily clear AAD-related environment variables to prevent
-    # ambient user credentials from being picked up by the token request
-    try {
-        $savedVars = @{}
-        $varsToSuppress = @(
-            'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID',
-            'AZURE_USERNAME', 'AZURE_PASSWORD', 'MSI_ENDPOINT', 'MSI_SECRET',
-            'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'IMDS_ENDPOINT'
-        )
-        foreach ($var in $varsToSuppress) {
-            $savedVars[$var] = [System.Environment]::GetEnvironmentVariable($var)
-            [System.Environment]::SetEnvironmentVariable($var, $null)
-        }
-
-        $tokenResponse = Invoke-RestMethod `
-            -Uri "https://login.microsoftonline.com/$($config.tenantId)/oauth2/v2.0/token" `
-            -Method POST `
-            -ContentType "application/x-www-form-urlencoded" `
-            -UseBasicParsing `
-            -UseDefaultCredentials:$false `
-            -Body @{
-            client_id             = $config.clientId
-            client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-            client_assertion      = $jwt
-            scope                 = "https://storage.azure.com/.default"
-            grant_type            = "client_credentials"
-        }
-    }
-    catch {
-        $errorDetail = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
-        switch -Wildcard ($errorDetail.error_codes) {
-            "*700027*" { Write-Error "Get-StorageToken: JWT signature invalid. Certificate may not match Azure registration." }
-            "*700016*" { Write-Error "Get-StorageToken: Application '$($config.clientId)' not found in tenant '$($config.tenantId)'." }
-            "*7000215*" { Write-Error "Get-StorageToken: Invalid certificate. It may have been deleted from the app registration." }
-            "*53003*" { Write-Error "Get-StorageToken: Blocked by Conditional Access policy. Ask your admin to exclude the 'Memlabs Data Downloader' service principal from CA policies." }
-            default { Write-Error "Get-StorageToken: Failed to acquire token: $($errorDetail.error_description)" }
-        }
-        Write-Error $_.ErrorDetails.Message
-        return $null
-    }
-    finally {
-        # Restore suppressed environment variables
-        foreach ($var in $varsToSuppress) {
-            if ($null -ne $savedVars[$var]) {
-                [System.Environment]::SetEnvironmentVariable($var, $savedVars[$var])
-            }
-        }
-    }
-
-    # ---- Store in global cache and return ----
-    $expiresAt = [System.DateTimeOffset]::UtcNow.AddSeconds($tokenResponse.expires_in)
-    $global:TokenCache = [PSCustomObject]@{
-        AccessToken = $tokenResponse.access_token
-        ExpiresAt   = $expiresAt
-        ExpiresIn   = $tokenResponse.expires_in
-        AcquiredAt  = [System.DateTimeOffset]::UtcNow
-    }
-
-    Write-Host "✅ New token acquired (expires at $($expiresAt.ToString('HH:mm:ss')) UTC)"
-    return $global:TokenCache
+    # No alternative auth methods are currently implemented.
+    # SAS token auth is handled inline via StorageConfig.StorageToken.
+    return $null
 }
 
-# ---- Helper: Build a URL, appending SAS token if not using bearer auth ----
+# ---- Helper: Build a URL, appending SAS token ----
 function Get-StorageUrl {
     param(
         [string]$BaseUrl,
@@ -206,50 +22,25 @@ function Get-StorageUrl {
     )
 
     $url = "$BaseUrl/$FileName"
-
-    if ($StorageConfig.UseBearerAuth) {
-        return $url
-    }
-    else {
-        return "$url`?$($StorageConfig.StorageToken)"
-    }
+    return "$url`?$($StorageConfig.StorageToken)"
 }
 
-# ---- Helper: Invoke-WebRequest with retry, getting token via Get-StorageToken if needed ----
+# ---- Helper: Invoke-WebRequest with retry ----
 function Invoke-StorageRequest {
     param(
         [string]$Url,
         [int]$RetrySeconds = 5
     )
 
-    $headers = @{}
-    if ($StorageConfig.UseBearerAuth) {
-        $token = Get-StorageToken
-        if ($null -eq $token) {
-            Write-Log "Invoke-StorageRequest: Failed to get bearer token from Get-StorageToken."
-            return $null
-        }
-        $headers["Authorization"] = "Bearer $($token.AccessToken)"
-        $headers["x-ms-version"] = "2020-04-08"
-    }
-
     try {
-        return Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -ErrorAction Stop
+        return Invoke-WebRequest -Uri $Url -UseBasicParsing -ErrorAction Stop
     }
     catch {
         Write-Log "Invoke-StorageRequest: First attempt failed, retrying in $RetrySeconds seconds..."
         Write-Log "Invoke-StorageRequest: First attempt failed, $_" -logonly
         Start-Sleep -Seconds $RetrySeconds
         try {
-            $global:TokenCache = $null  # Clear token cache to force refresh on retry
-            $token = Get-StorageToken
-            if ($null -eq $token) {
-                Write-Log "Invoke-StorageRequest: Failed to get bearer token from Get-StorageToken."
-                return $null
-            }
-            $headers["Authorization"] = "Bearer $($token.AccessToken)"
-            $headers["x-ms-version"] = "2020-04-08"
-            return Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -ErrorAction Stop
+            return Invoke-WebRequest -Uri $Url -UseBasicParsing -ErrorAction Stop
         }
         catch {
             Write-Exception -ExceptionInfo $_
@@ -310,17 +101,11 @@ function Get-StorageConfig {
             continue
         }
 
-        # ---- Validate auth fields ----
-        $candidateBearerAvailable = (-not [string]::IsNullOrWhiteSpace($candidate.pBase64)) -and
-        (-not [string]::IsNullOrWhiteSpace($candidate.pword)) -and
-        (-not [string]::IsNullOrWhiteSpace($candidate.xKey)) -and
-        (-not [string]::IsNullOrWhiteSpace($candidate.tenantId)) -and
-        (-not [string]::IsNullOrWhiteSpace($candidate.clientId))
-
+        # ---- Validate SAS token ----
         $candidateSasAvailable = -not [string]::IsNullOrWhiteSpace($candidate.storageToken)
 
-        if (-not $candidateBearerAvailable -and -not $candidateSasAvailable) {
-            Write-Log "Get-StorageConfig: $($file.Name) has no valid auth fields, skipping." -LogOnly
+        if (-not $candidateSasAvailable) {
+            Write-Log "Get-StorageConfig: $($file.Name) has no SAS token, skipping." -LogOnly
             continue
         }
 
@@ -333,60 +118,30 @@ function Get-StorageConfig {
         }
 
         # ---- Store script-scoped vars ----
-        # Set these before auth attempts so URL builders work correctly
         $script:storageConfigName = $file.Name
         $script:fileListName = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
         $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
 
-        Write-Log "Get-StorageConfig: Trying auth for $($file.Name) (Bearer: $candidateBearerAvailable, SAS: $candidateSasAvailable)..." -LogOnly
+        Write-Log "Get-StorageConfig: Testing SAS token for $($file.Name)..." -LogOnly
 
         $Common.StorageConfigLocation = $file.FullName
-        # ---- Try bearer first ----
-        if ($candidateBearerAvailable) {
-            $Common.StorageConfigLocation = $file.FullName
-            $StorageConfig.StorageLocation = $candidateStorageLocation
-            $token = Get-StorageToken
-            if ($null -ne $token) {
-                $StorageConfig.UseBearerAuth = $true
-                $StorageConfig.StorageToken = $null
-                $config = $candidate
-                $configPath = $file.FullName
-                $authSet = $true
-                Write-Log "Get-StorageConfig: Storage auth mode: Bearer (Service Principal) via $($file.Name)" -LogOnly
-                break
-            }
-            else {
-                $Common.StorageConfigLocation = $null
-                Write-Log "Get-StorageConfig: Bearer auth failed for $($file.Name)." -Warning
-            }
+        $StorageConfig.StorageToken = $candidate.storageToken
+        $StorageConfig.StorageLocation = $candidateStorageLocation
+
+        $testUrl = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
+        $testResponse = Invoke-StorageRequest -Url $testUrl
+        if ($null -ne $testResponse) {
+            $config = $candidate
+            $configPath = $file.FullName
+            $authSet = $true
+            Write-Log "Get-StorageConfig: Storage auth mode: SAS Token via $($file.Name)" -LogOnly
+            break
         }
-
-        # ---- Try SAS ----
-        if (-not $authSet -and $candidateSasAvailable) {
-            $StorageConfig.UseBearerAuth = $false
-            $StorageConfig.StorageToken = $candidate.storageToken
-            $StorageConfig.StorageLocation = $candidateStorageLocation
-
-            Write-Log "Get-StorageConfig: Testing SAS token for $($file.Name)..." -LogOnly
-            $testUrl = Get-StorageUrl -BaseUrl $candidateStorageLocation -FileName $script:fileListName
-            $testResponse = Invoke-StorageRequest -Url $testUrl
-            if ($null -ne $testResponse) {
-                $StorageConfig.UseBearerAuth = $false
-                $config = $candidate
-                $configPath = $file.FullName
-                $authSet = $true
-                Write-Log "Get-StorageConfig: Storage auth mode: SAS Token via $($file.Name)" -LogOnly
-                break
-            }
-            else {
-                Write-Log "Get-StorageConfig: SAS token failed for $($file.Name)." -Warning
-                # Reset storage location so next iteration starts clean
-                $StorageConfig.StorageLocation = $null
-                $StorageConfig.StorageToken = $null
-            }
+        else {
+            Write-Log "Get-StorageConfig: SAS token failed for $($file.Name)." -Warning
+            $StorageConfig.StorageLocation = $null
+            $StorageConfig.StorageToken = $null
         }
-
-        Write-Log "Get-StorageConfig: Both auth methods failed for $($file.Name), trying next config file..." -Warning
     }
 
     if (-not $authSet) {
@@ -520,9 +275,9 @@ function Update-StorageConfigFile {
     $script:downloadConfigName = $Common.NewestStorageConfigFileName
     $script:downloadConfigPath = Join-Path $Common.ConfigPath $script:downloadConfigName
 
-    # Nothing to do if we're already using the newest config with bearer auth
-    if ($StorageConfig.UseBearerAuth -and ($script:storageConfigName -eq $script:downloadConfigName)) {
-        Write-Log "Update-StorageConfigFile: Already using $($script:downloadConfigName) with bearer auth, nothing to do." -LogOnly
+    # Nothing to do if we're already using the newest config
+    if ($script:storageConfigName -eq $script:downloadConfigName) {
+        Write-Log "Update-StorageConfigFile: Already using $($script:downloadConfigName), nothing to do." -LogOnly
         return $true
     }
 
@@ -561,7 +316,7 @@ function Update-StorageConfigFile {
         return $true  # Non-fatal
     }
 
-    Write-Log "Update-StorageConfigFile: Re-initialized successfully. Auth mode: $(if ($StorageConfig.UseBearerAuth) { 'Bearer' } else { 'SAS' })" -LogOnly
+    Write-Log "Update-StorageConfigFile: Re-initialized successfully." -LogOnly
     return $true
 }
 
@@ -706,15 +461,4 @@ function Get-LocalAdminCredential {
     $s = ConvertTo-SecureString $response -AsPlainText -Force
     $Common.LocalAdmin = New-Object System.Management.Automation.PSCredential($username, $s)
     return $true
-}
-function Unprotect-String($obfuscatedBase64, $keyBytes) {
-    $bytes = [Convert]::FromBase64String($obfuscatedBase64)
-    $result = New-Object byte[] $bytes.Length
-    for ($i = 0; $i -lt $bytes.Length; $i++) {
-        $result[$i] = $bytes[$i] -bxor $keyBytes[$i % $keyBytes.Length]
-    }
-    return $result
-}
-function ConvertTo-Base64Url($bytes) {
-    [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }

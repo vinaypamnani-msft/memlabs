@@ -19,8 +19,12 @@ $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMach
 #$ClientNames = ($deployConfig.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not ($_.hidden -eq $true)} -and -not ($_.SqlVersion)).vmName -join ","
 $ClientNames = $thisVM.thisParams.ClientPush
 $cm_svc = "$NetbiosDomainName\cm_svc"
-$pushClients = $deployConfig.cmOptions.pushClientToDomainMembers
-$usePKI = $deployConfig.cmOptions.UsePKI
+# Push is now per-VM (pushClient property). thisParams.ClientPush only contains
+# VMs that have opted in, so an empty list means nothing to push.
+$pushClients = [bool]$ClientNames
+# Per-VM cmOptions wins over the rehydrated global for multi-hierarchy deploys.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$usePKI = $cmo.UsePKI
 if (-not $usePKI) {
     $usePKI = $false
 }
@@ -67,6 +71,44 @@ Write-DscStatus "Client push candidates are '$ClientNames'"
 # Create Boundary groups
 $bgs = $ThisVM.thisParams.sitesAndNetworks | Where-Object { $_.SiteCode -in $ValidSiteCodes }
 $bgsCount = $bgs.count
+
+# Quick check: if all boundary groups, boundaries, membership, and discovery are already configured, skip
+$allBGsExist = $true
+foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
+    if (-not (Get-CMBoundaryGroup -Name $bgsitecode -ErrorAction SilentlyContinue)) {
+        $allBGsExist = $false
+        break
+    }
+}
+if ($allBGsExist) {
+    foreach ($bg in $bgs) {
+        $boundary = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+        if (-not $boundary) {
+            $allBGsExist = $false
+            break
+        }
+        # Verify boundary is actually in its group
+        $memberOf = Get-CMBoundary -BoundaryGroupName $bg.SiteCode -ErrorAction SilentlyContinue
+        if (-not ($memberOf | Where-Object { $_.DisplayName -eq $bg.Subnet })) {
+            $allBGsExist = $false
+            break
+        }
+    }
+}
+if ($allBGsExist) {
+    $adiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SYSTEM_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    $adsgdiscovery = (Get-CMDiscoveryMethod | Where-Object { $_.ItemName -eq "SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT|SMS Site Server" }).Props | Where-Object { $_.PropertyName -eq "Settings" }
+    if ($adiscovery.Value1.ToLower() -eq "active" -and $adsgdiscovery.Value1.ToLower() -eq "active") {
+        Write-DscStatus "All boundary groups, boundaries, and discovery already configured. Skipping."
+        # Still handle client push path
+        if ($ThisVm.thisParams.PassiveNode -or -not $pushClients) {
+            $Configuration.InstallClient.Status = 'NotRequested'
+            $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+        }
+        return
+    }
+}
+
 Write-DscStatus "Create $bgsCount Boundary Groups for site $SiteCode"
 foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
     $siteStatus = Get-CMSite -SiteCode $bgsitecode
@@ -189,7 +231,7 @@ if ($ThisVm.thisParams.PassiveNode) {
 # Push Clients
 #==============
 if (-not $pushClients) {
-    Write-DscStatus "Skipping Client Push. pushClientToDomainMembers options is set to false."
+    Write-DscStatus "Skipping Client Push. No VMs have pushClient=true in this deployment."
     $Configuration.InstallClient.Status = 'NotRequested'
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
@@ -289,7 +331,7 @@ if ($false) {
         }
         if ($success) {
             Write-DscStatus "Pushing client to $client."
-            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Out-File $global:StatusLog -Append
+            Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 5
         }
     }

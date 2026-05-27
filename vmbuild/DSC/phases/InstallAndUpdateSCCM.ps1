@@ -9,12 +9,17 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 
 # Get required values from config
 $DomainFullName = $deployConfig.parameters.domainName
-$CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
 $ThisVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisMachineName }
 $CurrentRole = $ThisVM.role
 $psvms = $deployConfig.VirtualMachines | Where-Object { $_.Role -eq "Primary" -and $_.ParentSiteCode -eq $thisVM.SiteCode }
 $PSVM = $deployConfig.virtualMachines | where-object { $_.vmName -eq $ThisVM.thisParams.Primary }
+
+# Per-VM cmOptions wins over the rehydrated global so multi-hierarchy deploys
+# (CAS hierarchy alongside a separate standalone Primary with differing
+# version/OfflineSCP/UsePKI) pick this VM's own hierarchy settings.
+$cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+$CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
 # Read locale settings
 $locale = $deployConfig.vmOptions.locale
@@ -88,10 +93,112 @@ if (!(Test-Path C:\$CM\Redist)) {
 $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
 
-# Reset upgrade action (in case called again in add to existing scenario)
-$Configuration.UpgradeSCCM.Status = 'NotStart'
-$Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+# Reset upgrade action (in case called again in add to existing scenario), but not if already completed
+if ($Configuration.UpgradeSCCM.Status -ne 'Completed') {
+    $Configuration.UpgradeSCCM.Status = 'NotStart'
+    $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+}
+
+# On re-entry, Status='Running' means the prior runner was killed mid-install
+# (the script never reached the 'Completed' write). What's safe to do next
+# depends on *which* sub-step was running when it got killed:
+#
+#   * setupdl.exe (the pre-req downloader) is idempotent -- it has its own
+#     two-successes-in-a-row verification loop and will quickly re-verify
+#     already-downloaded files. Safe to re-run.
+#   * setup.exe before it creates the site database: nothing of substance
+#     committed yet (no CM_<sitecode> on the SQL server). Safe to re-run.
+#   * setup.exe after the CM_<sitecode> database exists: partial install
+#     state lives in SQL and on disk; re-running setup.exe is unsafe and
+#     the supported recovery is to restore the Phase 8 checkpoint on this
+#     VM.
+#
+# Two breadcrumbs disambiguate:
+#   $setupExeStartedFlag: written just before Start-Process setup.exe.
+#   CM_<SiteCode> database on $sqlServerName\$sqlInstanceName: probed via
+#     a short-timeout System.Data.SqlClient query against sys.databases.
+#
+# Decision matrix on Status='Running' re-entry:
+#   flag absent                      -> setupdl/ini phase, reset to NotStart
+#   flag present + DB absent         -> setup.exe failed early, reset
+#   flag present + DB present        -> fail loudly, demand checkpoint
+#   flag present + SQL unreachable   -> fail loudly (conservative; can't
+#                                       confirm DB state, assume worst)
+$setupExeStartedFlag = 'C:\staging\DSC\InstallSCCM.setupexe.started'
+if ($Configuration.InstallSCCM.Status -eq 'Running') {
+
+    $resetReason = $null      # if set, we will reset to NotStart
+    $failReason = $null      # if set, we will Write-DscStatus -Failure and return
+
+    if (-not (Test-Path $setupExeStartedFlag)) {
+        $resetReason = "setup.exe breadcrumb absent -- prior attempt was killed before setup.exe launched (still in setupdl or earlier)."
+    }
+    else {
+        # Breadcrumb present. Probe the site DB to decide whether setup.exe
+        # got far enough to do real damage.
+        $cmDbName = "CM_$SiteCode"
+        if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+            $sqlDataSource = "$sqlServerName\$sqlInstanceName"
+        }
+        else {
+            $sqlDataSource = $sqlServerName
+        }
+        if ($sqlPort -and $sqlPort -ne 1433) {
+            $sqlDataSource = "$sqlServerName,$sqlPort"
+        }
+        Write-DscStatus "InstallSCCM.Status='Running' on re-entry with setup.exe breadcrumb present. Probing [$sqlDataSource] for database [$cmDbName] to decide whether retry is safe..."
+
+        $probeReached = $false
+        $probeDbExists = $false
+        $probeError = $null
+        try {
+            $cs = "Data Source=$sqlDataSource;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+            $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+            $conn.Open()
+            try {
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @n"
+                $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128)
+                $p.Value = $cmDbName
+                [int]$probeCount = $cmd.ExecuteScalar()
+                $probeDbExists = ($probeCount -gt 0)
+                $probeReached = $true
+            }
+            finally {
+                $conn.Close()
+            }
+        }
+        catch {
+            $probeError = $_.Exception.Message
+        }
+
+        if (-not $probeReached) {
+            $failReason = "setup.exe breadcrumb present but SQL probe of [$sqlDataSource] failed: $probeError. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+        }
+        elseif ($probeDbExists) {
+            $failReason = "setup.exe breadcrumb present and [$cmDbName] already exists on [$sqlDataSource] -- prior setup.exe attempt created the site database before being killed. setup.exe cannot be safely re-run against a partial install. Restore the Phase 8 checkpoint on this VM and re-run the deployment. See C:\ConfigMgrSetup.log for how far the prior attempt got."
+        }
+        else {
+            $resetReason = "setup.exe breadcrumb present but [$cmDbName] does not exist on [$sqlDataSource] -- prior setup.exe attempt failed before creating the site database, so no install state was committed. Safe to retry."
+        }
+    }
+
+    if ($failReason) {
+        Write-DscStatus $failReason -Failure
+        return
+    }
+
+    # Otherwise reset and fall through to the install block.
+    Write-DscStatus "InstallSCCM.Status='Running' on re-entry: $resetReason Resetting to 'NotStart' so setupdl + setup.exe re-run from a clean state."
+    # Clear the breadcrumb so the next attempt starts from a clean state.
+    if (Test-Path $setupExeStartedFlag) {
+        Remove-Item -Path $setupExeStartedFlag -Force -ErrorAction SilentlyContinue
+    }
+    $Configuration.InstallSCCM.Status = 'NotStart'
+    $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+}
 
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
@@ -166,7 +273,7 @@ CurrentBranch=1
     $productID = "EVAL"
 
     if ($CM -ne "CMTP") {
-        if (-not $($deployConfig.cmOptions.EVALVersion)) {
+        if (-not $($cmo.EVALVersion)) {
             if ($($deployConfig.parameters.ProductID)) {
                 $productID = $($deployConfig.parameters.ProductID)
             }
@@ -183,11 +290,11 @@ CurrentBranch=1
     # $cmini = $cmini.Replace('%SQLLogFilePath%', $sqlinfo.DefaultLog)
     $cmini = $cmini.Replace('%CM%', $CM)
 
-    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+    if ($($cmo.InstallSCP) -eq $false) {
         $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
     }
 
-    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    if ($($cmo.OfflineSCP) -eq $true) {
         $cmini = $cmini.Replace('CloudConnector=1', "CloudConnector=0")
     }
 
@@ -282,11 +389,106 @@ CurrentBranch=1
     Write-DscStatus "Starting Pre-Req Download using $CMSetupDL /NOUI $CMRedist"
 
     $maxTries = 20
+    # Per-attempt timeout for setupdl.exe. Historically we called
+    # Start-Process -Wait with no cap; if setupdl wedged on a single
+    # CDN fetch we'd hang for hours with no progress in the DSC status
+    # stream. Now we cap each attempt at $setupDlTimeoutSec, surface
+    # the tail of ConfigMgrSetup.log every $setupDlPollSec while it
+    # runs, and kill+retry if the cap is hit.
+    $setupDlTimeoutSec = 1800   # 30 min hard cap per attempt
+    $setupDlStallSec = 300      # kill early if log hasn't advanced for 5 min
+    $setupDlFastKillSec = 90    # kill in 90s if log is parked on a known-bad marker
+    $setupDlPollSec = 30        # status cadence while running
+    $lastReportedTail = ''
+
+    # Log lines that immediately precede a known setupdl hang. When the
+    # log is parked on one of these AND stops advancing, we don't need
+    # to wait the full $setupDlStallSec -- kill quickly and let the
+    # retry path re-launch. Pattern is matched case-insensitively as a
+    # substring of the latest log line.
+    $setupDlBadMarkers = @(
+        # MSODBCSQL18 download wedge (observed on CS2-CS1SITE 05/25).
+        # setupdl probes for the driver, finds it missing ("Error = 2"),
+        # then hangs on the Microsoft CDN fetch.
+        'MSODBCSQL18'
+    )
+
     # We require 2 success entries in a row
     while ($success -le 1) {
 
-        #Start Setupdl.exe, and wait for it to exit
-        Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist ) -wait
+        #Start Setupdl.exe asynchronously so we can poll its log for
+        #progress and enforce a per-attempt timeout.
+        $dlProc = Start-Process -Filepath ($CMSetupDL) -ArgumentList ('/NOUI ' + $CMRedist) -PassThru
+        $dlStart = Get-Date
+        $lastLogAdvanceAt = Get-Date
+        $dlTimedOut = $false
+        $dlStalled = $false
+        while (-not $dlProc.HasExited) {
+            Start-Sleep -Seconds $setupDlPollSec
+            $elapsedSec = [int]((Get-Date) - $dlStart).TotalSeconds
+            $stalledSec = [int]((Get-Date) - $lastLogAdvanceAt).TotalSeconds
+
+            # Tail the setup log and surface the latest activity so the
+            # operator can see whether setupdl is making progress or
+            # stuck on a specific file.
+            $tail = $null
+            try { $tail = Get-Content -Path $CMLog -Tail 1 -ErrorAction SilentlyContinue } catch { }
+            if ($tail -and $tail -ne $lastReportedTail) {
+                $lastReportedTail = $tail
+                $lastLogAdvanceAt = Get-Date
+                $stalledSec = 0
+                Write-DscStatus ("Pre-Req download in progress ({0}s elapsed): {1}" -f $elapsedSec, $tail.Trim())
+            }
+            elseif ($tail) {
+                Write-DscStatus ("Pre-Req download still running ({0}s elapsed, no new log activity for {1}s): {2}" -f $elapsedSec, $stalledSec, $tail.Trim())
+            }
+            else {
+                Write-DscStatus ("Pre-Req download still running ({0}s elapsed; setup log not yet readable)" -f $elapsedSec)
+            }
+
+            # Early-kill: if the setup log has been completely silent for
+            # $setupDlStallSec, setupdl is wedged on a single fetch (CDN
+            # stall, TLS hang, etc.). Kill now rather than waiting the
+            # full 30-min hard cap; the outer retry will relaunch and
+            # setupdl is idempotent (only re-downloads missing files).
+            # Faster-kill: if the latest log line matches a known-bad
+            # wedge marker (e.g. MSODBCSQL18 download), use the shorter
+            # $setupDlFastKillSec threshold so we recover in ~90s instead
+            # of 5 min.
+            $matchedBadMarker = $null
+            if ($tail) {
+                foreach ($marker in $setupDlBadMarkers) {
+                    if ($tail -match [Regex]::Escape($marker)) { $matchedBadMarker = $marker; break }
+                }
+            }
+            $effectiveStallLimit = if ($matchedBadMarker) { $setupDlFastKillSec } else { $setupDlStallSec }
+
+            if ($stalledSec -ge $effectiveStallLimit) {
+                $dlStalled = $true
+                if ($matchedBadMarker) {
+                    Write-DscStatus ("Pre-Req download parked on known-bad marker '{0}' for {1}s (fast-kill threshold {2}s); killing setupdl.exe (PID {3}) and retrying" -f $matchedBadMarker, $stalledSec, $effectiveStallLimit, $dlProc.Id)
+                }
+                else {
+                    Write-DscStatus ("Pre-Req download log stalled for {0}s (threshold {1}s); killing setupdl.exe (PID {2}) and retrying" -f $stalledSec, $effectiveStallLimit, $dlProc.Id)
+                }
+                try { Stop-Process -Id $dlProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+                Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dlProc.Id } | ForEach-Object {
+                    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { }
+                }
+                break
+            }
+
+            if ($elapsedSec -ge $setupDlTimeoutSec) {
+                $dlTimedOut = $true
+                Write-DscStatus ("Pre-Req download exceeded {0}s; killing setupdl.exe (PID {1}) and retrying" -f $setupDlTimeoutSec, $dlProc.Id)
+                try { Stop-Process -Id $dlProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+                # Also kill any straggler setupdl/Setupdl children spawned by the bootstrap copy
+                Get-Process -Name 'setupdl' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dlProc.Id } | ForEach-Object {
+                    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch { }
+                }
+                break
+            }
+        }
 
         #Just to make sure the log is flushed.
         start-sleep -seconds 5
@@ -294,8 +496,16 @@ CurrentBranch=1
         #Get the last line of the log.  Assumption: No other components are writing to the log at this time.
         $LogLine = Get-Content -Path $CMLog -Tail 1
 
+        if ($dlStalled) {
+            $LogLine = "STALLED: setupdl log idle for $setupDlStallSec seconds. Last log line: $LogLine"
+        }
+        elseif ($dlTimedOut) {
+            # Treat as a failed attempt and let the retry/fail counter logic below handle it.
+            $LogLine = "TIMEOUT: setupdl exceeded $setupDlTimeoutSec seconds. Last log line: $LogLine"
+        }
+
         #Check for success indicator.
-        if ($LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
+        if (-not $dlTimedOut -and -not $dlStalled -and $LogLine -and $LogLine.Contains("INFO: Setup downloader") -and $LogLine.Contains("FINISHED")) {
             $success++
             Write-DscStatus "Pre-Req downloading complete Success Count $success out of 2."
         }
@@ -325,9 +535,22 @@ CurrentBranch=1
     $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
-    start-sleep -seconds 4
+    start-sleep -seconds 2
 
     Write-DscStatusSetup
+
+    # Drop a breadcrumb so a future re-entry can tell whether the prior
+    # 'Running' state was killed during setupdl (safe to retry) or during
+    # setup.exe (must restore Phase 8 checkpoint). See the Status='Running'
+    # gate near the top of this script for the consuming side.
+    try {
+        $flagDir = Split-Path -Parent $setupExeStartedFlag
+        if (-not (Test-Path $flagDir)) { New-Item -ItemType Directory -Path $flagDir -Force | Out-Null }
+        Set-Content -Path $setupExeStartedFlag -Value (Get-Date -Format 'o') -Force
+    }
+    catch {
+        Write-DscStatus "Warning: failed to write setup.exe breadcrumb at $setupExeStartedFlag : $($_.Exception.Message). Re-entry recovery may be less precise."
+    }
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
@@ -337,7 +560,7 @@ CurrentBranch=1
     $Configuration.InstallSCCM.Status = 'Completed'
     $Configuration.InstallSCCM.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-    start-sleep -seconds 60
+    start-sleep -seconds 5
     $firstRun = $true
 
 }
@@ -389,7 +612,7 @@ if (-not $exists) {
         $i++
         New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
             -SecurityScopeName "All", "All Systems", "All Users and User Groups"
-        Start-Sleep -Seconds 30
+        Start-Sleep -Seconds 10
         $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -eq $domainUserName }
     }
     until ($exists -or $i -gt 10)
@@ -401,20 +624,20 @@ if (-not $exists) {
 
 # Check if we should update
 $UpdateRequired = $false
-if ($deployConfig.cmOptions.version -notin "current-branch", "tech-preview" -and $deployConfig.cmOptions.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
+if ($cmo.version -notin "current-branch", "tech-preview" -and $cmo.version -ne $ThisVM.thisParams.cmDownloadVersion.baselineVersion) {
     $UpdateRequired = $true
 
-    if ($($deployConfig.cmOptions.InstallSCP) -eq $false) {
+    if ($($cmo.InstallSCP) -eq $false) {
         $UpdateRequired = $false
     }
 
-    if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+    if ($($cmo.OfflineSCP) -eq $true) {
         $UpdateRequired = $false        
     }
 
 }
 
-if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
+if ($($cmo.OfflineSCP) -eq $true) {
     $UpdateRequired = $false
     Write-DscStatus "Installing Offline SCP"
     Add-CMServiceConnectionPoint -SiteSystemServerName "$env:computername.$DomainFullName" -SiteCode $SiteCode -Mode Offline
@@ -422,7 +645,18 @@ if ($($deployConfig.cmOptions.OfflineSCP) -eq $true) {
 
 
 if ($Configuration.UpgradeSCCM.Status -eq 'Completed') {
-    $UpdateRequired = $false
+    # Verify the update is actually installed before skipping
+    $targetVersion = $cmo.version
+    $installedUpdate = Get-CMSiteUpdate -Fast | Where-Object { $_.State -eq 196612 -and $_.Name -eq "Configuration Manager $targetVersion" }
+    if ($installedUpdate) {
+        Write-DscStatus "Update 'Configuration Manager $targetVersion' verified as installed. Skipping upgrade."
+        $UpdateRequired = $false
+    }
+    else {
+        Write-DscStatus "UpgradeSCCM marked Completed but update 'Configuration Manager $targetVersion' not found in installed state. Re-running upgrade."
+        $Configuration.UpgradeSCCM.Status = 'NotStart'
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    }
 }
 
 if ($UpdateRequired) {
@@ -463,8 +697,8 @@ if ($UpdateRequired) {
         Write-DscStatus "[DMP Downloader] The LastSyncedTime was not updated in the last 60 minutes."
         Set-ItemProperty -Path $registryPath -Name $valueName -Value 0 -Force
         Set-ItemProperty -Path $registryPath -Name "LastSyncRequestTime" -Value 0 -Force
-        # Wait for 2 mins before checking DMP Downloader status
-        Start-Sleep -Seconds 120
+        # Wait before checking DMP Downloader status
+        Start-Sleep -Seconds 30
         Write-DscStatus "Checking for updates. Waiting for DMP Downloader."
 
         # Set var
@@ -568,7 +802,7 @@ if ($UpdateRequired) {
     # Check for updates
     $retrytimes = 0
     $downloadretrycount = 0
-    $updatepack = Get-UpdatePack -UpdateVersion $deployConfig.cmOptions.version
+    $updatepack = Get-UpdatePack -UpdateVersion $cmo.version
     if ($updatepack -ne "") {
         Write-DscStatus "Found '$($updatepack.Name)' update."
     }
@@ -603,7 +837,7 @@ if ($UpdateRequired) {
             break
         }
 
-        if (-not $deployConfig.cmOptions.UsePKI) {
+        if (-not $cmo.UsePKI) {
             # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
             Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
@@ -780,7 +1014,7 @@ if ($UpdateRequired) {
                 }
 
                 # Wait for copying files finished
-                Start-Sleep 600
+                Start-Sleep 120
                 $updateCompleted = $true
             }
         }
@@ -909,33 +1143,46 @@ else {
                 $Configuration | Add-Member -MemberType NoteProperty -Name  $propName  -Value  $PSReadytoUse -Force
 
             }
-            # Waiting for PS ready to use
-            $Configuration.$propName.Status = 'Running'
-            $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            # Only mark Running if not already Completed
+            if ($Configuration.$propName.Status -ne 'Completed') {
+                $Configuration.$propName.Status = 'Running'
+                $Configuration.$propName.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+            }
             Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
         }
-        #Wait for all Primaries to get added
-        foreach ($PSVM in $PSVMs) {
 
-            $PSSiteCode = $PSVM.siteCode
-            $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
-            Write-DscStatus "Waiting for Primary site installation to finish"
-            while (!$PSSystemServer) {
-                Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
-                Start-Sleep -Seconds 30
-                $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+        # Build wait list excluding already-completed primaries
+        $waitList = @()
+        foreach ($PSVM in $PSVMs) {
+            $propName = "PSReadyToUse" + $PSVM.VmName
+            if ($Configuration.$propName.Status -eq 'Completed') {
+                Write-DscStatus "Replication link for $($PSVM.VmName) already verified. Skipping."
+                continue
             }
+            $waitList += $PSVM.vmName
         }
 
-        Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
-
-
-        $waitList = @($PSVMs.vmName)
-
-        while ( $true) {
-            if ($waitlist.Count -eq 0) {
-                break
+        if ($waitList.Count -eq 0) {
+            Write-DscStatus "All replication links already active. Skipping wait."
+        }
+        else {
+            #Wait for primaries that still need verification
+            foreach ($PSVM in $PSVMs) {
+                if ($waitList -notcontains $PSVM.vmName) { continue }
+                $PSSiteCode = $PSVM.siteCode
+                $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+                Write-DscStatus "Waiting for Primary site installation to finish"
+                while (!$PSSystemServer) {
+                    Write-DscStatus "Waiting for Primary site to show up via Get-CMSiteSystemServer" -NoLog -RetrySeconds 30
+                    Start-Sleep -Seconds 30
+                    $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSSiteCode
+                }
             }
+
+            Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
+        }
+
+        while ($waitList.Count -gt 0) {
             foreach ($PSVM in $PSVMs) {
                 if ($waitList -notcontains $PSVM.VmName) {
                     continue
@@ -943,26 +1190,41 @@ else {
                 $PSSiteCode = $PSVM.siteCode
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
-                
+
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-                    #If the percent is 100, print out the Linkstatus and states for troubleshooting, otherwise print out the percentage
-                    if ($replicationStatus.GlobalInitPercentage -eq 100) {
-                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode LinkStatus: $($replicationStatus.LinkStatus), Site1ToSite2GlobalState: $($replicationStatus.Site1ToSite2GlobalState), Site2ToSite1GlobalState: $($replicationStatus.Site2ToSite1GlobalState), Site2ToSite1SiteState: $($replicationStatus.Site2ToSite1SiteState)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    # Map numeric states to friendly names for readability
+                    $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed" }
+                    $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
+                    $g12Name = $stateMap[[int]$replicationStatus.Site1ToSite2GlobalState]; if (-not $g12Name) { $g12Name = "$($replicationStatus.Site1ToSite2GlobalState)" }
+                    $g21Name = $stateMap[[int]$replicationStatus.Site2ToSite1GlobalState]; if (-not $g21Name) { $g21Name = "$($replicationStatus.Site2ToSite1GlobalState)" }
+                    $s21Name = $stateMap[[int]$replicationStatus.Site2ToSite1SiteState]; if (-not $s21Name) { $s21Name = "$($replicationStatus.Site2ToSite1SiteState)" }
+
+                    if ($replicationStatus.GlobalInitPercentage -ge 100) {
+                        # Init complete but link not yet active - show which states are pending
+                        $pending = @()
+                        if ($replicationStatus.LinkStatus -ne 2) { $pending += "Link=$linkName" }
+                        if ($replicationStatus.Site1ToSite2GlobalState -ne 2) { $pending += "Global($SiteCode->$PSSiteCode)=$g12Name" }
+                        if ($replicationStatus.Site2ToSite1GlobalState -ne 2) { $pending += "Global($PSSiteCode->$SiteCode)=$g21Name" }
+                        if ($replicationStatus.Site2ToSite1SiteState -ne 2) { $pending += "Site($PSSiteCode->$SiteCode)=$s21Name" }
+                        $pendingStr = $pending -join ", "
+                        Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds 30
                     }
                     else {
-                        Write-DscStatus "Waiting for Data Replication. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        $pct = $replicationStatus.GlobalInitPercentage
+                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct%" -RetrySeconds 30 -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds 30
                     }
-                    $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
                     Start-Sleep -Seconds 30
                 }
                 else {
-                    Write-DscStatus "Data Replication Complete. $SiteCode -> $PSSiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds 30 -MachineName $PSVM.VmName
+                    Write-DscStatus "Replication link is Active" -MachineName $PSVM.VmName
+                    Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active"
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName
                     $Configuration.$propName.Status = 'Completed'
                     $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
                     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
-                    Start-Sleep -Seconds 30
                 }
             }
         }

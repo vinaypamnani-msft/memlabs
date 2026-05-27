@@ -19,7 +19,7 @@ function Install-Console {
     #Uninstall the console
     Write-DscStatus -NoStatus "Install-Console: Uninstalling the console"
     & $ConsoleUIExe  /uninstall /q
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
     Wait-Process -Name ConsoleSetup -ErrorAction SilentlyContinue
 
     Write-DscStatus -NoStatus "Install-Console: Uninstall Complete"
@@ -29,7 +29,7 @@ function Install-Console {
     #Install the Console
     Write-DscStatus -NoStatus "& $ConsoleUIExe /q LangPackDir=$LangPackDir TargetDir=$UIInstallDir DEFAULTSITESERVERNAME=$localsiteserver"
     & $ConsoleUIExe /q LangPackDir=$LangPackDir TargetDir=$UIInstallDir DEFAULTSITESERVERNAME=$localsiteserver
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 2
     Wait-Process -Name ConsoleSetup -ErrorAction SilentlyContinue
     Write-DscStatus -NoStatus "Install-Console: Install Complete"
 }
@@ -70,5 +70,5 @@ $localSiteServer = $SiteServer
 
 
 Install-Console -ConsoleUIExe $ConsoleUIExe -LangPackDir $LangPackDir -UIInstallDir $UIInstallDir -localsiteserver $localsiteserver
-start-sleep -Seconds 5
+start-sleep -Seconds 2
 

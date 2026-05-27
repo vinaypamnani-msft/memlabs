@@ -7,8 +7,64 @@ param(
 # dot source functions
 . $PSScriptRoot\ScriptFunctions.ps1
 
+# Banner: emit a clearly-delimited start-of-run marker into InstallCMLog.log
+# so multiple ScriptWorkflow invocations on the same VM (reruns, retries,
+# DSC re-applies) are easy to tell apart when scrolling the log.
+try {
+    $bannerPid    = $PID
+    $bannerHost   = $env:COMPUTERNAME
+    $bannerUser   = "$($env:USERDOMAIN)\$($env:USERNAME)"
+    $bannerPSVer  = $PSVersionTable.PSVersion.ToString()
+    $bannerOS     = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { '<unknown>' }
+    $bannerStart  = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $bannerCwd    = (Get-Location).Path
+    $bannerScript = $MyInvocation.MyCommand.Path
+    try {
+        $bannerCmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).CommandLine
+    } catch { $bannerCmdLine = '<unavailable>' }
+    try {
+        $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop).ParentProcessId
+        $parent    = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction Stop
+        $bannerParent = "$($parent.Name) (PID $parentPid)"
+    } catch { $bannerParent = '<unavailable>' }
+
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    '' | Write-StatusLogEntry -Component 'ScriptWorkflow' -AllowBlank
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ' ScriptWorkflow.ps1 - START'                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Started      : $bannerStart"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PID          : $bannerPid"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Parent       : $bannerParent"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Host         : $bannerHost"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  User         : $bannerUser"                                             | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  OS           : $bannerOS"                                               | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  PowerShell   : $bannerPSVer"                                            | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Script       : $bannerScript"                                           | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  Cwd          : $bannerCwd"                                              | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  CommandLine  : $bannerCmdLine"                                          | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  ConfigFile   : $ConfigFilePath"                                         | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    "  LogPath      : $LogPath"                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+    ('=' * 100)                                                                | Write-StatusLogEntry -Component 'ScriptWorkflow'
+}
+catch {
+    # Don't let banner failure stop the workflow
+    "ScriptWorkflow banner failed: $_" | Write-StatusLogEntry -Component 'ScriptWorkflow' -Type 2
+}
 
 Write-DscStatus "ScriptWorkflow.ps1 called with $ConfigFilePath and $LogPath)"
+
+# Read the per-deploy RunId stamped by the orchestrator (Common.ScriptBlocks.ps1)
+# right before it began monitoring this phase. We'll echo it back into
+# ScriptWorkflow.completed.runid at the very end so the orchestrator can
+# detect completion authoritatively (immune to status-string overwrites).
+$ExpectedRunIdFile  = 'C:\staging\DSC\ScriptWorkflow.expected.runid'
+$CompletedRunIdFile = 'C:\staging\DSC\ScriptWorkflow.completed.runid'
+$ScriptWorkflowRunId = $null
+if (Test-Path $ExpectedRunIdFile) {
+    $ScriptWorkflowRunId = (Get-Content $ExpectedRunIdFile -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
+    Write-DscStatus "ScriptWorkflow.ps1 RunId for this deploy: $ScriptWorkflowRunId"
+}
 
 # Read required items from config json
 $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
@@ -44,6 +100,12 @@ $firstRun = $true
 if (Test-Path -Path $ConfigurationFile) {
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
     $firstRun = $false
+    # Immediately reset status so WaitForEvent won't find stale "Completed" from a previous run
+    if ($Configuration.ScriptWorkflow -and $Configuration.ScriptWorkflow.Status -eq "Completed") {
+        $Configuration.ScriptWorkflow.Status = "Running"
+        $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    }
 }
 if (-not ($configuration.ScriptWorkflow)) {
     $Configuration = $null
@@ -182,16 +244,27 @@ if (-not $Configuration.InstallSUP) {
     $Configuration | Add-Member -MemberType NoteProperty -Name "InstallSUP" -Value $item -force
 }
 
+if (-not $Configuration.ConfigureCMProxy) {
+    $item = [PSCustomObject]@{
+        Status    = 'NotStart'
+        StartTime = ''
+        EndTime   = ''
+    }
+    $Configuration | Add-Member -MemberType NoteProperty -Name "ConfigureCMProxy" -Value $item -Force
+}
+
 $Configuration.ScriptWorkflow.Status = "Running"
 $Configuration.ScriptWorkflow.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-# Force AD Replication
-$domainControllers = Get-ADDomainController -Filter *
-if ($domainControllers.Count -gt 1) {
-    Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
-    $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
-    Start-Sleep -Seconds 3
+# Force AD Replication (only on first run)
+if ($firstRun) {
+    $domainControllers = Get-ADDomainController -Filter *
+    if ($domainControllers.Count -gt 1) {
+        Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
+        $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+        Start-Sleep -Seconds 3
+    }
 }
 
 if ($scenario -eq "MultiDomain") {
@@ -205,6 +278,10 @@ if ($scenario -eq "MultiDomain") {
     $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     Write-DscStatus "Complete!"
+    # Stamp completion RunId for the orchestrator's race-proof completion check
+    if ($ScriptWorkflowRunId) {
+        try { Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII } catch {}
+    }
     return
 }
 
@@ -217,10 +294,29 @@ if ($scenario -eq "Standalone") {
     . $ScriptFile $ConfigFilePath $LogPath
 
     #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-    Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+    if ($Configuration.InstallDP.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+    }
+
+    # Start AD Discovery early so DDRs have maximum processing time before PushClients
+    try {
+        Set-Location $LogPath
+        . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+        $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+        Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+        Invoke-CMSystemDiscovery
+        Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+    }
+    catch {
+        Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+    }
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
 
     if ($containsSecondary) {
         # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
@@ -230,9 +326,22 @@ if ($scenario -eq "Standalone") {
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
+    if ($Configuration.InstallSUP.Status -ne "Completed") {
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+    }
 
-    Write-DscStatus "$scenario Running InstallRoles.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+    # ConfigureCMProxy is cheap and idempotent; always run it so latched
+    # Completed state from a deploy that ran before the Proxy was hydrated
+    # into deployConfig can self-heal on the next pass. The script itself
+    # short-circuits when there's no Proxy or no opted-in clients.
+    Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
@@ -254,8 +363,19 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
-        Write-DscStatus "$scenario Running InstallRoles.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        if ($Configuration.InstallSUP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallRoles.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
+
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
@@ -271,10 +391,29 @@ if ($scenario -eq "Hierarchy") {
         }
 
         #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
-        Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+        if ($Configuration.InstallDP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
+        }
+
+        # Start AD Discovery early so DDRs have maximum processing time before PushClients
+        try {
+            Set-Location $LogPath
+            . $PSScriptRoot\Connect-CMSite.ps1 -Tag "[EarlyDiscovery]"
+            $DomainDN = 'DC=' + ($deployConfig.vmOptions.domainName).Replace('.',',DC=')
+            Set-CMDiscoveryMethod -ActiveDirectorySystemDiscovery -SiteCode $SiteCode -Enabled $true -AddActiveDirectoryContainer "LDAP://$DomainDN" -Recursive
+            Invoke-CMSystemDiscovery
+            Write-DscStatus "AD System Discovery invoked early (pre-staging for client push)"
+        }
+        catch {
+            Write-DscStatus "Early AD Discovery: $($_.Exception.Message)"
+        }
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
                
         if ($containsSecondary) {
             # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
@@ -284,8 +423,19 @@ if ($scenario -eq "Hierarchy") {
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
-        Write-DscStatus "$scenario Running InstallRoles.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        if ($Configuration.InstallSUP.Status -ne "Completed") {
+            Write-DscStatus "$scenario Running InstallRoles.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
+        }
+        else {
+            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
+        }
+
+        # ConfigureCMProxy is cheap and idempotent; always run.
+        Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
@@ -299,11 +449,19 @@ if ($scenario -eq "Hierarchy") {
 }
 
 if ($containsPassive) {
-    # Install Passive Site Server
-    Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
-    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
-    Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $DomainFullName = $deployConfig.vmOptions.domainName
+    $passiveFQDN = $containsPassive.vmName + "." + $DomainFullName
+    $passiveExists = Get-CMSiteRole -SiteSystemServerName $passiveFQDN -RoleName "SMS Site Server" -ErrorAction SilentlyContinue
+    if ($Configuration.InstallPassive.Status -ne "Completed" -or -not $passiveExists) {
+        Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
+    }
+    else {
+        Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
+    }
 }
 
 Write-DscStatus "Finished setting up ConfigMgr. Running Additional Tasks"
@@ -318,7 +476,9 @@ if ($CurrentRole -eq "CAS") {
 }
 
 
-if (-not $deployConfig.cmOptions.UsePKI) {
+# Per-VM cmOptions (multi-hierarchy safe).
+$cmo = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+if (-not $cmo.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
@@ -357,6 +517,60 @@ if ($ThisVM.role -ne "CAS") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
     Write-DscStatus "Complete!"
+}
+
+# Run EnableBLM AFTER PushClients so newly pushed clients are discoverable
+if ($CurrentRole -eq "Primary") {
+    Write-DscStatus "Running EnableBLM.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
+    # MUST re-assert Complete! -- EnableBLM's final status ("BitLocker Management
+    # configuration complete") overwrites the earlier Complete! marker written
+    # after PushClients. The orchestrator in Common.ScriptBlocks.ps1 polls for
+    # exact match "Complete!" / "Setting up ConfigMgr. Status: Complete!" and
+    # will otherwise hang on Phase 8 long after the work is done.
+    Write-DscStatus "Complete!"
+}
+
+# Reset SMS component status counts on site servers. New installs accumulate
+# transient warnings/errors from components that started before all their
+# dependencies were ready (SMS_DATABASE_NOTIFICATION_MONITOR,
+# SMS_DISCOVERY_DATA_MANAGER, etc.). Once the site is fully wired these
+# components are healthy but their status counters still show the startup
+# noise, which Phase 11 validation flags as WARN. This is equivalent to
+# right-clicking each component in the console and choosing "Reset Counts".
+if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
+    try {
+        $svrSiteCode = $ThisVM.siteCode
+        if ($svrSiteCode) {
+            Write-DscStatus "Resetting SMS component status counts for site $svrSiteCode"
+            $ns = "root\sms\site_$svrSiteCode"
+            $sums = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer -ErrorAction Stop)
+            $resetCount = 0
+            foreach ($s in $sums) {
+                try { [void]$s.ResetCounts(); $resetCount++ } catch { }
+            }
+            Write-DscStatus "Reset component counts on $resetCount of $($sums.Count) summarizer entries"
+        }
+    }
+    catch {
+        Write-DscStatus "WARNING: Failed to reset SMS component status counts: $($_.Exception.Message)"
+    }
+}
+
+# Stamp the completion RunId as the very last action. The orchestrator's
+# monitoring loop treats a matching RunId as authoritative completion,
+# which is bulletproof against any later status writes from background
+# work or future phase additions.
+if ($ScriptWorkflowRunId) {
+    try {
+        Set-Content -Path $CompletedRunIdFile -Value $ScriptWorkflowRunId -Force -Encoding ASCII
+        Write-DscStatus "ScriptWorkflow.ps1 stamped completion RunId: $ScriptWorkflowRunId"
+    }
+    catch {
+        Write-DscStatus "ScriptWorkflow.ps1 WARNING: failed to stamp completion RunId: $($_.Exception.Message)"
+    }
 }
 
 

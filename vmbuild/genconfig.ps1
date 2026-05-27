@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param (
     [Parameter(Mandatory = $false, HelpMessage = "Used when calling from New-Lab")]
     [Switch] $InternalUseOnly
@@ -25,6 +25,22 @@ if (-not $InternalUseOnly.IsPresent) {
 }
 
 $configDir = Join-Path $PSScriptRoot "config"
+
+# Clear any stale validation state from a previous genconfig invocation in the
+# same PowerShell session. Without this, $global:PendingValidationErrors set
+# by a prior save attempt (potentially under different validation rules) gets
+# re-injected by the carryOver merge in Select-MainMenu and surfaces ghost
+# errors that the current validation no longer produces.
+$global:PendingValidationErrors = $null
+$global:GenConfigErrorMessages = @()
+# Also drop the Test-Configuration -Fast memoization cache. It's keyed by a
+# hash of the InputObject JSON only, so if validation logic was changed
+# (e.g. a new Linux/Proxy bypass) between runs, a cache hit on the same
+# config returns the OLD TestObject - failures and all - and ghost errors
+# show up in the banner even though current validators no longer produce
+# them. Add-ValidationMessage logging won't fire on a cache hit either,
+# which is the telltale we just chased.
+$global:TestConfigFastCache = $null
 
 Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "New-Lab Configuration generator:"
 Write-Host2 -ForegroundColor DeepSkyBlue "You can use this tool to customize your MemLabs deployment."
@@ -192,9 +208,10 @@ function Select-ConfigMenu {
             }
             "v" { Select-VMMenu }
             "r" { 
-                $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and re-create it. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
+                $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and memlabs-mremoteng.xml and re-create them. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
                 if ($response -eq "y") {
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
+                    New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
                 }               
             }
             "f" { Select-DeletePending; Clear-HealthStatsCache }
@@ -421,7 +438,7 @@ function Select-DomainMenu {
 
             if ($domainList.Count -eq 0) {
                 Write-Host
-                Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VM's manually from hyper-v"
+                Write-Host2 -ForegroundColor FireBrick "No Domains found. Please delete VMs manually from Hyper-V"
 
                 return
             }
@@ -516,17 +533,17 @@ function Build-DomainSubMenuOptions {
         "H1"    = "Select any stopped VMs to start.  List will be empty if nothing is stopped."
         "2"     = "Stop VMs in domain  [$running VMs are running]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "H2"    = "Select any running VMs to stop.  List will be empty if nothing is running."
-        "3"     = "Compact VHDX's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
-        "H3"    = "Select VMs to optimize. Running VMs are cleaned in-guest, then all selected VMs are stopped, checkpoints merged, VHDX free-space zeroed, and Optimize-VHD runs in parallel in a WPF window. VMs that were running at start are auto-restarted when compaction finishes."
+        "3"     = "Compact VHDXs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "H3"    = "Select VMs to optimize. Running VMs are cleaned, stopped, checkpoints merged, VHDXs zeroed and compacted in parallel. Previously-running VMs auto-restart when done."
         "*S"    = ""
         "*B2"   = "Snapshot Management%$($Global:Common.Colors.GenConfigHeader)"
-        "S"     = "Snapshot all VM's in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+        "S"     = "Snapshot all VMs in domain%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
         "HS"    = "Create a Hyper-V snapshot/checkpoint of the domain.  All VMs will be stopped, then restarted"
     }
 
     if ($checkPoint) {
         $customOptions += [ordered]@{
-            "R"  = "Restore all VM's to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
+            "R"  = "Restore all VMs to a snapshot%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             "HR" = "Restore a domain checkpoint/snapshot taken by this script. All VMs in the snapshot will be restored"
             "X"  = "Delete (merge) domain Snapshots [$checkPoint Snapshot(s)]%$($Global:Common.Colors.GenConfigNormal)%$($Global:Common.Colors.GenConfigNormalNumber)"
             "HX" = "Merges snapshots back into the VHDX file, effectively 'deleting' them.  This can help with performance and disk usage"
@@ -556,7 +573,7 @@ function Build-DomainSubMenuOptions {
         "*Z"  = ""
         "*B3" = "Danger Zone%$($Global:Common.Colors.GenConfigHeader)"
         "D"   = "Delete VMs in Domain%$($Global:Common.Colors.GenConfigDangerous)%$($Global:Common.Colors.GenConfigDangerous)"
-        "HD"  = "Delete selected VM's from Hyper-V. This can be used to remove your entire domain, or individual VMs"
+        "HD"  = "Delete selected VMs from Hyper-V. This can be used to remove your entire domain, or individual VMs"
     }
 
     return $customOptions
@@ -597,6 +614,13 @@ function Get-ExistingVMs {
         }
         if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
             $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
+        }
+        # Inject useProxy=$false on existing VMs that don't have it yet
+        # (deployed before the proxy feature). Excluded roles and Linux VMs
+        # never get useProxy -- mirrors Test-VmUsesProxy hard-excludes.
+        $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+        if ($null -eq $evm.useProxy -and $evm.role -notin $proxyExcluded -and -not (Test-VmIsLinux -Vm $evm)) {
+            $evm | Add-Member -MemberType NoteProperty -Name 'useProxy' -Value $false -Force
         }
     }
 
@@ -684,6 +708,17 @@ function Select-MainMenu {
         $carryOver = $global:PendingValidationErrors
         $global:PendingValidationErrors = $null
         $global:GenConfigErrorMessages = @()
+        # Auto-add a StandaloneRootCA VM if a DC has UseOfflineRoot enabled but
+        # one doesn't exist in this config or in the target domain. Conversely,
+        # if UseOfflineRoot is now disabled on all DCs, auto-remove any
+        # StandaloneRootCA VM that we previously auto-added (user-created ones are preserved).
+        try { Add-OfflineRootCAVMIfMissing -ConfigToModify $Global:Config } catch { Write-Log "Add-OfflineRootCAVMIfMissing failed: $_" -LogOnly }
+        try { Remove-OfflineRootCAVMIfAutoAdded -ConfigToModify $Global:Config } catch { Write-Log "Remove-OfflineRootCAVMIfAutoAdded failed: $_" -LogOnly }
+        # Same pattern for Proxy: if anything opted into the proxy (domainDefaults
+        # UseProxyFor* or a per-VM useProxy=true flipped on) and no Proxy VM
+        # exists in this config or the existing domain, auto-add one.
+        try { Add-ProxyVMIfMissing -ConfigToModify $Global:Config } catch { Write-Log "Add-ProxyVMIfMissing failed: $_" -LogOnly }
+        try { Remove-ProxyVMIfAutoAdded -ConfigToModify $Global:Config } catch { Write-Log "Remove-ProxyVMIfAutoAdded failed: $_" -LogOnly }
         $tc = Test-Configuration -InputObject $Global:Config -fast
         Convert-ValidationMessages -TestObject $tc
         if ($carryOver) {
@@ -691,10 +726,27 @@ function Select-MainMenu {
             # doesn't reproduce (they'd otherwise vanish from the error box).
             # Skip any that fast validation already added (avoid duplicates).
             $existingMsgs = @($global:GenConfigErrorMessages | ForEach-Object { $_.Message })
+            # Drop carryOver entries that reference VMs no longer present in
+            # the current config (e.g. config was rebuilt, VM was renamed, or
+            # an auto-add changed the shape). Without this filter, a stale
+            # "VM Validation: [OLDNAME] does not contain a supported
+            # operatingSystem [Ubuntu Server 24.04 LTS]" from a prior pass
+            # keeps surfacing even after the Linux bypass correctly fires.
+            $currentVmNames = @($Global:Config.virtualMachines | ForEach-Object { $_.vmName } | Where-Object { $_ })
             foreach ($co in $carryOver) {
-                if ($co.Message -and $co.Message -notin $existingMsgs) {
-                    $global:GenConfigErrorMessages += $co
+                if (-not $co.Message) { continue }
+                if ($co.Message -in $existingMsgs) { continue }
+                # If the message looks like "[VMNAME] ..." but VMNAME isn't in
+                # the current config, drop it as stale.
+                if ($co.Message -match '\[([^\]]+)\]') {
+                    $refVm = $matches[1]
+                    if ($currentVmNames -and ($currentVmNames -notcontains $refVm)) {
+                        Write-Log "[carryOver] Dropping stale msg for missing VM [$refVm]: $($co.Message)" -LogOnly
+                        continue
+                    }
                 }
+                Write-Log "[carryOver] Re-injecting validation msg from prior save: $($co.Message)" -LogOnly
+                $global:GenConfigErrorMessages += $co
             }
         }
 
@@ -756,7 +808,10 @@ function Select-MainMenu {
                 Select-Options -MenuName "Global VM Options Menu" -Rootproperty $($Global:Config) -PropertyName vmOptions -prompt "Select Global Property to modify" -HelpFunction "Get-GenericHelp"
             }
             "c" { 
-                Select-Options -MenuName "Global Configuration Manager Menu"  -Rootproperty $($Global:Config) -PropertyName cmOptions -prompt "Select ConfigMgr Property to modify" -HelpFunction "Get-GenericHelp"
+                Invoke-CMOptionsMenu
+            }
+            "p" {
+                Select-PKIOptions
             }
             "d" {
                 Add-ModifiedExistingVMsToConfig
@@ -837,10 +892,45 @@ function Build-MainMenuOptions {
     $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
     $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
-    if ($Global:Config.cmOptions) {
-        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $(get-CMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
-        $preOptions += [ordered]@{ "HC" = "Change Global Config Manager Options, such as PKI, Version, licensing, etc" }
+    # Top-level site servers (CAS, or standalone Primary) own cmOptions per-VM.
+    # Display rules:
+    #   1 top-level -> summary inline (uses that VM's cmOptions block).
+    #   2+         -> literal "<Multiple Options>" (use the C picker to drill in).
+    #   0 + root cmOptions present -> legacy "expand existing domain" path, root
+    #                                  block stays editable until a top-level VM
+    #                                  is added to the config.
+    #   0 + no root -> hide the row.
+    $topLevelSiteServers = @($Global:Config.virtualMachines | Where-Object {
+        $_.role -in 'CAS', 'Primary' -and -not $_.parentSiteCode
+    })
+    $rootCmOptions = $Global:Config.cmOptions
+    if ($topLevelSiteServers.Count -ge 1 -or $rootCmOptions) {
+        if ($topLevelSiteServers.Count -eq 1) {
+            $cmSummary = get-CMOptionsSummary -CmOptions $topLevelSiteServers[0].cmOptions
+        }
+        elseif ($topLevelSiteServers.Count -eq 0) {
+            $cmSummary = get-CMOptionsSummary -CmOptions $rootCmOptions
+        }
+        else {
+            # Multi-top-level: build a compact per-server summary so the row
+            # tells the user which site servers and CM versions are configured
+            # before they drill into the picker.
+            $sep = Format-OptionToken -Color "DimGray" -Text "  ·  "
+            $parts = foreach ($tl in $topLevelSiteServers) {
+                $opts = $tl.cmOptions
+                $verText = if ($opts) { $opts.version } else { "?" }
+                $verColor = if ($opts -and $opts.version -eq "tech-preview") { "Tomato" } else { "ForestGreen" }
+                (Format-OptionToken -Color "LightSteelBlue" -Text $tl.vmName) +
+                (Format-OptionToken -Color "DimGray" -Text " [$($tl.role) $($tl.siteCode)] CM ") +
+                (Format-OptionToken -Color $verColor -Text $verText)
+            }
+            $cmSummary = $parts -join $sep
+        }
+        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{ "HC" = "Change Configuration Manager Options on the top-level site server (Version, licensing, PKI, BitLocker, etc.)" }
     }
+    $preOptions += [ordered]@{ "P" = "PKI Settings      `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
 
     $customOptions = [ordered]@{}
     $VMNameToNumberMap = @{}
@@ -913,17 +1003,18 @@ function Save-Config {
 
 
     $file = "$($config.vmOptions.domainName)"
+    $cfgCmOptions = Get-ConfigCmOptions -Config $config
     if ($config.vmOptions.existingDCNameWithPrefix) {
         $file += "-ADD-"
     }
-    elseif (-not $config.cmOptions) {
+    elseif (-not $cfgCmOptions) {
         $file += "-NOSCCM-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "CAS" }) {
-        $file += "-CAS-$($config.cmOptions.version)-"
+        $file += "-CAS-$($cfgCmOptions.version)-"
     }
     elseif ($Config.virtualMachines | Where-Object { $_.Role -eq "Primary" }) {
-        $file += "-PRI-$($config.cmOptions.version)-"
+        $file += "-PRI-$($cfgCmOptions.version)-"
     }
 
     $file += "$($config.virtualMachines.Count)VMs"
@@ -1071,7 +1162,7 @@ do {
             Write-Host
             Write-verbose "13"
             if ($return.DeployNow -eq $true) {
-                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please save and exit any RDCMan sessions you have open, as deployment will make modifications to the memlabs.rdg file on the desktop"
+                Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigNotice "Please close any open RDCMan sessions. Deployment will update the MemLabs.rdg file on the desktop."
             }
             Write-Host "Answering 'no' below will take you back to the previous menu to allow you to make modifications"
             $response = Read-YesOrNoWithTimeout -Prompt "Everything correct? (Y/n)" -HideHelp -timeout 180 -Default "y"

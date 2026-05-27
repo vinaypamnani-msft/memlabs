@@ -88,7 +88,9 @@ configuration Phase7
             DependsOn = "[ModuleAdd]SQLServerModule"
         }
 
-        $usePKI = $deployConfig.cmOptions.UsePKI
+        # Per-VM cmOptions (multi-hierarchy safe).
+        $cmo = if ($thisVM.cmOptions) { $thisVM.cmOptions } else { $deployConfig.cmOptions }
+        $usePKI = $cmo.UsePKI
         if ($usePKI) {
             $templateName = 'ConfigMgr WebServer Certificate'
             $dnsName = $thisVm.vmName + "." + $DomainName

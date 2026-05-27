@@ -21,7 +21,11 @@ function Select-Options {
         [bool] $ContinueMode = $false,
         [Parameter(Mandatory = $false, HelpMessage = "Run a configuration test. Default True")]
         [bool] $Test = $true,
-        [string] $HelpFunction = $null
+        [string] $HelpFunction = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Hashtable mapping property name -> section header text. A non-selectable divider with the header is rendered immediately before that property.")]
+        [hashtable] $Sections = $null,
+        [Parameter(Mandatory = $false, HelpMessage = "Regex matched against menu item ItemName. If the assembled menu would overflow the current window, items whose ItemName matches are removed (lowest priority first) until it fits. Used for optional inline rows that should hide rather than push other items onto a second page.")]
+        [string] $DroppableItemPattern = $null
     )
 
     $property = $null
@@ -81,7 +85,15 @@ function Select-Options {
                 continue
 
             }
-            if ($isExisting -and ($item -notin $existingPropList -or ($value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
+            # additionalDisks is rendered/edited via the dedicated "Manage Disks"
+            # entry (M) below; suppress the auto-generated property row so the
+            # user doesn't see a confusing PSCustomObject dump. ($isVM is
+            # cleared for DC role earlier, so don't gate this on $isVM -- the
+            # Manage Disks entry is shown for all VMs.)
+            if ($item -eq "AdditionalDisks") {
+                continue
+            }
+            if ($isExisting -and ($item -notin $existingPropList -or ($item -ne "useProxy" -and $value -eq $true -and $null -eq $property."$($item + "-Original")") )) {
                 $color = $Global:Common.Colors.GenConfigHidden
                 $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName " " -ItemText "        $($($item).PadRight($padding," "")) = $value" -Color1 $color -selectable $false -HelpFunction $HelpFunction
                 #Write-Option " " "$($($item).PadRight($padding," "")) = $value" -Color $color
@@ -105,8 +117,23 @@ function Select-Options {
             $deletable = $false            
             #$padding = 27 - ($i.ToString().Length)
             $color = $null
-            $TextToDisplay = Get-AdditionalInformation -item $item -data $value
-            $color = Get-AdditionalInformationColor -item $item -data $value
+            if ($item -eq "cmOptions") {
+                # cmOptions on a top-level site server VM: render as the same
+                # colored summary the main menu shows, and route the handler
+                # into the dedicated sub-menu (see switch below).
+                $TextToDisplay = get-CMOptionsSummary -CmOptions $value
+                $color = $Global:Common.Colors.GenConfigNonDefault
+            }
+            else {
+                $TextToDisplay = Get-AdditionalInformation -item $item -data $value
+                $color = Get-AdditionalInformationColor -item $item -data $value
+            }
+            # Section header: rendered as a non-selectable divider right before
+            # this property when caller passes -Sections @{ propName = "Header" }.
+            if ($Sections -and $Sections.ContainsKey($item)) {
+                $headerText = "   ─────────  $($Sections[$item])  ─────────"
+                $null = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*S$i" -ItemText $headerText -selectable $false -selected $false -Color1 "SlateGray"
+            }
             $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName $i -ItemText "$($($item).PadRight($padding," "")) = $TextToDisplay" -selectable $true -Color1 $color -HelpFunction $HelpFunction -Deletable $deletable
             write-log -verbose "Adding $item as element $i in itemmap with currentvalue $value"
             $itemMap[$i] = $item
@@ -130,7 +157,13 @@ function Select-Options {
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*B" -ItemText "" -selectable $false -selected $false -Color1 $Global:Common.Colors.GenConfigHeader  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "*V" -ItemText "   ──────────────────────" -selectable $false -selected $false -Color1 "SlateGray"  
         $MenuItem = Add-MenuItem -MenuName $MenuName -MenuItems ([ref]$MenuItems) -ItemName "!" -ItemText "Done with changes" -selectable $true -selected $true -Color1 $Global:Common.Colors.GenConfigHelpHighlight -HelpFunction $HelpFunction
-        $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false  
+
+        # Droppable-item pruning lives inside Show-Menu now (forwarded via
+        # Get-Menu2's -DroppableItemPattern). It runs every render iteration
+        # so items reappear when the window grows and disappear when it
+        # shrinks. Doing it here would only fire once, before the first
+        # render, and would never react to resizes.
+        $response = Get-Menu2 -MenuName $MenuName -menuItems ([ref]$MenuItems) -Prompt $prompt -HideHelp:$true -test:$false -AcceptsDelete -DroppableItemPattern $DroppableItemPattern
 
         if ([String]::IsNullOrWhiteSpace($response) -or $response -eq "ESCAPE") {
             return "ESCAPE"
@@ -143,10 +176,26 @@ function Select-Options {
         }
         $return = $null
         if ($null -ne $additionalOptions) {
+            # Response can be either the itemName (pick) or "-D<itemName>" (Delete
+            # key on a deletable row). additionalOptions keys may carry a "-D"
+            # prefix to mark the row deletable -- New-MenuItem strips that
+            # prefix before display. Match on the stripped form for picks and
+            # on the original (prefixed) form for deletes. Caller-side dispatch
+            # tells the two apart by the leading "-D" in the returned string.
+            $responseLower = if ($response) { $response.ToLowerInvariant() } else { $null }
+            $responseIsDelete = ($responseLower -and $responseLower.StartsWith("-d"))
+            $responseStripped = if ($responseIsDelete) { $response.Substring(2) } else { $response }
+            $responseStrippedLower = if ($responseStripped) { $responseStripped.ToLowerInvariant() } else { $null }
             foreach ($item in $($additionalOptions.keys)) {
-                if (($response -and $item) -and ($response.ToLowerInvariant() -eq $item.ToLowerInvariant())) {
-                    # Return fails here for some reason. If the values were the same, let the user escape, as no changes were made.
-                    $return = $item
+                $itemStripped = $item
+                if ($itemStripped.StartsWith("-D") -and $itemStripped.Length -gt 2) {
+                    $itemStripped = $itemStripped.Substring(2)
+                }
+                if (-not $item -or -not $itemStripped) { continue }
+                if ($responseStrippedLower -eq $itemStripped.ToLowerInvariant()) {
+                    # Preserve the "-D" prefix in the returned value when the
+                    # response was a delete so callers can route accordingly.
+                    $return = if ($responseIsDelete) { "-D" + $itemStripped } else { $itemStripped }
                 }
             }
         }
@@ -177,6 +226,12 @@ function Select-Options {
 
 
         switch ($name) {
+            "cmOptions" {
+                # Dive into this VM's cmOptions sub-object via the dedicated helper
+                # (lazy-creates defaults if missing; exposes Version/Install/etc).
+                Invoke-CMOptionsMenuForVM -VM $property
+                continue MainLoop
+            }
             "operatingSystem" {
                 Get-OperatingSystemMenu -property $property -name $name -CurrentValue $value
                 if ($property.role -eq "DomainMember") {
@@ -319,7 +374,7 @@ function Select-Options {
             }
             "siteCode" {
                 if ($property.role -eq "PassiveSite") {
-                    Add-ErrorMessage -property $name "SiteCode can not be manually modified on a Passive server. Please modify this on the Active node"
+                    Add-ErrorMessage -property $name "SiteCode cannot be manually modified on a Passive server. Please modify this on the Active node"
                     continue MainLoop
                 }
                 if ($property.role -in ("SiteSystem", "WSUS")) {
@@ -331,11 +386,11 @@ function Select-Options {
                     $SiteType = get-RoleForSitecode -siteCode $Property.SiteCode -config $Global:Config
                     if ($SiteType -eq "CAS") {
                         if ($property.InstallMP) {
-                            Add-ErrorMessage -property $name "Can not install an MP on a CAS site. Automatically disabled"
+                            Add-ErrorMessage -property $name "Cannot install an MP on a CAS site. Automatically disabled"
                             $property.InstallMP = $false
                         }
                         if ($property.InstallDP) {
-                            Add-ErrorMessage -property $name "Can not install a DP on a CAS site. Automatically disabled"
+                            Add-ErrorMessage -property $name "Cannot install a DP on a CAS site. Automatically disabled"
                             $property.InstallDP = $false
                             $property.PsObject.Members.Remove("enablePullDP")
                             $property.PsObject.Members.Remove("pullDPSourceDP")
@@ -348,7 +403,7 @@ function Select-Options {
             }
             "role" {
                 if ($property.role -eq "PassiveSite") {
-                    Add-ErrorMessage -property $name "role can not be manually modified on a Passive server. Please disable HA or delete the VM."
+                    Add-ErrorMessage -property $name "Role cannot be manually modified on a Passive server. Please disable HA or delete the VM."
                     continue MainLoop
                 }
                 if (Get-RoleMenu -property $property -name $name -CurrentValue $value) {
@@ -611,6 +666,7 @@ function Select-VirtualMachines {
                             }
                             Get-List -type VM -SmartUpdate | Out-Null
                             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
+                            New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
                             return
                         }                        
                     }
@@ -714,20 +770,54 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                        $customOptions = [ordered]@{ 
+                        $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
+                        $customOptions = [ordered]@{
                             "*B1" = ""
                             "*B"  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
-                            "A"   = "Add Additional Disk"
-                            "HA"  = "Add an additional VHDX to this VMs configuration"
                         }
-                        if ($null -eq $virtualMachine.additionalDisks) {
-                        }
-                        else {
-                            $customOptions += [ordered]@{
-                                "R"  = "Remove Last Additional Disk"
-                                "HR" = "The last disk added to this configuration will be removed"
+                        # Inline one row per existing disk (when present).
+                        # itemName must be either a single letter or a number;
+                        # multi-letter alpha keys ("dE" etc.) are not dispatched
+                        # correctly by Get-Menu2. Use high numeric IDs (90+) so
+                        # they don't collide with the property list's 1..N
+                        # numbering, and keep a $diskNumToLetter map for the
+                        # reverse lookup. "-D" prefix marks the row deletable
+                        # (Delete key returns "-D<num>").
+                        $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
+                        $diskNumToLetter = @{}
+                        $diskNum = 90
+                        foreach ($dl in $diskLettersInline) {
+                            $dsize = $virtualMachine.additionalDisks.$dl
+                            $dusage = Get-VMDiskUsage -VirtualMachine $virtualMachine -Letter $dl
+                            $key = [string]$diskNum
+                            $rowText = "$($dl):  $dsize".PadRight(20) + "($dusage)"
+                            $rowColor = "DarkSeaGreen"
+                            # If a prior Invoke-RemoveDisk rejected this disk
+                            # (e.g. in use by SQL / ConfigMgr install dir),
+                            # surface that reason inline on the row and
+                            # consume the error so it doesn't also show in
+                            # the top banner. Mirrors Get-DataString's
+                            # [x] <message> pattern for property edits.
+                            $diskErrKey = "disk:$($virtualMachine.vmName):$dl"
+                            $diskErr = $null
+                            if ($global:GenConfigErrorMessages) {
+                                $diskErr = $global:GenConfigErrorMessages | Where-Object { $_.property -eq $diskErrKey } | Select-Object -First 1
                             }
+                            if ($diskErr) {
+                                # Pad to ~50 so [x] lines up roughly with the
+                                # extras column on property rows (where things
+                                # like "(CON-PS1SITE)" appear next to vmName).
+                                $rowText = $rowText.PadRight(50) + "[x] $($diskErr.Message)"
+                                $rowColor = "Salmon"
+                                $global:GenConfigErrorMessages = @($global:GenConfigErrorMessages | Where-Object { $_.property -ne $diskErrKey })
+                            }
+                            $customOptions["-D$key"] = "$rowText%$rowColor"
+                            $customOptions["H$key"]  = "Press Enter to change size of disk $($dl):, or Delete to remove it."
+                            $diskNumToLetter[$key] = $dl
+                            $diskNum++
                         }
+                        $customOptions["M"]  = "Manage Disks  ($diskSummary)"
+                        $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
                         if (($virtualMachine.Role -eq "Primary") -or ($virtualMachine.Role -eq "CAS")) {
                             $customOptions += [ordered]@{
                                 "*B2" = ""
@@ -839,7 +929,7 @@ function Select-VirtualMachines {
                             "HZ"  = "Deletes this VM from the current configuration"
                         }
                         if ([String]::IsNullOrEmpty($result)) {
-                            $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp"
+                            $newValue = Select-Options -MenuName "Modify Properties for $($virtualMachine.VMName)" -propertyEnum $global:config.virtualMachines -PropertyNum $ii -prompt "Which VM property to modify" -additionalOptions $customOptions -Test:$false -HelpFunction "Get-GenericHelp" -DroppableItemPattern '^9\d$'
                         }
                         else {
                             $newValue = $result
@@ -870,7 +960,7 @@ function Select-VirtualMachines {
                                     $OtherVMs2 = $global:config.virtualMachines | Where-Object { $_.remoteContentLibVM -eq $FSVM.vmName -and $_.vmname -ne $PassiveNode.vmName } 
                                     if (-not $OtherVMs -and -not $OtherVMs2) {
                                         write-host
-                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other vm's.  Removing from config"
+                                        Write-OrangePoint "$($FSVM.vmName) is not in use by any other VMs. Removing from config"
                                         Remove-VMFromConfig -vmName $FSVM.vmName -ConfigToModify $global:config
                                     }
                                 }
@@ -927,6 +1017,10 @@ function Select-VirtualMachines {
                                         $virtualMachine.memory = "4GB"
                                     }
                                 }
+                                # Raise dynamicMinRam floor to 4GB for SQL workloads
+                                if ($virtualMachine.dynamicMinRam -and (($virtualMachine.dynamicMinRam / 1) -lt 4GB)) {
+                                    $virtualMachine.dynamicMinRam = "4GB"
+                                }
 
                                 $newName = Rename-VirtualMachine -vm $virtualMachine
 
@@ -944,102 +1038,21 @@ function Select-VirtualMachines {
                             }
                             $newName = Rename-VirtualMachine -vm $virtualMachine
                         }
-                        if ($newValue -eq "A") {
-                            if ($null -eq $virtualMachine.additionalDisks) {
-                                $disk = [PSCustomObject]@{"E" = "400GB" }
-                                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'additionalDisks' -Value $disk -force
-                            }
-                            else {
-                                $letters = 69
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $letters++
-                                }
-                                if ($letters -lt 90) {
-                                    $letter = $([char]$letters).ToString()
-                                    $virtualMachine.additionalDisks | Add-Member -MemberType NoteProperty -Name $letter -Value "250GB" -force
-                                }
-                            }
+                        if ($newValue -eq "M") {
+                            Select-VMDisksMenu -VirtualMachine $virtualMachine
+                            $newValue = "Start"
                         }
-                        if ($newValue -eq "R") {
-                            $diskscount = 0
-                            $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                $diskscount++
-                            }
-                            if ($virtualMachine.Role -eq "FileServer") {
-                                if ($diskscount -le 2) {
-                                    write-host
-                                    write-redx "FileServers must have at least 2 disks"
-                                    Continue VMLoop
-                                }
-                            }
-                            if ($virtualMachine.SqlInstanceDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.SqlInstanceDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "SQL is configured to install to the disk we are trying to remove. Can not remove"
-                                    Continue VMLoop
-                                }
-                            }
-
-                            if ($virtualMachine.cmInstallDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.cmInstallDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.cmInstallDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.cmInstallDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "ConfigMgr is configured to install to the disk we are trying to remove. Can not remove"
-                                    Continue VMLoop
-                                }
-                            }
-
-                            if ($virtualMachine.wsusContentDir) {
-                                $neededDisks = 0
-                                if ($virtualMachine.wsusContentDir.StartsWith("E:")) {
-                                    $neededDisks = 1
-                                }
-                                if ($virtualMachine.wsusContentDir.StartsWith("F:")) {
-                                    $neededDisks = 2
-                                }
-                                if ($virtualMachine.wsusContentDir.StartsWith("G:")) {
-                                    $neededDisks = 3
-                                }
-                                if ($diskscount -le $neededDisks) {
-                                    write-host
-                                    write-redx "WSUS is configured to use to the disk we are trying to remove. Can not remove"
-                                    Continue VMLoop
-                                }
-                            }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
-                            }
-                            else {
-                                $i = 0
-                                $virtualMachine.additionalDisks | Get-Member -MemberType NoteProperty | ForEach-Object {
-                                    $i = $i + 1
-                                    if ($i -eq $diskscount) {
-                                        $virtualMachine.additionalDisks.psobject.properties.remove($_.Name)
-                                    }
-                                }
-                            }
-                            if ($diskscount -eq 1) {
-                                $virtualMachine.psobject.properties.remove('additionalDisks')
-                            }
+                        # Inline disk rows: itemName is "<num>" (90+). Pick
+                        # returns "<num>" -> Invoke-EditDiskSize. Delete key
+                        # returns "-D<num>" -> Invoke-RemoveDisk. Map back to
+                        # disk letter via $diskNumToLetter populated above.
+                        if ($newValue -match '^-D(9\d)$' -and $diskNumToLetter.ContainsKey($matches[1])) {
+                            $null = Invoke-RemoveDisk -VirtualMachine $virtualMachine -Letter $diskNumToLetter[$matches[1]]
+                            $newValue = "Start"
+                        }
+                        elseif ($newValue -match '^(9\d)$' -and $diskNumToLetter.ContainsKey($matches[1])) {
+                            $null = Invoke-EditDiskSize -VirtualMachine $virtualMachine -Letter $diskNumToLetter[$matches[1]]
+                            $newValue = "Start"
                         }
                         if (-not ($newValue -eq "Z")) {
                             Get-TestResult -SuccessOnError | out-null
@@ -1074,12 +1087,12 @@ function Select-VirtualMachines {
                             foreach ($testVM in $global:config.virtualMachine) {
                                 if ($testVM.remoteContentLibVM -eq $virtualMachine.vmName) {
                                     Write-Host
-                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and can not be deleted at this time."
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the RemoteContentLib for $($testVM.vmName) and cannot be deleted at this time."
                                     $removeVM = $false
                                 }
                                 if ($testVM.fileServerVM -eq $virtualMachine.vmName) {
                                     Write-Host
-                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and can not be deleted at this time."
+                                    write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($testVM.vmName) and cannot be deleted at this time."
                                     $removeVM = $false
                                 }
                             }
@@ -1089,7 +1102,7 @@ function Select-VirtualMachines {
                                 foreach ($SQLAOVM in $SQLAOVMs) {
                                     if ($SQLAOVM.fileServerVM -eq $virtualMachine.vmName) {
                                         Write-Host
-                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and can not be deleted at this time."
+                                        write-host2 -ForegroundColor Khaki "This VM is currently used as the fileServerVM for $($SQLAOVM.vmName) and cannot be deleted at this time."
                                         $removeVM = $false
                                     }
                                 }
@@ -1147,6 +1160,14 @@ function Remove-VMFromConfig {
 
         foreach ($child in $children ) {
             $child.parentSiteCode = $null
+            # Newly-standalone Primary: inherit the deleted CAS's cmOptions so each
+            # orphaned hierarchy keeps its existing CM settings (Version, PKI, BLM,
+            # etc.). Skip if the child already has its own block. Deep-clone via
+            # JSON round-trip so siblings don't share a mutable reference.
+            if ($child.Role -eq "Primary" -and $DeletedVM.cmOptions -and -not $child.cmOptions) {
+                $clone = $DeletedVM.cmOptions | ConvertTo-Json -Depth 5 -Compress | ConvertFrom-Json
+                $child | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $clone -Force
+            }
         }
     }
 }

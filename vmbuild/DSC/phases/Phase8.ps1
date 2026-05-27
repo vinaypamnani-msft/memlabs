@@ -20,8 +20,9 @@ Configuration Phase8
     $LogFolder = "DSC"
     $LogPath = "c:\staging\$LogFolder"
 
-    # CM Share Folder
-    $CM = if ($deployConfig.cmOptions.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+    # $CM (CMTP vs CMCB source folder) is resolved per-Node from the owning
+    # VM's cmOptions so multi-hierarchy deploys with mixed CM versions stamp
+    # the correct folder on each node. See CAS/Primary and DC Node blocks.
 
     # Domain Creds
     $DomainName = $deployConfig.parameters.domainName
@@ -121,8 +122,8 @@ Configuration Phase8
                 WaitForAll WaitSCCM {
                     ResourceName     = '[WaitForEvent]WorkflowComplete'
                     NodeName         = $WaitFor
-                    RetryIntervalSec = 15
-                    RetryCount       = 2400
+                    RetryIntervalSec = 5
+                    RetryCount       = 7200
                     DependsOn        = $nextDepend
                 }
                 $nextDepend = '[WaitForAll]WaitSCCM'
@@ -227,8 +228,8 @@ Configuration Phase8
             WaitForAll WaitSCCM {
                 ResourceName     = '[WaitForEvent]WorkflowComplete'
                 NodeName         = $WaitFor
-                RetryIntervalSec = 15
-                RetryCount       = 2400
+                RetryIntervalSec = 5
+                RetryCount       = 7200
                 DependsOn        = $nextDepend
             }
             $nextDepend = '[WaitForAll]WaitSCCM'
@@ -321,13 +322,40 @@ Configuration Phase8
         $nextDepend = $waitOnDependency
 
         if ($CSName -or $PSName) {
+            # AD schema extensions are cumulative -- a single extension by the
+            # highest-version top-level site server in this domain covers every
+            # hierarchy. Prefer tech-preview (newer schema) over current-branch.
+            # Falls back to legacy $CSName/$PSName if no top-levels are visible
+            # in this deployConfig snapshot.
+            $dcDomain = if ($ThisVM.Domain) { $ThisVM.Domain } else { $deployConfig.parameters.domainName }
+            $domainTops = @($deployConfig.virtualMachines | Where-Object {
+                    $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and
+                    (-not $_.Domain -or $_.Domain -eq $dcDomain)
+                })
+            $schemaServer = $domainTops | Where-Object {
+                $vmCmo = if ($_.cmOptions) { $_.cmOptions } else { $deployConfig.cmOptions }
+                $vmCmo.version -eq 'tech-preview'
+            } | Select-Object -First 1
+            if (-not $schemaServer) { $schemaServer = $domainTops | Select-Object -First 1 }
+
+            if ($schemaServer) {
+                $parentName = $schemaServer.vmName
+                $parentCmo = if ($schemaServer.cmOptions) { $schemaServer.cmOptions } else { $deployConfig.cmOptions }
+            }
+            else {
+                $parentName = if ($CSName) { $CSName } else { $PSName }
+                $parentVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $parentName } | Select-Object -First 1
+                $parentCmo = if ($parentVM.cmOptions) { $parentVM.cmOptions } else { $deployConfig.cmOptions }
+            }
+            $CM = if ($parentCmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
+
             WriteStatus WaitExtSchema {
                 DependsOn = $nextDepend
                 Status    = "Waiting for site to download ConfigMgr source files, before extending schema for Configuration Manager"
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = if ($CSName) { $CSName } else { $PSName }
+                MachineName = $parentName
                 ExtFolder   = $CM
                 Ensure      = "Present"
                 DependsOn   = "[WriteStatus]WaitExtSchema"
@@ -422,6 +450,11 @@ Configuration Phase8
         }
         #[System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
         [System.Management.Automation.PSCredential]$CMAdmin = New-Object System.Management.Automation.PSCredential ("${DomainName}\$DomainAdminName", $Admincreds.Password)
+
+        # Resolve per-VM CM version so each hierarchy uses its own source
+        # folder when multiple top-level site servers are deployed together.
+        $cmo = if ($ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        $CM = if ($cmo.version -eq "tech-preview") { "CMTP" } else { "CMCB" }
 
         WriteStatus ADKInstall {
             Status = "Downloading and installing ADK"
@@ -606,8 +639,8 @@ Configuration Phase8
         WaitForAll ActiveNode {
             ResourceName     = '[WriteStatus]Complete'
             NodeName         = $ThisVM.thisParams.ActiveNode
-            RetryIntervalSec = 25
-            RetryCount       = 1300
+            RetryIntervalSec = 5
+            RetryCount       = 6500
             DependsOn        = '[WriteStatus]WaitActive'
         }
 
