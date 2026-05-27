@@ -68,6 +68,31 @@ function Install-MRemoteNG {
             Write-Log "Removed default mRemoteNG shortcut: $defaultLnk" -LogOnly -Verbose
         }
     }
+
+    # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
+    # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
+    # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
+    # to our memlabs XML so mRemoteNG loads it without needing /cons:.
+    $memlabsXml = $Global:Common.MRemoteNGFilePath
+    if ($memlabsXml -and (Test-Path $memlabsXml)) {
+        try {
+            $defaultDir = Join-Path $env:LOCALAPPDATA "mRemoteNG"
+            $defaultFile = Join-Path $defaultDir "confCons.xml"
+            if (-not (Test-Path $defaultDir)) {
+                New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+            }
+            $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
+            $isCorrectSymlink = $item -and $item.LinkTarget -eq $memlabsXml
+            if (-not $isCorrectSymlink) {
+                if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
+                New-Item -ItemType SymbolicLink -Path $defaultFile -Target $memlabsXml -Force | Out-Null
+                Write-Log "Symlinked confCons.xml -> $memlabsXml (workaround for /cons: bug)" -LogOnly -Verbose
+            }
+        }
+        catch {
+            Write-Log "Could not create confCons.xml symlink: $_" -Warning -LogOnly
+        }
+    }
 }
 
 function Get-MRemoteNGPassword {

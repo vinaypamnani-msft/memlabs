@@ -333,6 +333,31 @@ function Update-MRemoteNGShortcut {
     catch {
         Write-LogMessage "Could not update desktop shortcut: $_" -Level 'WARNING'
     }
+
+    # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
+    # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
+    # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
+    # to our memlabs XML so mRemoteNG loads it without needing /cons:.
+    if (Test-Path $xmlPath) {
+        try {
+            $defaultDir = Join-Path $env:LOCALAPPDATA "mRemoteNG"
+            $defaultFile = Join-Path $defaultDir "confCons.xml"
+            if (-not (Test-Path $defaultDir)) {
+                New-Item -ItemType Directory -Path $defaultDir -Force | Out-Null
+            }
+            # Check if already a symlink to our file
+            $item = Get-Item $defaultFile -ErrorAction SilentlyContinue
+            $isCorrectSymlink = $item -and $item.LinkTarget -eq $xmlPath
+            if (-not $isCorrectSymlink) {
+                if (Test-Path $defaultFile) { Remove-Item $defaultFile -Force }
+                New-Item -ItemType SymbolicLink -Path $defaultFile -Target $xmlPath -Force | Out-Null
+                Write-LogMessage "Symlinked $defaultFile -> $xmlPath (workaround for /cons: bug in 1.78.2)"
+            }
+        }
+        catch {
+            Write-LogMessage "Could not create confCons.xml symlink: $_" -Level 'WARNING'
+        }
+    }
 }
 
 function Invoke-MRemoteNGMaintenance {
