@@ -629,6 +629,16 @@ function New-MRemoteNGFileFromHyperV {
                     $shouldSave = $true
                 }
 
+                # Link the "Proxy Admin (Edge)" external tool to Proxy SSH entries
+                if ($vm.Role -eq 'Proxy') {
+                    $sshId = Get-MRemoteNGDeterministicGuid -Seed "ssh:${domain}:$($vm.VmName)"
+                    $proxyNode = $linuxContainer.SelectSingleNode("Node[@Id='$sshId']")
+                    if ($proxyNode -and $proxyNode.GetAttribute("ExtApp") -ne "Proxy Admin (Edge)") {
+                        $proxyNode.SetAttribute("ExtApp", "Proxy Admin (Edge)")
+                        $shouldSave = $true
+                    }
+                }
+
                 # If enableRDP, also add an RDP entry in the main container
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
@@ -909,5 +919,83 @@ function New-MRemoteNGFileFromHyperV {
         else {
             Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
         }
+    }
+
+    # Ensure the "Proxy Admin" external tool is registered in extApps.xml
+    Set-MRemoteNGExternalApps
+}
+
+function Set-MRemoteNGExternalApps {
+    <#
+    .SYNOPSIS
+        Ensure mRemoteNG's extApps.xml includes a "Proxy Admin" external tool
+        that opens Edge to http://%Hostname%:8443.
+    .DESCRIPTION
+        mRemoteNG stores external tools in %AppData%\mRemoteNG\extApps.xml.
+        This function creates the file if missing, or adds the entry if absent.
+        When right-clicking a Proxy SSH connection in mRemoteNG, the user can
+        launch "Proxy Admin" from the External Tools menu to open the web UI.
+    #>
+
+    $extAppsDir = Join-Path $env:APPDATA 'mRemoteNG'
+    $extAppsFile = Join-Path $extAppsDir 'extApps.xml'
+
+    # Find Edge
+    $edgePaths = @(
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+    )
+    $edgeExe = $null
+    foreach ($p in $edgePaths) {
+        if (Test-Path $p) { $edgeExe = $p; break }
+    }
+    if (-not $edgeExe) {
+        Write-Log "Edge not found; skipping mRemoteNG external tool setup" -Warning -LogOnly
+        return
+    }
+
+    $toolName = "Proxy Admin (Edge)"
+    $toolArgs = "http://%Hostname%:8443"
+
+    try {
+        if (Test-Path $extAppsFile) {
+            [xml]$xDoc = Get-Content -Path $extAppsFile -Raw
+            # Check if the tool already exists
+            $existing = $xDoc.Apps.App | Where-Object { $_.DisplayName -eq $toolName }
+            if ($existing) {
+                # Update FileName/Arguments if they changed
+                if ($existing.FileName -ne $edgeExe -or $existing.Arguments -ne $toolArgs) {
+                    $existing.FileName = $edgeExe
+                    $existing.Arguments = $toolArgs
+                    $xDoc.Save($extAppsFile)
+                    Write-Log "Updated '$toolName' external tool in extApps.xml" -LogOnly -Verbose
+                }
+                return
+            }
+        }
+        else {
+            # Create the directory and a new extApps.xml
+            if (-not (Test-Path $extAppsDir)) {
+                New-Item -ItemType Directory -Path $extAppsDir -Force | Out-Null
+            }
+            [xml]$xDoc = '<?xml version="1.0" encoding="utf-8"?><Apps></Apps>'
+        }
+
+        # Add the new external tool
+        $appEl = $xDoc.CreateElement("App")
+        $appEl.SetAttribute("DisplayName", $toolName)
+        $appEl.SetAttribute("FileName", $edgeExe)
+        $appEl.SetAttribute("Arguments", $toolArgs)
+        $appEl.SetAttribute("WorkingDir", "")
+        $appEl.SetAttribute("WaitForExit", "False")
+        $appEl.SetAttribute("TryToIntegrate", "False")
+        $appEl.SetAttribute("RunElevated", "False")
+        $appEl.SetAttribute("ShowOnToolbar", "True")
+        [void]$xDoc.DocumentElement.AppendChild($appEl)
+        $xDoc.Save($extAppsFile)
+        Write-Log "Added '$toolName' external tool to extApps.xml" -LogOnly -Verbose
+    }
+    catch {
+        Write-Log "Failed to update extApps.xml: $_" -Warning -LogOnly
     }
 }
