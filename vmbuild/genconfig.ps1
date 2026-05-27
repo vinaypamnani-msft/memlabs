@@ -614,6 +614,13 @@ function Get-ExistingVMs {
         if ($evm.SqlVersion -and $null -eq $evm.sqlInstanceName) {
             $evm | Add-Member -MemberType NoteProperty -Name 'sqlInstanceName' -Value "MSSQLSERVER" -force
         }
+        # Inject useProxy=$false on existing VMs that don't have it yet
+        # (deployed before the proxy feature). Excluded roles and Linux VMs
+        # never get useProxy -- mirrors Test-VmUsesProxy hard-excludes.
+        $proxyExcluded = @('Proxy', 'DC', 'BDC', 'StandaloneRootCA')
+        if ($null -eq $evm.useProxy -and $evm.role -notin $proxyExcluded -and -not (Test-VmIsLinux -Vm $evm)) {
+            $evm | Add-Member -MemberType NoteProperty -Name 'useProxy' -Value $false -Force
+        }
     }
 
 

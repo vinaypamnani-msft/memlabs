@@ -240,6 +240,12 @@ function Remove-VirtualMachine {
         if (Get-Command -Name Remove-HostProxyShortcuts -ErrorAction SilentlyContinue) {
             Remove-HostProxyShortcuts -ProxyFqdn "$VmName.$($vmFromList.domain)"
         }
+        # Remove SSH shortcuts from guest VM desktops (DC, Primary, etc.)
+        if (-not $RemovingDomain) {
+            if (Get-Command -Name Remove-ProxyAdminAccessForDomain -ErrorAction SilentlyContinue) {
+                Remove-ProxyAdminAccessForDomain -DomainName $vmFromList.domain -ProxyFqdn "$VmName.$($vmFromList.domain)"
+            }
+        }
     }
 
     # -- Linux: scrub stale known_hosts entries for the removed VM's IP --

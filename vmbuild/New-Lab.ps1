@@ -894,6 +894,21 @@ try {
         # Update Existing VMs
         if ($updateExistingRequired) {
             Write-Log "Update Existing Virtual Machine Properties" -Activity -HostOnly
+
+            # Capture previous useProxy values from live VM notes BEFORE the
+            # update loop overwrites them. The -Original properties are
+            # stripped by Add-ModifiedExistingVMToDeployConfig, so we compare
+            # against the actual VM note to detect changes.
+            $previousUseProxy = @{}
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                if ($null -ne $vm.useProxy) {
+                    $note = Get-VMNote -VMName $vm.vmName
+                    if ($note) {
+                        $previousUseProxy[$vm.vmName] = if ($note.PSObject.Properties.Name -contains 'useProxy') { [bool]$note.useProxy } else { $false }
+                    }
+                }
+            }
+
             foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
                 Write-Host "Updating VM Notes on $($vm.VmName)"
                 foreach ($updatableEntry in $Global:Common.Supported.PropsToUpdate) {
@@ -901,6 +916,44 @@ try {
                         Write-Host "Updating $($vm.vmName) $updatableEntry to $($vm."$updatableEntry")"
                         Update-VMNoteProperty -vmName $vm.VmName -PropertyName $updatableEntry -PropertyValue $vm."$updatableEntry"
                     }
+                }
+            }
+
+            # Apply or remove Windows proxy settings on existing VMs whose
+            # useProxy property was modified. This handles the host-side
+            # configuration (in-guest proxy + Hyper-V ACLs) that Phase 8
+            # can't do (Phase 8 only covers CM site-system proxy via
+            # ConfigureCMProxy.ps1).
+            foreach ($vm in $deployConfig.VirtualMachines | Where-Object { $_.ExistingVM }) {
+                if ($null -eq $vm.useProxy) { continue }
+                $prevValue = if ($previousUseProxy.ContainsKey($vm.vmName)) { $previousUseProxy[$vm.vmName] } else { $false }
+                if ([bool]$vm.useProxy -eq $prevValue) { continue }
+
+                if ($vm.useProxy -eq $true) {
+                    # Enabling proxy: find the Proxy VM and configure
+                    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+                    if (-not $proxyVm) {
+                        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
+                        if ($existingProxyName) {
+                            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
+                        }
+                    }
+                    if ($proxyVm) {
+                        $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
+                        Write-Log "[Proxy] Enabling proxy on existing VM $($vm.vmName) -> $proxyFqdn`:3128"
+                        Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
+                            -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
+                        Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets (Get-VmProxyEnforcementSubnets -deployConfig $deployConfig)
+                    }
+                    else {
+                        Write-Log "[Proxy] $($vm.vmName): useProxy=true but no Proxy VM found; skipping" -Warning
+                    }
+                }
+                else {
+                    # Disabling proxy: remove in-guest config and host ACLs
+                    Write-Log "[Proxy] Removing proxy from existing VM $($vm.vmName)"
+                    Remove-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName
+                    Clear-VmProxyEnforcement -VmName $vm.vmName
                 }
             }
         }
