@@ -25,7 +25,18 @@ function Write-JobProgress {
             #Extracts the latest progress of the job and writes the progress
             $latestPercentComplete = 0
             # Notes: "Preparing modules for first use" is translated when other than en-US
-            $lastProgress = $streamSource.Progress | Where-Object { $_.Activity -ne "Preparing modules for first use." } | Select-Object -Last 1
+            # Index directly instead of piping through Where-Object | Select-Object -Last 1
+            # to avoid enumerating the full PSDataCollection, which can cause PS7 to
+            # auto-render the child job's raw progress records as orphan bars (no VM name prefix).
+            $lastProgress = $null
+            $progressCount = $streamSource.Progress.Count
+            for ($pi = $progressCount - 1; $pi -ge 0; $pi--) {
+                $candidate = $streamSource.Progress[$pi]
+                if ($candidate.Activity -ne "Preparing modules for first use.") {
+                    $lastProgress = $candidate
+                    break
+                }
+            }
             if ($lastProgress) {
                 $latestPercentComplete = $lastProgress | Select-Object -expand PercentComplete;
                 $latestActivity = $lastProgress | Select-Object -expand Activity;
@@ -76,6 +87,19 @@ function Write-JobProgress {
                         }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"                        
+                    }
+
+                    # Dismiss any orphan progress bar that PS7 may auto-render from
+                    # the child job's original progress record. Child jobs write with
+                    # the default ActivityId (0), but the managed bar above uses
+                    # $Job.Id. If PS7 surfaces the child's record at its original Id,
+                    # an extra bar appears without the VM name prefix.
+                    $childActivityId = $lastProgress.ActivityId
+                    if ($childActivityId -ne $Job.Id) {
+                        $savedPref = $Global:ProgressPreference
+                        $Global:ProgressPreference = 'Continue'
+                        Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
+                        $Global:ProgressPreference = $savedPref
                     }
                 }
                 catch {
