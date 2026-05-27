@@ -288,28 +288,154 @@ function Invoke-WindowsTerminalMaintenance {
 function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'Starting mRemoteNG maintenance...'
 
-    $mRNGExe = "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe"
+    # mRemoteNG 1.77+ nightly builds support Hyper-V Console via UseVmId/UseEnhancedMode.
+    # The stable choco package (1.76.20) does not. We install the nightly portable build from GitHub.
+    $minVersion = [version]"1.77.0"
+    $installDir = "$env:ProgramFiles\mRemoteNG"
+    $mRNGExe = Join-Path $installDir "mRemoteNG.exe"
+
+    # Check all known install locations for a sufficient version
+    $candidatePaths = @(
+        $mRNGExe
+        "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe"
+        "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe"
+    )
+    foreach ($candidate in $candidatePaths) {
+        if (Test-Path $candidate) {
+            try {
+                $vi = (Get-Item $candidate).VersionInfo
+                $ver = [version]"$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
+                if ($ver -ge $minVersion) {
+                    Write-LogMessage "mRemoteNG $ver found at $candidate. No upgrade needed."
+                    return
+                }
+                Write-LogMessage "mRemoteNG $ver at $candidate is below $minVersion (no Hyper-V Console support)."
+            }
+            catch {
+                Write-LogMessage "Could not read version from $candidate`: $_"
+            }
+        }
+    }
+
+    Write-LogMessage 'Installing mRemoteNG nightly (1.78+) for Hyper-V Console support...'
+
+    # Use the GitHub API to find the latest nightly with a self-contained (SC) portable asset
+    $downloadUrl = $null
+    $assetName = $null
+    try {
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/mRemoteNG/mRemoteNG/releases" `
+            -UserAgent 'MemLabs-Maintenance' -TimeoutSec 30 -ErrorAction Stop
+
+        $release = $releases | Where-Object {
+            $_.assets | Where-Object { $_.name -match 'x64-SC\.rar$' }
+        } | Select-Object -First 1
+
+        if ($release) {
+            $asset = $release.assets | Where-Object { $_.name -match 'x64-SC\.rar$' } | Select-Object -First 1
+            $downloadUrl = $asset.browser_download_url
+            $assetName = $asset.name
+            Write-LogMessage "Found release: $($release.name) - $assetName"
+        }
+    }
+    catch {
+        Write-LogMessage "GitHub API call failed: $_. Using known-good URL." -Level 'WARNING'
+    }
+
+    # Fall back to the known-good nightly if API failed or returned nothing
+    if (-not $downloadUrl) {
+        $downloadUrl = "https://github.com/mRemoteNG/mRemoteNG/releases/download/20260222-v1.78.2-NB-(3405)/mRemoteNG-20260222-v1.78.2-NB-3405-x64-SC.rar"
+        $assetName = "mRemoteNG-20260222-v1.78.2-NB-3405-x64-SC.rar"
+        Write-LogMessage "Using known-good URL: $assetName"
+    }
+
+    # Ensure 7-Zip is available for RAR extraction
+    $7zExe = $null
+    foreach ($p in @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\7z.exe", "C:\ProgramData\chocolatey\bin\7z.exe")) {
+        if (Test-Path $p) { $7zExe = $p; break }
+    }
+    if (-not $7zExe) {
+        if (Test-ChocoAvailable) {
+            Write-LogMessage 'Installing 7-Zip for RAR extraction...'
+            & choco install 7zip.portable -y | Out-Null
+            if (Test-ChocoSuccessCode -Code $LASTEXITCODE) {
+                $7zExe = "C:\ProgramData\chocolatey\bin\7z.exe"
+            }
+        }
+        if (-not $7zExe -or -not (Test-Path $7zExe)) {
+            Write-LogMessage '7-Zip not available and cannot be installed. Skipping mRemoteNG install.' -Level 'WARNING'
+            return
+        }
+    }
+
+    # Download the nightly build
+    $tempDir = Join-Path $env:TEMP "mremoteng-install"
+    $null = New-Item -Path $tempDir -ItemType Directory -Force
+    $downloadPath = Join-Path $tempDir $assetName
+
+    try {
+        Write-LogMessage "Downloading $assetName..."
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+        Write-LogMessage "Download complete ($('{0:N1}' -f ((Get-Item $downloadPath).Length / 1MB)) MB)."
+    }
+    catch {
+        Write-LogMessage "Download failed: $_" -Level 'WARNING'
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    # Stop mRemoteNG if running
+    $mRNGProcs = Get-Process -Name mRemoteNG -ErrorAction SilentlyContinue
+    if ($mRNGProcs) {
+        Write-LogMessage 'Stopping running mRemoteNG process...'
+        $mRNGProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+
+    # Remove old choco 1.76 installation if present
+    $oldChocoExe = "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe"
+    if ((Test-Path $oldChocoExe) -and (Test-ChocoAvailable)) {
+        Write-LogMessage 'Removing old mRemoteNG choco package (1.76)...'
+        & choco uninstall mremoteng -y 2>&1 | Out-Null
+    }
+
+    # Extract to install directory
+    if (Test-Path $installDir) {
+        Remove-Item -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $null = New-Item -Path $installDir -ItemType Directory -Force
+
+    try {
+        Write-LogMessage "Extracting to $installDir..."
+        & $7zExe x $downloadPath -o"$installDir" -y 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "7z extraction failed with exit code $LASTEXITCODE" }
+
+        # RAR may contain a subfolder; if so, move contents up
+        if (-not (Test-Path $mRNGExe)) {
+            $subDirs = Get-ChildItem -Path $installDir -Directory
+            if ($subDirs.Count -eq 1) {
+                $subDir = $subDirs[0].FullName
+                Write-LogMessage "Moving contents from subfolder $($subDirs[0].Name)..."
+                Get-ChildItem -Path $subDir -Force | Move-Item -Destination $installDir -Force
+                Remove-Item $subDir -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-LogMessage "Extraction failed: $_" -Level 'WARNING'
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    # Cleanup temp download
+    Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+
     if (Test-Path $mRNGExe) {
-        Write-LogMessage 'mRemoteNG already installed. Skipping installation.'
-        return
-    }
-
-    Write-LogMessage 'mRemoteNG not installed, attempting to install...'
-
-    if (-not (Test-ChocoAvailable)) {
-        Write-LogMessage 'Chocolatey CLI not found. Skipping mRemoteNG install.' -Level 'WARNING'
-        return
-    }
-
-    & choco install mremoteng -y | Out-Null
-    $exitCode = $LASTEXITCODE
-    Write-LogMessage "choco install mremoteng returned exit code: $exitCode"
-
-    if (Test-ChocoSuccessCode -Code $exitCode) {
-        Write-LogMessage 'mRemoteNG successfully installed.'
+        $vi = (Get-Item $mRNGExe).VersionInfo
+        Write-LogMessage "mRemoteNG $($vi.FileVersion) installed successfully at $installDir"
     }
     else {
-        Write-LogMessage 'Failed to install mRemoteNG.' -Level 'WARNING'
+        Write-LogMessage "mRemoteNG.exe not found after extraction at $installDir" -Level 'WARNING'
     }
 
     Write-LogMessage 'mRemoteNG maintenance completed.'

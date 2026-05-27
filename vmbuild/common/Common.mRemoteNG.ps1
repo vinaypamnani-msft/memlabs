@@ -942,7 +942,7 @@ function New-MRemoteNGFileFromHyperV {
     # Restart mRemoteNG if we stopped it (or start it fresh after saving)
     if ($killed -or $shouldSave) {
         $mRNGExe = $null
-        foreach ($p in @("${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
+        foreach ($p in @("$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
             if (Test-Path $p) { $mRNGExe = $p; break }
         }
         if ($mRNGExe) {
