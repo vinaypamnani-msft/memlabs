@@ -1466,10 +1466,10 @@ Function Set-Window {
             if (-not [Window].GetMethod('FindWindow')) { throw "stale" }
         }
         Catch {
-            # Remove stale type if loaded without FindWindow (can't unload, but -IgnoreWarnings
-            # allows re-add in some scenarios). Use a uniquely-named type to avoid conflicts.
+            # Type doesn't exist or is stale - define it. Guard with -ErrorAction to suppress
+            # "type already exists" warnings when Common.ps1 is dot-sourced multiple times.
             try {
-                Add-Type @"
+                Add-Type -ErrorAction SilentlyContinue @"
               using System;
               using System.Runtime.InteropServices;
               public class Window {
