@@ -843,15 +843,18 @@ function Disable-MouseInput {
     $script:_mouseShiftHeld = $false
 }
 
-# Temporarily restore Quick Edit Mode (for text selection) without touching
-# _savedConsoleMode. Used when Shift is held to allow native text selection.
+# Disable mouse input so the terminal handles mouse events natively (text
+# selection in Windows Terminal). Does NOT enable Quick Edit Mode — Quick Edit
+# starts a modal selection in Windows Terminal that traps all input until
+# dismissed, and SetConsoleMode cannot cancel an active selection. Disabling
+# MOUSE_INPUT alone is sufficient: ConPTY translates MOUSE_INPUT into VT mouse
+# tracking, so clearing the flag tells Windows Terminal to stop forwarding mouse
+# events to the app and handle them itself (selection, right-click, etc.).
 function Suspend-MouseInput {
     if ($null -ne $script:_consoleInputHandle) {
         $mode = [uint32]0
         [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
-        $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE `
-                          -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS) `
-                          -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
+        $newMode = $mode -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
         [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
     }
 }
