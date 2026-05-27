@@ -495,11 +495,28 @@ if ($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer) {
     Set-ItemProperty $hkcu -Name ProxyEnable   -Value $p.ProxyEnable   -Type DWord  -Force
     Set-ItemProperty $hkcu -Name ProxyServer    -Value $p.ProxyServer   -Type String -Force
     Set-ItemProperty $hkcu -Name ProxyOverride  -Value $p.ProxyOverride -Type String -Force
+    $en = $true; $pS = $p.ProxyServer; $bL = $p.ProxyOverride
 } else {
     Set-ItemProperty $hkcu -Name ProxyEnable -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
     Remove-ItemProperty $hkcu -Name ProxyServer   -ErrorAction SilentlyContinue
     Remove-ItemProperty $hkcu -Name ProxyOverride  -ErrorAction SilentlyContinue
+    $en = $false; $pS = ''; $bL = ''
 }
+# Write DefaultConnectionSettings blob — this is what Edge/Chrome actually reads
+$conn = "$hkcu\Connections"
+if (-not (Test-Path $conn)) { New-Item $conn -Force | Out-Null }
+$old = (Get-ItemProperty $conn -Name DefaultConnectionSettings -EA SilentlyContinue).DefaultConnectionSettings
+$ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old,0)+1 } else { 46 }
+if ($en) { $pB=[Text.Encoding]::ASCII.GetBytes($pS); $bB=[Text.Encoding]::ASCII.GetBytes($bL); $fl=[uint32]3 }
+else      { $pB=[byte[]]@(); $bB=[byte[]]@(); $fl=[uint32]9 }
+$blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32); $o=0
+[Array]::Copy([BitConverter]::GetBytes([uint32]$ctr),0,$blob,$o,4); $o+=4
+[Array]::Copy([BitConverter]::GetBytes($fl),0,$blob,$o,4); $o+=4
+[Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length),0,$blob,$o,4); $o+=4
+if ($pB.Length) { [Array]::Copy($pB,0,$blob,$o,$pB.Length); $o+=$pB.Length }
+[Array]::Copy([BitConverter]::GetBytes([uint32]$bB.Length),0,$blob,$o,4); $o+=4
+if ($bB.Length) { [Array]::Copy($bB,0,$blob,$o,$bB.Length); $o+=$bB.Length }
+Set-ItemProperty $conn -Name DefaultConnectionSettings -Value $blob -Type Binary -Force
 '@
     try {
         $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `

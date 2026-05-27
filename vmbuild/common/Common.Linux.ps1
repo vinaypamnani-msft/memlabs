@@ -2979,6 +2979,37 @@ function Set-WindowsClientProxy {
         $ErrorActionPreference = 'Stop'
 
         try {
+            # Helper: build and write the DefaultConnectionSettings binary blob
+            # under the given Internet Settings registry path. This is what
+            # WinHttpGetIEProxyConfigForCurrentUser() (and therefore Edge/Chrome)
+            # actually reads. The classic ProxyEnable/ProxyServer/ProxyOverride
+            # keys are a separate, independent store that Edge ignores.
+            $writeConnBlob = {
+                param([string]$ieRegPath, [string]$proxy, [string]$bypass, [bool]$enable)
+                $connPath = Join-Path $ieRegPath 'Connections'
+                if (-not (Test-Path $connPath)) { New-Item -Path $connPath -Force | Out-Null }
+                $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
+                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                if ($enable) {
+                    $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
+                    $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
+                    $fl = [uint32]0x03  # present + proxy enabled
+                } else {
+                    $pB = [byte[]]@(); $bB = [byte[]]@()
+                    $fl = [uint32]0x09  # present + auto-detect (Windows default)
+                }
+                $blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32)
+                $o = 0
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr), 0, $blob, $o, 4); $o += 4
+                [Array]::Copy([BitConverter]::GetBytes($fl), 0, $blob, $o, 4); $o += 4
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length), 0, $blob, $o, 4); $o += 4
+                if ($pB.Length) { [Array]::Copy($pB, 0, $blob, $o, $pB.Length); $o += $pB.Length }
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$bB.Length), 0, $blob, $o, 4); $o += 4
+                if ($bB.Length) { [Array]::Copy($bB, 0, $blob, $o, $bB.Length); $o += $bB.Length }
+                # auto-config URL length = 0, remaining 32 bytes = zero padding
+                Set-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -Value $blob -Type Binary -Force
+            }
+
             # 1) WinHTTP (used by BITS, Windows Update, .NET in some modes)
             & netsh winhttp set proxy proxy-server="$proxyServer" bypass-list="$bypassList" | Out-Null
 
@@ -3023,7 +3054,18 @@ function Set-WindowsClientProxy {
                 New-ItemProperty -Path $userIeKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
                 New-ItemProperty -Path $userIeKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
                 New-ItemProperty -Path $userIeKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+                & $writeConnBlob $userIeKey $proxyServer $bypassList $true
             }
+
+            # 3a-conn) DefaultConnectionSettings blobs for HKCU + HKLM.
+            #    Edge/Chrome calls WinHttpGetIEProxyConfigForCurrentUser()
+            #    which reads the DefaultConnectionSettings binary blob under
+            #    ...\Internet Settings\Connections — NOT the classic
+            #    ProxyEnable/ProxyServer/ProxyOverride keys written above.
+            #    Without this blob, the Windows Settings > Proxy UI shows
+            #    "Off" and Edge goes direct despite the classic keys being set.
+            & $writeConnBlob $hkcuKey $proxyServer $bypassList $true
+            & $writeConnBlob $ieKey  $proxyServer $bypassList $true
 
             # 3b) HKLM Wow6432Node IE settings -- the 32-bit registry view.
             #     Internet Settings is NOT redirected by WOW64, but some
@@ -3056,6 +3098,7 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+            & $writeConnBlob $defaultUserKey $proxyServer $bypassList $true
 
             # 5) .NET Framework machine.config <defaultProxy>. This is the only
             #    proxy source that SYSTEM-context System.Net.WebClient honors
@@ -3201,6 +3244,32 @@ function Remove-WindowsClientProxy {
     $scriptBlock = {
         $ErrorActionPreference = 'Stop'
         try {
+            # Helper: reset DefaultConnectionSettings blob (same as Set function)
+            $writeConnBlob = {
+                param([string]$ieRegPath, [string]$proxy, [string]$bypass, [bool]$enable)
+                $connPath = Join-Path $ieRegPath 'Connections'
+                if (-not (Test-Path $connPath)) { return }
+                $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
+                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                if ($enable) {
+                    $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
+                    $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
+                    $fl = [uint32]0x03
+                } else {
+                    $pB = [byte[]]@(); $bB = [byte[]]@()
+                    $fl = [uint32]0x09
+                }
+                $blob = New-Object byte[] (4+4+4+$pB.Length+4+$bB.Length+4+32)
+                $o = 0
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$ctr), 0, $blob, $o, 4); $o += 4
+                [Array]::Copy([BitConverter]::GetBytes($fl), 0, $blob, $o, 4); $o += 4
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$pB.Length), 0, $blob, $o, 4); $o += 4
+                if ($pB.Length) { [Array]::Copy($pB, 0, $blob, $o, $pB.Length); $o += $pB.Length }
+                [Array]::Copy([BitConverter]::GetBytes([uint32]$bB.Length), 0, $blob, $o, 4); $o += 4
+                if ($bB.Length) { [Array]::Copy($bB, 0, $blob, $o, $bB.Length); $o += $bB.Length }
+                Set-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -Value $blob -Type Binary -Force
+            }
+
             # 1) WinHTTP
             & netsh winhttp reset proxy | Out-Null
 
@@ -3220,6 +3289,7 @@ function Remove-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
             Remove-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
             Remove-ItemProperty -Path $ieKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            & $writeConnBlob $ieKey '' '' $false
 
             # 3b) HKLM Wow6432Node IE settings (32-bit view)
             $ieKeyWow = 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -3235,6 +3305,7 @@ function Remove-WindowsClientProxy {
                 New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
                 Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
                 Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+                & $writeConnBlob $defaultUserKey '' '' $false
             }
 
             # 4a) HKCU + all loaded user hives (reverse of Set step 3a-hkcu)
@@ -3243,6 +3314,7 @@ function Remove-WindowsClientProxy {
                 New-ItemProperty -Path $hkcuKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
                 Remove-ItemProperty -Path $hkcuKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
                 Remove-ItemProperty -Path $hkcuKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+                & $writeConnBlob $hkcuKey '' '' $false
             }
             $userSids = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
                 Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' }
@@ -3252,6 +3324,7 @@ function Remove-WindowsClientProxy {
                 New-ItemProperty -Path $userIeKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
                 Remove-ItemProperty -Path $userIeKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
                 Remove-ItemProperty -Path $userIeKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+                & $writeConnBlob $userIeKey '' '' $false
             }
 
             # 5) .NET Framework machine.config <defaultProxy>
