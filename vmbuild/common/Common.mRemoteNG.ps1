@@ -425,7 +425,7 @@ function Add-MRemoteNGConnectionToContainer {
         -VmId $VmId -UseEnhancedMode $UseEnhancedMode
 
     [void]$Container.AppendChild($node)
-    Write-Log "Added $DisplayName ($Protocol) to mRemoteNG" -LogOnly -Verbose
+    Write-Log "Added $DisplayName ($Protocol) to mRemoteNG" -LogOnly
     return $true
 }
 
@@ -846,9 +846,10 @@ function New-MRemoteNGFileFromHyperV {
                 try { $hvVmId = (Get-VM -Name $vm.VmName -ErrorAction Stop).Id.ToString() } catch { }
             }
             if ([string]::IsNullOrWhiteSpace($hvVmId)) {
-                Write-Log "mRemoteNG: Skipping Hyper-V Console for $($vm.VmName) — no vmId" -LogOnly -Warning
+                Write-Log "mRemoteNG: Skipping Hyper-V Console for $($vm.VmName) — no vmId (type=$($vm.vmId.GetType().Name))" -LogOnly
                 continue
             }
+            Write-Log "mRemoteNG: Hyper-V Console $($vm.VmName) vmId=$hvVmId" -LogOnly
 
             $hvDisplayName = $vm.VmName
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $hvContainer `
