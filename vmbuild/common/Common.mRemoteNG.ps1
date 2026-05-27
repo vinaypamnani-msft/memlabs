@@ -862,14 +862,23 @@ function New-MRemoteNGFileFromHyperV {
     }
 
     # Save
+    $killed = $false
     if ($shouldSave) {
         try {
+            # mRemoteNG does not auto-reload its XML; stop it before writing
+            # so it doesn't hold a file lock and doesn't show stale data.
+            $proc = Get-Process -Name mRemoteNG -ErrorAction Ignore | Select-Object -First 1
+            if ($proc) {
+                $killed = $true
+                Get-Process -Name mRemoteNG -ErrorAction Ignore | Stop-Process -Force
+                Start-Sleep -Seconds 1
+            }
+
             # Use UTF-8 without BOM — mRemoteNG expects UTF-8, but [xml].Save() writes UTF-16
             $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
             $writer = [System.IO.StreamWriter]::new($MRemoteNGFile, $false, $utf8NoBom)
             $doc.Save($writer)
             $writer.Close()
-            Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
         }
         catch {
             Write-RedX "Could not update $MRemoteNGFile. $_"
@@ -877,5 +886,28 @@ function New-MRemoteNGFileFromHyperV {
     }
     else {
         Write-Log "No Changes. Not updating $MRemoteNGFile" -Success -Verbose
+    }
+
+    # Restart mRemoteNG if we stopped it (or start it fresh after saving)
+    if ($killed -or $shouldSave) {
+        $mRNGExe = $null
+        foreach ($p in @("${env:ProgramFiles(x86)}\mRemoteNG\mRemoteNG.exe", "$env:ProgramFiles\mRemoteNG\mRemoteNG.exe", "C:\ProgramData\chocolatey\lib\mremoteng\tools\mRemoteNG.exe")) {
+            if (Test-Path $p) { $mRNGExe = $p; break }
+        }
+        if ($mRNGExe) {
+            $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -ErrorAction SilentlyContinue
+            if ($mRNGProc) {
+                Write-GreenCheck "Updated $MRemoteNGFile. Restarted mRemoteNG (PID $($mRNGProc.Id))" -ForegroundColor ForestGreen
+            }
+            else {
+                Write-GreenCheck "Updated $MRemoteNGFile. mRemoteNG was stopped but failed to restart" -ForegroundColor ForestGreen
+            }
+        }
+        elseif ($killed) {
+            Write-GreenCheck "Updated $MRemoteNGFile. mRemoteNG was stopped (exe not found for restart)" -ForegroundColor ForestGreen
+        }
+        else {
+            Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
+        }
     }
 }
