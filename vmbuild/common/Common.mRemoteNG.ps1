@@ -55,6 +55,18 @@ function Install-MRemoteNG {
             Write-Log "Failed to create mRemoteNG shortcut: $_" -Warning -LogOnly
         }
     }
+
+    # Remove the default mRemoteNG shortcut(s) created by choco to avoid confusion
+    $defaultShortcutPaths = @(
+        Join-Path ([Environment]::GetFolderPath("Desktop")) "mRemoteNG.lnk"
+        Join-Path ([Environment]::GetFolderPath("CommonDesktopDirectory")) "mRemoteNG.lnk"
+    )
+    foreach ($defaultLnk in $defaultShortcutPaths) {
+        if (Test-Path $defaultLnk) {
+            Remove-Item $defaultLnk -Force -ErrorAction SilentlyContinue
+            Write-Log "Removed default mRemoteNG shortcut: $defaultLnk" -LogOnly -Verbose
+        }
+    }
 }
 
 function Get-MRemoteNGPassword {
