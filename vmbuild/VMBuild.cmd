@@ -65,6 +65,10 @@ IF NOT "%CURBRANCH%"=="" (
                         ECHO changes on "%CURBRANCH%". Resolve manually then re-run.
                         ECHO Press any key to continue with current branch...
                         PAUSE > NUL
+                    ) ELSE (
+                        @ECHO ON
+                        git pull
+                        @ECHO OFF
                     )
                 )
             )
