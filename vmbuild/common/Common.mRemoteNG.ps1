@@ -799,7 +799,11 @@ function New-MRemoteNGFileFromHyperV {
     # Save
     if ($shouldSave) {
         try {
-            $doc.Save($MRemoteNGFile) | Out-Null
+            # Use UTF-8 without BOM — mRemoteNG expects UTF-8, but [xml].Save() writes UTF-16
+            $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+            $writer = [System.IO.StreamWriter]::new($MRemoteNGFile, $false, $utf8NoBom)
+            $doc.Save($writer)
+            $writer.Close()
             Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
         }
         catch {
