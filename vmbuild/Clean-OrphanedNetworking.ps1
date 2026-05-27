@@ -35,10 +35,13 @@ param(
 )
 
 # ── Bootstrap memlabs environment ────────────────────────────────────────────
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-Push-Location $scriptRoot
+if ($Common.Initialized) {
+    $Common.Initialized = $false
+}
+
+Push-Location $PSScriptRoot
 try {
-    . "$scriptRoot\Common.ps1" -intMode
+    . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false
 }
 catch {
     Write-Host "ERROR: Failed to load Common.ps1. Run this from the vmbuild directory." -ForegroundColor Red
