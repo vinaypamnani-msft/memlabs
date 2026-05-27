@@ -3209,6 +3209,28 @@ function Invoke-LinuxRoleConfiguration {
         return $false
     }
 
+    # Wait for cloud-init to finish before applying any configuration.
+    # The Ubuntu Desktop base image runs a first-boot cloud-init that does
+    # apt-get update, package installs, user creation, and a final reboot.
+    # If we start our apt-get installs while cloud-init still holds the
+    # dpkg lock, the command fails under set -euo pipefail and the whole
+    # module aborts. Even if our commands slip through, cloud-init's final
+    # reboot or cleanup can overwrite our dconf/xsession/mimeapps changes.
+    # `cloud-init status --wait` blocks until cloud-init reaches 'done' or
+    # 'error' (typically 1-5 minutes on Desktop images).
+    Write-Progress2 -Activity $activity -Status "Waiting for cloud-init to finish" -force
+    Write-Log "[LinuxConfig] $vmName`: waiting for cloud-init to complete before applying config"
+    $ciResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
+        -BashCommand 'cloud-init status --wait 2>/dev/null; echo "cloud-init exit=$?"' `
+        -Sudo -DisplayName 'cloud-init-wait' -TimeoutSeconds 600
+    if ($ciResult -and $ciResult.ScriptBlockOutput) {
+        $ciOutput = ($ciResult.ScriptBlockOutput -split "`n" | Select-Object -Last 5) -join ' | '
+        Write-Log "[LinuxConfig] $vmName`: cloud-init result: $ciOutput"
+    }
+    else {
+        Write-Log "[LinuxConfig] $vmName`: cloud-init wait returned no output (may already be done)" -Warning
+    }
+
     # Run each module as its own SSH invocation so the Phase 3 row reflects
     # exactly what's running. Fail-fast: a module failure aborts subsequent
     # modules and returns $false (matches the old single-blob behavior).
