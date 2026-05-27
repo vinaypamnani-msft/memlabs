@@ -236,12 +236,18 @@ function New-MRemoteNGContainerNode {
     $node.SetAttribute("Descr", "MemLabs Auto Generated")
     $node.SetAttribute("Icon", "mRemoteNG")
     $node.SetAttribute("Panel", "General")
+    $node.SetAttribute("TabColor", "")
+    $node.SetAttribute("ConnectionFrameColor", "None")
     $node.SetAttribute("Id", (Get-MRemoteNGDeterministicGuid -Seed "container:$Name"))
     $node.SetAttribute("Username", $Username)
     $node.SetAttribute("Domain", $Domain)
     $node.SetAttribute("Password", $Password)
     $node.SetAttribute("Hostname", "")
     $node.SetAttribute("Protocol", $Protocol)
+    $node.SetAttribute("RdpVersion", "rdc10")
+    $node.SetAttribute("SSHTunnelConnectionName", "")
+    $node.SetAttribute("OpeningCommand", "")
+    $node.SetAttribute("SSHOptions", "")
     $node.SetAttribute("PuttySession", "Default Settings")
     $node.SetAttribute("Port", $Port)
     $node.SetAttribute("ConnectToConsole", "false")
@@ -259,20 +265,31 @@ function New-MRemoteNGContainerNode {
     $node.SetAttribute("DisplayThemes", "false")
     $node.SetAttribute("EnableFontSmoothing", "false")
     $node.SetAttribute("EnableDesktopComposition", "false")
+    $node.SetAttribute("DisableFullWindowDrag", "false")
+    $node.SetAttribute("DisableMenuAnimations", "false")
+    $node.SetAttribute("DisableCursorShadow", "false")
+    $node.SetAttribute("DisableCursorBlinking", "false")
     $node.SetAttribute("CacheBitmaps", "false")
-    $node.SetAttribute("RedirectDiskDrives", "false")
+    $node.SetAttribute("RedirectDiskDrives", "None")
+    $node.SetAttribute("RedirectDiskDrivesCustom", "")
     $node.SetAttribute("RedirectPorts", "false")
     $node.SetAttribute("RedirectPrinters", "false")
+    $node.SetAttribute("RedirectClipboard", "false")
     $node.SetAttribute("RedirectSmartCards", "false")
     $node.SetAttribute("RedirectSound", "DoNotPlay")
     $node.SetAttribute("SoundQuality", "Dynamic")
+    $node.SetAttribute("RedirectAudioCapture", "false")
     $node.SetAttribute("RedirectKeys", "false")
     $node.SetAttribute("Connected", "false")
     $node.SetAttribute("PreExtApp", "")
     $node.SetAttribute("PostExtApp", "")
     $node.SetAttribute("MacAddress", "")
     $node.SetAttribute("UserField", "")
+    $node.SetAttribute("EnvironmentTags", "")
+    $node.SetAttribute("Favorite", "false")
     $node.SetAttribute("ExtApp", "")
+    $node.SetAttribute("StartProgram", "")
+    $node.SetAttribute("StartProgramWorkDir", "")
     $node.SetAttribute("VNCCompression", "CompNone")
     $node.SetAttribute("VNCEncoding", "EncHextile")
     $node.SetAttribute("VNCAuthMode", "AuthVNC")
@@ -287,28 +304,21 @@ function New-MRemoteNGContainerNode {
     $node.SetAttribute("RDGatewayUsageMethod", "Never")
     $node.SetAttribute("RDGatewayHostname", "")
     $node.SetAttribute("RDGatewayUseConnectionCredentials", "Yes")
+    $node.SetAttribute("RDGatewayExternalCredentialProvider", "None")
+    $node.SetAttribute("RDGatewayUserViaAPI", "")
     $node.SetAttribute("RDGatewayUsername", "")
     $node.SetAttribute("RDGatewayPassword", "")
     $node.SetAttribute("RDGatewayDomain", "")
-
-    # All Inherit* attributes must be present or mRemoteNG throws NullReferenceException
-    $inheritAttrs = @(
-        "CacheBitmaps", "Colors", "Description", "DisplayThemes", "DisplayWallpaper",
-        "EnableFontSmoothing", "EnableDesktopComposition", "Domain", "Icon", "Panel",
-        "Password", "Port", "Protocol", "PuttySession", "RedirectDiskDrives", "RedirectKeys",
-        "RedirectPorts", "RedirectPrinters", "RedirectSmartCards", "RedirectSound",
-        "SoundQuality", "Resolution", "AutomaticResize", "UseConsoleSession", "UseCredSsp",
-        "RenderingEngine", "Username", "ICAEncryptionStrength", "RDPAuthenticationLevel",
-        "RDPMinutesToIdleTimeout", "RDPAlertIdleTimeout", "LoadBalanceInfo", "PreExtApp",
-        "PostExtApp", "MacAddress", "UserField", "ExtApp", "VNCCompression", "VNCEncoding",
-        "VNCAuthMode", "VNCProxyType", "VNCProxyIP", "VNCProxyPort", "VNCProxyUsername",
-        "VNCProxyPassword", "VNCColors", "VNCSmartSizeMode", "VNCViewOnly",
-        "RDGatewayUsageMethod", "RDGatewayHostname", "RDGatewayUseConnectionCredentials",
-        "RDGatewayUsername", "RDGatewayPassword", "RDGatewayDomain"
-    )
-    foreach ($attr in $inheritAttrs) {
-        $node.SetAttribute("Inherit$attr", "false")
-    }
+    $node.SetAttribute("UseRCG", "false")
+    $node.SetAttribute("UseRestrictedAdmin", "false")
+    $node.SetAttribute("UserViaAPI", "")
+    $node.SetAttribute("EC2InstanceId", "")
+    $node.SetAttribute("EC2Region", "eu-central-1")
+    $node.SetAttribute("ExternalCredentialProvider", "None")
+    $node.SetAttribute("ExternalAddressProvider", "None")
+    $node.SetAttribute("VaultOpenbaoMount", "")
+    $node.SetAttribute("VaultOpenbaoRole", "")
+    $node.SetAttribute("VaultOpenbaoSecretEngine", "Kv")
 
     return $node
 }
@@ -337,12 +347,18 @@ function New-MRemoteNGConnectionNode {
     $node.SetAttribute("Descr", $Description)
     $node.SetAttribute("Icon", "mRemoteNG")
     $node.SetAttribute("Panel", "General")
+    $node.SetAttribute("TabColor", "")
+    $node.SetAttribute("ConnectionFrameColor", "None")
     $node.SetAttribute("Id", $Id)
     $node.SetAttribute("Username", $Username)
     $node.SetAttribute("Domain", $Domain)
     $node.SetAttribute("Password", $Password)
     $node.SetAttribute("Hostname", $Hostname)
     $node.SetAttribute("Protocol", $Protocol)
+    $node.SetAttribute("RdpVersion", "rdc10")
+    $node.SetAttribute("SSHTunnelConnectionName", "")
+    $node.SetAttribute("OpeningCommand", "")
+    $node.SetAttribute("SSHOptions", "")
     $node.SetAttribute("PuttySession", $PuttySession)
     $node.SetAttribute("Port", $Port)
     $node.SetAttribute("ConnectToConsole", "false")
@@ -360,20 +376,31 @@ function New-MRemoteNGConnectionNode {
     $node.SetAttribute("DisplayThemes", "false")
     $node.SetAttribute("EnableFontSmoothing", "false")
     $node.SetAttribute("EnableDesktopComposition", "false")
+    $node.SetAttribute("DisableFullWindowDrag", "false")
+    $node.SetAttribute("DisableMenuAnimations", "false")
+    $node.SetAttribute("DisableCursorShadow", "false")
+    $node.SetAttribute("DisableCursorBlinking", "false")
     $node.SetAttribute("CacheBitmaps", "false")
-    $node.SetAttribute("RedirectDiskDrives", "false")
+    $node.SetAttribute("RedirectDiskDrives", "None")
+    $node.SetAttribute("RedirectDiskDrivesCustom", "")
     $node.SetAttribute("RedirectPorts", "false")
     $node.SetAttribute("RedirectPrinters", "false")
+    $node.SetAttribute("RedirectClipboard", "false")
     $node.SetAttribute("RedirectSmartCards", "false")
     $node.SetAttribute("RedirectSound", "DoNotPlay")
     $node.SetAttribute("SoundQuality", "Dynamic")
+    $node.SetAttribute("RedirectAudioCapture", "false")
     $node.SetAttribute("RedirectKeys", "false")
     $node.SetAttribute("Connected", "false")
     $node.SetAttribute("PreExtApp", "")
     $node.SetAttribute("PostExtApp", "")
     $node.SetAttribute("MacAddress", "")
     $node.SetAttribute("UserField", "")
+    $node.SetAttribute("EnvironmentTags", "")
+    $node.SetAttribute("Favorite", "false")
     $node.SetAttribute("ExtApp", "")
+    $node.SetAttribute("StartProgram", "")
+    $node.SetAttribute("StartProgramWorkDir", "")
     $node.SetAttribute("VNCCompression", "CompNone")
     $node.SetAttribute("VNCEncoding", "EncHextile")
     $node.SetAttribute("VNCAuthMode", "AuthVNC")
@@ -388,6 +415,8 @@ function New-MRemoteNGConnectionNode {
     $node.SetAttribute("RDGatewayUsageMethod", "Never")
     $node.SetAttribute("RDGatewayHostname", "")
     $node.SetAttribute("RDGatewayUseConnectionCredentials", "Yes")
+    $node.SetAttribute("RDGatewayExternalCredentialProvider", "None")
+    $node.SetAttribute("RDGatewayUserViaAPI", "")
     $node.SetAttribute("RDGatewayUsername", "")
     $node.SetAttribute("RDGatewayPassword", "")
     $node.SetAttribute("RDGatewayDomain", "")
@@ -398,24 +427,16 @@ function New-MRemoteNGConnectionNode {
         $node.SetAttribute("UseEnhancedMode", $UseEnhancedMode.ToString().ToLower())
     }
 
-    # All Inherit* attributes must be present or mRemoteNG throws NullReferenceException
-    $inheritAttrs = @(
-        "CacheBitmaps", "Colors", "Description", "DisplayThemes", "DisplayWallpaper",
-        "EnableFontSmoothing", "EnableDesktopComposition", "Domain", "Icon", "Panel",
-        "Password", "Port", "Protocol", "PuttySession", "RedirectDiskDrives", "RedirectKeys",
-        "RedirectPorts", "RedirectPrinters", "RedirectSmartCards", "RedirectSound",
-        "SoundQuality", "Resolution", "AutomaticResize", "UseConsoleSession", "UseCredSsp",
-        "RenderingEngine", "Username", "ICAEncryptionStrength", "RDPAuthenticationLevel",
-        "RDPMinutesToIdleTimeout", "RDPAlertIdleTimeout", "LoadBalanceInfo", "PreExtApp",
-        "PostExtApp", "MacAddress", "UserField", "ExtApp", "VNCCompression", "VNCEncoding",
-        "VNCAuthMode", "VNCProxyType", "VNCProxyIP", "VNCProxyPort", "VNCProxyUsername",
-        "VNCProxyPassword", "VNCColors", "VNCSmartSizeMode", "VNCViewOnly",
-        "RDGatewayUsageMethod", "RDGatewayHostname", "RDGatewayUseConnectionCredentials",
-        "RDGatewayUsername", "RDGatewayPassword", "RDGatewayDomain"
-    )
-    foreach ($attr in $inheritAttrs) {
-        $node.SetAttribute("Inherit$attr", "false")
-    }
+    $node.SetAttribute("UseRCG", "false")
+    $node.SetAttribute("UseRestrictedAdmin", "false")
+    $node.SetAttribute("UserViaAPI", "")
+    $node.SetAttribute("EC2InstanceId", "")
+    $node.SetAttribute("EC2Region", "eu-central-1")
+    $node.SetAttribute("ExternalCredentialProvider", "None")
+    $node.SetAttribute("ExternalAddressProvider", "None")
+    $node.SetAttribute("VaultOpenbaoMount", "")
+    $node.SetAttribute("VaultOpenbaoRole", "")
+    $node.SetAttribute("VaultOpenbaoSecretEngine", "Kv")
 
     return $node
 }
