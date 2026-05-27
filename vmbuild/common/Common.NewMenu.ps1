@@ -705,6 +705,9 @@ public const ushort MOUSE_EVENT = 0x0002;
 
 // MOUSE_EVENT_RECORD.dwButtonState flags
 public const uint FROM_LEFT_1ST_BUTTON_PRESSED = 0x0001;
+public const uint FROM_LEFT_2ND_BUTTON_PRESSED = 0x0004; // middle
+public const uint RIGHTMOST_BUTTON_PRESSED     = 0x0002;
+public const uint XBUTTON1_PRESSED              = 0x0008; // back/X1
 
 // MOUSE_EVENT_RECORD.dwEventFlags values
 public const uint MOUSE_MOVED  = 0x0001;
@@ -1784,13 +1787,14 @@ function Get-KeyStroke {
                         if ($script:_mouseShiftHeld) { continue }
                         $me = $rec.MouseEvent
                         $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
+                        $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::XBUTTON1_PRESSED))
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
-                        if ($isClick -or $isMove) {
+                        if ($isClick -or $isBack -or $isMove) {
                             return [pscustomobject]@{
                                 IsMouseEvent = $true
                                 MouseX       = [int]$me.dwMousePosition.X
                                 MouseY       = [int]$me.dwMousePosition.Y
-                                MouseButton  = $(if ($isClick) { 1 } else { 0 })
+                                MouseButton  = $(if ($isClick) { 1 } elseif ($isBack) { 2 } else { 0 })
                                 MouseFlags   = [int]$me.dwEventFlags
                             }
                         }
@@ -2074,7 +2078,17 @@ function Start-Navigation {
 
         # --- Mouse event handling ---
         if ($key.IsMouseEvent) {
-            if ($key.MouseButton -eq 1) {
+            if ($key.MouseButton -eq 2) {
+                # Back/X1 button: act like Escape
+                if ($script:_lastHoveredIndex -ge 0) {
+                    Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+                }
+                Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+                Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                Set-CursorPosition -X $CPosition.x -Y $CPosition.y
+                return "ESCAPE"
+            }
+            elseif ($key.MouseButton -eq 1) {
                 # Left click: find the menu item at the clicked Y position
                 $clickedIndex = -1
                 for ($mi = 0; $mi -lt $menuItems.Count; $mi++) {
