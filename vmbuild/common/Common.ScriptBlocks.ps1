@@ -1486,7 +1486,8 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC Files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create staging directory on the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                return
             }
             $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
         }
@@ -1494,93 +1495,70 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
 
-        $Expand_Archive = {
-
-            $global:ScriptBlockName = "Expand_Archive"
-            try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-            # Create init log
-            $log = "C:\staging\DSC\DSC_Init.log"
-            $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-
+        # Expand DSC.zip and install modules in one PSDirect round-trip
+        $DSC_ExpandAndInstall = {
             try {
-                "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
-            }
-            catch {
-                throw "Could not write to $log"
-            }
-
-            $zipPath = "C:\staging\DSC\DSC.zip"
-            $extractPath = "C:\staging\DSC\modules"
-
-            if (test-path -PathType Container $extractPath) {
-                "$time : Expand_Archive is attempting to remove the existing folder $($extractPath)" | Out-File $log -Append
-
-                try {
-                    Remove-Item -Force -Recurse $extractPath -ErrorAction Continue
-                }
-                catch {
-                    "$time : Failed to Remove $($extractPath)" | Out-File $log -Append
-                }
-            }
-
-            "$time : Expand_Archive is attempting to expand $($zipPath) to $($extractPath)" | Out-File $log -Append
-            try {
-                Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
-            }
-            catch {
-
-                if (Test-Path $extractPath) {
-                    Start-Sleep -Seconds 10
-                    Remove-Item -Path $extractPath -Force -Recurse | Out-Null
-                }
-
-                Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
-            }
-        }
-
-        # Install DSC Modules
-        $DSC_InstallModules = {
-
-            try {
-                $global:ScriptBlockName = "DSC_InstallModules"
-                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-                # Get required variables from parent scope
+                $global:ScriptBlockName = "DSC_ExpandAndInstall"
                 $currentItem = $using:currentItem
                 $Phase = $using:Phase
+                try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
-                # Create init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
                 try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
                 }
                 catch {
                     throw "Could not write to $log"
                 }
 
+                # Remove stale flag (idempotent)
+                Remove-Item -Path "C:\staging\DSC\DSC.zip.Installed" -Force -ErrorAction SilentlyContinue
+
+                # Expand archive
+                $zipPath = "C:\staging\DSC\DSC.zip"
+                $extractPath = "C:\staging\DSC\modules"
+
+                if (Test-Path -PathType Container $extractPath) {
+                    "$time : Removing existing folder $extractPath" | Out-File $log -Append
+                    try {
+                        Remove-Item -Force -Recurse $extractPath -ErrorAction Continue
+                    }
+                    catch {
+                        "$time : Failed to Remove $extractPath" | Out-File $log -Append
+                    }
+                }
+
+                "$time : Expanding $zipPath to $extractPath" | Out-File $log -Append
+                try {
+                    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
+                }
+                catch {
+                    if (Test-Path $extractPath) {
+                        Start-Sleep -Seconds 10
+                        Remove-Item -Path $extractPath -Force -Recurse | Out-Null
+                    }
+                    Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force -ErrorAction Stop
+                }
+
                 # Install modules
                 "Installing modules" | Out-File $log -Append
-                $modules = Get-ChildItem -Path "C:\staging\DSC\modules" -Directory
+                $modules = Get-ChildItem -Path $extractPath -Directory
+
                 foreach ($folder in $modules) {
-
-
-
                     try {
                         $targetFolder = Join-Path "C:\Program Files\WindowsPowerShell\Modules" $folder.Name
-                        "Removing $($targetFolder) in WindowsPowerShell\Modules." | Out-File $log -Append
+                        "Removing $targetFolder in WindowsPowerShell\Modules." | Out-File $log -Append
                         Remove-Item -Recurse -Force $targetFolder -ErrorAction SilentlyContinue
                     }
                     catch {
-                        "Failed to delete $($targetFolder) in WindowsPowerShell\Modules. Continuing" | Out-File $log -Append
+                        "Failed to delete $targetFolder in WindowsPowerShell\Modules. Continuing" | Out-File $log -Append
                     }
-
                 }
 
                 foreach ($folder in $modules) {
                     try {
-
                         "Copying $($folder.FullName) to WindowsPowerShell\Modules." | Out-File $log -Append
-
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
                     }
                     catch {
@@ -1590,48 +1568,29 @@ $global:VM_Config = {
                         Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction SilentlyContinue
                     }
                 }
-                #Create the zip flag
-                $zipflag = "C:\staging\DSC\DSC.zip.Installed"
-                New-Item -Path $zipflag -ItemType File -Force -ErrorAction SilentlyContinue                
 
+                # Create the zip flag
+                New-Item -Path "C:\staging\DSC\DSC.zip.Installed" -ItemType File -Force -ErrorAction SilentlyContinue
+                "Modules Installed" | Out-File $log -Append
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
-                try {
-                    $error_message | Out-File $log -Append
-                }
-                catch {}
-                Write-Error $error_message
+                try { $error_message | Out-File $log -Append } catch {}
                 throw $error_message
-                return $error_message
             }
-            "Modules Installed" | Out-File $log -Append
         }
 
         if ($dscZipHash -ne $guestZipHash -or -not $guestFlagExists) {
-            #Remove the zip flag on the guest if hash changed
-            if ($guestFlagExists) {
-                Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Remove-Item -Path "C:\staging\DSC\DSC.zip.Installed" -Force -ErrorAction SilentlyContinue } -DisplayName "DSC: Remove stale flag" | Out-Null
-            }
-            
-            Write-Progress2 $Activity -Status "Expanding Modules" -percentcomplete 40 -force
-            # Extract DSC modules
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding modules inside the VM."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
+            Write-Progress2 $Activity -Status "Expanding and installing modules" -percentcomplete 40 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding and installing DSC modules inside the VM."
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
             if ($result.ScriptBlockFailed) {
-                start-sleep -Seconds 60
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Expand_Archive -DisplayName "Expand_Archive ScriptBlock"
+                Start-Sleep -Seconds 15
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
                 if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to extract PS modules inside the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to expand and install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
-            }
-            Write-Progress2 $Activity -Status "Installing Modules" -percentcomplete 55 -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Installing DSC Modules."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_InstallModules -DisplayName "DSC: Install Modules"
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to install DSC modules. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
             }
         }
         else {
