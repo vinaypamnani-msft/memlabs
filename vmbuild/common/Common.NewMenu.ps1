@@ -717,6 +717,14 @@ public const uint ENABLE_WINDOW_INPUT     = 0x0008;
 public const uint ENABLE_EXTENDED_FLAGS   = 0x0080;
 public const uint ENABLE_QUICK_EDIT_MODE  = 0x0040;
 
+// Control key state flags (from dwControlKeyState in event records)
+public const uint SHIFT_PRESSED = 0x0010;
+
+// VK constants for Shift keys
+public const ushort VK_SHIFT  = 0x10;
+public const ushort VK_LSHIFT = 0xA0;
+public const ushort VK_RSHIFT = 0xA1;
+
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
 public static extern System.IntPtr GetStdHandle(int nStdHandle);
 
@@ -728,6 +736,9 @@ public static extern bool SetConsoleMode(System.IntPtr hConsole, uint dwMode);
 
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool GetNumberOfConsoleInputEvents(System.IntPtr hConsole, out uint lpcNumberOfEvents);
+
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern short GetAsyncKeyState(int vKey);
 
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
 public static extern bool ReadConsoleInput(
@@ -773,6 +784,9 @@ public struct MOUSE_EVENT_RECORD {
 # Disable-MouseInput to restore the original state.
 $script:_savedConsoleMode = $null
 $script:_consoleInputHandle = $null
+# Tracks whether Shift is held for the text-selection toggle.
+# Reset by Enable-MouseInput at the start of each menu session.
+$script:_mouseShiftHeld = $false
 
 function Enable-MouseInput {
     if ($null -eq $script:_consoleInputHandle -or $script:_consoleInputHandle -eq [IntPtr]::Zero) {
@@ -782,6 +796,7 @@ function Enable-MouseInput {
     $mode = [uint32]0
     [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
     $script:_savedConsoleMode = $mode
+    $script:_mouseShiftHeld = $false
 
     # Enable mouse input and disable Quick Edit Mode (which swallows mouse
     # events for text selection). Preserve processed input so Ctrl+C works.
@@ -796,6 +811,32 @@ function Disable-MouseInput {
     if ($null -ne $script:_savedConsoleMode -and $null -ne $script:_consoleInputHandle) {
         [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_savedConsoleMode)
         $script:_savedConsoleMode = $null
+    }
+    $script:_mouseShiftHeld = $false
+}
+
+# Temporarily restore Quick Edit Mode (for text selection) without touching
+# _savedConsoleMode. Used when Shift is held to allow native text selection.
+function Suspend-MouseInput {
+    if ($null -ne $script:_consoleInputHandle) {
+        $mode = [uint32]0
+        [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
+        $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE `
+                          -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS) `
+                          -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+    }
+}
+
+# Re-enable mouse input after a Shift-suspend, without touching _savedConsoleMode.
+function Resume-MouseInput {
+    if ($null -ne $script:_consoleInputHandle) {
+        $mode = [uint32]0
+        [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
+        $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT `
+                          -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS) `
+                          -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
     }
 }
 
@@ -1626,6 +1667,46 @@ function Get-KeyStroke {
                 [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
                 if ($read -gt 0) {
                     $rec = $buf[0]
+
+                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::KEY_EVENT) {
+                        $ke = $rec.KeyEvent
+                        $vk = $ke.wVirtualKeyCode
+
+                        # Shift toggle: hold Shift to enable native text selection
+                        $isShiftKey = ($vk -eq [MemLabsConsole.MouseInput]::VK_SHIFT -or `
+                                       $vk -eq [MemLabsConsole.MouseInput]::VK_LSHIFT -or `
+                                       $vk -eq [MemLabsConsole.MouseInput]::VK_RSHIFT)
+                        if ($isShiftKey) {
+                            if ($ke.bKeyDown -and -not $script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $true
+                                Suspend-MouseInput
+                            }
+                            elseif (-not $ke.bKeyDown -and $script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $false
+                                Resume-MouseInput
+                            }
+                            # Consume bare Shift events — don't pass to caller
+                            continue
+                        }
+
+                        if ($ke.bKeyDown) {
+                            # Non-Shift key while Shift was held (e.g. user pressed
+                            # Shift+Letter): resume mouse before returning the key
+                            if ($script:_mouseShiftHeld) {
+                                $script:_mouseShiftHeld = $false
+                                Resume-MouseInput
+                            }
+                            # Synthesize a KeyInfo object matching what ReadKey returns
+                            return [System.Management.Automation.Host.KeyInfo]::new(
+                                [int]$ke.wVirtualKeyCode,
+                                $ke.UnicodeChar,
+                                [System.Management.Automation.Host.ControlKeyStates]$ke.dwControlKeyState,
+                                $true
+                            )
+                        }
+                        continue
+                    }
+
                     if ($rec.EventType -eq [MemLabsConsole.MouseInput]::MOUSE_EVENT) {
                         $me = $rec.MouseEvent
                         $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
@@ -1642,19 +1723,6 @@ function Get-KeyStroke {
                         # Ignore other mouse events (right-click, wheel, etc.)
                         continue
                     }
-                    if ($rec.EventType -eq [MemLabsConsole.MouseInput]::KEY_EVENT) {
-                        $ke = $rec.KeyEvent
-                        if ($ke.bKeyDown) {
-                            # Synthesize a KeyInfo object matching what ReadKey returns
-                            return [System.Management.Automation.Host.KeyInfo]::new(
-                                [int]$ke.wVirtualKeyCode,
-                                $ke.UnicodeChar,
-                                [System.Management.Automation.Host.ControlKeyStates]$ke.dwControlKeyState,
-                                $true
-                            )
-                        }
-                        continue
-                    }
                     # WINDOW_BUFFER_SIZE_EVENT or FOCUS_EVENT — skip
                     continue
                 }
@@ -1667,6 +1735,19 @@ function Get-KeyStroke {
                     return $null
                 }
             }
+
+            # Fallback Shift detection: if the console's mark mode (text
+            # selection) swallowed the Shift key-up event, we'd stay in
+            # suspended mode forever. Poll the physical key state to catch
+            # the release even when no events arrive.
+            if ($script:_mouseShiftHeld) {
+                $shiftState = [MemLabsConsole.MouseInput]::GetAsyncKeyState([int][MemLabsConsole.MouseInput]::VK_SHIFT)
+                if (($shiftState -band 0x8000) -eq 0) {
+                    $script:_mouseShiftHeld = $false
+                    Resume-MouseInput
+                }
+            }
+
             Start-Sleep -Milliseconds 50
         }
     }
