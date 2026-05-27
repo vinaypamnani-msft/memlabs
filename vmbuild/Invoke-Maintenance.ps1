@@ -285,6 +285,27 @@ function Invoke-WindowsTerminalMaintenance {
     Write-LogMessage 'Windows Terminal maintenance completed.'
 }
 
+function Install-DotNet9DesktopRuntime {
+    # mRemoteNG 1.78+ uses .NET 9 WinForms — ensure the Desktop Runtime is installed
+    $desktopRuntimePath = "$env:ProgramFiles\dotnet\shared\Microsoft.WindowsDesktop.App"
+    $hasDesktopRuntime = (Test-Path $desktopRuntimePath) -and @(Get-ChildItem $desktopRuntimePath -Directory -Filter "9.*" -ErrorAction SilentlyContinue).Count -gt 0
+    if (-not $hasDesktopRuntime) {
+        if (Test-ChocoAvailable) {
+            Write-LogMessage 'Installing .NET 9 Desktop Runtime (required by mRemoteNG WinForms)...'
+            & choco install dotnet-9.0-desktopruntime -y | Out-Null
+            if (Test-ChocoSuccessCode -Code $LASTEXITCODE) {
+                Write-LogMessage '.NET 9 Desktop Runtime installed successfully.'
+            }
+            else {
+                Write-LogMessage 'Failed to install .NET 9 Desktop Runtime.' -Level 'WARNING'
+            }
+        }
+        else {
+            Write-LogMessage '.NET 9 Desktop Runtime not found and Chocolatey unavailable. mRemoteNG may fail to launch.' -Level 'WARNING'
+        }
+    }
+}
+
 function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'Starting mRemoteNG maintenance...'
 
@@ -307,6 +328,8 @@ function Invoke-MRemoteNGMaintenance {
                 $ver = [version]"$($vi.FileMajorPart).$($vi.FileMinorPart).$($vi.FileBuildPart)"
                 if ($ver -ge $minVersion) {
                     Write-LogMessage "mRemoteNG $ver found at $candidate. No upgrade needed."
+                    # Still ensure .NET 9 Desktop Runtime is present (required by 1.78+ WinForms)
+                    Install-DotNet9DesktopRuntime
                     return
                 }
                 Write-LogMessage "mRemoteNG $ver at $candidate is below $minVersion (no Hyper-V Console support)."
@@ -438,24 +461,7 @@ function Invoke-MRemoteNGMaintenance {
         Write-LogMessage "mRemoteNG.exe not found after extraction at $installDir" -Level 'WARNING'
     }
 
-    # mRemoteNG 1.78+ uses .NET 9 WinForms — ensure the Desktop Runtime is installed
-    $desktopRuntimePath = "$env:ProgramFiles\dotnet\shared\Microsoft.WindowsDesktop.App"
-    $hasDesktopRuntime = (Test-Path $desktopRuntimePath) -and @(Get-ChildItem $desktopRuntimePath -Directory -Filter "9.*" -ErrorAction SilentlyContinue).Count -gt 0
-    if (-not $hasDesktopRuntime) {
-        if (Test-ChocoAvailable) {
-            Write-LogMessage 'Installing .NET 9 Desktop Runtime (required by mRemoteNG WinForms)...'
-            & choco install dotnet-9.0-desktopruntime -y | Out-Null
-            if (Test-ChocoSuccessCode -Code $LASTEXITCODE) {
-                Write-LogMessage '.NET 9 Desktop Runtime installed successfully.'
-            }
-            else {
-                Write-LogMessage 'Failed to install .NET 9 Desktop Runtime.' -Level 'WARNING'
-            }
-        }
-        else {
-            Write-LogMessage '.NET 9 Desktop Runtime not found and Chocolatey unavailable. mRemoteNG may fail to launch.' -Level 'WARNING'
-        }
-    }
+    Install-DotNet9DesktopRuntime
 
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
