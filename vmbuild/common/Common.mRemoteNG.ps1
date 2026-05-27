@@ -336,9 +336,13 @@ function New-MRemoteNGConnectionNode {
     $node.SetAttribute("RDGatewayDomain", "")
 
     if (-not [string]::IsNullOrWhiteSpace($VmId)) {
+        Write-Log "  -> New-MRemoteNGConnectionNode: Setting VmId=$VmId UseEnhancedMode=$($UseEnhancedMode.ToString().ToLower()) on node '$DisplayName'" -LogOnly
         $node.SetAttribute("VmId", $VmId)
         $node.SetAttribute("UseVmId", "true")
         $node.SetAttribute("UseEnhancedMode", $UseEnhancedMode.ToString().ToLower())
+    }
+    else {
+        Write-Log "  -> New-MRemoteNGConnectionNode: VmId is empty for '$DisplayName' (raw='$VmId')" -LogOnly
     }
 
     # All Inherit* attributes must be present or mRemoteNG throws NullReferenceException
@@ -910,6 +914,14 @@ function New-MRemoteNGFileFromHyperV {
                 $shouldSave = $true
             }
         }
+    }
+
+    # Pre-save diagnostic: verify VmId attributes survived in the XML DOM
+    $hvContainerNodes = $doc.SelectNodes("//Node[@Name='Hyper-V Console']/Node[@Type='Connection']")
+    foreach ($hvNode in $hvContainerNodes) {
+        $vmIdVal = $hvNode.GetAttribute("VmId")
+        $useVmIdVal = $hvNode.GetAttribute("UseVmId")
+        Write-Log "  PRE-SAVE: $($hvNode.GetAttribute('Name')) VmId=$vmIdVal UseVmId=$useVmIdVal" -LogOnly
     }
 
     # Save
