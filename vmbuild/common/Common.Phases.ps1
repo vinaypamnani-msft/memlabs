@@ -167,10 +167,8 @@ function Start-Phase {
         # are visible in the cache.
 
         # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
-        # site-server desktops, and stamp matching shortcuts on the host
-        # user's desktop. No-op when no Proxy VM is in this config.
+        # site-server desktops. No-op when no Proxy VM is in this config.
         Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
-        New-HostProxyShortcuts -deployConfig $deployConfig | Out-Null
     }
 
     return $true
