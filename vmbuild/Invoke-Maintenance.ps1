@@ -306,6 +306,35 @@ function Install-DotNet9DesktopRuntime {
     }
 }
 
+function Update-MRemoteNGShortcut {
+    param([string]$ExePath)
+    # Ensure desktop shortcut points to the correct exe and our connection XML
+    $xmlPath = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mRemoteNG.lnk"
+    $expectedArgs = "/cons:`"$xmlPath`""
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $needsUpdate = $true
+        if (Test-Path $shortcutPath) {
+            $existing = $shell.CreateShortcut($shortcutPath)
+            if ($existing.TargetPath -eq $ExePath -and $existing.Arguments -eq $expectedArgs) {
+                $needsUpdate = $false
+            }
+        }
+        if ($needsUpdate) {
+            $shortcut = $shell.CreateShortcut($shortcutPath)
+            $shortcut.TargetPath = $ExePath
+            $shortcut.Arguments = $expectedArgs
+            $shortcut.WorkingDirectory = Split-Path $ExePath
+            $shortcut.Save()
+            Write-LogMessage "Updated desktop shortcut to $ExePath with /cons: $xmlPath"
+        }
+    }
+    catch {
+        Write-LogMessage "Could not update desktop shortcut: $_" -Level 'WARNING'
+    }
+}
+
 function Invoke-MRemoteNGMaintenance {
     Write-LogMessage 'Starting mRemoteNG maintenance...'
 
@@ -330,6 +359,7 @@ function Invoke-MRemoteNGMaintenance {
                     Write-LogMessage "mRemoteNG $ver found at $candidate. No upgrade needed."
                     # Still ensure .NET 9 Desktop Runtime is present (required by 1.78+ WinForms)
                     Install-DotNet9DesktopRuntime
+                    Update-MRemoteNGShortcut -ExePath $candidate
                     return
                 }
                 Write-LogMessage "mRemoteNG $ver at $candidate is below $minVersion (no Hyper-V Console support)."
@@ -462,6 +492,7 @@ function Invoke-MRemoteNGMaintenance {
     }
 
     Install-DotNet9DesktopRuntime
+    Update-MRemoteNGShortcut -ExePath $mRNGExe
 
     Write-LogMessage 'mRemoteNG maintenance completed.'
 }
