@@ -1468,8 +1468,14 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Upgrading Modules" -percentcomplete 30 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
-        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue } -DisplayName "DSC: Detect modules."
+        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+            [PSCustomObject]@{
+                Hash        = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
+                FlagExists  = Test-Path "C:\staging\DSC\DSC.zip.Installed"
+            }
+        } -DisplayName "DSC: Detect modules."
         $guestZipHash = $result.ScriptBlockOutput.Hash
+        $guestFlagExists = $result.ScriptBlockOutput.FlagExists
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
@@ -1602,17 +1608,10 @@ $global:VM_Config = {
             "Modules Installed" | Out-File $log -Append
         }
 
-        $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
-        $flagFound = $false
-        $zipflag = "C:\staging\DSC\DSC.zip.Installed"
-        
-        if (Test-Path $zipflag) {
-            $flagFound = $true
-        }
-        if ($dscZipHash -ne $guestZipHash -or -not $flagFound) {
-            #Remove the zip flag
-            if ($flagFound) {
-                Remove-Item -Path $zipflag -Force -ErrorAction SilentlyContinue
+        if ($dscZipHash -ne $guestZipHash -or -not $guestFlagExists) {
+            #Remove the zip flag on the guest if hash changed
+            if ($guestFlagExists) {
+                Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Remove-Item -Path "C:\staging\DSC\DSC.zip.Installed" -Force -ErrorAction SilentlyContinue } -DisplayName "DSC: Remove stale flag" | Out-Null
             }
             
             Write-Progress2 $Activity -Status "Expanding Modules" -percentcomplete 40 -force
