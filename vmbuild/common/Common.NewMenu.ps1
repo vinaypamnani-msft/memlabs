@@ -852,6 +852,12 @@ function Disable-MouseInput {
 # events to the app and handle them itself (selection, right-click, etc.).
 function Suspend-MouseInput {
     if ($null -ne $script:_consoleInputHandle) {
+        # Flush any pending mouse/key events that arrived before the mode change.
+        # Without this, stale events from the previous mouse-active state linger
+        # and get processed when Resume re-enables mouse input.
+        if ($script:_hasFlushConsoleInput) {
+            [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+        }
         $mode = [uint32]0
         [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
         $newMode = $mode -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
@@ -869,9 +875,9 @@ function Resume-MouseInput {
                           -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
         [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
 
-        # Flush events generated while Quick Edit was active (text selection
-        # clicks, ConPTY internal bookkeeping). Without this, phantom events
-        # linger and poison the next menu's input buffer.
+        # Flush events that accumulated while mouse input was disabled.
+        # ConPTY mode transitions can leave phantom events or stale
+        # focus/window events that confuse the polling loop.
         if ($script:_hasFlushConsoleInput) {
             [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
         }
@@ -1729,6 +1735,14 @@ function Get-KeyStroke {
             if ($hasEvents) {
                 $read = [uint32]0
                 [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
+                if ($read -eq 0) {
+                    # Peek said events exist but Read got nothing — phantom event
+                    # from a ConPTY mode transition. Flush to clear the ghost.
+                    if ($script:_hasFlushConsoleInput) {
+                        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
+                    }
+                    continue
+                }
                 if ($read -gt 0) {
                     $rec = $buf[0]
 
