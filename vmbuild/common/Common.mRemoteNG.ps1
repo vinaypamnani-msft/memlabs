@@ -821,6 +821,38 @@ function New-MRemoteNGFileFromHyperV {
                 $shouldSave = $true
             }
         }
+
+        # --- Hyper-V Console sub-container ---
+        # Protocol=RDP, Port=2179, UseVmId=true, Hostname=local Hyper-V host.
+        # Lets users connect via Hyper-V Enhanced Session (vmconnect equivalent)
+        # without needing network connectivity to the guest.
+        $hvContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Hyper-V Console" } | Select-Object -First 1
+        if (-not $hvContainer) {
+            $hvContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Hyper-V Console" `
+                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179"
+            [void]$container.AppendChild($hvContainer)
+            $shouldSave = $true
+        }
+
+        foreach ($vm in $vmListFull) {
+            $hvVmId = $vm.vmId
+            if ([string]::IsNullOrWhiteSpace($hvVmId)) {
+                # Try to resolve from Hyper-V if not cached
+                try { $hvVmId = (Get-VM -Name $vm.VmName -ErrorAction Stop).Id.ToString() } catch { }
+            }
+            if ([string]::IsNullOrWhiteSpace($hvVmId)) { continue }
+
+            $hvDisplayName = $vm.VmName
+            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $hvContainer `
+                    -Name $vm.VmName -DisplayName $hvDisplayName -Hostname $env:COMPUTERNAME `
+                    -Protocol "RDP" -Port "2179" -Description "" `
+                    -Username $env:USERNAME -Domain "" -Password "" `
+                    -GuidSeed "hv:${domain}:$($vm.VmName)" `
+                    -VmId $hvVmId -UseEnhancedMode $true `
+                    -ForceOverwrite $true) {
+                $shouldSave = $true
+            }
+        }
     }
 
     # Prune domains that no longer exist
