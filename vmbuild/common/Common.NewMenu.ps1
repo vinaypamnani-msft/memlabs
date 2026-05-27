@@ -849,41 +849,31 @@ function Disable-MouseInput {
     $script:_mouseShiftHeld = $false
 }
 
-# Disable mouse input so the terminal handles mouse events natively (text
-# selection in Windows Terminal). Does NOT enable Quick Edit Mode — Quick Edit
-# starts a modal selection in Windows Terminal that traps all input until
-# dismissed, and SetConsoleMode cannot cancel an active selection. Disabling
-# MOUSE_INPUT alone is sufficient: ConPTY translates MOUSE_INPUT into VT mouse
-# tracking, so clearing the flag tells Windows Terminal to stop forwarding mouse
-# events to the app and handle them itself (selection, right-click, etc.).
+# Suspend mouse handling while Shift is held for text selection.
 #
-# Uses the saved _mouseActiveMode instead of GetConsoleMode read-modify-write.
-# ConPTY can internally modify console mode flags between our calls, so reading
-# the current mode and patching it progressively corrupts the mode across
-# Suspend/Resume cycles (losing flags like VIRTUAL_TERMINAL_INPUT, causing VT
-# output sequences like clear-screen to stop working).
+# Does NOT change console mode. Toggling MOUSE_INPUT via SetConsoleMode causes
+# ConPTY to emit VT mouse-tracking enable/disable sequences (\e[?1000h/l) to
+# Windows Terminal. Those sequences interleave with our app's own VT output
+# (e.g. \e[2J\e[H clear-screen). After a Suspend/Resume cycle, the next VT
+# output write corrupts ConPTY's tracking state: clear-screen stops working and
+# subsequent mouse reads hang.
+#
+# Instead, we leave MOUSE_INPUT on and set _mouseShiftHeld. The polling loop
+# in Get-KeyStroke discards all mouse events while the flag is set. Windows
+# Terminal's built-in Shift-override already handles text selection when the
+# app has mouse tracking active (user holds Shift → terminal intercepts clicks
+# for selection instead of forwarding them as mouse events).
 function Suspend-MouseInput {
-    if ($null -ne $script:_consoleInputHandle -and $null -ne $script:_mouseActiveMode) {
-        # Flush any pending mouse/key events that arrived before the mode change.
-        if ($script:_hasFlushConsoleInput) {
-            [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
-        }
-        # Set the suspended mode: mouse-active mode minus MOUSE_INPUT.
-        $suspendedMode = $script:_mouseActiveMode -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
-        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $suspendedMode)
+    if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
     }
 }
 
-# Re-enable mouse input after a Shift-suspend, without touching _savedConsoleMode.
-# Restores the exact _mouseActiveMode that Enable-MouseInput computed, bypassing
-# GetConsoleMode entirely.
+# Resume mouse handling after Shift is released.
+# Flushes any events that accumulated during the suspend.
 function Resume-MouseInput {
-    if ($null -ne $script:_consoleInputHandle -and $null -ne $script:_mouseActiveMode) {
-        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_mouseActiveMode)
-        # Flush events that accumulated while mouse input was disabled.
-        if ($script:_hasFlushConsoleInput) {
-            [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
-        }
+    if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
     }
 }
 
@@ -1789,6 +1779,9 @@ function Get-KeyStroke {
                     }
 
                     if ($rec.EventType -eq [MemLabsConsole.MouseInput]::MOUSE_EVENT) {
+                        # Ignore mouse events while Shift is held (text selection mode).
+                        # MOUSE_INPUT stays enabled so ConPTY's VT state is untouched.
+                        if ($script:_mouseShiftHeld) { continue }
                         $me = $rec.MouseEvent
                         $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
