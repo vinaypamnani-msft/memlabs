@@ -707,6 +707,7 @@ function Test-CMSiteFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
 
+    Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying ConfigMgr site $siteCode"
     Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Testing ConfigMgr site services and WMI" -LogOnly
 
     $scriptBlock = {
@@ -830,6 +831,7 @@ function Test-CMSiteFunctionality {
     # while replication is still catching up.
     $isTopLevel = (-not $CurrentItem.parentSiteCode) -and ($CurrentItem.role -in @('CAS', 'Primary'))
     if ($passed -and $isTopLevel) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying site-wide settings"
         $sitePassed = Test-CMSiteWideFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         if (-not $sitePassed) { $passed = $false }
     }
@@ -849,6 +851,7 @@ function Test-BLMFunctionality {
     $domain = $DeployConfig.vmOptions.domainName
     $siteCode = $CurrentItem.siteCode
 
+    Write-Progress2 -PercentComplete 0 -Activity "$VMName [Primary]" -Status "Verifying BitLocker Management"
     Write-Log "[Phase $Phase] $VMName [BLM]: Testing BitLocker Management policy and deployment" -LogOnly
 
     $scriptBlock = {
@@ -1099,6 +1102,7 @@ function Test-SiteSystemFunctionality {
 
     # Test MP if installed
     if ($CurrentItem.installMP) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Management Point"
         Write-Log "[Phase $Phase] $VMName [MP]: Testing Management Point" -LogOnly
 
         $mpScript = {
@@ -1213,6 +1217,7 @@ function Test-SiteSystemFunctionality {
 
     # Test DP: verify from the parent Primary that the DP is recognized
     if ($CurrentItem.installDP) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
         $siteCode = $CurrentItem.siteCode
         $parentVM = $DeployConfig.virtualMachines | Where-Object {
             $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
@@ -1290,6 +1295,7 @@ function Test-SiteSystemFunctionality {
             }
 
             # Local DP probes: SMS_DP$ share + WDS (PXE always-on per ScriptFunctions)
+            Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying DP local content + PXE"
             Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
             $localDpScript = {
                 $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
@@ -1334,6 +1340,7 @@ function Test-SiteSystemFunctionality {
 
     # Test SUP if installSUP
     if ($CurrentItem.installSUP) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Software Update Point"
         Write-Log "[Phase $Phase] $VMName [SUP]: Testing Software Update Point" -LogOnly
 
         $supScript = {
