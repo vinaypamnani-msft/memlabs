@@ -402,9 +402,12 @@ function Add-MRemoteNGConnectionToContainer {
         [bool]$ForceOverwrite = $false
     )
 
-    # Check for existing connection by display name
+    # Check for existing connection by display name only.
+    # Do NOT match on Hostname — Hyper-V Console connections all share the same
+    # host ($env:COMPUTERNAME), so hostname matching would treat every VM as a
+    # duplicate of the first one added, causing ForceOverwrite to delete it.
     $existingNodes = $Container.SelectNodes("Node[@Type='Connection']")
-    $findNode = $existingNodes | Where-Object { $_.Name -eq $DisplayName -or $_.GetAttribute("Hostname") -eq $Hostname } | Select-Object -First 1
+    $findNode = $existingNodes | Where-Object { $_.Name -eq $DisplayName } | Select-Object -First 1
 
     if ($findNode -and $ForceOverwrite) {
         [void]$Container.RemoveChild($findNode)
