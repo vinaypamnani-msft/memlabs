@@ -601,6 +601,7 @@ function Remove-Domain {
         Get-List -type VM -SmartUpdate | Out-Null
         New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
+        Restore-TerminalFocus
         Write-Host
     }
     

@@ -212,6 +212,7 @@ function Select-ConfigMenu {
                 if ($response -eq "y") {
                     New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$true 
                     New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath -OverWrite:$true
+                    Restore-TerminalFocus
                 }               
             }
             "f" { Select-DeletePending; Clear-HealthStatsCache }

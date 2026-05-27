@@ -516,6 +516,7 @@ function select-RestoreSnapshotDomain {
             }
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
             New-MRemoteNGFileFromHyperV -MRemoteNGFile $Global:Common.MRemoteNGFilePath
+            Restore-TerminalFocus
         }
 
     }

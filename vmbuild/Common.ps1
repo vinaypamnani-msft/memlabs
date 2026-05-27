@@ -1583,6 +1583,65 @@ Function Set-Window {
 }
 
 
+function Restore-TerminalFocus {
+    <#
+    .SYNOPSIS
+        Restores foreground focus to the calling terminal window.
+    .DESCRIPTION
+        After launching GUI apps (RDCMan, mRemoteNG) that steal foreground,
+        call this once to pull focus back. Uses keybd_event Alt trick +
+        AttachThreadInput to bypass Windows' SetForegroundWindow restriction.
+    #>
+    try {
+        $focusApi = Add-Type -MemberDefinition @"
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetConsoleWindow();
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+            [DllImport("user32.dll")]
+            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")]
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            [DllImport("kernel32.dll")]
+            public static extern uint GetCurrentThreadId();
+            [DllImport("user32.dll")]
+            public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+            [DllImport("user32.dll")]
+            public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+"@ -Name "FocusApi" -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+
+        $ourWindow = $focusApi::GetConsoleWindow()
+        if (-not $ourWindow -or $ourWindow -eq [IntPtr]::Zero) {
+            $ourWindow = $focusApi::GetForegroundWindow()
+        }
+        if (-not $ourWindow -or $ourWindow -eq [IntPtr]::Zero) { return }
+
+        # Synthesize Alt press/release so Windows grants us foreground-set privilege
+        $focusApi::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+        $focusApi::keybd_event(0x12, 0, 0x2, [UIntPtr]::Zero)
+
+        # Attach to the current foreground thread (belt-and-suspenders)
+        $fg = $focusApi::GetForegroundWindow()
+        $fgPid = [uint32]0
+        $fgThread = $focusApi::GetWindowThreadProcessId($fg, [ref]$fgPid)
+        $ourThread = $focusApi::GetCurrentThreadId()
+        $attached = $false
+        if ($fgThread -ne 0 -and $fgThread -ne $ourThread) {
+            $attached = $focusApi::AttachThreadInput($ourThread, $fgThread, $true)
+        }
+        $focusApi::ShowWindow($ourWindow, 9) | Out-Null   # SW_RESTORE
+        $focusApi::SetForegroundWindow($ourWindow) | Out-Null
+        if ($attached) {
+            $focusApi::AttachThreadInput($ourThread, $fgThread, $false) | Out-Null
+        }
+    }
+    catch {
+        # Best-effort; don't fail the caller.
+    }
+}
+
 function Add-SwitchAndDhcp {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]

@@ -937,7 +937,7 @@ function New-MRemoteNGFileFromHyperV {
             if (Test-Path $p) { $mRNGExe = $p; break }
         }
         if ($mRNGExe) {
-            $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -ErrorAction SilentlyContinue
+            $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -WindowStyle Minimized -ErrorAction SilentlyContinue
             if ($mRNGProc) {
                 Write-GreenCheck "Updated $MRemoteNGFile. Restarted mRemoteNG (PID $($mRNGProc.Id))" -ForegroundColor ForestGreen
             }
