@@ -737,6 +737,16 @@ public static extern bool SetConsoleMode(System.IntPtr hConsole, uint dwMode);
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
 public static extern bool GetNumberOfConsoleInputEvents(System.IntPtr hConsole, out uint lpcNumberOfEvents);
 
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool FlushConsoleInputBuffer(System.IntPtr hConsoleInput);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern bool PeekConsoleInput(
+    System.IntPtr hConsoleInput,
+    [System.Runtime.InteropServices.Out] INPUT_RECORD[] lpBuffer,
+    uint nLength,
+    out uint lpNumberOfEventsRead);
+
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern short GetAsyncKeyState(int vKey);
 
@@ -805,6 +815,14 @@ function Enable-MouseInput {
                        -bor [MemLabsConsole.MouseInput]::ENABLE_WINDOW_INPUT) `
                        -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
     [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+
+    # Flush stale events that may linger from a previous Shift-toggle
+    # (Suspend/Resume cycle). When Quick Edit text selection was active and
+    # the mode was switched back, ConPTY can leave phantom events in the
+    # input buffer. ReadConsoleInput blocks if it finds the buffer empty
+    # after GetNumberOfConsoleInputEvents reported stale counts, causing
+    # the polling loop to hang.
+    [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
 }
 
 function Disable-MouseInput {
@@ -837,6 +855,11 @@ function Resume-MouseInput {
                           -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS) `
                           -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
         [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+
+        # Flush events generated while Quick Edit was active (text selection
+        # clicks, ConPTY internal bookkeeping). Without this, phantom events
+        # linger and poison the next menu's input buffer.
+        [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
     }
 }
 
@@ -1669,10 +1692,15 @@ function Get-KeyStroke {
     if ($mouseActive) {
         $buf = New-Object 'MemLabsConsole.MouseInput+INPUT_RECORD[]' 1
         while ($true) {
-            # Non-blocking check: are any events waiting?
-            $eventCount = [uint32]0
-            [void][MemLabsConsole.MouseInput]::GetNumberOfConsoleInputEvents($script:_consoleInputHandle, [ref]$eventCount)
-            if ($eventCount -gt 0) {
+            # Non-blocking peek: verify an event is truly readable before calling
+            # ReadConsoleInput (which blocks when the buffer is empty).
+            # GetNumberOfConsoleInputEvents can report phantom counts after
+            # ConPTY mode toggles (Shift-suspend/resume Quick Edit), causing
+            # ReadConsoleInput to block indefinitely on events that ConPTY
+            # consumed internally.
+            $peekRead = [uint32]0
+            [void][MemLabsConsole.MouseInput]::PeekConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$peekRead)
+            if ($peekRead -gt 0) {
                 $read = [uint32]0
                 [void][MemLabsConsole.MouseInput]::ReadConsoleInput($script:_consoleInputHandle, $buf, 1, [ref]$read)
                 if ($read -gt 0) {
