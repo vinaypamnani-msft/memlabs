@@ -2055,7 +2055,7 @@ function Start-DHCP {
     # but Import-Module fails with "module could not be loaded".
     $moduleLoaded = $false
     try {
-        Import-Module DhcpServer -Force -ErrorAction Stop
+        Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
         $moduleLoaded = $true
     }
     catch {
@@ -2075,7 +2075,7 @@ function Start-DHCP {
             Start-Service DHCPServer -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
             try {
-                Import-Module DhcpServer -Force -ErrorAction Stop
+                Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction Stop
                 $moduleLoaded = $true
                 Write-GreenCheck "DhcpServer module loaded after WMI service restart."
             }
@@ -2093,7 +2093,7 @@ function Start-DHCP {
                     $installed = Install-WindowsFeature 'DHCP' -Confirm:$false -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
                 }
                 if ($installed -and $installed.Success) {
-                    Import-Module DhcpServer -Force -ErrorAction SilentlyContinue
+                    Import-Module DhcpServer -Force -SkipEditionCheck -ErrorAction SilentlyContinue
                     $moduleLoaded = $true
                     Write-GreenCheck "DHCP management tools reinstalled."
                 }
