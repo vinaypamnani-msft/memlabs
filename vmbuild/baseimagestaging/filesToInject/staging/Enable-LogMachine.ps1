@@ -485,7 +485,7 @@ $hklmProxy = Get-ItemProperty -Path $hklmIeKey -Name 'ProxyEnable' -ErrorAction 
 $proxyConfigured = $hklmProxy -and $hklmProxy.ProxyEnable -eq 1
 $taskExists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 
-if ($proxyConfigured -and -not $taskExists) {
+if ($proxyConfigured) {
     # Inline PowerShell that copies HKLM proxy values into HKCU at logon
     $taskScript = @'
 $hklm = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
