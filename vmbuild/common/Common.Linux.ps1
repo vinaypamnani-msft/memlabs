@@ -2999,6 +2999,32 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
 
+            # 3a-hkcu) Per-user HKCU + all loaded user hives under HKU.
+            #    Edge/Chrome (Chromium) resolves proxy via
+            #    WinHttpGetIEProxyConfigForCurrentUser(), which reads HKCU
+            #    regardless of the ProxySettingsPerUser policy above (that
+            #    policy only affects WinINET-based apps like legacy IE).
+            #    Without this, Edge has no proxy configured, traffic goes
+            #    direct, TCP/UDP 443 is ACL-denied, and browsing fails.
+            #    Set HKCU for the PSDirect admin session (persists for
+            #    interactive logon) plus sweep all loaded user SIDs.
+            $hkcuKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            New-ItemProperty -Path $hkcuKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $hkcuKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
+            New-ItemProperty -Path $hkcuKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+
+            # Sweep all loaded user hives (S-1-5-21-*) so any other logged-in
+            # user or previously-loaded profile also gets the proxy.
+            $userSids = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' }
+            foreach ($sid in $userSids) {
+                $userIeKey = "Registry::HKEY_USERS\$($sid.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+                if (-not (Test-Path $userIeKey)) { continue }
+                New-ItemProperty -Path $userIeKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $userIeKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
+                New-ItemProperty -Path $userIeKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
+            }
+
             # 3b) HKLM Wow6432Node IE settings -- the 32-bit registry view.
             #     Internet Settings is NOT redirected by WOW64, but some
             #     32-bit installers (notably adksetup.exe, a 32-bit WiX Burn
@@ -3022,6 +3048,9 @@ function Set-WindowsClientProxy {
             #    DSC downloads (e.g. InstallODBCDriver fetching msodbcsql.msi
             #    via WebClient) bypass the proxy entirely and hit the ACL
             #    deny rule with "Unable to connect to the remote server".
+            #    (Step 3a-hkcu above already swept loaded S-1-5-21-* hives;
+            #    .DEFAULT is S-1-5-18 which that sweep skips, so set it
+            #    explicitly.)
             $defaultUserKey = 'Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
             if (-not (Test-Path $defaultUserKey)) { New-Item -Path $defaultUserKey -Force | Out-Null }
             New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
@@ -3206,6 +3235,23 @@ function Remove-WindowsClientProxy {
                 New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
                 Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
                 Remove-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            }
+
+            # 4a) HKCU + all loaded user hives (reverse of Set step 3a-hkcu)
+            $hkcuKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            if (Test-Path $hkcuKey) {
+                New-ItemProperty -Path $hkcuKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
+                Remove-ItemProperty -Path $hkcuKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $hkcuKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            }
+            $userSids = Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^S-1-5-21-' -and $_.PSChildName -notmatch '_Classes$' }
+            foreach ($sid in $userSids) {
+                $userIeKey = "Registry::HKEY_USERS\$($sid.PSChildName)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+                if (-not (Test-Path $userIeKey)) { continue }
+                New-ItemProperty -Path $userIeKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
+                Remove-ItemProperty -Path $userIeKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $userIeKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
             }
 
             # 5) .NET Framework machine.config <defaultProxy>

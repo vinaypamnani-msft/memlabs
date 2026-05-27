@@ -474,6 +474,53 @@ if (-not (Test-Path "$desktopPath\SQL Logs.lnk")) {
     }
 }
 
+# --- Proxy logon task: stamp HKLM proxy settings into HKCU on every logon ---
+# Edge/Chrome (Chromium) reads proxy from HKCU, not HKLM. Set-WindowsClientProxy
+# seeds HKCU for the admin + any loaded HKU hives at deploy time, but that misses
+# users who log in later. This scheduled task reads the machine-level proxy from
+# HKLM and mirrors it into HKCU at every interactive logon so Edge just works.
+$taskName = 'MemLabs-SetUserProxy'
+$hklmIeKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+$hklmProxy = Get-ItemProperty -Path $hklmIeKey -Name 'ProxyEnable' -ErrorAction SilentlyContinue
+$proxyConfigured = $hklmProxy -and $hklmProxy.ProxyEnable -eq 1
+$taskExists = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+if ($proxyConfigured -and -not $taskExists) {
+    # Inline PowerShell that copies HKLM proxy values into HKCU at logon
+    $taskScript = @'
+$hklm = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+$hkcu = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+$p = Get-ItemProperty $hklm -ErrorAction SilentlyContinue
+if ($p -and $p.ProxyEnable -eq 1 -and $p.ProxyServer) {
+    Set-ItemProperty $hkcu -Name ProxyEnable   -Value $p.ProxyEnable   -Type DWord  -Force
+    Set-ItemProperty $hkcu -Name ProxyServer    -Value $p.ProxyServer   -Type String -Force
+    Set-ItemProperty $hkcu -Name ProxyOverride  -Value $p.ProxyOverride -Type String -Force
+} else {
+    Set-ItemProperty $hkcu -Name ProxyEnable -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    Remove-ItemProperty $hkcu -Name ProxyServer   -ErrorAction SilentlyContinue
+    Remove-ItemProperty $hkcu -Name ProxyOverride  -ErrorAction SilentlyContinue
+}
+'@
+    try {
+        $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -Command `"$($taskScript -replace '"','\"')`""
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+            -Settings $settings -Description 'Mirror HKLM proxy settings into HKCU for Edge/Chrome' `
+            -RunLevel Limited -Force | Out-Null
+        Write-Status "Registered logon task '$taskName' to set per-user proxy"
+    }
+    catch {
+        Write-Status "Failed to register proxy logon task: $_"
+    }
+}
+elseif (-not $proxyConfigured -and $taskExists) {
+    # Proxy was removed; clean up the task
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Write-Status "Removed logon task '$taskName' (proxy no longer configured)"
+}
+
 # --- Clean up legacy flag files ---
 $legacyFlags = @(
     "EnableLogMachine.done", "ClientShortcuts.done", "ServerShortcuts2.done",

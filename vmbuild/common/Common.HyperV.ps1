@@ -1147,7 +1147,7 @@ function Set-VmProxyEnforcement {
             $w -= 2
         }
 
-        # --- Low-priority DENY rules (weights 5000-5003, one per rule) ---
+        # --- Low-priority DENY rules (weights 5000-5004, one per rule) ---
         # Block outbound HTTP/HTTPS to anywhere not covered above (= Internet).
         # The proxy itself reaches the Internet via the host NAT, so clients
         # MUST go through the proxy for any web traffic.
@@ -1158,8 +1158,17 @@ function Set-VmProxyEnforcement {
         # 0x800700B7 ("already exists") which our addAcl helper benignly
         # swallows -- and you end up with only the FIRST port enforced
         # (e.g. TCP/80 deny lands, TCP/443 deny silently lost).
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5003 }
-        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5002 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 80;  Protocol = 'TCP'; Weight = 5004 }
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'TCP'; Weight = 5003 }
+
+        # Block QUIC/HTTP3 (UDP 443). Without this, Chromium-based browsers
+        # (Edge, Chrome) bypass the proxy entirely for domains in the QUIC
+        # preload list (e.g. Google) -- connecting directly over UDP 443,
+        # which the TCP-only deny above doesn't catch. Symptoms: Google
+        # works but doesn't appear in Squid logs; non-preloaded domains
+        # (Bing, microsoft.com) fail because Edge tries TCP 443 first
+        # (blocked), and never attempts QUIC without a prior Alt-Svc header.
+        & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 443; Protocol = 'UDP'; Weight = 5002 }
 
         # Block outbound DNS to non-lab resolvers (lab DCs are covered by
         # the lab-subnet allow above).
