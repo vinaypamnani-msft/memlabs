@@ -49,66 +49,86 @@ function Test-VmFunctionality {
 
     Write-Log "[Phase $Phase] $VMName [$role]: Starting functional validation" -LogOnly
 
+    # Progress activity label — Write-JobProgress reads this from the job's
+    # Progress stream and displays it in the console during execution.
+    $validationActivity = "$VMName [$role]"
+
     # Determine which test function(s) to call based on role and installed features.
     $testsPassed = $true
 
     switch ($role) {
         'DC' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon"
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
         }
         'BDC' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon (BDC)"
             $testsPassed = Test-DCFunctionality -VMName $VMName -Domain $domain -IsBDC -DeployConfig $DeployConfig
         }
         'CAS' {
             if (-not $CurrentItem.remoteSQLVM) {
+                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
                 $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
             }
             if ($testsPassed) {
+                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
         }
         'Primary' {
             if (-not $CurrentItem.remoteSQLVM) {
+                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
                 $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$role]: SQL is remote ($($CurrentItem.remoteSQLVM)); SQL test runs against that VM" -LogOnly
             }
             if ($testsPassed) {
+                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying ConfigMgr site"
                 $testsPassed = Test-CMSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
             }
         }
         'Secondary' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Secondary site"
             $testsPassed = Test-SecondaryFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'SiteSystem' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying site system roles"
             $testsPassed = Test-SiteSystemFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'SQLAO' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Always On"
             $testsPassed = Test-SQLAOFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'WSUS' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying WSUS"
             $testsPassed = Test-WSUSFunctionality -VMName $VMName -Domain $domain
         }
         'FileServer' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying file server"
             $testsPassed = Test-FileServerFunctionality -VMName $VMName -Domain $domain
         }
         'StandaloneRootCA' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Standalone Root CA"
             $testsPassed = Test-StandaloneRootCAFunctionality -VMName $VMName -Domain $domain
         }
         'PassiveSite' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying passive site server"
             $testsPassed = Test-PassiveSiteFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'DomainMember' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying domain member"
             $testsPassed = Test-DomainMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'WorkgroupMember' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying workgroup member"
             $testsPassed = Test-WorkgroupMemberFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         'InternetClient' {
+            Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying internet client"
             $testsPassed = Test-InternetClientFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
         }
         default {
@@ -121,68 +141,81 @@ function Test-VmFunctionality {
 
     # If the VM has installRP, also test reporting services
     if ($testsPassed -and $CurrentItem.installRP) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Reporting Services"
         $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain
     }
 
     # If the VM has InstallCA, test Certificate Authority
     if ($testsPassed -and $CurrentItem.InstallCA) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Certificate Authority"
         $testsPassed = Test-CAFunctionality -VMName $VMName -Domain $domain
     }
 
     # If the VM has SQL but is not a Primary/CAS/SQLAO (standalone SQL server)
     if ($testsPassed -and $CurrentItem.sqlVersion -and $role -notin @('CAS', 'Primary', 'SQLAO')) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
         $testsPassed = Test-SQLFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # SSMS install check (any role with installSSMS=$true)
     if ($testsPassed -and $CurrentItem.installSSMS) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SSMS install"
         $testsPassed = Test-SSMSInstall -VMName $VMName -Domain $domain
     }
 
     # SMS Provider role check (remote SMS provider, not on the site server itself)
     if ($testsPassed -and $CurrentItem.InstallSMSProv -and $role -ne 'CAS' -and $role -ne 'Primary') {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SMS Provider"
         $testsPassed = Test-SMSProviderRole -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # Pull-DP configuration (verified from parent Primary)
     if ($testsPassed -and $CurrentItem.enablePullDP) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Pull-DP"
         $testsPassed = Test-PullDPConfiguration -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # Additional data disks (E:, F:, ...) per additionalDisks config
     if ($testsPassed -and $CurrentItem.additionalDisks) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying additional disks"
         $testsPassed = Test-AdditionalDisks -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # BitLocker volume state on member VMs flagged for encryption
     if ($testsPassed -and $CurrentItem.BitLocker -eq $true -and $role -notin @('DC', 'BDC')) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying BitLocker"
         $testsPassed = Test-BitLockerProtection -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # BitLocker Management: validate policy exists and is deployed (top-level site only)
     $hasBLMVMs = @($DeployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true }).Count -gt 0
     if ($testsPassed -and ($DeployConfig.cmOptions.EnableBLM -or $hasBLMVMs) -and $role -eq 'Primary') {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying BitLocker Management"
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # Verify maintenance scheduled tasks are present (confirms Phase 10 ran correctly)
     if ($testsPassed -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying maintenance tasks"
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
 
     # ---- Proxy validation ----
     # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
     if ($testsPassed -and $role -eq 'Proxy') {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Squid proxy"
         $testsPassed = Test-ProxyListening -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
     # 1b) Verify the Proxy Admin web UI is listening on TCP 8443.
     if ($testsPassed -and $role -eq 'Proxy') {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Proxy Admin web UI"
         $testsPassed = Test-ProxyAdminWebUI -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
     # 2) For any opted-in Windows client/CM-role VM: verify it's pointed at the proxy,
     #    that direct Internet is blocked by host ACLs, and (CM site roles only) that
     #    Get-CMSiteSystemServer reports UseProxy=$true.
     if ($testsPassed -and (Test-VmUsesProxy -Vm $CurrentItem -DeployConfig $DeployConfig)) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying proxy configuration"
         if (-not (Test-WindowsProxyConfig -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig)) {
             $testsPassed = $false
         }
@@ -195,6 +228,8 @@ function Test-VmFunctionality {
             }
         }
     }
+
+    Write-Progress2 -Activity $validationActivity -Completed
 
     return $testsPassed
 }
