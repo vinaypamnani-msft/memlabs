@@ -142,7 +142,7 @@ function Test-VmFunctionality {
     # If the VM has installRP, also test reporting services
     if ($testsPassed -and $CurrentItem.installRP) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Reporting Services"
-        $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain
+        $testsPassed = Test-ReportingFunctionality -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
     # If the VM has InstallCA, test Certificate Authority
@@ -1430,7 +1430,9 @@ function Test-ReportingFunctionality {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$Domain
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter()][object]$CurrentItem,
+        [Parameter()][object]$DeployConfig
     )
 
     $Phase = 11
@@ -1545,7 +1547,85 @@ function Test-ReportingFunctionality {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result)
+    $allPassed = Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result
+
+    # CM-level check: verify the Reporting Services Point role is actually
+    # registered in the site. The SSRS service/portal checks above only
+    # validate infrastructure; the CM RP role might not be configured if
+    # InstallRoles.ps1 was skipped (e.g. add-to-existing scenario).
+    if ($CurrentItem -and $DeployConfig -and $CurrentItem.siteCode) {
+        $siteCode = $CurrentItem.siteCode
+        $rpVmName = $VMName
+
+        # Determine which VM has the CM WMI namespace
+        $cmVmName = $null
+        if ($CurrentItem.role -in @('Primary', 'CAS')) {
+            $cmVmName = $VMName
+        }
+        else {
+            $parentVM = $DeployConfig.virtualMachines | Where-Object {
+                $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
+            } | Select-Object -First 1
+            if ($parentVM) {
+                $cmVmName = $parentVM.vmName
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [RP]: Cannot find parent site server for site '$siteCode'; skipping CM RP role check" -Warning
+            }
+        }
+
+        if ($cmVmName) {
+            Write-Log "[Phase $Phase] $VMName [RP]: Verifying CM RP role registration from '$cmVmName' (site $siteCode)" -LogOnly
+
+            $rpRoleScript = {
+                param($sc, $rpVmName)
+                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+                $maxAttempts = 3
+                $retryDelay = 20
+                $found = $false
+                $wmiFilter = "RoleName='SMS SRS Reporting Point' AND ServerName LIKE '%$rpVmName%'"
+                $results.Details.Add("CMD: Get-WmiObject SMS_SystemResourceList -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
+
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    try {
+                        $rpRole = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
+                            -Filter $wmiFilter -ErrorAction Stop | Select-Object -First 1
+                        if ($rpRole) {
+                            $results.Details.Add("OK: Reporting Services Point role registered for server matching '$rpVmName' in site '$sc' (attempt $attempt)")
+                            $found = $true
+                            break
+                        }
+                        else {
+                            $results.Details.Add("  Attempt $attempt/${maxAttempts}: RP role not yet visible in WMI")
+                            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
+                    }
+                }
+
+                if (-not $found) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Reporting Services Point role not registered for '$rpVmName' in site '$sc' -- InstallRoles may not have run")
+                }
+
+                return $results
+            }
+
+            $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
+                -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName `
+                -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog
+
+            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
+                $allPassed = $false
+            }
+        }
+    }
+
+    return $allPassed
 }
 
 function Test-FileServerFunctionality {
