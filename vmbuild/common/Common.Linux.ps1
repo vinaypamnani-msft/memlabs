@@ -2939,6 +2939,40 @@ if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
         /usr/share/applications/microsoft-edge.desktop
 fi
 
+# Login script: auto-repair Edge .desktop after apt upgrades (which reset it)
+# and ensure the user's taskbar favorites have Edge instead of Firefox.
+# Runs via /etc/profile.d/ so it fires on every interactive login (xrdp, SSH).
+cat > /etc/profile.d/memlabs-edge-fixup.sh << 'FIXUP'
+#!/bin/bash
+# memlabs: ensure Edge .desktop has --password-store=basic and taskbar has Edge.
+# Runs once per login; exits immediately if nothing to fix.
+
+# Fix 1: re-patch .desktop if Edge update removed --password-store=basic
+DESKTOP=/usr/share/applications/microsoft-edge.desktop
+if [ -f "$DESKTOP" ] && grep -q 'Exec=/usr/bin/microsoft-edge-stable ' "$DESKTOP" \
+   && ! grep -q '\-\-password-store=basic' "$DESKTOP"; then
+    sudo sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
+        "$DESKTOP" 2>/dev/null
+fi
+
+# Fix 2: swap firefox.desktop for microsoft-edge.desktop in taskbar favorites
+if command -v dconf >/dev/null 2>&1; then
+    FAVS=$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
+    if echo "$FAVS" | grep -q 'firefox.desktop'; then
+        NEW=$(echo "$FAVS" | sed "s/'firefox.desktop'/'microsoft-edge.desktop'/g")
+        dconf write /org/gnome/shell/favorite-apps "$NEW" 2>/dev/null
+    fi
+fi
+FIXUP
+chmod 0644 /etc/profile.d/memlabs-edge-fixup.sh
+
+# Allow vmbuildadmin to run the sed without a password (needed for .desktop fixup)
+if ! grep -q 'memlabs-edge-fixup' /etc/sudoers.d/memlabs-edge-fixup 2>/dev/null; then
+    echo 'ALL ALL=(root) NOPASSWD: /usr/bin/sed -i s*Exec=/usr/bin/microsoft-edge-stable*Exec=/usr/bin/microsoft-edge-stable --password-store=basic* /usr/share/applications/microsoft-edge.desktop' \
+        > /etc/sudoers.d/memlabs-edge-fixup
+    chmod 0440 /etc/sudoers.d/memlabs-edge-fixup
+fi
+
 install -d -m 0755 /etc/xdg
 cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
 [Default Applications]
