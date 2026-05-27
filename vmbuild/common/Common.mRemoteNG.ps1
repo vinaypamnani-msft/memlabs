@@ -91,7 +91,6 @@ function Get-MRemoteNGPassword {
 
     $bouncyCastleDll = Join-Path $mRNGPath "BouncyCastle.Crypto.dll"
     if (-not (Test-Path $bouncyCastleDll)) {
-        # Newer mRemoteNG versions may use a different assembly name
         $bouncyCastleDll = Get-ChildItem -Path $mRNGPath -Filter "BouncyCastle*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
         if (-not $bouncyCastleDll) {
             Write-Log "BouncyCastle DLL not found in $mRNGPath. Cannot encrypt password." -Warning -LogOnly
@@ -100,17 +99,31 @@ function Get-MRemoteNGPassword {
     }
 
     try {
-        # Load BouncyCastle first, then mRemoteNG assembly
-        Add-Type -Path $bouncyCastleDll -ErrorAction SilentlyContinue
-        [System.Reflection.Assembly]::LoadFile("$mRNGPath\mRemoteNG.exe") | Out-Null
-
-        $cryptoProvider = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
         $plaintext = $Common.LocalAdmin.GetNetworkCredential().Password
+        $mRNGExe = Join-Path $mRNGPath "mRemoteNG.exe"
 
-        # Default master password "mR3m" — same key mRemoteNG uses when no custom master password is set
-        $secureKey = ConvertTo-SecureString "mR3m" -AsPlainText -Force
-        $encrypted = $cryptoProvider.Encrypt($plaintext, $secureKey)
-        return $encrypted
+        # mRemoteNG is x86 — must use 32-bit PowerShell to load its assemblies
+        $ps32 = Join-Path $env:SystemRoot "SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+        if (-not (Test-Path $ps32)) {
+            Write-Log "32-bit PowerShell not found at $ps32. Cannot encrypt password." -Warning -LogOnly
+            return $null
+        }
+
+        # Build a self-contained script block that runs in the 32-bit process
+        $scriptText = @"
+Add-Type -Path '$bouncyCastleDll' -ErrorAction Stop
+[System.Reflection.Assembly]::LoadFile('$mRNGExe') | Out-Null
+`$cp = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+`$key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
+`$cp.Encrypt('$($plaintext -replace "'","''")', `$key)
+"@
+
+        $encrypted = & $ps32 -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $scriptText 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not $encrypted -or $encrypted -is [System.Management.Automation.ErrorRecord]) {
+            Write-Log "32-bit PowerShell encryption failed: $encrypted" -Warning -LogOnly
+            return $null
+        }
+        return ($encrypted | Select-Object -Last 1).ToString().Trim()
     }
     catch {
         Write-Log "Failed to encrypt password via mRemoteNG assemblies: $_" -Warning -LogOnly
