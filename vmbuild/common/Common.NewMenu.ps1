@@ -1455,17 +1455,27 @@ function Show-Menu {
         if (-not $Maxshrink) {
             Write-Host ""
         }
+        $pgIndicatorY = -1
+        $pgClickUp    = $false
+        $pgClickDn    = $false
         if ($PgUpAvailable -and $Operation -eq 'PGDNNEEDED') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNNEEDED' -PgUpAvailable $true
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickUp = $true
+            $pgClickDn = $true
         }
         elseif ($Operation -eq 'PGDNDONE') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNDONE' -PgUpAvailable $false
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickUp = $true
         }
         elseif ($Operation -eq 'PGDNNEEDED') {
             $Operation = ""
             Write-MenuPgIndicator -Operation 'PGDNNEEDED' -PgUpAvailable $false
+            $pgIndicatorY = (Get-CursorPosition).Y - 1
+            $pgClickDn = $true
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition
@@ -1481,7 +1491,7 @@ function Show-Menu {
                 continue
             }
         }
-        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect
+        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
         if ($return) {
@@ -1919,7 +1929,10 @@ function Start-Navigation {
         [Parameter(Mandatory = $true)] # Mandatory parameter
         [object]$PromptPosition, 
         [object]$HelpPosition, 
-        [switch]$MultiSelect = $false
+        [switch]$MultiSelect = $false,
+        [int]$PgIndicatorY = -1,
+        [switch]$PgClickUp = $false,
+        [switch]$PgClickDn = $false
     )
 
     $i = 0
@@ -2032,6 +2045,25 @@ function Start-Navigation {
                     Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                     Set-CursorPosition -X $CPosition.x -Y $CPosition.y
                     return $menuItems[$selectedIndex]
+                }
+                elseif ($PgIndicatorY -ge 0 -and $key.MouseY -eq $PgIndicatorY) {
+                    # Click on the PgUp/PgDn indicator line
+                    if ($PgClickUp -and $PgClickDn) {
+                        # Both directions available: left half = PgUp, right half = PgDn
+                        $halfWidth = [math]::Floor(($host.UI.RawUI.WindowSize.Width) / 2)
+                        if ($key.MouseX -lt $halfWidth) {
+                            return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
+                        }
+                        else {
+                            return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
+                        }
+                    }
+                    elseif ($PgClickDn) {
+                        return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
+                    }
+                    elseif ($PgClickUp) {
+                        return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
+                    }
                 }
             }
             elseif ($key.MouseButton -eq 0) {
