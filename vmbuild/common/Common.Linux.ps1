@@ -3568,7 +3568,7 @@ endlocal
             $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
             $sc2 = $shell.CreateShortcut($lnk2)
             $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -F /var/log/squid/access.log"
+            $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -n 100 -F /var/log/squid/access.log"
             $sc2.WorkingDirectory = 'C:\'
             $sc2.IconLocation = "$sshExe,0"
             $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
@@ -3772,7 +3772,7 @@ function New-HostProxyShortcuts {
         $lnk2 = Join-Path $desktop "Squid Access Log - $proxyFqdn.lnk"
         $sc2 = $shell.CreateShortcut($lnk2)
         $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-        $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -F /var/log/squid/access.log`""
+        $sc2.Arguments = "/k `"`"$sshExe`" $sshArgsBase sudo tail -n 100 -F /var/log/squid/access.log`""
         $sc2.WorkingDirectory = 'C:\'
         $sc2.IconLocation = "$sshExe,0"
         $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
