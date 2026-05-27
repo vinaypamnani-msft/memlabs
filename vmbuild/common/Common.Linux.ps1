@@ -402,6 +402,13 @@ chpasswd:
         # ensures the WantedBy=multi-user.target symlink exists regardless
         # of bake-era bugs.
         'systemctl enable hv-kvp-daemon.service || true',
+        # Start the KVP daemon now (don't wait for the post-cloud-init reboot).
+        # The override unit's ExecStartPre polls for /dev/vmbus/hv_kvp (up to
+        # 60s), and the kernel-exact cloud-tools package was installed above,
+        # so the binary exists. Starting now lets KVP report the guest IP to
+        # the host before the reboot, unblocking Wait-LinuxVmReady for DHCP
+        # VMs (LinuxServer) that have no ExpectedIPAddress fallback.
+        'systemctl restart hv-kvp-daemon.service || true',
         # Delete the temporary bake-time console user. The bake runcmd
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
@@ -1488,7 +1495,7 @@ function Wait-LinuxVmReady {
     write-progress2 "Wait for Linux VM" -Status "$VmName`: cloud-init running, waiting for IP..." -force
 
     $lastReportedIp = $null
-    $lastHeartbeatSec = 0
+    $lastHeartbeatSec = -30  # Fire first heartbeat (with KVP diagnostics) after ~30s instead of 60s
     $heartbeatIntervalSec = 60
     $loggedKnownHostsForIp = $null
     $lastSshErrLogSec = -9999
@@ -1598,6 +1605,49 @@ function Wait-LinuxVmReady {
             if (($elapsed - $lastHeartbeatSec) -ge $heartbeatIntervalSec) {
                 Write-Log "$VmName`: still waiting for guest IP / cloud-init (elapsed ${elapsed}s / ${TimeoutSeconds}s)"
                 $lastHeartbeatSec = $elapsed
+
+                # Inline KVP diagnostics so we can see what Hyper-V knows
+                # about the guest without waiting for the post-timeout autopsy.
+                try {
+                    $vmInfo = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+                    if ($vmInfo) {
+                        Write-Log "$VmName`:   heartbeat=$($vmInfo.Heartbeat) state=$($vmInfo.State) uptime=$([int]$vmInfo.Uptime.TotalSeconds)s" -LogOnly
+                    }
+                    $adapters = Get-VMNetworkAdapter -VMName $VmName -ErrorAction SilentlyContinue
+                    if ($adapters) {
+                        foreach ($a in $adapters) {
+                            $ipsRaw = ($a.IPAddresses -join ', ')
+                            if (-not $ipsRaw) { $ipsRaw = '(empty)' }
+                            Write-Log "$VmName`:   adapter '$($a.Name)': switch=$($a.SwitchName) connected=$($a.Connected) mac=$($a.MacAddress) ips=[$ipsRaw]" -LogOnly
+                        }
+                    }
+                    $vmObj = Get-WmiObject -Namespace 'root\virtualization\v2' -Class 'Msvm_ComputerSystem' `
+                        -Filter "ElementName='$VmName'" -ErrorAction SilentlyContinue
+                    if ($vmObj) {
+                        $kvpSvc = Get-WmiObject -Namespace 'root\virtualization\v2' -Query `
+                            "Associators of {$vmObj} Where AssocClass=Msvm_SystemDevice ResultClass=Msvm_KvpExchangeComponent" `
+                            -ErrorAction SilentlyContinue
+                        if ($kvpSvc -and $kvpSvc.GuestIntrinsicExchangeItems) {
+                            $intrinsicCount = $kvpSvc.GuestIntrinsicExchangeItems.Count
+                            Write-Log "$VmName`:   KVP intrinsic items: $intrinsicCount" -LogOnly
+                            foreach ($itemXml in $kvpSvc.GuestIntrinsicExchangeItems) {
+                                try {
+                                    $x = [xml]$itemXml
+                                    $name = ($x.INSTANCE.PROPERTY | Where-Object { $_.NAME -eq 'Name' }).VALUE
+                                    if ($name -in @('OSName', 'NetworkAddressIPv4', 'NetworkAddressIPv6', 'FullyQualifiedDomainName', 'IntegrationServicesVersion')) {
+                                        $val = ($x.INSTANCE.PROPERTY | Where-Object { $_.NAME -eq 'Data' }).VALUE
+                                        Write-Log "$VmName`:     KVP $name = $val" -LogOnly
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        else {
+                            Write-Log "$VmName`:   KVP: no intrinsic items (hv_kvp_daemon not running or hasn't reported yet)" -LogOnly
+                        }
+                    }
+                }
+                catch { Write-Log "$VmName`:   KVP heartbeat diagnostics error: $($_.Exception.Message)" -LogOnly }
             }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
@@ -4490,6 +4540,7 @@ runcmd:
   - systemctl enable qemu-guest-agent.service || true
   - systemctl enable hv-kvp-daemon.service || true
   - systemctl enable hv-vss-daemon.service || true
+  - dpkg -s "linux-cloud-tools-`$(uname -r)" >/dev/null 2>&1 || apt-get install -y "linux-tools-`$(uname -r)" "linux-cloud-tools-`$(uname -r)" || true
 $desktopRuncmdYaml
 $bakeUserCleanupYaml
   - systemctl stop unattended-upgrades.service 2>/dev/null || true
