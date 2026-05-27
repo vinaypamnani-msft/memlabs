@@ -2761,7 +2761,7 @@ function Get-LinuxClientBashScript {
     .SYNOPSIS
         Bash body that configures GNOME Desktop for LinuxClient VMs:
         .xsession for xrdp, Windows-like GNOME layout (Dash to Panel),
-        Firefox, and sensible lab defaults. Idempotent.
+        Edge, Intune, and sensible lab defaults. Idempotent.
 
     .DESCRIPTION
         LinuxClient VMs use the UbuntuDesktop2404.vhdx base which has
@@ -2774,7 +2774,7 @@ function Get-LinuxClientBashScript {
              - Activities hot corner disabled
              - Screen lock & idle blank disabled (lab VM)
              - Welcome dialog suppressed
-          4. Installs Firefox from the Mozilla deb repo
+          4. Installs Microsoft Edge + Intune app from packages.microsoft.com
         Returns: [string] bash source.  Assumes it will be run as root.
     #>
     [CmdletBinding()]
@@ -2914,30 +2914,35 @@ DCONF
 
 dconf update
 
-# --- Firefox: Mozilla deb repo (not the snap shim) -----------------------
+# --- Microsoft Edge: Intune enrollment requires Edge 102+ ----------------
 install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
-    > /etc/apt/sources.list.d/mozilla.list
-printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-    > /etc/apt/preferences.d/mozilla
+wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
+    | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
+    > /etc/apt/sources.list.d/microsoft-edge.list
 apt-get update
-apt-get install -y firefox
+apt-get install -y microsoft-edge-stable
 
-# Wire firefox as default browser system-wide.
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true
-update-alternatives --set x-www-browser /usr/bin/firefox || true
-update-alternatives --set gnome-www-browser /usr/bin/firefox || true
+# Wire Edge as default browser system-wide.
+update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200 || true
+update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200 || true
+update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable || true
+update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable || true
 
 install -d -m 0755 /etc/xdg
 cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
 [Default Applications]
-x-scheme-handler/http=firefox.desktop
-x-scheme-handler/https=firefox.desktop
-text/html=firefox.desktop
+x-scheme-handler/http=microsoft-edge.desktop
+x-scheme-handler/https=microsoft-edge.desktop
+text/html=microsoft-edge.desktop
 MIMEEOF
+
+# --- Microsoft Intune app (intune-portal) --------------------------------
+# Uses the same Microsoft signing key already imported above.
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
+    > /etc/apt/sources.list.d/microsoft-prod.list
+apt-get update
+apt-get install -y intune-portal
 
 echo "[memlabs-gnome] done: $(date -Is)"
 '@
@@ -3060,12 +3065,12 @@ function Invoke-LinuxRoleConfiguration {
     }
 
     # LinuxClient: GNOME Desktop with xrdp baked in; needs .xsession +
-    # Windows-like GNOME tweaks + Firefox.  No enableRDP toggle -- xrdp is
+    # Windows-like GNOME tweaks + Edge + Intune.  No enableRDP toggle -- xrdp is
     # always-on for this role (it's the whole point of a Desktop image).
     if ($role -eq 'LinuxClient') {
         $ops.Add([pscustomobject]@{
             Name       = 'gnomeDesktop'
-            Label      = 'Configuring GNOME desktop (Windows-like layout + Firefox)'
+            Label      = 'Configuring GNOME desktop (Windows-like layout + Edge + Intune)'
             Script     = (Get-LinuxClientBashScript)
             TimeoutSec = 1800
             Tag        = 'memlabs-gnome'
