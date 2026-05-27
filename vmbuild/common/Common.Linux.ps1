@@ -2870,10 +2870,11 @@ cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
 [org/gnome/desktop/wm/preferences]
 button-layout='appmenu:minimize,maximize,close'
 
-# Enable extensions
+# Enable extensions + pin Edge (not Firefox) to the dash/taskbar
 [org/gnome/shell]
 enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
 welcome-dialog-last-shown-version='99.0'
+favorite-apps=['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
 
 # Dash-to-panel: taskbar at bottom, Windows 10/11 style
 #   Left:   Show Apps (≈ Start), Left Box
@@ -2943,6 +2944,32 @@ echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://package
     > /etc/apt/sources.list.d/microsoft-prod.list
 apt-get update
 apt-get install -y intune-portal
+
+# --- Per-user fixup: replace Firefox with Edge in taskbar favorites -------
+# System-wide dconf defaults only apply to keys the user hasn't set yet.
+# Once a user logs in, GNOME writes per-user favorite-apps (including
+# firefox.desktop from Ubuntu's default). Patch every existing user's
+# dconf database so Edge replaces Firefox in the taskbar on next login.
+for UHOME in /home/vmbuildadmin /root; do
+    UNAME=$(stat -c '%U' "$UHOME" 2>/dev/null) || continue
+    # dbus-launch + dconf requires the user's XDG_RUNTIME_DIR; using
+    # gsettings/dconf as root with DCONF_PROFILE won't write to the
+    # per-user db. Instead, use the dconf CLI under su.
+    if [ -d "$UHOME/.config/dconf" ]; then
+        su - "$UNAME" -c "
+            export DCONF_PROFILE=/etc/dconf/profile/user
+            CURRENT=\$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
+            if echo \"\$CURRENT\" | grep -q 'firefox.desktop'; then
+                NEW=\$(echo \"\$CURRENT\" | sed \"s/'firefox.desktop'/'microsoft-edge.desktop'/g\")
+                dconf write /org/gnome/shell/favorite-apps \"\$NEW\"
+                echo '[memlabs-gnome] replaced firefox with edge in favorite-apps for $UNAME'
+            elif [ -z \"\$CURRENT\" ] || [ \"\$CURRENT\" = \"@as []\" ]; then
+                dconf write /org/gnome/shell/favorite-apps \"['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']\"
+                echo '[memlabs-gnome] set favorite-apps with edge for $UNAME'
+            fi
+        " || true
+    fi
+done
 
 echo "[memlabs-gnome] done: $(date -Is)"
 '@
