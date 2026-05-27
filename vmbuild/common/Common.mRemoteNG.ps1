@@ -363,12 +363,24 @@ function New-MRemoteNGFileFromHyperV {
     )
 
     if ($WhatIf.IsPresent) {
-        Write-Log "[WhatIf] Will update mRemoteNG file on Desktop, if needed."
+        Write-Log "[WhatIf] Will update mRemoteNG connection file, if needed."
         return
     }
 
     $Activity = -not $NoActivity.IsPresent
-    Write-Log "Updating mRemoteNG connection file on Desktop" -Activity:$Activity
+    Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
+
+    # Ensure target directory exists
+    $targetDir = Split-Path $MRemoteNGFile
+    if (-not (Test-Path $targetDir)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+
+    # Clean up old desktop copy if it was moved to %ProgramData%
+    $oldDesktopCopy = Join-Path ([Environment]::GetFolderPath("Desktop")) "memlabs-mremoteng.xml"
+    if ((Test-Path $oldDesktopCopy) -and $oldDesktopCopy -ne $MRemoteNGFile) {
+        Remove-Item $oldDesktopCopy -Force -ErrorAction SilentlyContinue
+    }
 
     if ($OverWrite -and (Test-Path $MRemoteNGFile)) {
         Write-Log "Deleting $MRemoteNGFile and regenerating."

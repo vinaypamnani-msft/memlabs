@@ -5416,7 +5416,7 @@ if (-not $Common.Initialized) {
             LogPath                     = Join-Path $logsPath "VMBuild.log"                                         # Log File
             CrashLogsPath               = New-Directory -DirectoryPath (Join-Path $logsPath "crashlogs")            # Path for crash logs
             RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
-            MRemoteNGFilePath           = Join-Path $DesktopPath "memlabs-mremoteng.xml"                              # mRemoteNG File
+            MRemoteNGFilePath           = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"                # mRemoteNG File
             VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
             DevBranch                   = $devBranch                                                                # Git dev branch
             Supported                   = $null                                                                     # Supported Configs
