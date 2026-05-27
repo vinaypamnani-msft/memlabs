@@ -51,6 +51,15 @@ catch {
 # ── Gather networks in use ───────────────────────────────────────────────────
 # Get-List -Type UniqueSwitch returns switch names like "192.168.8.0", "Internet", "Cluster"
 $networksInUse = @(Get-List -Type UniqueSwitch -SmartUpdate)
+
+# Internet and Cluster are shared infrastructure that should always be
+# protected even when no VMs currently sit on those networks.
+foreach ($infra in @('Internet', 'Cluster')) {
+    if ($networksInUse -notcontains $infra) {
+        $networksInUse += $infra
+    }
+}
+
 # NAT entries use subnet names (e.g. "192.168.8.0"), while switches named
 # "Internet" map to subnet 172.31.250.0 and "Cluster" to 10.250.250.0.
 $subnetsInUse = @($networksInUse | ForEach-Object {
@@ -143,6 +152,12 @@ Write-Host
 Write-Host "=== Orphaned Hyper-V Switches ===" -ForegroundColor Yellow
 $switches = @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)
 foreach ($sw in $switches) {
+    # Only consider switches that look like memlabs created them:
+    # subnet-named (e.g. "192.168.1.0") or well-known names.
+    $isMemlabs = $sw.Name -match '^\d+\.\d+\.\d+\.\d+$' -or
+                 $sw.Name -in @('Internet', 'Cluster', 'MemLabsNAT')
+    if (-not $isMemlabs) { continue }
+
     $inUse = $false
     foreach ($network in $networksInUse) {
         if ($sw.Name -like "*$network*") {
