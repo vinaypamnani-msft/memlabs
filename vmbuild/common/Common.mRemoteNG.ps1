@@ -838,12 +838,17 @@ function New-MRemoteNGFileFromHyperV {
         }
 
         foreach ($vm in $vmListFull) {
-            $hvVmId = $vm.vmId
+            # Explicitly stringify the Guid — a bare System.Guid flowing through
+            # two [string] parameter conversions can silently become empty.
+            $hvVmId = if ($vm.vmId) { "$($vm.vmId)" } else { "" }
             if ([string]::IsNullOrWhiteSpace($hvVmId)) {
                 # Try to resolve from Hyper-V if not cached
                 try { $hvVmId = (Get-VM -Name $vm.VmName -ErrorAction Stop).Id.ToString() } catch { }
             }
-            if ([string]::IsNullOrWhiteSpace($hvVmId)) { continue }
+            if ([string]::IsNullOrWhiteSpace($hvVmId)) {
+                Write-Log "mRemoteNG: Skipping Hyper-V Console for $($vm.VmName) — no vmId" -LogOnly -Warning
+                continue
+            }
 
             $hvDisplayName = $vm.VmName
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $hvContainer `
