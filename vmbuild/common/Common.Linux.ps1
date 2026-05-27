@@ -2930,6 +2930,15 @@ update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/
 update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable || true
 update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable || true
 
+# Suppress GNOME keyring password prompt on Edge launch. xrdp sessions don't
+# auto-unlock the keyring via PAM, so Edge prompts for a keyring password on
+# every start. --password-store=basic stores credentials in Edge's profile dir
+# instead (plaintext, acceptable for a lab VM with no real secrets).
+if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
+    sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
+        /usr/share/applications/microsoft-edge.desktop
+fi
+
 install -d -m 0755 /etc/xdg
 cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
 [Default Applications]
