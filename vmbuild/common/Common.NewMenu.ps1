@@ -801,6 +801,10 @@ $script:_hasFlushConsoleInput = [MemLabsConsole.MouseInput].GetMethod('FlushCons
 # The saved console mode before mouse input was enabled. Used by
 # Disable-MouseInput to restore the original state.
 $script:_savedConsoleMode = $null
+# The exact mode we set when mouse input is active. Used by Suspend/Resume
+# to avoid read-modify-write (GetConsoleMode can return values modified by
+# ConPTY, progressively corrupting the mode across Suspend/Resume cycles).
+$script:_mouseActiveMode = $null
 $script:_consoleInputHandle = $null
 # Tracks whether Shift is held for the text-selection toggle.
 # Reset by Enable-MouseInput at the start of each menu session.
@@ -823,6 +827,7 @@ function Enable-MouseInput {
                        -bor [MemLabsConsole.MouseInput]::ENABLE_WINDOW_INPUT) `
                        -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
     [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+    $script:_mouseActiveMode = $newMode
 
     # Flush stale events that may linger from a previous Shift-toggle
     # (Suspend/Resume cycle). When Quick Edit text selection was active and
@@ -840,6 +845,7 @@ function Disable-MouseInput {
         [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_savedConsoleMode)
         $script:_savedConsoleMode = $null
     }
+    $script:_mouseActiveMode = $null
     $script:_mouseShiftHeld = $false
 }
 
@@ -850,34 +856,31 @@ function Disable-MouseInput {
 # MOUSE_INPUT alone is sufficient: ConPTY translates MOUSE_INPUT into VT mouse
 # tracking, so clearing the flag tells Windows Terminal to stop forwarding mouse
 # events to the app and handle them itself (selection, right-click, etc.).
+#
+# Uses the saved _mouseActiveMode instead of GetConsoleMode read-modify-write.
+# ConPTY can internally modify console mode flags between our calls, so reading
+# the current mode and patching it progressively corrupts the mode across
+# Suspend/Resume cycles (losing flags like VIRTUAL_TERMINAL_INPUT, causing VT
+# output sequences like clear-screen to stop working).
 function Suspend-MouseInput {
-    if ($null -ne $script:_consoleInputHandle) {
+    if ($null -ne $script:_consoleInputHandle -and $null -ne $script:_mouseActiveMode) {
         # Flush any pending mouse/key events that arrived before the mode change.
-        # Without this, stale events from the previous mouse-active state linger
-        # and get processed when Resume re-enables mouse input.
         if ($script:_hasFlushConsoleInput) {
             [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
         }
-        $mode = [uint32]0
-        [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
-        $newMode = $mode -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
-        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
+        # Set the suspended mode: mouse-active mode minus MOUSE_INPUT.
+        $suspendedMode = $script:_mouseActiveMode -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT)
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $suspendedMode)
     }
 }
 
 # Re-enable mouse input after a Shift-suspend, without touching _savedConsoleMode.
+# Restores the exact _mouseActiveMode that Enable-MouseInput computed, bypassing
+# GetConsoleMode entirely.
 function Resume-MouseInput {
-    if ($null -ne $script:_consoleInputHandle) {
-        $mode = [uint32]0
-        [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
-        $newMode = ($mode -bor [MemLabsConsole.MouseInput]::ENABLE_MOUSE_INPUT `
-                          -bor [MemLabsConsole.MouseInput]::ENABLE_EXTENDED_FLAGS) `
-                          -band (-bnot [MemLabsConsole.MouseInput]::ENABLE_QUICK_EDIT_MODE)
-        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $newMode)
-
+    if ($null -ne $script:_consoleInputHandle -and $null -ne $script:_mouseActiveMode) {
+        [void][MemLabsConsole.MouseInput]::SetConsoleMode($script:_consoleInputHandle, $script:_mouseActiveMode)
         # Flush events that accumulated while mouse input was disabled.
-        # ConPTY mode transitions can leave phantom events or stale
-        # focus/window events that confuse the polling loop.
         if ($script:_hasFlushConsoleInput) {
             [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
         }
