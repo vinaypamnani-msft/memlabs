@@ -9,7 +9,7 @@
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
 
     # Define log share
     $LogFolder = "DSC"
@@ -214,14 +214,23 @@
             $DNSForwarderIPs = $deployConfig.DNSForwarders
         }
 
-        DnsServerForwarder DnsForwarders {
-            IsSingleInstance = 'Yes'
-            IPAddresses      = $DNSForwarderIPs
-            UseRootHint      = $true
-            EnableReordering = $true
-            DependsOn        = "[WriteStatus]ConfigureDnsForwarders"
+        Script DnsForwarders {
+            DependsOn  = "[WriteStatus]ConfigureDnsForwarders"
+            GetScript  = { return @{ Result = (Get-DnsServerForwarder).IPAddress.IPAddressToString -join ', ' } }
+            TestScript = {
+                try {
+                    $current = (Get-DnsServerForwarder).IPAddress.IPAddressToString
+                    $desired = $using:DNSForwarderIPs
+                    if (-not $current -or ($current -join ',') -ne ($desired -join ',')) { return $false }
+                    return $true
+                } catch { return $false }
+            }
+            SetScript  = {
+                $desired = $using:DNSForwarderIPs
+                Set-DnsServerForwarder -IPAddress $desired -UseRootHint $true
+            }
         }
-        $nextDepend = "[DnsServerForwarder]DnsForwarders"
+        $nextDepend = "[Script]DnsForwarders"
 
         WriteStatus ForceReplication {
             DependsOn = $nextDepend
