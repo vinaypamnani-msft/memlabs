@@ -4211,17 +4211,26 @@ class InstallPBIRS {
             $pbirsAttempt = 0
             $pbirsMaxAttempts = 2
             $pbirsExit = -1
+            $needsReboot = $false
             while ($pbirsAttempt -lt $pbirsMaxAttempts) {
                 $pbirsAttempt++
                 Write-Status ("PBIRS install attempt $pbirsAttempt/$pbirsMaxAttempts (Start-Process -Wait, may take several minutes)...")
                 $pbirsProc = Start-Process -FilePath $pbirsSetup -ArgumentList $PBIRSargs -Wait -PassThru
                 $pbirsExit = $pbirsProc.ExitCode
                 Write-Status ("PBIRS bootstrapper exit code: $pbirsExit (0x{0:x})" -f $pbirsExit)
-                if ($pbirsExit -eq 0 -and (Test-Path -LiteralPath $verifyPbirs)) {
-                    Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — install succeeded, reboot needed.
+                # Treat it the same as exit 0 for the path-verification check.
+                $pbirsOk = ($pbirsExit -eq 0 -or $pbirsExit -eq 3010)
+                if ($pbirsOk -and (Test-Path -LiteralPath $verifyPbirs)) {
+                    if ($pbirsExit -eq 3010) {
+                        Write-Status "PBIRS installed successfully (SSRS subfolder present, exit 3010 = reboot required)."
+                        $needsReboot = $true
+                    } else {
+                        Write-Status "PBIRS installed successfully (SSRS subfolder present)."
+                    }
                     break
                 }
-                if ($pbirsExit -eq 0) {
+                if ($pbirsOk) {
                     Write-Status "PBIRS bootstrapper reported success but expected install path missing: $verifyPbirs"
                     if (Test-Path -LiteralPath 'C:\staging\PBI.log') {
                         try {
@@ -4345,6 +4354,11 @@ class InstallPBIRS {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
             }
             catch {}
+
+            if ($needsReboot) {
+                Write-Status "Requesting reboot for pending PBIRS prerequisite updates (exit 3010)."
+                $global:DSCMachineStatus = 1
+            }
         }
         catch {
             Write-Status "Failed to Configure PBIRS"
@@ -4354,27 +4368,50 @@ class InstallPBIRS {
     }
 
     [bool] Test() {
-
         try {
-            $service = $null
-            if ($($this.RSInstance) -eq "PBIRS") {
-                try {
-                    $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
-                }
-                catch {}
-            }
-
-            if ($service) {
-                if ($service.status -eq "Running") {
-                    return $true
+            # Service must be installed and running
+            if ($this.RSInstance -eq "PBIRS") {
+                $service = Get-Service PowerBIReportServer -ErrorAction SilentlyContinue
+                if (-not $service -or $service.Status -ne "Running") {
+                    Write-Verbose "InstallPBIRS Test: PowerBIReportServer service not running."
+                    return $false
                 }
             }
 
-            return $false
+            # SSRS subfolder must exist (proves install completed)
+            $ssrsPath = Join-Path $this.InstallPath 'SSRS'
+            if (-not (Test-Path -LiteralPath $ssrsPath)) {
+                Write-Verbose "InstallPBIRS Test: SSRS subfolder missing at $ssrsPath"
+                return $false
+            }
+
+            # RSReportServer.config must show database + URL reservations are configured
+            $configPath = Join-Path $ssrsPath 'ReportServer\RSReportServer.config'
+            if (-not (Test-Path -LiteralPath $configPath)) {
+                Write-Verbose "InstallPBIRS Test: RSReportServer.config not found at $configPath"
+                return $false
+            }
+
+            [xml]$cfg = Get-Content -LiteralPath $configPath -ErrorAction Stop
+
+            # Database DSN must be populated (proves Set-RsDatabase ran)
+            $dsn = $cfg.Configuration.Database.DSN
+            if ([string]::IsNullOrWhiteSpace($dsn)) {
+                Write-Verbose "InstallPBIRS Test: database not configured (empty DSN in RSReportServer.config)"
+                return $false
+            }
+
+            # URL reservations must have at least one application entry
+            $urlApps = $cfg.Configuration.URLReservations.Application
+            if (-not $urlApps) {
+                Write-Verbose "InstallPBIRS Test: no URL reservations in RSReportServer.config"
+                return $false
+            }
+
+            return $true
         }
         catch {
-            Write-Verbose "Failed to Find PBIRS Server"
-            Write-Verbose "$_"
+            Write-Verbose "InstallPBIRS Test: $_"
             return $false
         }
     }
