@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Identifies and removes orphaned NAT entries, DHCP scopes, and Hyper-V
     switches that no longer have any VMs attached.

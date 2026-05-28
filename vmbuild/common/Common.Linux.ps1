@@ -1,4 +1,4 @@
-# Common.Linux.ps1
+﻿# Common.Linux.ps1
 # Building blocks for Linux (Ubuntu) VMs in memlabs.
 #
 # Exports:

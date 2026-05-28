@@ -1,4 +1,4 @@
-
+﻿
 # ThreadJob (PS7+) exposes its data streams directly on the job object and
 # has an empty ChildJobs collection, whereas Start-Job wraps the work in a
 # child PSRemotingChildJob whose streams hold the data. Return whichever

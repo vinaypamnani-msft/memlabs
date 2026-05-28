@@ -1,4 +1,4 @@
-# Enable-LogMachine.ps1
+﻿# Enable-LogMachine.ps1
 # Idempotent: checks actual shortcut/assoc existence, not flag files.
 
 function Add-Permissions {
