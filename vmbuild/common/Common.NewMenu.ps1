@@ -2229,7 +2229,17 @@ function Start-Navigation {
                             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                             continue
                         }
-                        # D or any other letter item: fall through to confirm
+                        elseif ($itemName -eq 'D') {
+                            # Done: collect selected items (same as keyboard D handler)
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect -Wait
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                            $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
+                            if (-not $return) {
+                                return "NOITEMS"
+                            }
+                            return $return
+                        }
+                        # Other letter items: fall through to confirm
                     }
 
                     # Single-select (or non-numeric multiselect item): confirm
