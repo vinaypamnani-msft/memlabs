@@ -831,6 +831,9 @@ function Get-ConfigurationData {
                 if ($allAlreadyDeployed) {
                     Write-Log "[Phase 8] Skipping auto-snapshot: all VMs already deployed (re-run)" -LogOnly
                 }
+                elseif (-not $global:Phase1DeployedNewVMs) {
+                    Write-Log "[Phase 8] Skipping auto-snapshot: re-deploy (Phase 1 did not deploy new VMs)" -LogOnly
+                }
                 elseif (-not $snapshot) {
                     $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"
                     if (-not ($response -eq "n")) {

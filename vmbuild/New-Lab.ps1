@@ -778,6 +778,9 @@ try {
             }
             else {
                 if ($i -eq 1) {
+                    # Phase 1 deployed new VMs; used by Phase 8 to decide whether to auto-snapshot
+                    $global:Phase1DeployedNewVMs = $true
+
                     # Clear out vm remove list
                     $global:vm_remove_list = @()
 
