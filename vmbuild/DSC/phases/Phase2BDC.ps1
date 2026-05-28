@@ -222,18 +222,15 @@
         # Now that DNS server role is installed (InstallDns=$true above),
         # point DNS at self first for the local AD-integrated zones, with
         # PDC as fallback for records not yet replicated.
-        # Uses a Script resource because DSC won't allow two DnsServerAddress
-        # resources targeting the same InterfaceAlias with different values.
-        # Uses string scripts (not scriptblocks) to bake $alias and
-        # $PDCIPAddress at compile time, avoiding $using: deserialization
-        # failures inside PSDirect-compiled configurations.
-        Script SetDNSSelfAndPDC {
-            DependsOn  = $nextDepend
-            GetScript  = { return @{ Result = 'N/A' } }
-            TestScript = { return $false }
-            SetScript  = "Set-DnsClientServerAddress -InterfaceAlias '$alias' -ServerAddresses @('127.0.0.1', '$PDCIPAddress')"
+        # Uses custom SetDNSAddress (keyed on Name) instead of a second
+        # DnsServerAddress (keyed on InterfaceAlias) to avoid the DSC
+        # compile-time conflict with the pre-promotion SetDNS resource.
+        SetDNSAddress SetDNSSelfAndPDC {
+            Name      = 'PostPromotion'
+            Address   = @('127.0.0.1', $PDCIPAddress)
+            DependsOn = $nextDepend
         }
-        $nextDepend = "[Script]SetDNSSelfAndPDC"
+        $nextDepend = "[SetDNSAddress]SetDNSSelfAndPDC"
 
         WriteStatus ConfigureDnsForwarders {
             DependsOn = $nextDepend

@@ -5079,3 +5079,29 @@ class GpUpdate {
     }
 
 }
+
+[DscResource()]
+class SetDNSAddress {
+    [DscProperty(Key)]
+    [string] $Name
+
+    [DscProperty(Mandatory)]
+    [string[]] $Address
+
+    [void] Set() {
+        $alias = (Get-NetAdapter | Select-Object -First 1).Name
+        Write-Status "Setting DNS to $($this.Address -join ', ') on $alias"
+        Set-DnsClientServerAddress -InterfaceAlias $alias -ServerAddresses $this.Address
+    }
+
+    [bool] Test() {
+        $alias = (Get-NetAdapter | Select-Object -First 1).Name
+        $current = (Get-DnsClientServerAddress -InterfaceAlias $alias -AddressFamily IPv4).ServerAddresses
+        $desired = $this.Address
+        return ($null -ne $current -and ($current -join ',') -eq ($desired -join ','))
+    }
+
+    [SetDNSAddress] Get() {
+        return $this
+    }
+}
