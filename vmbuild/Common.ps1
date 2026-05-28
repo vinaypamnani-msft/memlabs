@@ -1098,9 +1098,7 @@ function Copy-ItemSafe {
         [Parameter(Mandatory = $false)]
         [switch] $WhatIf,
         [Parameter(Mandatory = $false)]
-        [switch]$Force,
-        [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
-        [int]$TimeoutSeconds = 360
+        [switch]$Force
     )
     #$PSScriptRoot = $using:PSScriptRoot
     $location = $PSScriptRoot
@@ -1143,35 +1141,105 @@ function Copy-ItemSafe {
 
     write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
+    $pollIntervalSeconds = 30
+    $stallTimeoutSeconds = 60    # No progress for 1 minute = stalled
+    $maxTotalSeconds = 600       # Hard cap: 10 minutes per attempt
+
     $retries = 3
     while ($retries -gt 0) {
-        $job = start-job -ScriptBlock $CopyItemScript
-        $wait = Wait-Job -Timeout $TimeoutSeconds -Job $job
-        $job
-        if ($wait.State -eq "Running") {
-            Stop-Job $job | out-null
-            remove-job -job $job | out-null
-            $retries--
-        }
-        else {
-            if ($wait.State -eq "Completed") {
-                $result = Receive-Job $job
-                write-log "[Copy-ItemSafe] returned: $result" -LogOnly
-                remove-job $job | out-null
-                if ($result -eq $false) {
-                    Write-Log "[Copy-ItemSafe] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
-                    $retries--
-                    continue
-                }
-                return $true
-            }
-            else {
-                write-log "[Copy-ItemSafe] State = $($wait.State)" -logonly
-                Stop-Job $job | out-null
-                remove-job $job | out-null
-                $retries--
+        $job = Start-Job -ScriptBlock $CopyItemScript
+        $attemptStart = Get-Date
+        $lastProgressFingerprint = ''
+        $lastProgressTime = $attemptStart
+        $timedOut = $false
+
+        # On the last retry, skip stall detection and allow the full hard cap.
+        # Earlier retries use stall detection to fail fast and retry sooner.
+        $isLastRetry = $retries -eq 1
+
+        # Poll loop: check every $pollIntervalSeconds whether the copy is making progress
+        while ($job.State -eq "Running") {
+            $null = Wait-Job -Timeout $pollIntervalSeconds -Job $job
+            if ($job.State -ne "Running") { break }
+
+            $elapsedSeconds = [int]((Get-Date) - $attemptStart).TotalSeconds
+
+            # Hard cap safety net
+            if ($elapsedSeconds -ge $maxTotalSeconds) {
+                Write-Log "[Copy-ItemSafe] [$VMName] Copy hit hard cap of ${maxTotalSeconds}s copying $Path. Retries left: $($retries - 1)" -Warning
+                $timedOut = $true
+                break
             }
 
+            # Check progress via the job's Progress stream.
+            # Copy-Item emits ProgressRecords: Count increases per new file,
+            # and PercentComplete/StatusDescription update per chunk within a file.
+            # Track a fingerprint of (Count + latest record state) so both
+            # new-file progress AND byte-level progress on large files (ISOs) are detected.
+            $progressStream = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0].Progress } else { $job.Progress }
+            $currentCount = $progressStream.Count
+            $fingerprint = "$currentCount"
+            $progressDetail = ''
+            if ($currentCount -gt 0) {
+                $latestRecord = $progressStream[$currentCount - 1]
+                $fingerprint = "$currentCount|$($latestRecord.PercentComplete)|$($latestRecord.StatusDescription)"
+                $progressDetail = "$currentCount items, $($latestRecord.PercentComplete)%"
+                if ($latestRecord.CurrentOperation) {
+                    # Trim long paths to just the filename for log readability
+                    $progressDetail += " ($([System.IO.Path]::GetFileName($latestRecord.CurrentOperation)))"
+                }
+            }
+
+            if ($fingerprint -ne $lastProgressFingerprint) {
+                # Copy is making progress (new file started, or bytes advancing on current file)
+                if ($progressDetail) {
+                    Write-Log "[Copy-ItemSafe] [$VMName] Progress: $progressDetail (${elapsedSeconds}s elapsed)" -LogOnly
+                }
+                $lastProgressFingerprint = $fingerprint
+                $lastProgressTime = Get-Date
+            }
+            elseif (-not $isLastRetry) {
+                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
+                if ($stallSeconds -ge $stallTimeoutSeconds) {
+                    $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
+                    Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
+                    $timedOut = $true
+                    break
+                }
+                else {
+                    Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (stall timeout: ${stallTimeoutSeconds}s, ${elapsedSeconds}s total elapsed)" -LogOnly
+                }
+            }
+            else {
+                # Last retry: log stall but don't give up, let it run to the hard cap
+                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
+                Write-Log "[Copy-ItemSafe] [$VMName] Last retry: no new progress for ${stallSeconds}s, waiting up to ${maxTotalSeconds}s (${elapsedSeconds}s elapsed)" -LogOnly
+            }
+        }
+
+        if ($timedOut) {
+            Stop-Job $job | Out-Null
+            Remove-Job -Job $job | Out-Null
+            $retries--
+            continue
+        }
+
+        if ($job.State -eq "Completed") {
+            $result = Receive-Job $job
+            Write-Log "[Copy-ItemSafe] returned: $result" -LogOnly
+            Remove-Job $job | Out-Null
+            if ($result -eq $false) {
+                Write-Log "[Copy-ItemSafe] [$VMName] Job completed but scriptblock returned failure. Retries left: $($retries - 1)" -Warning
+                $retries--
+                continue
+            }
+            return $true
+        }
+        else {
+            Write-Log "[Copy-ItemSafe] [$VMName] Job ended with state '$($job.State)' copying $Path. Retries left: $($retries - 1)" -Warning
+            Stop-Job $job | Out-Null
+            Remove-Job -Job $job | Out-Null
+            $retries--
         }
     }
     return $false
