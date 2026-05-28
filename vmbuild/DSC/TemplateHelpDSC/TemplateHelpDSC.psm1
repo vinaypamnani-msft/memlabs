@@ -4198,16 +4198,22 @@ class InstallPBIRS {
 
             write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
+            # Verify install by checking for RSReportServer.config, not just
+            # the instance folder. The config file is the last artifact the
+            # installer creates; its presence proves a complete install.
+            $verifyPbirs = Join-Path $this.InstallPath "$($this.RSInstance)\ReportServer\RSReportServer.config"
+
+            # Skip download + install entirely if already installed
+            if (Test-Path -LiteralPath $verifyPbirs) {
+                Write-Status "PBIRS already installed ($verifyPbirs exists). Skipping install."
+            } else {
+
             # PowerBIReportServer.exe is a WiX/Burn bootstrapper bundle, so it
             # has the same silent-success failure mode as adksetup: a stale
             # dependency-provider registration ("WixBundleInstalled = 1") from
             # a prior failed install makes the bundle exit 0 in a few seconds
-            # without doing real work. Verify the install actually happened by
-            # checking for the SSRS subfolder (the bundle always creates that;
-            # the parent InstallPath was already created by us via New-Item).
-            # If missing, force /uninstall to clear the provider key and retry
-            # once before giving up.
-            $verifyPbirs = Join-Path $this.InstallPath 'SSRS'
+            # without doing real work. If config file is missing after install,
+            # force /uninstall to clear the provider key and retry.
             $pbirsAttempt = 0
             $pbirsMaxAttempts = 3
             $pbirsExit = -1
@@ -4278,7 +4284,7 @@ class InstallPBIRS {
             if (-not (Test-Path -LiteralPath $verifyPbirs)) {
                 if ($needsReboot) {
                     # Don't throw — let Set() exit normally so DSC processes the reboot
-                    # signal. After reboot, Test() will return false (SSRS folder still
+                    # signal. After reboot, Test() will return false (config file still
                     # missing) and LCM will call Set() again for a clean install.
                     Write-Status "PBIRS not yet installed; reboot pending. LCM will re-run Set() after reboot."
                     $global:DSCMachineStatus = 1
@@ -4287,6 +4293,8 @@ class InstallPBIRS {
                     throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
                 }
             }
+
+            } # end else (skip install when already present)
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
@@ -4411,14 +4419,10 @@ class InstallPBIRS {
                 }
             }
 
-            # SSRS subfolder must exist (proves install completed)
-            $ssrsPath = Join-Path $this.InstallPath 'SSRS'
-            if (-not (Test-Path -LiteralPath $ssrsPath)) {
-                Write-Verbose "InstallPBIRS Test: SSRS subfolder missing at $ssrsPath"
-                return $false
-            }
+            # Instance subfolder must exist (proves install completed)
+            $ssrsPath = Join-Path $this.InstallPath $this.RSInstance
 
-            # RSReportServer.config must show database + URL reservations are configured
+            # RSReportServer.config must exist (proves install completed fully)
             $configPath = Join-Path $ssrsPath 'ReportServer\RSReportServer.config'
             if (-not (Test-Path -LiteralPath $configPath)) {
                 Write-Verbose "InstallPBIRS Test: RSReportServer.config not found at $configPath"
