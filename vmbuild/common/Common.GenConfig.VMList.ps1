@@ -772,10 +772,11 @@ function Select-VirtualMachines {
                     $machineName = $virtualMachine.vmName                    
                     while ($newValue -ne "D" -and -not ([string]::IsNullOrWhiteSpace($($newValue)))) {
                         Write-Log -HostOnly -Verbose "NewValue = '$newvalue'"
-                        $isLinux = Test-VmIsLinux -Vm $virtualMachine
+                        # NB: $IsLinux is a PowerShell 7 automatic constant -- use $vmIsLinux
+                        $vmIsLinux = Test-VmIsLinux -Vm $virtualMachine
                         $diskSummary = Get-DiskShortSummary -VirtualMachine $virtualMachine
                         $customOptions = [ordered]@{}
-                        if (-not $isLinux) {
+                        if (-not $vmIsLinux) {
                             $customOptions["*B1"] = ""
                             $customOptions["*B"]  = "Disks%$($Global:Common.Colors.GenConfigHeader)"
                         }
@@ -788,7 +789,7 @@ function Select-VirtualMachines {
                         # reverse lookup. "-D" prefix marks the row deletable
                         # (Delete key returns "-D<num>").
                         $diskNumToLetter = @{}
-                        if (-not $isLinux) {
+                        if (-not $vmIsLinux) {
                             $diskLettersInline = Get-VMDiskLetters -VirtualMachine $virtualMachine
                             $diskNum = 90
                             foreach ($dl in $diskLettersInline) {
@@ -822,7 +823,7 @@ function Select-VirtualMachines {
                                 $diskNum++
                             }
                         }
-                        if (-not $isLinux) {
+                        if (-not $vmIsLinux) {
                             $customOptions["M"]  = "Manage Disks  ($diskSummary)"
                             $customOptions["HM"] = "Open the disk management screen (add, edit size, remove). Delete key on a disk row also removes it."
                         }
@@ -865,7 +866,7 @@ function Select-VirtualMachines {
                                     }
                                 }
                             }
-                            if (-not $isLinux -and $virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
+                            if (-not $vmIsLinux -and $virtualMachine.OperatingSystem -and $virtualMachine.OperatingSystem.Contains("Server")) {
 
 
                                 if ($virtualMachine.Role -notin ("DC", "BDC")) {
