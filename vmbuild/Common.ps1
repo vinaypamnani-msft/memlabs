@@ -3715,6 +3715,7 @@ function Invoke-VmCommand {
             }
             catch {
                 $failed = $true
+                $caughtException = $_
                 if (-not $SuppressLog) {
                     Write-Log "$VmName`: Failed to run '$DisplayName'. Error: $_" -Failure
                     Write-Log "$($_.ScriptStackTrace)" -LogOnly
@@ -3766,6 +3767,16 @@ function Invoke-VmCommand {
             # Uncomment when debugging, this is called many times while waiting for VM to be ready
             # Write-Log "Invoke-VmCommand: $VmName`: Failed to get VM Session." -Failure -LogOnly
             # return $return
+        }
+
+        # Populate ScriptBlockOutput with error text when command failed but output is null
+        if ($failed -and $null -eq $return.ScriptBlockOutput) {
+            if ($Err2 -and $Err2.Count -gt 0) {
+                $return.ScriptBlockOutput = $Err2[0].ToString().Trim()
+            }
+            elseif ($caughtException) {
+                $return.ScriptBlockOutput = "$caughtException".Trim()
+            }
         }
 
         # Set Command Result state in return object
