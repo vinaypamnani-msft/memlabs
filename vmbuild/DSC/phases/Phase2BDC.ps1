@@ -93,20 +93,21 @@
         }
         $nextDepend = "[InstallDotNet4]DotNet"
 
-        # Set DNS client to 127.0.0.1 (self) + PDC as fallback.
-        # Before promotion, 127.0.0.1 has no DNS server so queries fall
-        # through to the PDC. After promotion + reboot, 127.0.0.1 serves
-        # the AD-integrated zones replicated during promotion and the PDC
-        # covers any records not yet replicated.
+        # Before promotion, point DNS exclusively at the PDC so
+        # WaitForADDomain / WaitForDomainReady can actually resolve
+        # the domain. 127.0.0.1 has no DNS server at this point and
+        # Windows DNS client's tight retry loop never falls back to
+        # the secondary server in time.
+        # After promotion, SetDNSSelfAndPDC switches to self + PDC.
         $alias = (Get-NetAdapter).Name | Select-Object -First 1
 
         WriteStatus SetDNS {
             DependsOn = $nextDepend
-            Status    = "Setting DNS to self + PDC ($PDCIPAddress)"
+            Status    = "Setting DNS to PDC ($PDCIPAddress)"
         }
 
         DnsServerAddress SetDNS {
-            Address        = @('127.0.0.1', $PDCIPAddress)
+            Address        = @($PDCIPAddress)
             InterfaceAlias = $alias
             AddressFamily  = 'IPv4'
             Validate       = $false
@@ -217,6 +218,18 @@
         }
 
         $nextDepend = '[ADDomainController]DomainControllerAllProperties'
+
+        # Now that DNS server role is installed (InstallDns=$true above),
+        # point DNS at self first for the local AD-integrated zones, with
+        # PDC as fallback for records not yet replicated.
+        DnsServerAddress SetDNSSelfAndPDC {
+            Address        = @('127.0.0.1', $PDCIPAddress)
+            InterfaceAlias = $alias
+            AddressFamily  = 'IPv4'
+            Validate       = $false
+            DependsOn      = $nextDepend
+        }
+        $nextDepend = "[DnsServerAddress]SetDNSSelfAndPDC"
 
         WriteStatus ConfigureDnsForwarders {
             DependsOn = $nextDepend
