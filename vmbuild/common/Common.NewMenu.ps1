@@ -1865,7 +1865,7 @@ function Get-KeyStroke {
                         if ($script:_mouseShiftHeld) { continue }
                         $me = $rec.MouseEvent
                         $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
-                        $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::XBUTTON1_PRESSED))
+                        $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED))
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
                         if ($isClick -or $isBack -or $isMove) {
                             return [pscustomobject]@{
