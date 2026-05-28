@@ -189,6 +189,69 @@ Add-Type -Path '$bouncyCastleDll' -ErrorAction Stop
     }
 }
 
+function Repair-MRemoteNGPasswords {
+    # Audit all Password attributes in the mRemoteNG XML document.
+    # Every non-empty Password should decrypt to $Common.LocalAdmin's plaintext.
+    # If decryption fails (corrupted) or returns wrong value, replace with a
+    # freshly encrypted password. Returns $true if any were repaired.
+    param(
+        [xml]$Doc,
+        [string]$FreshEncryptedPassword
+    )
+
+    if ([string]::IsNullOrEmpty($FreshEncryptedPassword)) {
+        return $false
+    }
+
+    # Try to create the crypto provider for decryption validation.
+    # Assemblies should already be loaded from Get-MRemoteNGPassword earlier.
+    $cp = $null
+    $key = $null
+    $expectedPlaintext = $null
+    try {
+        $cp = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+        $key = ConvertTo-SecureString 'mR3m' -AsPlainText -Force
+        $expectedPlaintext = $Common.LocalAdmin.GetNetworkCredential().Password
+    }
+    catch {
+        Write-Log "mRemoteNG password audit: cannot load crypto provider; skipping. $_" -Warning -LogOnly
+        return $false
+    }
+
+    $repaired = $false
+    $checkedCount = 0
+    $nodes = $Doc.SelectNodes("//Node")
+    foreach ($node in $nodes) {
+        $pwd = $node.GetAttribute("Password")
+        if ([string]::IsNullOrEmpty($pwd)) { continue }
+
+        $checkedCount++
+        $nodeName = $node.GetAttribute("Name")
+        try {
+            $decrypted = $cp.Decrypt($pwd, $key)
+            if ($decrypted -cne $expectedPlaintext) {
+                Write-Log "mRemoteNG password audit: '$nodeName' decrypts to wrong value. Repairing." -Warning
+                $node.SetAttribute("Password", $FreshEncryptedPassword)
+                $repaired = $true
+            }
+        }
+        catch {
+            Write-Log "mRemoteNG password audit: '$nodeName' password corrupted (decrypt failed: $_). Repairing." -Warning
+            $node.SetAttribute("Password", $FreshEncryptedPassword)
+            $repaired = $true
+        }
+    }
+
+    if ($repaired) {
+        Write-Log "mRemoteNG password audit: repaired corrupted passwords (checked $checkedCount nodes)." -Warning
+    }
+    else {
+        Write-Log "mRemoteNG password audit: all $checkedCount passwords verified OK." -LogOnly -Verbose
+    }
+
+    return $repaired
+}
+
 function Get-MRemoteNGDeterministicGuid {
     param([string]$Seed)
     # Generate a deterministic GUID from a seed string so IDs remain stable across regenerations.
@@ -594,6 +657,18 @@ function New-MRemoteNGFileFromHyperV {
         Remove-Item $oldDesktopCopy -Force -ErrorAction SilentlyContinue
     }
 
+    # Stop mRemoteNG before touching the file. If it's running it can hold a
+    # file lock or save its own state mid-edit, corrupting our read or causing
+    # our write to silently lose its changes.
+    $killed = $false
+    $mRNGProc = Get-Process -Name mRemoteNG -ErrorAction Ignore | Select-Object -First 1
+    if ($mRNGProc) {
+        $killed = $true
+        Get-Process -Name mRemoteNG -ErrorAction Ignore | Stop-Process -Force
+        Start-Sleep -Seconds 1
+        Write-Log "Stopped mRemoteNG before modifying connection file." -LogOnly -Verbose
+    }
+
     if ($OverWrite -and (Test-Path $MRemoteNGFile)) {
         Write-Log "Deleting $MRemoteNGFile and regenerating."
         Remove-Item $MRemoteNGFile -Force -ErrorAction SilentlyContinue
@@ -991,18 +1066,15 @@ function New-MRemoteNGFileFromHyperV {
         }
     }
 
+    # Audit all passwords before saving — decrypt each one and verify it matches
+    # the expected plaintext. Replace any corrupted passwords with a fresh value.
+    if (Repair-MRemoteNGPasswords -Doc $doc -FreshEncryptedPassword $encryptedPass) {
+        $shouldSave = $true
+    }
+
     # Save
-    $killed = $false
     if ($shouldSave) {
         try {
-            # mRemoteNG does not auto-reload its XML; stop it before writing
-            # so it doesn't hold a file lock and doesn't show stale data.
-            $proc = Get-Process -Name mRemoteNG -ErrorAction Ignore | Select-Object -First 1
-            if ($proc) {
-                $killed = $true
-                Get-Process -Name mRemoteNG -ErrorAction Ignore | Stop-Process -Force
-                Start-Sleep -Seconds 1
-            }
 
             # Use UTF-8 without BOM — mRemoteNG expects UTF-8, but [xml].Save() writes UTF-16
             $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
