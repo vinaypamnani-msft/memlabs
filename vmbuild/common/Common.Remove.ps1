@@ -23,7 +23,13 @@ function Remove-VirtualMachine {
         # removing the DC). Skip expensive per-client proxy
         # unconfiguration since all VMs are going away anyway.
         [Parameter()]
-        [switch] $RemovingDomain
+        [switch] $RemovingDomain,
+        # When true, skip the entire proxy cleanup block (client
+        # unconfiguration, host shortcuts, guest shortcuts). Used when
+        # removing VMs that never reached Phase 2+ (proxy was never
+        # installed or configured).
+        [Parameter()]
+        [switch] $SkipProxyCleanup
     )
 
     # Helper: retry Remove-Item with configurable attempts and delay
@@ -232,7 +238,7 @@ function Remove-VirtualMachine {
     # domain: clear in-guest settings, remove Hyper-V port ACLs, and set
     # useProxy=false in VM Notes. Skip when -RemovingDomain since every
     # VM is going away anyway.
-    if (-not $WhatIf -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
+    if (-not $WhatIf -and -not $SkipProxyCleanup -and $vmFromList -and $vmFromList.role -eq 'Proxy' -and $vmFromList.domain) {
         if (-not $RemovingDomain) {
             if (Get-Command -Name Remove-WindowsClientProxyForDomain -ErrorAction SilentlyContinue) {
                 Remove-WindowsClientProxyForDomain -DomainName $vmFromList.domain
