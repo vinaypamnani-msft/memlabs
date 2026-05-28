@@ -93,18 +93,20 @@
         }
         $nextDepend = "[InstallDotNet4]DotNet"
 
-        # Explicitly set DNS to the PDC's IP so domain name resolution works
-        # regardless of DHCP state (DHCP may not have the PDC as DNS yet if
-        # the PDC is still creating the domain)
+        # Set DNS client to 127.0.0.1 (self) + PDC as fallback.
+        # Before promotion, 127.0.0.1 has no DNS server so queries fall
+        # through to the PDC. After promotion + reboot, 127.0.0.1 serves
+        # the AD-integrated zones replicated during promotion and the PDC
+        # covers any records not yet replicated.
         $alias = (Get-NetAdapter).Name | Select-Object -First 1
 
         WriteStatus SetDNS {
             DependsOn = $nextDepend
-            Status    = "Setting DNS to PDC ($PDCIPAddress)"
+            Status    = "Setting DNS to self + PDC ($PDCIPAddress)"
         }
 
         DnsServerAddress SetDNS {
-            Address        = $PDCIPAddress
+            Address        = @('127.0.0.1', $PDCIPAddress)
             InterfaceAlias = $alias
             AddressFamily  = 'IPv4'
             Validate       = $false
@@ -201,24 +203,10 @@
 
         $nextDepend = '[ADDomainController]DomainControllerAllProperties'
 
-        # After promotion + reboot, Install-ADDSDomainController resets the
-        # DNS client to 127.0.0.1. With InstallDns=$true that now works
-        # (local DNS has AD-integrated zones from promotion replication),
-        # but we add the PDC as a secondary for redundancy during the
-        # window before full zone replication completes.
-        WriteStatus FixDNSClient {
+        WriteStatus ConfigureDnsForwarders {
             DependsOn = $nextDepend
-            Status    = "Configuring DNS client and forwarders"
+            Status    = "Configuring DNS forwarders"
         }
-
-        DnsServerAddress FixDNSClient {
-            Address        = @('127.0.0.1', $PDCIPAddress)
-            InterfaceAlias = $alias
-            AddressFamily  = 'IPv4'
-            Validate       = $false
-            DependsOn      = "[WriteStatus]FixDNSClient"
-        }
-        $nextDepend = "[DnsServerAddress]FixDNSClient"
 
         # DNS forwarders (matching the PDC's configuration)
         $DNSForwarderIPs = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
@@ -231,7 +219,7 @@
             IPAddresses      = $DNSForwarderIPs
             UseRootHint      = $true
             EnableReordering = $true
-            DependsOn        = $nextDepend
+            DependsOn        = "[WriteStatus]ConfigureDnsForwarders"
         }
         $nextDepend = "[DnsServerForwarder]DnsForwarders"
 
