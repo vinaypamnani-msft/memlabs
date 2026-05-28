@@ -181,12 +181,22 @@
         }
         $nextDepend = "[AddNtfsPermissions]AddNtfsPerms"
 
+        WriteStatus Reboot {
+            DependsOn = $nextDepend
+            Status    = "Rebooting before DC promotion"
+        }
+
         RebootNow RebootNow {
             FileName  = 'C:\Temp\BDCReboot.txt'
-            DependsOn = $nextDepend
+            DependsOn = "[WriteStatus]Reboot"
         }
 
         $nextDepend = "[RebootNow]RebootNow"
+
+        WriteStatus PromoteDC {
+            DependsOn = $nextDepend
+            Status    = "Promoting to Backup Domain Controller (this takes 10-20 minutes)"
+        }
 
         ADDomainController 'DomainControllerAllProperties' {
             DomainName                    = $DomainName
@@ -198,7 +208,7 @@
             #SiteName                      = 'Europe'
             IsGlobalCatalog               = $true
             InstallDns                    = $true
-            DependsOn                     = $nextDepend
+            DependsOn                     = "[WriteStatus]PromoteDC"
         }
 
         $nextDepend = '[ADDomainController]DomainControllerAllProperties'
