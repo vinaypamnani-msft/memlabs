@@ -224,17 +224,14 @@
         # PDC as fallback for records not yet replicated.
         # Uses a Script resource because DSC won't allow two DnsServerAddress
         # resources targeting the same InterfaceAlias with different values.
+        # Uses string scripts (not scriptblocks) to bake $alias and
+        # $PDCIPAddress at compile time, avoiding $using: deserialization
+        # failures inside PSDirect-compiled configurations.
         Script SetDNSSelfAndPDC {
             DependsOn  = $nextDepend
-            GetScript  = { return @{ Result = (Get-DnsClientServerAddress -InterfaceAlias $using:alias -AddressFamily IPv4).ServerAddresses -join ',' } }
-            TestScript = {
-                $current = (Get-DnsClientServerAddress -InterfaceAlias $using:alias -AddressFamily IPv4).ServerAddresses
-                $desired = @('127.0.0.1', $using:PDCIPAddress)
-                return ($null -ne $current -and ($current -join ',') -eq ($desired -join ','))
-            }
-            SetScript  = {
-                Set-DnsClientServerAddress -InterfaceAlias $using:alias -ServerAddresses @('127.0.0.1', $using:PDCIPAddress)
-            }
+            GetScript  = { return @{ Result = 'N/A' } }
+            TestScript = { return $false }
+            SetScript  = "Set-DnsClientServerAddress -InterfaceAlias '$alias' -ServerAddresses @('127.0.0.1', '$PDCIPAddress')"
         }
         $nextDepend = "[Script]SetDNSSelfAndPDC"
 
