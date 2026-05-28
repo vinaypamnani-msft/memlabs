@@ -1867,16 +1867,23 @@ function Get-KeyStroke {
                         $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
                         $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED))
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
-                        if ($isClick -or $isBack -or $isMove) {
+                        $isWheel = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_WHEELED) -ne 0
+                        if ($isClick -or $isBack -or $isMove -or $isWheel) {
+                            # Wheel direction: dwButtonState high word is the delta (positive=up, negative=down).
+                            # Cast to [int] so the sign bit is preserved.
+                            $wheelBtn = 0
+                            if ($isWheel) {
+                                $wheelBtn = if ([int]$me.dwButtonState -gt 0) { 3 } else { 4 }  # 3=up, 4=down
+                            }
                             return [pscustomobject]@{
                                 IsMouseEvent = $true
                                 MouseX       = [int]$me.dwMousePosition.X
                                 MouseY       = [int]$me.dwMousePosition.Y
-                                MouseButton  = $(if ($isClick) { 1 } elseif ($isBack) { 2 } else { 0 })
+                                MouseButton  = $(if ($isClick) { 1 } elseif ($isBack) { 2 } elseif ($isWheel) { $wheelBtn } else { 0 })
                                 MouseFlags   = [int]$me.dwEventFlags
                             }
                         }
-                        # Ignore other mouse events (right-click, wheel, etc.)
+                        # Ignore other mouse events (X buttons, horizontal wheel, etc.)
                         continue
                     }
                     # WINDOW_BUFFER_SIZE_EVENT or FOCUS_EVENT — skip
@@ -2245,6 +2252,11 @@ function Start-Navigation {
                         return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
                     }
                 }
+            }
+            elseif ($key.MouseButton -eq 3 -or $key.MouseButton -eq 4) {
+                # Mouse wheel: 3=up (PgUp), 4=down (PgDn)
+                $wheelAction = if ($key.MouseButton -eq 3) { 'PGUP' } else { 'PGDN' }
+                return [PSCustomObject]@{ Action = $wheelAction; CurrentMenu = $menuItems }
             }
             elseif ($key.MouseButton -eq 0) {
                 # Mouse move: update hover highlight on menu items and PgIndicator
