@@ -3348,14 +3348,14 @@ Function Show-Summary {
         if ($vm.InstallMP) { $tags += "MP" }
         if ($vm.InstallSMSProv) { $tags += "PROV" }
         if ($vm.InstallDP) { if ($vm.pullDPSourceDP) { $tags += "Pull DP" } else { $tags += "DP" } }
-        $isLinux = Test-VmIsLinux -Vm $vm
-        if (-not $isLinux) {
+        $vmIsLinux = Test-VmIsLinux -Vm $vm
+        if (-not $vmIsLinux) {
             $diskLetters = @("C") + @($vm.additionalDisks.psobject.Properties.Name | Where-Object { $_ })
             $tags += ($diskLetters -join ",")
         }
         if ($vm.useProxy) { $tags += "Proxy" }
         if ($vm.BitLocker) { $tags += "BL" }
-        if ($isLinux) {
+        if ($vmIsLinux) {
             if ($vm.enableRDP) { $tags += "RDP" }
             if ($vm.joinDomain) { $tags += "AD" }
         }
