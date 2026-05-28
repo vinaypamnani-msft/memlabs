@@ -1652,32 +1652,25 @@ function Set-MouseHoverHighlight {
     # Nothing changed
     if ($hoveredIndex -eq $script:_lastHoveredIndex) { return }
 
-    # Un-highlight the old hovered item (re-render with original colors)
+    # Un-highlight the old hovered item (re-render with original colors).
+    # Columns 0-2 are left untouched so the keyboard selection arrow is preserved.
     if ($script:_lastHoveredIndex -ge 0 -and $script:_lastHoveredIndex -lt $menuItems.Count) {
         $old = $menuItems[$script:_lastHoveredIndex]
         if ($old.Displayed -and $old.Selectable) {
-            Set-CursorPosition -x 0 -y $old.CurrentPosition
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
             Write-Host "`e[K" -NoNewline
-            Set-CursorPosition -x 0 -y $old.CurrentPosition
-            Write-Host "   " -NoNewline
+            Set-CursorPosition -x 3 -y $old.CurrentPosition
             Write-Option $old.ItemName $old.Text -color $old.Color1 -Color2 $old.Color1 -MultiSelect:$MultiSelect -MultiSelected:$old.MultiSelected
         }
     }
 
-    # Highlight the new hovered item with a brighter hover color.
-    # The hover prefix "── " (dim arrow) replaces the normal 3-space indent.
+    # Highlight the new hovered item with SkyBlue text.
+    # Only the text from column 3 onward is redrawn; columns 0-2 are never touched.
     if ($hoveredIndex -ge 0) {
         $item = $menuItems[$hoveredIndex]
-        Set-CursorPosition -x 0 -y $item.CurrentPosition
+        Set-CursorPosition -x 3 -y $item.CurrentPosition
         Write-Host "`e[K" -NoNewline
-        Set-CursorPosition -x 0 -y $item.CurrentPosition
-        # Show a dim hover indicator unless this item already has the selection arrow
-        if (-not $item.Selected) {
-            Write-Host "── " -ForegroundColor DarkGray -NoNewline
-        }
-        else {
-            Write-Host "━➤ " -ForegroundColor Yellow -NoNewline
-        }
+        Set-CursorPosition -x 3 -y $item.CurrentPosition
         # Strip any embedded ANSI color sequences so the hover color (SkyBlue)
         # applies uniformly. Items with hardcoded ANSI (e.g. domain stats lines)
         # would otherwise keep their original colors and ignore the hover.
