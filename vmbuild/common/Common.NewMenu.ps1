@@ -1656,9 +1656,10 @@ function Set-MouseHoverHighlight {
     if ($script:_lastHoveredIndex -ge 0 -and $script:_lastHoveredIndex -lt $menuItems.Count) {
         $old = $menuItems[$script:_lastHoveredIndex]
         if ($old.Displayed -and $old.Selectable) {
-            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Set-CursorPosition -x 0 -y $old.CurrentPosition
             Write-Host "`e[K" -NoNewline
-            Set-CursorPosition -x 3 -y $old.CurrentPosition
+            Set-CursorPosition -x 0 -y $old.CurrentPosition
+            Write-Host "   " -NoNewline
             Write-Option $old.ItemName $old.Text -color $old.Color1 -Color2 $old.Color1 -MultiSelect:$MultiSelect -MultiSelected:$old.MultiSelected
         }
     }
