@@ -50,7 +50,8 @@ DscResourcesToExport = @(
     'UpdateCAPrefs',
     'InstallRootCertificate',
     'RunPkiSync',
-    'GpUpdate'
+    'GpUpdate',
+    'SetDNSAddress'
 
 
 )
