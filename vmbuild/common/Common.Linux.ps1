@@ -1,4 +1,5 @@
-﻿# Common.Linux.ps1
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# Common.Linux.ps1
 # Building blocks for Linux (Ubuntu) VMs in memlabs.
 #
 # Exports:

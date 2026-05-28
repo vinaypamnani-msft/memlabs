@@ -1,4 +1,5 @@
-﻿# Displays a Menu based on a property, offers options in [1], [2],[3] format
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# Displays a Menu based on a property, offers options in [1], [2],[3] format
 # With additional options passed in via additionalOptions
 function Select-Options {
     [CmdletBinding()]

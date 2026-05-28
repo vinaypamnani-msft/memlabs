@@ -1,3 +1,4 @@
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.GenConfig.CmMenus.ps1
 # Picker / menu helpers for ConfigMgr role, site code, SQL, OS, WSUS,
 # forest trust, and CM version selection used throughout genconfig.ps1.

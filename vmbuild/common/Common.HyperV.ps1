@@ -1,4 +1,5 @@
-﻿function Install-HyperV {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function Install-HyperV {
     # Cache the Hyper-V feature state — Get-WindowsFeature is a CIM call via
     # ServerManager that shows "Collecting data..." and can stall for minutes.
     # Once Hyper-V is installed it stays installed; only re-check once per 24 hours.

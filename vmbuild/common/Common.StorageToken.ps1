@@ -1,4 +1,5 @@
-﻿#Common.StorageToken.ps1
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+#Common.StorageToken.ps1
 # NOTE: This file is dot-sourced during DSC generation which runs under
 # PowerShell 5.1. Do not use PS7+ syntax (e.g. ?? ?. ??= ternary).
 

@@ -1,4 +1,5 @@
-﻿
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+
 # ThreadJob (PS7+) exposes its data streams directly on the job object and
 # has an empty ChildJobs collection, whereas Start-Job wraps the work in a
 # child PSRemotingChildJob whose streams hold the data. Return whichever

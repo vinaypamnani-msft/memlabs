@@ -1,4 +1,5 @@
-﻿function get-VMOptionsSummary {
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+function get-VMOptionsSummary {
 
     $options = $Global:Config.vmOptions
     if ($null -eq $options.timeZone) {
