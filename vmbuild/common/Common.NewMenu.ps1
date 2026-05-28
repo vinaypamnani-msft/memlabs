@@ -822,6 +822,7 @@ function Enable-MouseInput {
     [void][MemLabsConsole.MouseInput]::GetConsoleMode($script:_consoleInputHandle, [ref]$mode)
     $script:_savedConsoleMode = $mode
     $script:_mouseShiftHeld = $false
+    $script:_lastMouseBtnState = [uint32]0
 
     # Enable mouse input and disable Quick Edit Mode (which swallows mouse
     # events for text selection). Preserve processed input so Ctrl+C works.
@@ -870,6 +871,7 @@ function Suspend-MouseInput {
     if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
         [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
     }
+    $script:_lastMouseBtnState = [uint32]0
 }
 
 # Resume mouse handling after Shift is released.
@@ -878,6 +880,7 @@ function Resume-MouseInput {
     if ($null -ne $script:_consoleInputHandle -and $script:_hasFlushConsoleInput) {
         [void][MemLabsConsole.MouseInput]::FlushConsoleInputBuffer($script:_consoleInputHandle)
     }
+    $script:_lastMouseBtnState = [uint32]0
 }
 
 function Get-LiveWindowSize {
@@ -1864,10 +1867,19 @@ function Get-KeyStroke {
                         # MOUSE_INPUT stays enabled so ConPTY's VT state is untouched.
                         if ($script:_mouseShiftHeld) { continue }
                         $me = $rec.MouseEvent
-                        $isClick = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED))
-                        $isBack  = ($me.dwEventFlags -eq 0 -and ($me.dwButtonState -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED))
-                        $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
+                        # Detect button transitions by comparing against previous state.
+                        # ConPTY can add MOUSE_MOVED to button-press events when the
+                        # mouse position changed even slightly, so dwEventFlags==0 is
+                        # not reliable for distinguishing press from drag. Instead,
+                        # detect NEWLY pressed buttons (bits that weren't set before).
                         $isWheel = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_WHEELED) -ne 0
+                        $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
+                        $currentBtnState = if ($isWheel) { [uint32]0 } else { $me.dwButtonState -band [uint32]0x001F }
+                        $newlyPressed = $currentBtnState -band (-bnot $script:_lastMouseBtnState)
+                        $script:_lastMouseBtnState = $currentBtnState
+                        # Right-click takes priority (back/escape even if left is also held).
+                        $isBack  = ($newlyPressed -band [MemLabsConsole.MouseInput]::RIGHTMOST_BUTTON_PRESSED) -ne 0
+                        $isClick = (-not $isBack) -and (($newlyPressed -band [MemLabsConsole.MouseInput]::FROM_LEFT_1ST_BUTTON_PRESSED) -ne 0)
                         if ($isClick -or $isBack -or $isMove -or $isWheel) {
                             # Wheel direction: dwButtonState high word is the signed delta.
                             # Bit 31 indicates negative (down). Avoids [int] cast overflow
@@ -1876,11 +1888,14 @@ function Get-KeyStroke {
                             if ($isWheel) {
                                 $wheelBtn = if ($me.dwButtonState -band 0x80000000) { 4 } else { 3 }  # 3=up, 4=down
                             }
+                            if ($isClick -or $isBack) {
+                                Write-Log -Verbose -LogOnly "Mouse btn: btnState=0x$($me.dwButtonState.ToString('X8')) flags=0x$($me.dwEventFlags.ToString('X8')) newly=0x$($newlyPressed.ToString('X8')) -> $(if ($isBack) {'BACK'} else {'CLICK'}) at ($($me.dwMousePosition.X),$($me.dwMousePosition.Y))"
+                            }
                             return [pscustomobject]@{
                                 IsMouseEvent = $true
                                 MouseX       = [int]$me.dwMousePosition.X
                                 MouseY       = [int]$me.dwMousePosition.Y
-                                MouseButton  = $(if ($isClick) { 1 } elseif ($isBack) { 2 } elseif ($isWheel) { $wheelBtn } else { 0 })
+                                MouseButton  = $(if ($isBack) { 2 } elseif ($isClick) { 1 } elseif ($isWheel) { $wheelBtn } else { 0 })
                                 MouseFlags   = [int]$me.dwEventFlags
                             }
                         }
