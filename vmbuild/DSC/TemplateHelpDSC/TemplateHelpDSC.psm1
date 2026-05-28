@@ -1586,11 +1586,22 @@ class WaitForExtendSchemaFile {
 
         Write-Status "Extending the Active Directory schema..."
 
-        # Force AD Replication
-        $domainControllers = Get-ADDomainController -Filter *
+        # Force AD Replication (job-based with timeout; repadmin can hang if a
+        # DC's NTDS is still initializing, e.g. BDC just promoted)
+        $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
         if ($domainControllers.Count -gt 1) {
             Write-Status "Forcing AD Replication on $($domainControllers.Name -join ',')"
-            $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+            $dcNames = @($domainControllers.Name)
+            $dn = (Get-ADDomain).DistinguishedName
+            $replJob = Start-Job -ScriptBlock {
+                param($dcNames, $dn)
+                $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
+            } -ArgumentList $dcNames, $dn
+            $null = Wait-Job $replJob -Timeout 60
+            if ($replJob.State -eq 'Running') {
+                Stop-Job $replJob -ErrorAction SilentlyContinue
+            }
+            Remove-Job $replJob -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 3
         }
 

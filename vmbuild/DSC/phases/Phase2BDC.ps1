@@ -194,12 +194,46 @@
             LogPath                       = 'C:\Windows\Logs'
             SysvolPath                    = 'C:\Windows\SYSVOL'
             #SiteName                      = 'Europe'
-            IsGlobalCatalog               = $false
-            InstallDns                    = $false
+            IsGlobalCatalog               = $true
+            InstallDns                    = $true
             DependsOn                     = $nextDepend
         }
 
         $nextDepend = '[ADDomainController]DomainControllerAllProperties'
+
+        # After promotion + reboot, Install-ADDSDomainController resets the
+        # DNS client to 127.0.0.1. With InstallDns=$true that now works
+        # (local DNS has AD-integrated zones from promotion replication),
+        # but we add the PDC as a secondary for redundancy during the
+        # window before full zone replication completes.
+        WriteStatus FixDNSClient {
+            DependsOn = $nextDepend
+            Status    = "Configuring DNS client and forwarders"
+        }
+
+        DnsServerAddress FixDNSClient {
+            Address        = @('127.0.0.1', $PDCIPAddress)
+            InterfaceAlias = $alias
+            AddressFamily  = 'IPv4'
+            Validate       = $false
+            DependsOn      = "[WriteStatus]FixDNSClient"
+        }
+        $nextDepend = "[DnsServerAddress]FixDNSClient"
+
+        # DNS forwarders (matching the PDC's configuration)
+        $DNSForwarderIPs = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
+        if ($deployConfig.DNSForwarders) {
+            $DNSForwarderIPs = $deployConfig.DNSForwarders
+        }
+
+        DnsServerForwarder DnsForwarders {
+            IsSingleInstance = 'Yes'
+            IPAddresses      = $DNSForwarderIPs
+            UseRootHint      = $true
+            EnableReordering = $true
+            DependsOn        = $nextDepend
+        }
+        $nextDepend = "[DnsServerForwarder]DnsForwarders"
 
         WriteStatus ForceReplication {
             DependsOn = $nextDepend
@@ -210,7 +244,6 @@
             DependsOn  = "[WriteStatus]ForceReplication"
             GetScript  = { return @{ Result = (Get-Date).ToString() } }
             TestScript = {
-                # Always run on first pass after promotion; skip if replication already confirmed
                 $flag = 'C:\Temp\BDCReplicationDone.txt'
                 if (Test-Path $flag) { return $true }
                 return $false
@@ -219,45 +252,68 @@
                 $pdcName = $using:PDC.vmName
                 $domainDN = ($using:DomainName).Split('.') | ForEach-Object { "DC=$_" }
                 $domainDN = $domainDN -join ','
+                $adminUser = $using:Admincreds.UserName
 
-                # Wait for NTDS service to be ready (can take a moment after promotion reboot)
-                $timeout = (Get-Date).AddMinutes(5)
-                while ((Get-Date) -lt $timeout) {
-                    try {
-                        $null = Get-ADDomainController -ErrorAction Stop
-                        break
-                    }
-                    catch {
-                        Start-Sleep -Seconds 5
-                    }
-                }
+                # Run the entire replication attempt inside a background job
+                # with a hard wall-clock timeout. Get-ADDomainController,
+                # repadmin, and Get-ADUser can all hang indefinitely if NTDS
+                # is still initializing after promotion reboot. The previous
+                # 5-minute "timeout" loop only caught exceptions; if a cmdlet
+                # blocked (no throw, no return), the while condition never
+                # re-evaluated and DSC hung for 35+ minutes. A job with
+                # Wait-Job -Timeout is the only reliable kill switch in PS 5.1.
+                $job = Start-Job -ScriptBlock {
+                    param($pdcName, $domainDN, $adminUser)
 
-                # Force inbound replication from the PDC for all naming contexts
-                try {
-                    $sourceDC = Get-ADDomainController -Identity $pdcName -ErrorAction Stop
-                    $localDC = Get-ADDomainController -ErrorAction Stop
+                    Import-Module ActiveDirectory -ErrorAction SilentlyContinue
 
-                    foreach ($nc in @($domainDN, "CN=Configuration,$domainDN", "CN=Schema,CN=Configuration,$domainDN")) {
-                        repadmin /replicate $localDC.HostName $sourceDC.HostName $nc /force 2>&1 | Out-Null
-                    }
-
-                    # Verify the vmbuildadmin account is now reachable
-                    $retries = 0
-                    while ($retries -lt 12) {
+                    # Wait for NTDS to accept connections (up to 90s)
+                    $ntdsReady = $false
+                    for ($i = 0; $i -lt 18; $i++) {
                         try {
-                            $null = Get-ADUser -Identity $using:Admincreds.UserName -ErrorAction Stop
+                            $null = Get-ADDomainController -ErrorAction Stop
+                            $ntdsReady = $true
                             break
                         }
                         catch {
-                            $retries++
                             Start-Sleep -Seconds 5
                         }
                     }
+                    if (-not $ntdsReady) { return }
+
+                    # Force inbound replication from the PDC for all naming contexts
+                    try {
+                        $sourceDC = Get-ADDomainController -Identity $pdcName -ErrorAction Stop
+                        $localDC = Get-ADDomainController -ErrorAction Stop
+
+                        foreach ($nc in @($domainDN, "CN=Configuration,$domainDN", "CN=Schema,CN=Configuration,$domainDN")) {
+                            repadmin /replicate $localDC.HostName $sourceDC.HostName $nc /force 2>&1 | Out-Null
+                        }
+                    }
+                    catch {
+                        # Best-effort; replication converges naturally
+                    }
+
+                    # Verify admin account is reachable
+                    for ($i = 0; $i -lt 6; $i++) {
+                        try {
+                            $null = Get-ADUser -Identity $adminUser -ErrorAction Stop
+                            break
+                        }
+                        catch {
+                            Start-Sleep -Seconds 3
+                        }
+                    }
+                } -ArgumentList $pdcName, $domainDN, $adminUser
+
+                # 3-minute hard timeout. Replication will converge naturally
+                # within the 15-second intra-site interval, so bailing early
+                # just means the next resource waits a few extra seconds.
+                $null = Wait-Job $job -Timeout 180
+                if ($job.State -eq 'Running') {
+                    Stop-Job $job -ErrorAction SilentlyContinue
                 }
-                catch {
-                    # Best-effort; replication will happen naturally within 15s anyway
-                    Start-Sleep -Seconds 30
-                }
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
 
                 New-Item -Path 'C:\Temp\BDCReplicationDone.txt' -ItemType File -Force | Out-Null
             }

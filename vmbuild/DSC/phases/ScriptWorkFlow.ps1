@@ -288,10 +288,24 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Force AD Replication (only on first run)
 if ($firstRun) {
-    $domainControllers = Get-ADDomainController -Filter *
+    $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
     if ($domainControllers.Count -gt 1) {
         Write-DscStatus "Forcing AD Replication on $($domainControllers.Name -join ', ')"
-        $domainControllers.Name | Foreach-Object { repadmin /syncall $_ (Get-ADDomain).DistinguishedName /AdeP }
+        # Run repadmin in a job with a hard timeout. If a DC's NTDS is still
+        # initializing (e.g. BDC just promoted), repadmin /syncall can hang
+        # indefinitely waiting for RPC. A job + Wait-Job is the only reliable
+        # kill switch in PS 5.1.
+        $dcNames = @($domainControllers.Name)
+        $domainDistinguishedName = (Get-ADDomain).DistinguishedName
+        $replJob = Start-Job -ScriptBlock {
+            param($dcNames, $dn)
+            $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
+        } -ArgumentList $dcNames, $domainDistinguishedName
+        $null = Wait-Job $replJob -Timeout 60
+        if ($replJob.State -eq 'Running') {
+            Stop-Job $replJob -ErrorAction SilentlyContinue
+        }
+        Remove-Job $replJob -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 3
     }
 }
