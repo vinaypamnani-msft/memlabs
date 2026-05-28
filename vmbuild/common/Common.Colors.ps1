@@ -309,6 +309,33 @@ function Convert-RGBtoAnsi {
     }
 }
 
+# OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal
+$script:_hyperlinkSupport = $null -ne $env:WT_SESSION
+$script:_hyperlinkEsc = [char]0x1B
+$script:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
+
+function ConvertTo-Hyperlinks {
+    param([string]$Text)
+    if (-not $script:_hyperlinkSupport -or -not $Text) { return $Text }
+    if ($Text -notmatch 'https?://|[A-Za-z]:\\|\\\\[A-Za-z]') { return $Text }
+    $e = $script:_hyperlinkEsc
+    return [regex]::Replace($Text, $script:_hyperlinkPattern, {
+        param($m)
+        $link = $m.Value
+        if ($link -match '^https?://') {
+            "${e}]8;;${link}${e}\${link}${e}]8;;${e}\"
+        }
+        elseif ($link -match '^\\\\') {
+            $uri = "file:$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+        else {
+            $uri = "file:///$($link -replace '\\','/')"
+            "${e}]8;;${uri}${e}\${link}${e}]8;;${e}\"
+        }
+    })
+}
+
 function Write-Host2 {
     param(
         [Alias('Msg', 'Message')]
@@ -325,6 +352,7 @@ function Write-Host2 {
         }
     }
     #}
+    $Object = ConvertTo-Hyperlinks $Object
     if ($NoNewLine) {
         Write-Host $Object -NoNewline
     }
