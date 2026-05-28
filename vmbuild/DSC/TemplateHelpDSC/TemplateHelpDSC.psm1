@@ -4202,6 +4202,10 @@ class InstallPBIRS {
             # the instance folder. The config file is the last artifact the
             # installer creates; its presence proves a complete install.
             $verifyPbirs = Join-Path $this.InstallPath "$($this.RSInstance)\ReportServer\RSReportServer.config"
+            $pbirsAttempt = 0
+            $pbirsMaxAttempts = 3
+            $pbirsExit = -1
+            $needsReboot = $false
 
             # Skip download + install entirely if already installed
             if (Test-Path -LiteralPath $verifyPbirs) {
@@ -4214,10 +4218,6 @@ class InstallPBIRS {
             # a prior failed install makes the bundle exit 0 in a few seconds
             # without doing real work. If config file is missing after install,
             # force /uninstall to clear the provider key and retry.
-            $pbirsAttempt = 0
-            $pbirsMaxAttempts = 3
-            $pbirsExit = -1
-            $needsReboot = $false
             while ($pbirsAttempt -lt $pbirsMaxAttempts) {
                 $pbirsAttempt++
                 Write-Status ("PBIRS install attempt $pbirsAttempt/$pbirsMaxAttempts (Start-Process -Wait, may take several minutes)...")
