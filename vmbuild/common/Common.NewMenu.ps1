@@ -2186,15 +2186,37 @@ function Start-Navigation {
 
                     if ($MultiSelect) {
                         # In multiselect, clicking a numbered item toggles its
-                        # check mark; clicking a letter item (A/N/D) fires its
-                        # action, same as pressing Enter on it.
-                        $optionInt = ($menuItems[$selectedIndex].ItemName -as [int])
+                        # check mark; clicking A/N toggles all/none; clicking D
+                        # confirms. This mirrors the keyboard handler exactly.
+                        $itemName = $menuItems[$selectedIndex].ItemName
+                        $optionInt = ($itemName -as [int])
                         if ($optionInt) {
                             $menuItems[$selectedIndex].MultiSelected = -not $menuItems[$selectedIndex].MultiSelected
                             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
                             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
                             continue
                         }
+                        elseif ($itemName -eq 'A') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $true
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'N') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $false
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        # D or any other letter item: fall through to confirm
                     }
 
                     # Single-select (or non-numeric multiselect item): confirm
