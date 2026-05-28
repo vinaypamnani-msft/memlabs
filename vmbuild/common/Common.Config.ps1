@@ -3334,13 +3334,19 @@ Function Show-Summary {
 
     # Build row data for the colored deployment summary table.
     $roleColor = @{ "CAS" = "Yellow"; "Primary" = "Yellow"; "DC" = "White"; "SiteSystem" = "Yellow"; "DomainMember" = "Cyan"; "Secondary" = "Yellow"; "PassiveSite" = "Yellow"; "Proxy" = "Green"; "LinuxServer" = "Green" }
-    $summaryHeaders = @("VM Name", "Role", "Operating System", "Memory", "Procs", "Site", "Network", "Tags", "SQL")
+    $summaryHeaders = @("VM Name", "Role", "Operating System", "Memory", "Procs", "Site", "Network", "Drives", "Tags", "SQL")
     $summaryRows = @()
     foreach ($vm in $fixedConfig) {
         $memStr = if (($vm.dynamicMinRam / 1) -lt ($vm.memory / 1) -and ($vm.dynamicMinRam / 1) -ne 0) { "$($vm.dynamicMinRam)-$($vm.memory)" } else { "$($vm.memory)" }
         $siteStr = $vm.siteCode
         if ($vm.ParentSiteCode) { $siteStr += "->$($vm.ParentSiteCode)" }
         $netStr = if ($vm.Network) { $vm.Network } else { $deployConfig.vmOptions.network }
+        $vmIsLinux = Test-VmIsLinux -Vm $vm
+        $driveStr = ""
+        if (-not $vmIsLinux) {
+            $diskLetters = @("C") + @($vm.additionalDisks.psobject.Properties.Name | Where-Object { $_ })
+            $driveStr = $diskLetters -join ","
+        }
         $tags = @()
         if ($vm.InstallCA -or $vm.Role -eq 'StandaloneRootCA') { $tags += "CA" }
         if ($vm.InstallSUP) { $tags += "SUP" }
@@ -3348,11 +3354,6 @@ Function Show-Summary {
         if ($vm.InstallMP) { $tags += "MP" }
         if ($vm.InstallSMSProv) { $tags += "PROV" }
         if ($vm.InstallDP) { if ($vm.pullDPSourceDP) { $tags += "Pull DP" } else { $tags += "DP" } }
-        $vmIsLinux = Test-VmIsLinux -Vm $vm
-        if (-not $vmIsLinux) {
-            $diskLetters = @("C") + @($vm.additionalDisks.psobject.Properties.Name | Where-Object { $_ })
-            $tags += ($diskLetters -join ",")
-        }
         if ($vm.useProxy) { $tags += "Proxy" }
         if ($vm.BitLocker) { $tags += "BL" }
         if ($vmIsLinux) {
@@ -3362,7 +3363,7 @@ Function Show-Summary {
         $sqlStr = ""
         if ($null -ne $vm.SqlVersion) { $sqlStr = $vm.SqlVersion }
         elseif ($null -ne $vm.remoteSQLVM) { $sqlStr = "Remote -> $($vm.remoteSQLVM)" }
-        $summaryRows += , @($vm.vmName, $vm.role, $vm.operatingSystem, $memStr, "$($vm.virtualProcs)", $siteStr, $netStr, ($tags -join ", "), $sqlStr)
+        $summaryRows += , @($vm.vmName, $vm.role, $vm.operatingSystem, $memStr, "$($vm.virtualProcs)", $siteStr, $netStr, $driveStr, ($tags -join ", "), $sqlStr)
     }
 
     # Auto-size columns.
