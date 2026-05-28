@@ -252,6 +252,12 @@
         }
         $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
 
+        # Pre-compute values for ForceReplication (avoids $using: which
+        # causes Deserialize errors in PSDirect-compiled configurations)
+        $frPdcName = $PDC.vmName
+        $frDomainDN = (($DomainName).Split('.') | ForEach-Object { "DC=$_" }) -join ','
+        $frAdminUser = $Admincreds.UserName
+
         WriteStatus ForceReplication {
             DependsOn = $nextDepend
             Status    = "Forcing AD replication from $($PDC.vmName)"
@@ -265,75 +271,59 @@
                 if (Test-Path $flag) { return $true }
                 return $false
             }
-            SetScript  = {
-                $pdcName = $using:PDC.vmName
-                $domainDN = ($using:DomainName).Split('.') | ForEach-Object { "DC=$_" }
-                $domainDN = $domainDN -join ','
-                $adminUser = $using:Admincreds.UserName
+            SetScript  = [string]"
+                `$pdcName = '$frPdcName'
+                `$domainDN = '$frDomainDN'
+                `$adminUser = '$frAdminUser'
 
-                # Run the entire replication attempt inside a background job
-                # with a hard wall-clock timeout. Get-ADDomainController,
-                # repadmin, and Get-ADUser can all hang indefinitely if NTDS
-                # is still initializing after promotion reboot. The previous
-                # 5-minute "timeout" loop only caught exceptions; if a cmdlet
-                # blocked (no throw, no return), the while condition never
-                # re-evaluated and DSC hung for 35+ minutes. A job with
-                # Wait-Job -Timeout is the only reliable kill switch in PS 5.1.
-                $job = Start-Job -ScriptBlock {
-                    param($pdcName, $domainDN, $adminUser)
+                `$job = Start-Job -ScriptBlock {
+                    param(`$pdcName, `$domainDN, `$adminUser)
 
                     Import-Module ActiveDirectory -ErrorAction SilentlyContinue
 
-                    # Wait for NTDS to accept connections (up to 90s)
-                    $ntdsReady = $false
-                    for ($i = 0; $i -lt 18; $i++) {
+                    `$ntdsReady = `$false
+                    for (`$i = 0; `$i -lt 18; `$i++) {
                         try {
-                            $null = Get-ADDomainController -ErrorAction Stop
-                            $ntdsReady = $true
+                            `$null = Get-ADDomainController -ErrorAction Stop
+                            `$ntdsReady = `$true
                             break
                         }
                         catch {
                             Start-Sleep -Seconds 5
                         }
                     }
-                    if (-not $ntdsReady) { return }
+                    if (-not `$ntdsReady) { return }
 
-                    # Force inbound replication from the PDC for all naming contexts
                     try {
-                        $sourceDC = Get-ADDomainController -Identity $pdcName -ErrorAction Stop
-                        $localDC = Get-ADDomainController -ErrorAction Stop
+                        `$sourceDC = Get-ADDomainController -Identity `$pdcName -ErrorAction Stop
+                        `$localDC = Get-ADDomainController -ErrorAction Stop
 
-                        foreach ($nc in @($domainDN, "CN=Configuration,$domainDN", "CN=Schema,CN=Configuration,$domainDN")) {
-                            repadmin /replicate $localDC.HostName $sourceDC.HostName $nc /force 2>&1 | Out-Null
+                        foreach (`$nc in @(`$domainDN, ""CN=Configuration,`$domainDN"", ""CN=Schema,CN=Configuration,`$domainDN"")) {
+                            repadmin /replicate `$localDC.HostName `$sourceDC.HostName `$nc /force 2>&1 | Out-Null
                         }
                     }
                     catch {
-                        # Best-effort; replication converges naturally
                     }
 
-                    # Verify admin account is reachable
-                    for ($i = 0; $i -lt 6; $i++) {
+                    for (`$i = 0; `$i -lt 6; `$i++) {
                         try {
-                            $null = Get-ADUser -Identity $adminUser -ErrorAction Stop
+                            `$null = Get-ADUser -Identity `$adminUser -ErrorAction Stop
                             break
                         }
                         catch {
                             Start-Sleep -Seconds 3
                         }
                     }
-                } -ArgumentList $pdcName, $domainDN, $adminUser
+                } -ArgumentList `$pdcName, `$domainDN, `$adminUser
 
-                # 3-minute hard timeout. Replication will converge naturally
-                # within the 15-second intra-site interval, so bailing early
-                # just means the next resource waits a few extra seconds.
-                $null = Wait-Job $job -Timeout 180
-                if ($job.State -eq 'Running') {
-                    Stop-Job $job -ErrorAction SilentlyContinue
+                `$null = Wait-Job `$job -Timeout 180
+                if (`$job.State -eq 'Running') {
+                    Stop-Job `$job -ErrorAction SilentlyContinue
                 }
-                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                Remove-Job `$job -Force -ErrorAction SilentlyContinue
 
                 New-Item -Path 'C:\Temp\BDCReplicationDone.txt' -ItemType File -Force | Out-Null
-            }
+            "
         }
 
         $nextDepend = "[Script]ForceReplication"
