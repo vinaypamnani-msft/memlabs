@@ -597,7 +597,7 @@ class InstallADK {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ADK installation status"
         $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         $subKey = $key.OpenSubKey("SOFTWARE\Microsoft\Windows Kits\Installed Roots")
         if ($subKey) {
@@ -675,7 +675,7 @@ class InstallSSMS {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking SSMS installation status"
         $smssinstallpath = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\ssms.exe"
         $smssinstallpath2 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\ssms.exe"
         $smssinstallpath3 = "C:\Program Files (x86)\Microsoft SQL Server Management Studio 20\Common7\IDE\ssms.exe"
@@ -762,7 +762,7 @@ class InstallDotNet4 {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking .NET Framework installation status"
         $NETval = Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Name "Release"
 
         If ($NETval.Release -ge $this.NetVersion) {
@@ -807,7 +807,7 @@ class InstallReportBuilder {
 
     [bool] Test() {
 
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking Report Builder installation status"
         $_path = $this.Path
 
         if (-not (Test-Path -Path $_path)) {
@@ -864,7 +864,7 @@ class InstallODBCDriver {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ODBC Driver 18 installation status"
 
         try {
             $ODBCRegistryPath = "HKLM:\Software\Microsoft\MSODBCSQL18"
@@ -933,7 +933,7 @@ class InstallOleDbDriver {
 
     [bool] Test() {
         $packageName = "Microsoft OLEDB Driver 19"
-        Write-Status "DSC Test- Checking deployment status for $packageName"
+        Write-Status "Checking $packageName installation status"
         try {
             $InstallRegistryPath = "HKLM:\SOFTWARE\Microsoft\MSOLEDBSQL19"
 
@@ -998,7 +998,7 @@ class InstallSqlClient {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking SQL Native Client 11 installation status"
         try {
             $RegistryPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
 
@@ -1180,7 +1180,7 @@ class InstallVCRedist {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking VC++ Redistributable installation status"
         try {
             # OLE DB Driver 19's VCRedistCheck CA reads Bld DWORD; require
             # at least 14.34 (Bld 33135). Major.Minor alone isn't enough --
@@ -1273,7 +1273,7 @@ class InstallPMPC {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking Patch My PC installation status"
         if ((Test-Path -Path "C:\Program Files\Patch My PC\Patch My PC Publishing Service\Settings.xml")) {
             return $true
         }        
@@ -1316,7 +1316,7 @@ class InstallConsole {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking ConfigMgr Console installation status"
         try {
             $key = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry32)
         }
@@ -1804,7 +1804,7 @@ class DelegateControl {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking AD System Management container delegation"
         $_machinename = $this.Machine
         $DomainName = $this.DomainFullName.split('.')[0]
         $root = (Get-ADRootDSE).defaultNamingContext
