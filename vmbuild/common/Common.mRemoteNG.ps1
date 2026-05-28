@@ -693,6 +693,28 @@ function New-MRemoteNGFileFromHyperV {
         $shouldSave = $true
     }
 
+    # Ensure root encryption attributes match our AeadCryptographyProvider defaults.
+    # mRemoteNG may update KdfIterations/BlockCipherMode/etc when it saves the file.
+    # We always encrypt with the provider's built-in defaults (AES-GCM, 1000 iterations),
+    # so if the XML declares different parameters mRemoteNG will derive a different key
+    # and every password will fail to decrypt on next load ("Decryption failed").
+    # Full regen avoids this because New-MRemoteNGXmlDocument sets these attributes fresh.
+    $root = $doc.DocumentElement
+    $expectedRootAttrs = @{
+        EncryptionEngine   = "AES"
+        BlockCipherMode    = "GCM"
+        KdfIterations      = "1000"
+        FullFileEncryption = "false"
+        Protected          = "zd4H/+kOmTb3uDN3ehFiYDE5SiS79p+qWRZkMBpQjzaiU4A5rA66CcSULCGAPhxpZRrcfKy7A7NMMG4jgBSD0SPG"
+    }
+    foreach ($kvp in $expectedRootAttrs.GetEnumerator()) {
+        if ($root.GetAttribute($kvp.Key) -ne $kvp.Value) {
+            Write-Log "mRemoteNG: resetting root attribute $($kvp.Key) from '$($root.GetAttribute($kvp.Key))' to '$($kvp.Value)'" -LogOnly -Verbose
+            $root.SetAttribute($kvp.Key, $kvp.Value)
+            $shouldSave = $true
+        }
+    }
+
     Install-MRemoteNG
 
     # Encrypt password
