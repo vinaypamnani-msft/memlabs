@@ -165,10 +165,32 @@
                 Status    = "Adding TPM protector for BitLocker"
             }
 
+            # On Server OS, the BitLocker feature (and its PowerShell module) must be installed
+            # before Get-BitLockerVolume and Enable-BitLocker are available. On client OS
+            # (Windows 10/11) the cmdlets are always present.
+            Script InstallBitLockerFeature {
+                DependsOn  = "[WriteStatus]SeedTPM"
+                GetScript  = { @{ Result = "N/A" } }
+                TestScript = {
+                    # ProductType 1 = Workstation (client OS) — BitLocker cmdlets built-in
+                    $productType = (Get-CimInstance Win32_OperatingSystem).ProductType
+                    if ($productType -eq 1) { return $true }
+                    # Server OS — check if the BitLocker feature is installed
+                    $feat = Get-WindowsFeature -Name BitLocker -ErrorAction SilentlyContinue
+                    return ($feat -and $feat.Installed)
+                }
+                SetScript  = {
+                    Install-WindowsFeature -Name BitLocker -IncludeManagementTools -ErrorAction Stop
+                    if ((Get-WindowsFeature -Name BitLocker).InstallState -eq 'InstallPending') {
+                        $global:DSCMachineStatus = 1
+                    }
+                }
+            }
+
             # Prevent Windows 11 24H2 automatic device encryption on first login.
             # We want ConfigMgr BLM to manage encryption, not the OS auto-trigger.
             Registry PreventDeviceEncryption {
-                DependsOn = "[WriteStatus]SeedTPM"
+                DependsOn = "[Script]InstallBitLockerFeature"
                 Ensure    = "Present"
                 Key       = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
                 ValueName = "PreventDeviceEncryption"
