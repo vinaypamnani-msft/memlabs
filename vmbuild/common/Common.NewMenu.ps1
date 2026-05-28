@@ -818,6 +818,9 @@ $script:_consoleInputHandle = $null
 $script:_mouseShiftHeld = $false
 
 function Enable-MouseInput {
+    if ($Global:Common -and -not $Global:Common.MouseEnabled) {
+        return
+    }
     if ($null -eq $script:_consoleInputHandle -or $script:_consoleInputHandle -eq [IntPtr]::Zero) {
         # STD_INPUT_HANDLE = -10
         $script:_consoleInputHandle = [MemLabsConsole.MouseInput]::GetStdHandle(-10)

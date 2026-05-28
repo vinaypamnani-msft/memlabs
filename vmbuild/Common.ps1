@@ -5581,6 +5581,20 @@ if (-not $Common.Initialized) {
         if (-not $breakPrefix) {
             $breakPrefix = "-----"
         }
+
+        # Load sticky mouse preference from cache (default: enabled)
+        $mouseEnabled = $true
+        $mousePrefFile = Join-Path $startupCachePath "mouse-preference.json"
+        if (Test-Path $mousePrefFile) {
+            try {
+                $mousePref = Get-Content $mousePrefFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($null -ne $mousePref.MouseEnabled) {
+                    $mouseEnabled = [bool]$mousePref.MouseEnabled
+                }
+            }
+            catch {}
+        }
+
         $global:Common = [PSCustomObject]@{
             MemLabsVersion              = "260522.0"
             LatestHotfixVersion         = "260522.0"
@@ -5620,6 +5634,7 @@ if (-not $Common.Initialized) {
             IsAzureVM                   = $isAzureVM
             CorpNetInterfaceIndex       = $corpNetInterfaceIndex
             OfflineMode                 = $false
+            MouseEnabled                = $mouseEnabled
             NewestStorageConfigFileName = "_storageConfig2026.1.json"
             StorageConfigLocation       = $null
         }

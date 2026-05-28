@@ -53,7 +53,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "No prompt for domain snapshot")]
     [switch]$NoSnapshot,
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
-    [switch]$KeepFailedVMs
+    [switch]$KeepFailedVMs,
+    [Parameter(Mandatory = $false, HelpMessage = "Disable mouse support in menus.")]
+    [switch]$DisableMouse
 
 )
 
@@ -113,6 +115,10 @@ $enableDebug = if ($PSBoundParameters.Debug -eq $true) { $true } else { $false }
 if ($global:init_failed) {
     Write-Log "Failed to initialize common. Exiting." -Failure
     exit 1
+}
+
+if ($DisableMouse) {
+    $Global:Common.MouseEnabled = $false
 }
 
 

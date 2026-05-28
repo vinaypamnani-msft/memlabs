@@ -210,6 +210,15 @@ function Select-ConfigMenu {
                 }
             }
             "v" { Select-VMMenu }
+            "m" {
+                $Global:Common.MouseEnabled = -not $Global:Common.MouseEnabled
+                try {
+                    [PSCustomObject]@{
+                        MouseEnabled = $Global:Common.MouseEnabled
+                    } | ConvertTo-Json | Set-Content -Path (Join-Path $Global:Common.CachePath "mouse-preference.json") -Encoding UTF8
+                }
+                catch {}
+            }
             "r" { 
                 $response = Read-YesOrNoWithTimeout -Prompt "This will delete your current memlabs.rdg and memlabs-mremoteng.xml and re-create them. Are you Sure? (Y/n)" -HideHelp -Default "y" -timeout 10
                 if ($response -eq "y") {
@@ -355,6 +364,9 @@ function Build-ConfigMenuOptions {
         $customOptions += @{"F" = "Delete ($($pendingCount)) Failed/In-Progress VMs (These may have been orphaned by a cancelled deployment)%$($Global:Common.Colors.GenConfigFailedVM)%$($Global:Common.Colors.GenConfigFailedVMNumber)" }
         $customOptions += [ordered]@{ "HF" = "Uh oh.. Looks like a deployment may have failed.  Delete the failed VMs and start over!" }
     }
+    $mouseState = if ($Global:Common.MouseEnabled) { "ON" } else { "OFF" }
+    $customOptions += [ordered]@{"M" = "Mouse Support [$mouseState]%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{ "HM" = "Toggle mouse support in menus (hover, click, scroll). Setting is remembered across sessions." }
     $customOptions += [ordered]@{"^" = "Exit script" }
     $customOptions += [ordered]@{ "H^" = "Same as Ctrl-C, Exits the script without saving." }
     if ([Environment]::OSVersion.Version -ge [System.version]"10.0.26100.0") {
