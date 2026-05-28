@@ -137,7 +137,7 @@
 
         WriteStatus NewDS {
             DependsOn = $nextDepend
-            Status    = "Configuring ADDS and setting up the domain Controller."
+            Status    = "Waiting for AD forest to be available"
         }
 
         WaitForADDomain 'WaitForestAvailability' {
@@ -158,11 +158,16 @@
 
         $nextDepend = "[OpenFirewallPortForSCCM]OpenFirewall"
 
+        WriteStatus Prereqs {
+            DependsOn = $nextDepend
+            Status    = "Configuring RDP, file shares, and NTFS permissions"
+        }
+
         File ShareFolder {
             DestinationPath = $LogPath
             Type            = 'Directory'
             Ensure          = 'Present'
-            DependsOn       = $nextDepend
+            DependsOn       = "[WriteStatus]Prereqs"
         }
         $nextDepend = "[File]ShareFolder"
 
@@ -319,10 +324,15 @@
 
         $nextDepend = "[Script]ForceReplication"
 
+        WriteStatus FinalizeShares {
+            DependsOn = $nextDepend
+            Status    = "Creating log share and finishing up"
+        }
+
         FileReadAccessShare DomainSMBShare {
             Name      = $LogFolder
             Path      = $LogPath
-            DependsOn = $nextDepend
+            DependsOn = "[WriteStatus]FinalizeShares"
         }
 
         $nextDepend = "[FileReadAccessShare]DomainSMBShare"
