@@ -4209,7 +4209,7 @@ class InstallPBIRS {
             # once before giving up.
             $verifyPbirs = Join-Path $this.InstallPath 'SSRS'
             $pbirsAttempt = 0
-            $pbirsMaxAttempts = 2
+            $pbirsMaxAttempts = 3
             $pbirsExit = -1
             $needsReboot = $false
             while ($pbirsAttempt -lt $pbirsMaxAttempts) {
@@ -4231,6 +4231,14 @@ class InstallPBIRS {
                     break
                 }
                 if ($pbirsOk) {
+                    # 3010 without SSRS folder: bootstrapper saw a pending reboot (likely from
+                    # a prior uninstall or VC++ redist) and returned immediately without
+                    # installing anything. Retrying won't help — need to reboot first.
+                    if ($pbirsExit -eq 3010) {
+                        Write-Status "PBIRS returned 3010 but SSRS folder missing — pending reboot blocking install. Requesting reboot."
+                        $needsReboot = $true
+                        break
+                    }
                     Write-Status "PBIRS bootstrapper reported success but expected install path missing: $verifyPbirs"
                     if (Test-Path -LiteralPath 'C:\staging\PBI.log') {
                         try {
@@ -4240,11 +4248,27 @@ class InstallPBIRS {
                     }
                 }
                 if ($pbirsAttempt -lt $pbirsMaxAttempts) {
+                    # Exit 87 (ERROR_INVALID_PARAMETER) is often transient — file lock,
+                    # bootstrapper collision, etc. Sleep and retry before resorting to
+                    # uninstall which can leave a pending 3010 that poisons the next attempt.
+                    if ($pbirsExit -eq 87) {
+                        Write-Status "Exit 87 is often transient. Sleeping 15s before retry (no uninstall)."
+                        Start-Sleep -Seconds 15
+                        continue
+                    }
                     Write-Status "Running PBIRS /uninstall /quiet to clear stale Burn registration before retry."
                     try {
                         $unArgs = "/uninstall /quiet /Log C:\staging\PBI-uninstall.log"
                         $unProc = Start-Process -FilePath $pbirsSetup -ArgumentList $unArgs -Wait -PassThru
-                        Write-Status ("PBIRS /uninstall returned $($unProc.ExitCode).")
+                        $unExit = $unProc.ExitCode
+                        Write-Status ("PBIRS /uninstall returned $unExit.")
+                        # If the uninstall itself needs a reboot, retrying the install is
+                        # futile — the bootstrapper will return 3010 without doing real work.
+                        if ($unExit -eq 3010) {
+                            Write-Status "Uninstall requires reboot (3010). Requesting reboot; install will resume after."
+                            $needsReboot = $true
+                            break
+                        }
                     } catch {
                         Write-Status ("PBIRS /uninstall threw: $($_.Exception.Message) (continuing to retry install)")
                     }
@@ -4252,7 +4276,16 @@ class InstallPBIRS {
                 }
             }
             if (-not (Test-Path -LiteralPath $verifyPbirs)) {
-                throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+                if ($needsReboot) {
+                    # Don't throw — let Set() exit normally so DSC processes the reboot
+                    # signal. After reboot, Test() will return false (SSRS folder still
+                    # missing) and LCM will call Set() again for a clean install.
+                    Write-Status "PBIRS not yet installed; reboot pending. LCM will re-run Set() after reboot."
+                    $global:DSCMachineStatus = 1
+                    return
+                } else {
+                    throw "PBIRS install failed after $pbirsMaxAttempts attempts (last exit $pbirsExit). Expected path missing: $verifyPbirs. See C:\staging\PBI.log."
+                }
             }
 
             try {
