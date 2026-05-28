@@ -606,6 +606,12 @@ function get-VMString {
         }
         $name += "]"
     }
+    if (Test-VmIsLinux -Vm $virtualMachine) {
+        if ($virtualMachine.enableRDP) { $name += " [RDP]" }
+        if ($virtualMachine.joinDomain) { $name += " [AD]" }
+    }
+    if ($virtualMachine.useProxy) { $name += " [Proxy]" }
+    if ($virtualMachine.BitLocker) { $name += " [BL]" }
     $MaxWidth = ($host.UI.RawUI.WindowSize.Width - 12)
     # Demoted from -LogOnly: this runs once per VM on every menu redraw and
     # stringifying $virtualMachine is expensive. Promote with -Verbose only
