@@ -1288,6 +1288,21 @@ $global:VM_Config = {
                     }
                 }
             }
+
+            # Persist the first valid (non-APIPA) IP as LastKnownIP on the VM
+            # so it flows into the Hyper-V VM Note via New-VmNote. The background
+            # IP refresh job only runs outside of deploy, so this is the earliest
+            # opportunity to record a guest-confirmed IP for Windows VMs.
+            if ($success -and $IPAddress.ScriptBlockOutput) {
+                $validIP = $IPAddress.ScriptBlockOutput | Where-Object { $_ -and -not $_.StartsWith("169.254") } | Select-Object -First 1
+                if ($validIP) {
+                    $existingIP = $currentItem.LastKnownIP
+                    if (-not $existingIP -or $existingIP -ne $validIP) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP" -LogOnly
+                        $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
+                    }
+                }
+            }
         }
 
         # inject tools
