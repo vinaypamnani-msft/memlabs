@@ -531,7 +531,10 @@ function Get-Menu2 {
         # are dropped entirely (not just hidden by shrink) when the rendered
         # menu would overflow the viewport. Re-evaluated on every render so
         # items reappear when the window grows. Forwarded to Show-Menu.
-        [string] $DroppableItemPattern = $null
+        [string] $DroppableItemPattern = $null,
+        # When set, left-arrow and right-click no longer act as Escape.
+        # Use on top-level menus where there is nothing to "go back" to.
+        [switch] $DisableBackNavigation
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -561,7 +564,7 @@ function Get-Menu2 {
         #foreach ($menuItem in $menuItems) {
         #    write-host "[Get-Menu2] Item: $menuItem"
         #}
-        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern
+        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern -DisableBackNavigation:$DisableBackNavigation
         if ($response -is [array] -or $response.MultiSelected) {
             $ReturnValue = @()
             foreach ($item in $response) {
@@ -1265,7 +1268,9 @@ function Show-Menu {
         # are eligible to be DROPPED ENTIRELY (not just hidden by shrink) when
         # the rendered menu would otherwise overflow the viewport. Re-evaluated
         # on every render iteration so items reappear when the window grows.
-        [string]$DroppableItemPattern = $null
+        [string]$DroppableItemPattern = $null,
+        # When set, left-arrow and right-click no longer act as Escape.
+        [switch]$DisableBackNavigation
     )
     $LongestBreakLine = 0
     $Operation = ""
@@ -1471,7 +1476,12 @@ function Show-Menu {
 
         $AnySelections = $menuItems | Where-Object { $_.Selectable }
         if ($AnySelections) {
-            $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
+            if ($DisableBackNavigation) {
+                $prompt = "Press Enter/Right to select, Up/Down to navigate, ESC to exit"
+            }
+            else {
+                $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
+            }
         }
         else {
             $prompt = "No Selections. Press Left/Enter or Escape to exit"
@@ -1531,7 +1541,7 @@ function Show-Menu {
                 continue
             }
         }
-        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn
+        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn -DisableBackNavigation:$DisableBackNavigation
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
         if ($return) {
@@ -2091,7 +2101,8 @@ function Start-Navigation {
         [switch]$MultiSelect = $false,
         [int]$PgIndicatorY = -1,
         [switch]$PgClickUp = $false,
-        [switch]$PgClickDn = $false
+        [switch]$PgClickDn = $false,
+        [switch]$DisableBackNavigation = $false
     )
 
     $i = 0
@@ -2171,7 +2182,8 @@ function Start-Navigation {
         # --- Mouse event handling ---
         if ($key.IsMouseEvent) {
             if ($key.MouseButton -eq 2) {
-                # Back/X1 button: act like Escape
+                # Back/X1 button: act like Escape (unless back-navigation is disabled)
+                if ($DisableBackNavigation) { continue }
                 if ($script:_lastHoveredIndex -ge 0) {
                     Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
                 }
@@ -2573,7 +2585,8 @@ function Start-Navigation {
             }
         }
         
-        if ($key.VirtualKeyCode -eq 27 -or $key.VirtualKeyCode -eq 37) {
+        if ($key.VirtualKeyCode -eq 27 -or ($key.VirtualKeyCode -eq 37 -and -not $DisableBackNavigation)) {
+            # 27 = Escape, 37 = Left arrow (skipped when back-navigation disabled)
             if ($MultiSelect) {
                 $Global:MenuHistory[$menuName] = @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
             }
@@ -2585,9 +2598,7 @@ function Start-Navigation {
             }
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
-            # 27 = Escape key
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
-            #Write-Host "-> You pressed ESC to exit." -ForegroundColor Red # Display the selected menu item
             return "ESCAPE"
         }
 

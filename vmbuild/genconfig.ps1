@@ -161,7 +161,7 @@ function Select-ConfigMenu {
             $global:GoBack = $false        
         }
         else {
-            $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete
+            $response = Get-Menu2 -MenuName "MemLabs Main Menu" -Prompt "Select menu option" -AdditionalOptions $customOptions -NoNewLine -test:$false -AcceptsDelete -DisableBackNavigation
         }
 
         write-Verbose "1 response $response"
