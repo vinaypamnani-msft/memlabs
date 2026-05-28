@@ -2616,9 +2616,14 @@ function Start-Navigation {
     finally {
         Disable-MouseInput
         $script:_lastHoveredIndex = -1
+        # Move cursor below the prompt so Ctrl+C / exit output doesn't
+        # overwrite rendered menu text. PromptPosition is the row where
+        # the input prompt was drawn; +1 puts us on the first clean line.
+        if ($PromptPosition) {
+            Set-CursorPosition -X 0 -Y ($PromptPosition.Y + 1)
+        }
+        [System.Console]::CursorVisible = $true
     }
-
-    [System.Console]::CursorVisible = $true # Show the cursor
 }
 
 
