@@ -1029,16 +1029,33 @@ finally {
 
     Write-Host -NoNewline "Please Wait.. Stopping running jobs."
 
-    foreach ($job in Get-Job) {
+    # Request all running jobs to stop asynchronously. Stop-Job blocks if a
+    # job is stuck in blocking I/O (e.g. PSDirect Copy-Item), so use the
+    # non-blocking StopJobAsync() method and then Wait-Job with a timeout.
+    $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
+    if ($runningJobs.Count -gt 0 -and -not $enableVerbose) {
+        foreach ($job in $runningJobs) {
+            try { $job.StopJobAsync() } catch { }
+            Write-Host -NoNewline "."
+        }
+        # Give jobs 15 seconds to stop gracefully
+        $null = $runningJobs | Wait-Job -Timeout 15 -ErrorAction SilentlyContinue
+        Write-Host -NoNewline "."
+    }
+
+    # Force-remove any jobs still running (stuck in blocking I/O)
+    $stuckJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
+    foreach ($job in $stuckJobs) {
         if (-not $enableVerbose) {
-            $job | Stop-Job
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
             Write-Host -NoNewline "."
         }
     }
+
     if (-not $global:Common.DevBranch) {
         foreach ($job in Get-Job) {
             if (-not $enableVerbose) {
-                $job | Remove-Job
+                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
                 Write-Host -NoNewline "."
             }
         }
