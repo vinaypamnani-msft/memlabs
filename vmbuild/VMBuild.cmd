@@ -38,6 +38,13 @@ git config --global --add safe.directory E:\Memlabs
 git config --global --add safe.directory E:/memlabs
 @ECHO OFF
 
+REM Prevent inline auto-gc during fetch/pull. On Windows gc.autoDetach
+REM defaults to false (no fork), so gc runs synchronously and tries to
+REM rewrite pack files while fetch still holds handles -- causing
+REM "Unlink of file '.git/objects/pack/...' failed" hangs.
+REM Explicit gc runs in Invoke-Maintenance.ps1 instead.
+git config --local gc.auto 0 2>NUL
+
 REM ------------------------------------------------------------
 REM Detect if the current branch has been deleted from origin
 REM (e.g. a feature branch that was merged + pruned). If so,
@@ -79,6 +86,12 @@ IF NOT "%CURBRANCH%"=="" (
 @ECHO ON
 git pull
 @ECHO OFF
+IF ERRORLEVEL 1 (
+    ECHO  git pull failed -- running git gc and retrying...
+    git gc 2>NUL
+    timeout /t 5 /nobreak >NUL
+    git pull
+)
 IF ERRORLEVEL 1 (
     ECHO.
     ECHO ============================================================
