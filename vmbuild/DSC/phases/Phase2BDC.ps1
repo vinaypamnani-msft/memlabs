@@ -9,7 +9,7 @@
     )
 
     Import-DscResource -ModuleName 'TemplateHelpDSC'
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'NetworkingDsc', 'xDhcpServer', 'DnsServerDsc', 'ComputerManagementDsc', 'ActiveDirectoryDsc'
 
     # Define log share
     $LogFolder = "DSC"
@@ -214,32 +214,14 @@
             $DNSForwarderIPs = $deployConfig.DNSForwarders
         }
 
-        Script DnsForwarders {
-            DependsOn  = "[WriteStatus]ConfigureDnsForwarders"
-            GetScript  = {
-                $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server -ErrorAction SilentlyContinue
-                return @{ Result = ($dns.Forwarders -join ', ') }
-            }
-            TestScript = {
-                try {
-                    # Use DNS WMI provider (part of DNS Server role, no RSAT/Server Manager dependency)
-                    $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server
-                    $current = $dns.Forwarders
-                    $desired = $using:DNSForwarderIPs
-                    if (-not $current -or ($current -join ',') -ne ($desired -join ',')) { return $false }
-                    return $true
-                } catch { return $false }
-            }
-            SetScript  = {
-                $desired = $using:DNSForwarderIPs
-                # Use DNS WMI provider directly — always available when DNS Server role is
-                # installed. Does not require RSAT-DNS-Server or Server Manager.
-                $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server
-                $dns.Forwarders = [string[]]$desired
-                $dns.Put() | Out-Null
-            }
+        DnsServerForwarder DnsServerForwarder {
+            DependsOn        = "[WriteStatus]ConfigureDnsForwarders"
+            IsSingleInstance = 'Yes'
+            IPAddresses      = $DNSForwarderIPs
+            UseRootHint      = $true
+            EnableReordering = $true
         }
-        $nextDepend = "[Script]DnsForwarders"
+        $nextDepend = "[DnsServerForwarder]DnsServerForwarder"
 
         WriteStatus ForceReplication {
             DependsOn = $nextDepend
