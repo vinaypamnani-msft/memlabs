@@ -532,9 +532,10 @@ function Get-Menu2 {
         # menu would overflow the viewport. Re-evaluated on every render so
         # items reappear when the window grows. Forwarded to Show-Menu.
         [string] $DroppableItemPattern = $null,
-        # When set, left-arrow and right-click no longer act as Escape.
-        # Use on top-level menus where there is nothing to "go back" to.
-        [switch] $DisableBackNavigation
+        # When set, Get-Menu2 returns "GOBACK" (left-arrow, right-click,
+        # back-button) as a distinct value instead of collapsing it into
+        # "ESCAPE". Lets the caller differentiate ESC from go-back.
+        [switch] $SplitEscapeFromGoBack
     )
 
     $host.ui.RawUI.FlushInputBuffer()
@@ -564,7 +565,7 @@ function Get-Menu2 {
         #foreach ($menuItem in $menuItems) {
         #    write-host "[Get-Menu2] Item: $menuItem"
         #}
-        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern -DisableBackNavigation:$DisableBackNavigation
+        $response = Show-Menu -menuName $MenuName -menuItems ([ref]$menuItems) -NoClear:$false -MultiSelect:$MultiSelect -DroppableItemPattern $DroppableItemPattern -SplitEscapeFromGoBack:$SplitEscapeFromGoBack
         if ($response -is [array] -or $response.MultiSelected) {
             $ReturnValue = @()
             foreach ($item in $response) {
@@ -1269,8 +1270,8 @@ function Show-Menu {
         # the rendered menu would otherwise overflow the viewport. Re-evaluated
         # on every render iteration so items reappear when the window grows.
         [string]$DroppableItemPattern = $null,
-        # When set, left-arrow and right-click no longer act as Escape.
-        [switch]$DisableBackNavigation
+        # When set, "GOBACK" is returned as-is instead of collapsed to "ESCAPE".
+        [switch]$SplitEscapeFromGoBack
     )
     $LongestBreakLine = 0
     $Operation = ""
@@ -1476,12 +1477,7 @@ function Show-Menu {
 
         $AnySelections = $menuItems | Where-Object { $_.Selectable }
         if ($AnySelections) {
-            if ($DisableBackNavigation) {
-                $prompt = "Press Enter/Right to select, Up/Down to navigate, ESC to exit"
-            }
-            else {
-                $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
-            }
+            $prompt = "Press Enter to select, Up/Down/Left/Right to navigate, ESC to exit"
         }
         else {
             $prompt = "No Selections. Press Left/Enter or Escape to exit"
@@ -1541,9 +1537,13 @@ function Show-Menu {
                 continue
             }
         }
-        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn -DisableBackNavigation:$DisableBackNavigation
+        $return = Start-Navigation -menuItems $MenuItems -startOfmenu $MenuStart -PromptPosition $PromptPosition -HelpPosition $HelpPosition -MultiSelect:$MultiSelect -PgIndicatorY $pgIndicatorY -PgClickUp:$pgClickUp -PgClickDn:$pgClickDn
         Set-CursorPosition -x $PromptPosition.X -y $PromptPosition.Y
         write-host
+        # Collapse GOBACK into ESCAPE unless caller opted into split mode.
+        if ($return -eq "GOBACK" -and -not $SplitEscapeFromGoBack) {
+            $return = "ESCAPE"
+        }
         if ($return) {
             
             if (-not [string]::IsNullOrWhiteSpace($return.Action)) {
@@ -2101,8 +2101,7 @@ function Start-Navigation {
         [switch]$MultiSelect = $false,
         [int]$PgIndicatorY = -1,
         [switch]$PgClickUp = $false,
-        [switch]$PgClickDn = $false,
-        [switch]$DisableBackNavigation = $false
+        [switch]$PgClickDn = $false
     )
 
     $i = 0
@@ -2182,15 +2181,14 @@ function Start-Navigation {
         # --- Mouse event handling ---
         if ($key.IsMouseEvent) {
             if ($key.MouseButton -eq 2) {
-                # Back/X1 button: act like Escape (unless back-navigation is disabled)
-                if ($DisableBackNavigation) { continue }
+                # Back/X1 button: go back
                 if ($script:_lastHoveredIndex -ge 0) {
                     Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
                 }
                 Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
                 Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                 Set-CursorPosition -X $CPosition.x -Y $CPosition.y
-                return "ESCAPE"
+                return "GOBACK"
             }
             elseif ($key.MouseButton -eq 1) {
                 # Left click: find the menu item at the clicked Y position
@@ -2585,8 +2583,8 @@ function Start-Navigation {
             }
         }
         
-        if ($key.VirtualKeyCode -eq 27 -or ($key.VirtualKeyCode -eq 37 -and -not $DisableBackNavigation)) {
-            # 27 = Escape, 37 = Left arrow (skipped when back-navigation disabled)
+        if ($key.VirtualKeyCode -eq 27 -or $key.VirtualKeyCode -eq 37) {
+            # 27 = Escape, 37 = Left arrow
             if ($MultiSelect) {
                 $Global:MenuHistory[$menuName] = @($menuItems | Where-Object { $_.MultiSelected -eq $true } | Select-Object -ExpandProperty Text)                
             }
@@ -2599,7 +2597,8 @@ function Start-Navigation {
             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
-            return "ESCAPE"
+            # ESC = hard escape, Left arrow = go back
+            if ($key.VirtualKeyCode -eq 27) { return "ESCAPE" } else { return "GOBACK" }
         }
 
         if ($key.Character.ToString().ToUpperInvariant() -in $ValidChars -or ($buffer -and $key.Character.ToString() -in @(0..9))) {
