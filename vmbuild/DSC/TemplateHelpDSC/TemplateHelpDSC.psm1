@@ -1865,7 +1865,7 @@ class AddNtfsPermissions {
     }
 
     [bool] Test() {
-        Write-Status "DSC Test- Checking deployment status"
+        Write-Status "Checking NTFS permissions on C:\tools"
         $testPath = "C:\staging\DSC\AddNtfsPermissions.txt"
         if (Test-Path $testPath) {
             return $true
