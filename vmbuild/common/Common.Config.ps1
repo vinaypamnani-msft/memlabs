@@ -3332,69 +3332,77 @@ Function Show-Summary {
         Write-Host2 -ForegroundColor DeepPink "$($Common.LocalAdmin.GetNetworkCredential().Password)"
     }
 
-    $out = $fixedConfig | Format-table vmName, 
-    @{Label = "Role"; Expression = { $_.role } },
-    @{Label = "OperatingSystem"; Expression = { $_.operatingSystem } },
-    @{Label = "Memory" ; Expression = {
-            if (($_.dynamicMinRam / 1 ) -lt ($_.memory / 1 ) -and ($_.dynamicMinRam / 1 ) -ne 0 ) {    
-                $_.dynamicMinRam + "-" + $_.memory
-            }
-            else {
-                $_.memory
-            }
+    # Build row data for the colored deployment summary table.
+    $roleColor = @{ "CAS" = "Yellow"; "Primary" = "Yellow"; "DC" = "White"; "SiteSystem" = "Yellow"; "DomainMember" = "Cyan"; "Secondary" = "Yellow"; "PassiveSite" = "Yellow"; "Proxy" = "Green"; "LinuxServer" = "Green" }
+    $summaryHeaders = @("VM Name", "Role", "Operating System", "Memory", "Procs", "Site", "Network", "Tags", "SQL")
+    $summaryRows = @()
+    foreach ($vm in $fixedConfig) {
+        $memStr = if (($vm.dynamicMinRam / 1) -lt ($vm.memory / 1) -and ($vm.dynamicMinRam / 1) -ne 0) { "$($vm.dynamicMinRam)-$($vm.memory)" } else { "$($vm.memory)" }
+        $siteStr = $vm.siteCode
+        if ($vm.ParentSiteCode) { $siteStr += "->$($vm.ParentSiteCode)" }
+        $netStr = if ($vm.Network) { $vm.Network } else { $deployConfig.vmOptions.network }
+        $tags = @()
+        if ($vm.InstallCA -or $vm.Role -eq 'StandaloneRootCA') { $tags += "CA" }
+        if ($vm.InstallSUP) { $tags += "SUP" }
+        if ($vm.InstallRP) { $tags += "RP" }
+        if ($vm.InstallMP) { $tags += "MP" }
+        if ($vm.InstallSMSProv) { $tags += "PROV" }
+        if ($vm.InstallDP) { if ($vm.pullDPSourceDP) { $tags += "Pull DP" } else { $tags += "DP" } }
+        $isLinux = Test-VmIsLinux -Vm $vm
+        if (-not $isLinux) {
+            $diskLetters = @("C") + @($vm.additionalDisks.psobject.Properties.Name | Where-Object { $_ })
+            $tags += ($diskLetters -join ",")
         }
-    },
-    @{Label = "Procs"; Expression = { $_.virtualProcs } },
-    @{Label = "SiteCode"; Expression = {
-            $SiteCode = $_.siteCode
-            if ($_.ParentSiteCode) {
-                $SiteCode += "->$($_.ParentSiteCode)"
-            }
-            $SiteCode
+        if ($vm.useProxy) { $tags += "Proxy" }
+        if ($vm.BitLocker) { $tags += "BL" }
+        if ($isLinux) {
+            if ($vm.enableRDP) { $tags += "RDP" }
+            if ($vm.joinDomain) { $tags += "AD" }
         }
-    },
-    @{Label = "Network"; Expression = {
-            if ($_.Network) { $_.Network }
-            else {
-                $deployConfig.vmOptions.network + " [Default]"
-            }
-        }
-    },
-    @{Label = "Roles"; Expression = {
-            $roles = @()
-            if ($_.InstallCA -or $_.Role -eq 'StandaloneRootCA') { $roles += "CA" }
-            if ($_.InstallSUP) { $roles += "SUP" }
-            if ($_.InstallRP) { $roles += "RP" }
-            if ($_.InstallMP) { $roles += "MP" }
-            if ($_.InstallSMSProv) { $roles += "PROV" }
-            if ($_.InstallDP) {
-                if ($_.pullDPSourceDP) { $roles += "Pull DP" }
-                else {
-                    $roles += "DP"
-                }
-            }
-            $roles -join ","
-        }
-    },
-    #@{Label = "AddedDisks"; Expression = { $_.additionalDisks.psobject.Properties.Value.count } },
-    @{Label = "Disks"; Expression = {
-            $Disks = @("C")
-            $Disks += $_.additionalDisks.psobject.Properties.Name | Where-Object { $_ }
-            $Disks -Join ","
-        }
-    },
-    @{Label = "SQL"; Expression = {
-            if ($null -ne $_.SqlVersion) {
-                $_.SqlVersion
-            }
-            else {
-                if ($null -ne $_.remoteSQLVM) {
-                    ("Remote -> " + $($_.remoteSQLVM))
-                }
-            }
-        }
-    } ` | Out-String
+        $sqlStr = ""
+        if ($null -ne $vm.SqlVersion) { $sqlStr = $vm.SqlVersion }
+        elseif ($null -ne $vm.remoteSQLVM) { $sqlStr = "Remote -> $($vm.remoteSQLVM)" }
+        $summaryRows += , @($vm.vmName, $vm.role, $vm.operatingSystem, $memStr, "$($vm.virtualProcs)", $siteStr, $netStr, ($tags -join ", "), $sqlStr)
+    }
 
+    # Auto-size columns.
+    $colCount = $summaryHeaders.Count
+    $colWidths = @(0) * $colCount
+    for ($i = 0; $i -lt $colCount; $i++) {
+        $colWidths[$i] = $summaryHeaders[$i].Length
+        foreach ($row in $summaryRows) {
+            $len = "$($row[$i])".Length
+            if ($len -gt $colWidths[$i]) { $colWidths[$i] = $len }
+        }
+        if ($i -lt $colCount - 1) { $colWidths[$i] += 2 }
+    }
+
+    # Render header row.
+    Write-Host ""
+    Write-Host "  " -NoNewline
+    for ($i = 0; $i -lt $colCount; $i++) {
+        Write-Host ("{0,-$($colWidths[$i])}" -f $summaryHeaders[$i]) -NoNewline -ForegroundColor White -BackgroundColor DarkBlue
+    }
+    Write-Host ""
+
+    # Render data rows.
+    foreach ($row in $summaryRows) {
+        Write-Host "  " -NoNewline
+        for ($i = 0; $i -lt $colCount; $i++) {
+            $val = "$($row[$i])"
+            $fmt = "{0,-$($colWidths[$i])}"
+            if ($i -eq 1) {
+                # Role column — colored
+                $color = if ($roleColor[$val]) { $roleColor[$val] } else { "PapayaWhip" }
+                Write-Host2 ($fmt -f $val) -NoNewline -ForegroundColor $color
+            }
+            else {
+                Write-Host ($fmt -f $val) -NoNewline
+            }
+        }
+        Write-Host ""
+    }
+    
     $list = Get-List -Type VM
     $existingPrinted = $false
     Foreach ($evm in $existingConfig) {
@@ -3417,8 +3425,4 @@ Function Show-Summary {
         }
     }
     Write-Host
-    $outIndented = $out.Trim() -split "\r\n"
-    foreach ($line in $outIndented) {
-        Write-Host "  $line"
-    }
 }
