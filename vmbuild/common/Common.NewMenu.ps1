@@ -1200,7 +1200,7 @@ function Get-PageLayout {
     }
 }
 
-# Render the bottom-of-menu pagination hint ("Press [PgUp/PgDn] to see more"
+# Render the bottom-of-menu pagination hint ("Press [PgUp] or [PgDn] to see more"
 # etc). Caller passes Operation and whether PgUp is available; the helper
 # writes the hint to the console. Returns nothing.
 function Write-MenuPgIndicator {
@@ -1210,7 +1210,7 @@ function Write-MenuPgIndicator {
     )
     if ($PgUpAvailable -and $Operation -eq 'PGDNNeeded') {
         Write-Host2
-        Write-Host2 'Press [PgUp/PgDn] to see more' -ForegroundColor Yellow
+        Write-Host2 'Press [PgUp] or [PgDn] to see more' -ForegroundColor Yellow
     }
     elseif ($Operation -eq 'PGDNDone') {
         Write-Host2
@@ -1625,6 +1625,84 @@ function Set-PointerDisplayAsPerMenu {
 # Track the last hovered menu item index so we can un-highlight it when the
 # mouse moves to a different row.
 $script:_lastHoveredIndex = -1
+# Track which PgIndicator word is currently hover-highlighted: 'PgUp', 'PgDn', or $null.
+$script:_lastHoveredPgWord = $null
+
+# Highlight [PgUp] or [PgDn] on the pagination indicator line when the mouse
+# hovers over the corresponding word. Restores Yellow on the previously
+# highlighted word when the mouse moves away.
+function Set-PgIndicatorHoverHighlight {
+    param(
+        [int]$MouseX,
+        [int]$MouseY,
+        [int]$PgIndicatorY,
+        [switch]$PgClickUp,
+        [switch]$PgClickDn
+    )
+    if ($PgIndicatorY -lt 0 -or $MouseY -ne $PgIndicatorY) {
+        # Mouse is not on the indicator line; clear any existing highlight
+        if ($script:_lastHoveredPgWord) {
+            Set-CursorPosition -x 0 -y $PgIndicatorY
+            Write-Host "`e[K" -NoNewline
+            Set-CursorPosition -x 0 -y $PgIndicatorY
+            if ($PgClickUp -and $PgClickDn) {
+                Write-Host2 'Press [PgUp] or [PgDn] to see more' -ForegroundColor Yellow
+            } elseif ($PgClickUp) {
+                Write-Host2 'Press [PgUp] to see more' -ForegroundColor Yellow
+            } else {
+                Write-Host2 'Press [PgDn] to see more' -ForegroundColor Yellow
+            }
+            $script:_lastHoveredPgWord = $null
+        }
+        return
+    }
+
+    # Determine which word the mouse is over based on column positions.
+    # Both:    'Press [PgUp] or [PgDn] to see more'
+    #           0     6    11   16   21
+    # PgUp only: 'Press [PgUp] to see more'  → [PgUp] at 6-11
+    # PgDn only: 'Press [PgDn] to see more'  → [PgDn] at 6-11
+    $hoveredWord = $null
+    if ($PgClickUp -and $PgClickDn) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgUp' }
+        elseif ($MouseX -ge 16 -and $MouseX -le 21) { $hoveredWord = 'PgDn' }
+    }
+    elseif ($PgClickUp) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgUp' }
+    }
+    elseif ($PgClickDn) {
+        if ($MouseX -ge 6 -and $MouseX -le 11) { $hoveredWord = 'PgDn' }
+    }
+
+    if ($hoveredWord -eq $script:_lastHoveredPgWord) { return }
+
+    # Redraw the indicator line with the hovered word in SkyBlue
+    Set-CursorPosition -x 0 -y $PgIndicatorY
+    Write-Host "`e[K" -NoNewline
+    Set-CursorPosition -x 0 -y $PgIndicatorY
+    if ($PgClickUp -and $PgClickDn) {
+        $pgUpColor = if ($hoveredWord -eq 'PgUp') { 'SkyBlue' } else { 'Yellow' }
+        $pgDnColor = if ($hoveredWord -eq 'PgDn') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgUp]' -ForegroundColor $pgUpColor -NoNewline
+        Write-Host2 ' or ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgDn]' -ForegroundColor $pgDnColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    elseif ($PgClickUp) {
+        $pgUpColor = if ($hoveredWord -eq 'PgUp') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgUp]' -ForegroundColor $pgUpColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    else {
+        $pgDnColor = if ($hoveredWord -eq 'PgDn') { 'SkyBlue' } else { 'Yellow' }
+        Write-Host2 'Press ' -ForegroundColor Yellow -NoNewline
+        Write-Host2 '[PgDn]' -ForegroundColor $pgDnColor -NoNewline
+        Write-Host2 ' to see more' -ForegroundColor Yellow
+    }
+    $script:_lastHoveredPgWord = $hoveredWord
+}
 
 # Update hover highlighting: when the mouse is over a selectable menu item,
 # re-render that item's row with an underline (ANSI SGR 4). When the mouse
@@ -2058,6 +2136,7 @@ function Start-Navigation {
     # exit path (Enter, Escape, resize, PgUp/PgDn, etc.).
     Enable-MouseInput
     $script:_lastHoveredIndex = -1
+    $script:_lastHoveredPgWord = $null
     try {
     while ($true) {
         $currentsize = Get-LiveWindowSize
@@ -2125,28 +2204,32 @@ function Start-Navigation {
                     return $menuItems[$selectedIndex]
                 }
                 elseif ($PgIndicatorY -ge 0 -and $key.MouseY -eq $PgIndicatorY) {
-                    # Click on the PgUp/PgDn indicator line
+                    # Click on the PgUp/PgDn indicator line.
+                    # Use the same column ranges as the hover highlight so the
+                    # clickable zone matches the visual feedback exactly.
                     if ($PgClickUp -and $PgClickDn) {
-                        # Both directions available: left half = PgUp, right half = PgDn
-                        $halfWidth = [math]::Floor(($host.UI.RawUI.WindowSize.Width) / 2)
-                        if ($key.MouseX -lt $halfWidth) {
+                        # Both: [PgUp] at cols 6-11, [PgDn] at cols 16-21
+                        if ($key.MouseX -ge 6 -and $key.MouseX -le 11) {
                             return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
                         }
-                        else {
+                        elseif ($key.MouseX -ge 16 -and $key.MouseX -le 21) {
                             return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
                         }
                     }
-                    elseif ($PgClickDn) {
+                    elseif ($PgClickDn -and $key.MouseX -ge 6 -and $key.MouseX -le 11) {
                         return [PSCustomObject]@{ Action = 'PGDN'; CurrentMenu = $menuItems }
                     }
-                    elseif ($PgClickUp) {
+                    elseif ($PgClickUp -and $key.MouseX -ge 6 -and $key.MouseX -le 11) {
                         return [PSCustomObject]@{ Action = 'PGUP'; CurrentMenu = $menuItems }
                     }
                 }
             }
             elseif ($key.MouseButton -eq 0) {
-                # Mouse move: update hover highlight
+                # Mouse move: update hover highlight on menu items and PgIndicator
                 Set-MouseHoverHighlight -menuItems $menuItems -mouseY $key.MouseY -MultiSelect:$MultiSelect
+                if ($PgIndicatorY -ge 0) {
+                    Set-PgIndicatorHoverHighlight -MouseX $key.MouseX -MouseY $key.MouseY -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
+                }
             }
             continue
         }
@@ -2155,6 +2238,9 @@ function Start-Navigation {
         # navigation doesn't leave a stale hover color on a different row.
         if ($script:_lastHoveredIndex -ge 0) {
             Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
+        }
+        if ($script:_lastHoveredPgWord -and $PgIndicatorY -ge 0) {
+            Set-PgIndicatorHoverHighlight -MouseX -1 -MouseY -1 -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
         }
 
         $currentsize = Get-LiveWindowSize
