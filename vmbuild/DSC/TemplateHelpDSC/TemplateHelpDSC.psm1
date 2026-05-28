@@ -4184,6 +4184,19 @@ class InstallPBIRS {
             $_Creds = $this.DBcredentials
             write-Status ("Configuring PBIRS for $($this.SqlServer) in $($this.InstallPath) downloading from $($this.DownloadUrl)")
 
+            # Verify install by checking for RSReportServer.config, not just
+            # the instance folder. The config file is the last artifact the
+            # installer creates; its presence proves a complete install.
+            $verifyPbirs = Join-Path $this.InstallPath "$($this.RSInstance)\ReportServer\RSReportServer.config"
+            $pbirsAttempt = 0
+            $pbirsMaxAttempts = 3
+            $pbirsExit = -1
+            $needsReboot = $false
+
+            # Skip download + install entirely if already installed
+            if (Test-Path -LiteralPath $verifyPbirs) {
+                Write-Status "PBIRS already installed ($verifyPbirs exists). Skipping install."
+            } else {
 
             $pbirsSetup = "C:\temp\PowerBIReportServer.exe"
             Invoke-DownloadFile $this.DownloadUrl $pbirsSetup
@@ -4198,19 +4211,6 @@ class InstallPBIRS {
 
             write-Status ("Starting $pbirsSetup")
             $PBIRSargs = "/quiet /InstallFolder=$($this.InstallPath) /IAcceptLicenseTerms /Edition=Dev /Log C:\staging\PBI.log"
-            # Verify install by checking for RSReportServer.config, not just
-            # the instance folder. The config file is the last artifact the
-            # installer creates; its presence proves a complete install.
-            $verifyPbirs = Join-Path $this.InstallPath "$($this.RSInstance)\ReportServer\RSReportServer.config"
-            $pbirsAttempt = 0
-            $pbirsMaxAttempts = 3
-            $pbirsExit = -1
-            $needsReboot = $false
-
-            # Skip download + install entirely if already installed
-            if (Test-Path -LiteralPath $verifyPbirs) {
-                Write-Status "PBIRS already installed ($verifyPbirs exists). Skipping install."
-            } else {
 
             # PowerBIReportServer.exe is a WiX/Burn bootstrapper bundle, so it
             # has the same silent-success failure mode as adksetup: a stale
