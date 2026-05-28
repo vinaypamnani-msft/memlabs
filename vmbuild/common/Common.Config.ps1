@@ -3334,8 +3334,24 @@ Function Show-Summary {
 
     # Build row data for the colored deployment summary table.
     $roleColor = @{ "CAS" = "Yellow"; "Primary" = "Yellow"; "DC" = "White"; "SiteSystem" = "Yellow"; "DomainMember" = "Cyan"; "Secondary" = "Yellow"; "PassiveSite" = "Yellow"; "Proxy" = "Green"; "LinuxServer" = "Green" }
+
+    # Build SiteCode-to-color map matching the genconfig VM list colors.
+    $CASColors = @("PaleGreen", "YellowGreen", "SeaGreen", "MediumSeaGreen", "SpringGreen", "Lime", "LimeGreen")
+    $PRIColors = @("LightSkyBlue", "CornflowerBlue", "SlateBlue", "DeepSkyBlue", "Turquoise", "Cyan", "MediumTurquoise", "Aquamarine", "SteelBlue", "Blue")
+    $SECColors = @("SandyBrown", "Chocolate", "Peru", "DarkGoldenRod", "Orange", "RosyBrown", "SaddleBrown", "Tan", "DarkSalmon", "GoldenRod")
+    $siteColorMap = @{}
+    $casIdx = 0; $priIdx = 0; $secIdx = 0
+    foreach ($vm in $fixedConfig) {
+        switch ($vm.Role) {
+            "CAS"       { if ($vm.SiteCode -and -not $siteColorMap.ContainsKey($vm.SiteCode)) { $siteColorMap[$vm.SiteCode] = $CASColors[$casIdx % $CASColors.Count]; $casIdx++ } }
+            "Primary"   { if ($vm.SiteCode -and -not $siteColorMap.ContainsKey($vm.SiteCode)) { $siteColorMap[$vm.SiteCode] = $PRIColors[$priIdx % $PRIColors.Count]; $priIdx++ } }
+            "Secondary" { if ($vm.SiteCode -and -not $siteColorMap.ContainsKey($vm.SiteCode)) { $siteColorMap[$vm.SiteCode] = $SECColors[$secIdx % $SECColors.Count]; $secIdx++ } }
+        }
+    }
+
     $summaryHeaders = @("VM Name", "Role", "Operating System", "Memory", "Procs", "Site", "Network", "Drives", "Tags", "SQL")
     $summaryRows = @()
+    $summaryVmColors = @()
     foreach ($vm in $fixedConfig) {
         $memStr = if (($vm.dynamicMinRam / 1) -lt ($vm.memory / 1) -and ($vm.dynamicMinRam / 1) -ne 0) { "$($vm.dynamicMinRam)-$($vm.memory)" } else { "$($vm.memory)" }
         $siteStr = $vm.siteCode
@@ -3363,6 +3379,48 @@ Function Show-Summary {
         $sqlStr = ""
         if ($null -ne $vm.SqlVersion) { $sqlStr = $vm.SqlVersion }
         elseif ($null -ne $vm.remoteSQLVM) { $sqlStr = "Remote -> $($vm.remoteSQLVM)" }
+
+        # Determine VM name color matching the genconfig VM list menu.
+        $vmNameColor = $null
+        switch ($vm.Role) {
+            { $_ -in "DC", "BDC" } { $vmNameColor = "Tomato" }
+            { $_ -in "CAS", "Primary", "Secondary", "PassiveSite", "SiteSystem" } {
+                if ($vm.SiteCode -and $siteColorMap.ContainsKey($vm.SiteCode)) { $vmNameColor = $siteColorMap[$vm.SiteCode] }
+            }
+            "WSUS" {
+                if ($vm.SiteCode -and $siteColorMap.ContainsKey($vm.SiteCode)) { $vmNameColor = $siteColorMap[$vm.SiteCode] }
+            }
+            "SQLAO" {
+                $primaryNode = if (-not $vm.OtherNode) { $fixedConfig | Where-Object { $_.OtherNode -eq $vm.vmName } } else { $vm }
+                $siteVM = $fixedConfig | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName } | Select-Object -First 1
+                if ($siteVM -and $siteVM.SiteCode -and $siteColorMap.ContainsKey($siteVM.SiteCode)) { $vmNameColor = $siteColorMap[$siteVM.SiteCode] }
+            }
+            "DomainMember" {
+                $siteVM = $fixedConfig | Where-Object { $_.RemoteSQLVM -eq $vm.vmName -and $_.role -in ("CAS", "Primary", "Secondary") } | Select-Object -First 1
+                if ($siteVM -and $siteVM.SiteCode -and $siteColorMap.ContainsKey($siteVM.SiteCode)) {
+                    $vmNameColor = $siteColorMap[$siteVM.SiteCode]
+                }
+                else {
+                    $clientNetwork = if ($vm.Network) { $vm.Network } else { $deployConfig.vmOptions.network }
+                    if ($clientNetwork) {
+                        $siteServers = $fixedConfig | Where-Object { $_.role -in ("Primary", "Secondary") -and $_.SiteCode }
+                        $owningSite = $siteServers | Where-Object { $_.Network -eq $clientNetwork } | Select-Object -First 1
+                        if (-not $owningSite) {
+                            $secondaryOnNet = $siteServers | Where-Object { $_.role -eq "Secondary" -and $_.Network -eq $clientNetwork } | Select-Object -First 1
+                            if ($secondaryOnNet -and $secondaryOnNet.parentSiteCode) {
+                                $owningSite = $siteServers | Where-Object { $_.role -eq "Primary" -and $_.SiteCode -eq $secondaryOnNet.parentSiteCode } | Select-Object -First 1
+                            }
+                        }
+                        if ($owningSite -and $siteColorMap.ContainsKey($owningSite.SiteCode)) { $vmNameColor = $siteColorMap[$owningSite.SiteCode] }
+                    }
+                }
+            }
+            { $_ -in "Proxy", "LinuxServer" } { $vmNameColor = "Green" }
+            "FileServer" { $vmNameColor = "PapayaWhip" }
+            "StandaloneRootCA" { $vmNameColor = "PapayaWhip" }
+        }
+        $summaryVmColors += $vmNameColor
+
         $summaryRows += , @($vm.vmName, $vm.role, $vm.operatingSystem, $memStr, "$($vm.virtualProcs)", $siteStr, $netStr, $driveStr, ($tags -join ", "), $sqlStr)
     }
 
@@ -3387,12 +3445,17 @@ Function Show-Summary {
     Write-Host ""
 
     # Render data rows.
+    $rowIdx = 0
     foreach ($row in $summaryRows) {
         Write-Host "  " -NoNewline
         for ($i = 0; $i -lt $colCount; $i++) {
             $val = "$($row[$i])"
             $fmt = "{0,-$($colWidths[$i])}"
-            if ($i -eq 1) {
+            if ($i -eq 0 -and $summaryVmColors[$rowIdx]) {
+                # VM Name column — colored to match genconfig menu
+                Write-Host2 ($fmt -f $val) -NoNewline -ForegroundColor $summaryVmColors[$rowIdx]
+            }
+            elseif ($i -eq 1) {
                 # Role column — colored
                 $color = if ($roleColor[$val]) { $roleColor[$val] } else { "PapayaWhip" }
                 Write-Host2 ($fmt -f $val) -NoNewline -ForegroundColor $color
@@ -3402,6 +3465,7 @@ Function Show-Summary {
             }
         }
         Write-Host ""
+        $rowIdx++
     }
     
     $list = Get-List -Type VM
