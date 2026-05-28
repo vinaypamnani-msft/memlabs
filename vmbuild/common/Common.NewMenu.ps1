@@ -2190,6 +2190,14 @@ function Start-Navigation {
                     }
                 }
                 if ($clickedIndex -ge 0) {
+                    # Require the item to be hover-highlighted before activating.
+                    # This prevents a focus-click (clicking the window to give it
+                    # focus) from accidentally activating whatever item is under
+                    # the cursor. First click just highlights; second click activates.
+                    if ($clickedIndex -ne $script:_lastHoveredIndex) {
+                        Set-MouseHoverHighlight -menuItems $menuItems -mouseY $key.MouseY -MultiSelect:$MultiSelect
+                        continue
+                    }
                     # Clear hover highlight before acting on the click
                     if ($script:_lastHoveredIndex -ge 0) {
                         Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
