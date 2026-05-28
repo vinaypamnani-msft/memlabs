@@ -222,14 +222,21 @@
         # Now that DNS server role is installed (InstallDns=$true above),
         # point DNS at self first for the local AD-integrated zones, with
         # PDC as fallback for records not yet replicated.
-        DnsServerAddress SetDNSSelfAndPDC {
-            Address        = @('127.0.0.1', $PDCIPAddress)
-            InterfaceAlias = $alias
-            AddressFamily  = 'IPv4'
-            Validate       = $false
-            DependsOn      = $nextDepend
+        # Uses a Script resource because DSC won't allow two DnsServerAddress
+        # resources targeting the same InterfaceAlias with different values.
+        Script SetDNSSelfAndPDC {
+            DependsOn  = $nextDepend
+            GetScript  = { return @{ Result = (Get-DnsClientServerAddress -InterfaceAlias $using:alias -AddressFamily IPv4).ServerAddresses -join ',' } }
+            TestScript = {
+                $current = (Get-DnsClientServerAddress -InterfaceAlias $using:alias -AddressFamily IPv4).ServerAddresses
+                $desired = @('127.0.0.1', $using:PDCIPAddress)
+                return ($null -ne $current -and ($current -join ',') -eq ($desired -join ','))
+            }
+            SetScript  = {
+                Set-DnsClientServerAddress -InterfaceAlias $using:alias -ServerAddresses @('127.0.0.1', $using:PDCIPAddress)
+            }
         }
-        $nextDepend = "[DnsServerAddress]SetDNSSelfAndPDC"
+        $nextDepend = "[Script]SetDNSSelfAndPDC"
 
         WriteStatus ConfigureDnsForwarders {
             DependsOn = $nextDepend
