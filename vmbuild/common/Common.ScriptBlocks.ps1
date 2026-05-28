@@ -1224,6 +1224,38 @@ $global:VM_Config = {
             }
         }
 
+        # Check if VM has a pending reboot (common after crashed/killed deploys).
+        # A pending reboot can leave PSDirect file operations hanging indefinitely
+        # even though sessions connect fine.
+        $Test_PendingReboot = {
+            # Component Based Servicing
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { return $true }
+            # Windows Update
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { return $true }
+            # Pending file rename operations
+            $pfro = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+            if ($pfro) { return $true }
+            # Pending computer rename
+            $active = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+            $pending = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+            if ($active -and $pending -and $active -ne $pending) { return $true }
+            return $false
+        }
+        $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
+        if ($rebootCheck.ScriptBlockOutput -eq $true) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected. Rebooting VM before proceeding." -Warning -OutputStream
+            Write-Progress2 $Activity -Status "Rebooting VM (pending reboot detected)" -percentcomplete 7 -force
+            Stop-VM2 -Name $currentItem.vmName
+            Start-Sleep -Seconds 10
+            Start-VM2 -Name $currentItem.vmName
+            Start-Sleep -Seconds 15
+            $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest
+            if (-not $connected) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM did not come back after pending-reboot restart. Exiting." -Failure -OutputStream
+                return
+            }
+        }
+
         if ($Phase -eq 2) {
             $retryCount = 0
             $success = $false
