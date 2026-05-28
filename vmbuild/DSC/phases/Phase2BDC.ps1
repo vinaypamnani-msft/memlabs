@@ -216,19 +216,9 @@
 
         Script DnsForwarders {
             DependsOn  = "[WriteStatus]ConfigureDnsForwarders"
-            GetScript  = {
-                if (-not (Get-Command Get-DnsServerForwarder -ErrorAction SilentlyContinue)) {
-                    Install-WindowsFeature RSAT-DNS-Server -ErrorAction SilentlyContinue | Out-Null
-                }
-                return @{ Result = (Get-DnsServerForwarder).IPAddress.IPAddressToString -join ', ' }
-            }
+            GetScript  = { return @{ Result = (Get-DnsServerForwarder).IPAddress.IPAddressToString -join ', ' } }
             TestScript = {
                 try {
-                    # RSAT-DNS-Server may not be installed (ADDomainController installs the DNS
-                    # Server role service but not the management tools with the PowerShell module)
-                    if (-not (Get-Command Get-DnsServerForwarder -ErrorAction SilentlyContinue)) {
-                        Install-WindowsFeature RSAT-DNS-Server -ErrorAction SilentlyContinue | Out-Null
-                    }
                     $current = (Get-DnsServerForwarder).IPAddress.IPAddressToString
                     $desired = $using:DNSForwarderIPs
                     if (-not $current -or ($current -join ',') -ne ($desired -join ',')) { return $false }
@@ -237,9 +227,6 @@
             }
             SetScript  = {
                 $desired = $using:DNSForwarderIPs
-                if (-not (Get-Command Set-DnsServerForwarder -ErrorAction SilentlyContinue)) {
-                    Install-WindowsFeature RSAT-DNS-Server -ErrorAction SilentlyContinue | Out-Null
-                }
                 Set-DnsServerForwarder -IPAddress $desired -UseRootHint $true
             }
         }

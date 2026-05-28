@@ -3268,7 +3268,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "7"
+    [string] $Version = "8"
 
     [void] Set() {
         $_Role = $this.Role
@@ -3312,6 +3312,14 @@ class InstallFeatureForSCCM {
             [void]$features.Add("Web-ISAPI-Ext")
             [void]$features.Add("RSAT-AD-PowerShell")
             [void]$features.Add("AD-Domain-Services")
+
+            if ($_Role -contains "DC" -or $_Role -contains "BDC") {
+                # DCs need DNS Server management tools for Get/Set-DnsServerForwarder.
+                # ADDomainController -InstallDns installs the DNS Server role service
+                # but not the RSAT tools (DnsServer PowerShell module). Install here
+                # so the module is available before DC promotion completes.
+                [void]$features.Add("RSAT-DNS-Server")
+            }
 
             if ($_Role -notcontains "DC" -and $_Role -notcontains "BDC") {
                 # Non-DC servers get BITS and IIS metabase
