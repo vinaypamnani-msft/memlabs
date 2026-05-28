@@ -272,7 +272,9 @@ class InstallADK {
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
             Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
-            if ($code -ne 0) {
+            # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — install succeeded, reboot needed.
+            # Don't enter the diagnostics/dead-link-probe path for 3010.
+            if ($code -ne 0 -and $code -ne 3010) {
                 $errLines = @()
                 if (Test-Path $logFile) {
                     try {
@@ -512,8 +514,8 @@ class InstallADK {
                     Write-Status "Failed to launch ADK $label setup: $ErrorMessage"
                     throw "Failed to launch ADK $label setup: $ErrorMessage"
                 }
-                if ($lastExit -eq 0) {
-                    if (& $verifyInstall) { return 0 }
+                if ($lastExit -eq 0 -or $lastExit -eq 3010) {
+                    if (& $verifyInstall) { return $lastExit }
                     # 0-exit but install didn't happen -- almost always means
                     # Burn's dependency-provider registry has a stale entry
                     # ("WixBundleInstalled = 1" in the log) from a prior run
@@ -541,7 +543,7 @@ class InstallADK {
                 }
                 $layoutArgs = @('/quiet','/layout',$layoutDir)
                 $layoutExit = & $invokeAdk $exe $layoutArgs ("$label-layout")
-                if ($layoutExit -ne 0) {
+                if ($layoutExit -ne 0 -and $layoutExit -ne 3010) {
                     Write-Status "ADK $label : /layout fallback failed with exit $layoutExit. Giving up."
                     return $layoutExit
                 }
@@ -555,7 +557,7 @@ class InstallADK {
                 }
                 $offlineArgs = @('/quiet','/features') + $features
                 $offlineExit = & $invokeAdk $localExe $offlineArgs ("$label-offline")
-                if ($offlineExit -eq 0 -and -not (& $verifyInstall)) {
+                if (($offlineExit -eq 0 -or $offlineExit -eq 3010) -and -not (& $verifyInstall)) {
                     Write-Status "ADK $label : offline install reported success but expected paths still missing. Giving up."
                     return -2
                 }
