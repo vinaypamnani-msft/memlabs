@@ -1869,11 +1869,12 @@ function Get-KeyStroke {
                         $isMove  = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_MOVED) -ne 0
                         $isWheel = ($me.dwEventFlags -band [MemLabsConsole.MouseInput]::MOUSE_WHEELED) -ne 0
                         if ($isClick -or $isBack -or $isMove -or $isWheel) {
-                            # Wheel direction: dwButtonState high word is the delta (positive=up, negative=down).
-                            # Cast to [int] so the sign bit is preserved.
+                            # Wheel direction: dwButtonState high word is the signed delta.
+                            # Bit 31 indicates negative (down). Avoids [int] cast overflow
+                            # on uint values like 0xFF880000 (4286578688).
                             $wheelBtn = 0
                             if ($isWheel) {
-                                $wheelBtn = if ([int]$me.dwButtonState -gt 0) { 3 } else { 4 }  # 3=up, 4=down
+                                $wheelBtn = if ($me.dwButtonState -band 0x80000000) { 4 } else { 3 }  # 3=up, 4=down
                             }
                             return [pscustomobject]@{
                                 IsMouseEvent = $true
