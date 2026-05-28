@@ -4345,7 +4345,7 @@ class InstallPBIRS {
 
 
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -Confirm:$false
 
 
             if ($this.TemplateName) {
@@ -4431,19 +4431,37 @@ class InstallPBIRS {
                 return $false
             }
 
-            [xml]$cfg = Get-Content -LiteralPath $configPath -ErrorAction Stop
-
-            # Database DSN must be populated (proves Set-RsDatabase ran)
-            $dsn = $cfg.Configuration.Database.DSN
-            if ([string]::IsNullOrWhiteSpace($dsn)) {
-                Write-Verbose "InstallPBIRS Test: database not configured (empty DSN in RSReportServer.config)"
+            # Check database configuration via WMI (the definitive source).
+            # RSReportServer.config's <DSN> element is often empty/encrypted;
+            # WMI always has the real DatabaseName after Set-RsDatabase.
+            $wmiNs = $null
+            try {
+                $wmiRS = Get-WmiObject -Namespace root\Microsoft\SqlServer\ReportServer -Class __Namespace -ErrorAction Stop
+                $rsName = $wmiRS.Name
+                $wmiVer = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rsName" -Class __Namespace -ErrorAction Stop
+                $verName = $wmiVer.Name
+                $wmiNs = "root\Microsoft\SqlServer\ReportServer\$rsName\$verName\Admin"
+            } catch {
+                Write-Verbose "InstallPBIRS Test: cannot enumerate PBIRS WMI namespace: $_"
                 return $false
             }
 
-            # URL reservations must have at least one application entry
-            $urlApps = $cfg.Configuration.URLReservations.Application
-            if (-not $urlApps) {
-                Write-Verbose "InstallPBIRS Test: no URL reservations in RSReportServer.config"
+            $rsConfig = Get-WmiObject -Namespace $wmiNs -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue
+            if (-not $rsConfig) {
+                Write-Verbose "InstallPBIRS Test: MSReportServer_ConfigurationSetting not found in $wmiNs"
+                return $false
+            }
+
+            # DatabaseName must be populated (proves Set-RsDatabase ran)
+            if ([string]::IsNullOrWhiteSpace($rsConfig.DatabaseName)) {
+                Write-Verbose "InstallPBIRS Test: database not configured (empty DatabaseName in WMI)"
+                return $false
+            }
+
+            # At least one URL must be reserved
+            $urls = $rsConfig.ListReservedUrls()
+            if (-not $urls -or -not $urls.UrlString -or $urls.UrlString.Count -eq 0) {
+                Write-Verbose "InstallPBIRS Test: no URL reservations in WMI"
                 return $false
             }
 
