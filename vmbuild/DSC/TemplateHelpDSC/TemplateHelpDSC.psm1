@@ -2233,19 +2233,10 @@ class WriteStatus {
     }
 
     [bool] Test() {
-        $_Status = $this.Status
-        $StatusLog = "C:\staging\DSC\DSC_Log.log"
-
-        if (Test-Path $StatusLog) {
-            Write-Verbose "Testing if $StatusLog contains: $_Status"
-            $contains = Get-Content -Path $StatusLog -Force | Select-String -Pattern $_Status -SimpleMatch
-            if ($contains) {
-                Write-Verbose "StatusLog contains status."
-                return $true
-            }
-        }
-
-        Write-Verbose "StatusLog does NOT contain status."
+        # Always return false so Set() writes the current status.
+        # Previously checked DSC_Log.log for the text, but that caused
+        # skips on re-runs when the message was already in the log from
+        # a prior attempt, leaving DSC_Status.txt stale.
         return $false
     }
 
