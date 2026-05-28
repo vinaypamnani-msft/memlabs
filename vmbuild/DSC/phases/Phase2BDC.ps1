@@ -216,10 +216,15 @@
 
         Script DnsForwarders {
             DependsOn  = "[WriteStatus]ConfigureDnsForwarders"
-            GetScript  = { return @{ Result = (Get-DnsServerForwarder).IPAddress.IPAddressToString -join ', ' } }
+            GetScript  = {
+                $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server -ErrorAction SilentlyContinue
+                return @{ Result = ($dns.Forwarders -join ', ') }
+            }
             TestScript = {
                 try {
-                    $current = (Get-DnsServerForwarder).IPAddress.IPAddressToString
+                    # Use DNS WMI provider (part of DNS Server role, no RSAT/Server Manager dependency)
+                    $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server
+                    $current = $dns.Forwarders
                     $desired = $using:DNSForwarderIPs
                     if (-not $current -or ($current -join ',') -ne ($desired -join ',')) { return $false }
                     return $true
@@ -227,7 +232,11 @@
             }
             SetScript  = {
                 $desired = $using:DNSForwarderIPs
-                Set-DnsServerForwarder -IPAddress $desired -UseRootHint $true
+                # Use DNS WMI provider directly — always available when DNS Server role is
+                # installed. Does not require RSAT-DNS-Server or Server Manager.
+                $dns = Get-WmiObject -Namespace root\MicrosoftDNS -Class MicrosoftDNS_Server
+                $dns.Forwarders = [string[]]$desired
+                $dns.Put() | Out-Null
             }
         }
         $nextDepend = "[Script]DnsForwarders"
