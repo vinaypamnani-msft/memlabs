@@ -83,6 +83,24 @@ IF NOT "%CURBRANCH%"=="" (
     )
 )
 
+REM ------------------------------------------------------------
+REM Clean up local branches whose remote tracking branch was pruned
+REM (merged + deleted on GitHub). Uses -d (not -D) so unmerged
+REM work is never lost. Skips develop/main/master and current branch.
+REM ------------------------------------------------------------
+FOR /F "tokens=1,2" %%A IN ('git for-each-ref --format="%%(refname:short) %%(upstream:track)" refs/heads/ 2^>NUL') DO (
+    IF "%%B"=="[gone]" (
+        IF /I NOT "%%A"=="develop" (
+            IF /I NOT "%%A"=="main" (
+                IF /I NOT "%%A"=="master" (
+                    ECHO  Removing stale branch: %%A
+                    git branch -d "%%A" 2>NUL
+                )
+            )
+        )
+    )
+)
+
 @ECHO ON
 git pull
 @ECHO OFF
