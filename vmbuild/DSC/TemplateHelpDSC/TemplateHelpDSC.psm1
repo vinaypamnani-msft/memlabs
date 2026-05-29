@@ -5307,6 +5307,9 @@ class DisableClusterNicDnsRegistration {
                     Write-Status "Adding cluster DNS A record $cName -> $cIP"
                     Add-DnsServerResourceRecordA -ZoneName $_domain -Name $cName -IPv4Address $cIP -ComputerName $_dc -ErrorAction Stop
                 }
+
+                # Flush local DNS cache so xCluster resolves the corrected name immediately.
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
             }
         }
         catch {
