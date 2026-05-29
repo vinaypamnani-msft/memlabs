@@ -4347,7 +4347,7 @@ class InstallPBIRS {
 
 
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer -Confirm:$false
+            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
 
 
             if ($this.TemplateName) {
@@ -4407,7 +4407,6 @@ class InstallPBIRS {
         }
         catch {
             Write-Status "Failed to Configure PBIRS"
-            Write
             Write-Verbose "$_"
         }
     }
