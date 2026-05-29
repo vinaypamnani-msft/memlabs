@@ -1800,6 +1800,25 @@ function Set-MouseHoverHighlight {
             $line = $line.Substring(0, [Math]::Max(0, $available - 3)) + "..."
         }
 
+        # Pad background to the width of the longest menu item so all hover
+        # highlights are the same width regardless of text length.
+        $maxLineLen = 0
+        foreach ($mi in $menuItems) {
+            if ($mi.Displayed -and $mi.Selectable -and $mi.Text) {
+                $plainText = if ($mi.Text.Contains([char]27)) {
+                    (Get-AnsiCsiPattern).Replace($mi.Text, '')
+                } else { $mi.Text }
+                $msBracketLen = 1 + $mi.ItemName.Length + [Math]::Max(0, 4 - $mi.ItemName.Length)
+                if ($MultiSelect -and ($mi.ItemName -as [int])) { $msBracketLen += 4 }
+                elseif ($MultiSelect) { $msBracketLen += 4 }
+                $thisLen = $msBracketLen + $plainText.Length
+                if ($thisLen -gt $maxLineLen) { $maxLineLen = $thisLen }
+            }
+        }
+        if ($maxLineLen -gt 0 -and $line.Length -lt $maxLineLen) {
+            $line = $line.PadRight($maxLineLen)
+        }
+
         # Single Write-Host: fg + bg + content + reset. No intermediate resets.
         Write-Host "${fgAnsi}${bgAnsi}${line}`e[0m" -NoNewline
     }
