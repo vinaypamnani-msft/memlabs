@@ -288,8 +288,8 @@ Configuration Phase5
         WaitForAny CreateCluster {
             NodeName             = $node2
             ResourceName         = "[xCluster]JoinSecondNodeToCluster"
-            RetryIntervalSec     = 120
-            RetryCount           = 30
+            RetryIntervalSec     = 10
+            RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
         }
