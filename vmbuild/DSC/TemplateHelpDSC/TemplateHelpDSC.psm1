@@ -5262,6 +5262,43 @@ class DisableClusterNicDnsRegistration {
         catch {
             Write-Verbose "Could not clean stale DNS records: $_"
         }
+
+        # If a cluster already exists on this node, ensure the cluster name has a
+        # DNS A record pointing to the cluster IP (heartbeat subnet).  When the
+        # cluster was originally created the Cluster Name resource registered DNS
+        # via the domain NIC, producing a stale A record on the domain subnet.
+        # On redeploy xCluster resolves that stale IP, RPC fails, and DSC is stuck.
+        try {
+            $cluster = Get-Cluster -ErrorAction SilentlyContinue
+            if ($cluster) {
+                $clusterName = $cluster.Name
+                $clusterIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
+                $clusterIP = ($clusterIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+
+                if ($clusterName -and $clusterIP) {
+                    $dnsRecords = Get-DnsServerResourceRecord -ZoneName $_domain -Name $clusterName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue
+
+                    # Remove any A records that don't match the actual cluster IP.
+                    foreach ($rec in $dnsRecords) {
+                        $ip = $rec.RecordData.IPv4Address.ToString()
+                        if ($ip -ne $clusterIP) {
+                            Write-Status "Removing stale cluster DNS A record $clusterName -> $ip (expected $clusterIP)"
+                            Remove-DnsServerResourceRecord -ZoneName $_domain -Name $clusterName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
+                        }
+                    }
+
+                    # Ensure the correct A record exists.
+                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $clusterIP }
+                    if (-not $correct) {
+                        Write-Status "Adding cluster DNS A record $clusterName -> $clusterIP"
+                        Add-DnsServerResourceRecordA -ZoneName $_domain -Name $clusterName -IPv4Address $clusterIP -ComputerName $_dc -ErrorAction Stop
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not fix cluster name DNS: $_"
+        }
     }
 
     [bool] Test() {
@@ -5288,6 +5325,27 @@ class DisableClusterNicDnsRegistration {
         }
         catch {
             # If we cannot reach the DC to check, assume OK to avoid blocking.
+        }
+
+        # Check that the cluster name (if a cluster exists) has the correct DNS record.
+        try {
+            $cluster = Get-Cluster -ErrorAction SilentlyContinue
+            if ($cluster) {
+                $clusterName = $cluster.Name
+                $clusterIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
+                $clusterIP = ($clusterIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+
+                if ($clusterName -and $clusterIP) {
+                    $dnsRecords = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $clusterName -RRType A -ComputerName $this.DCName -ErrorAction SilentlyContinue
+                    # Fail if any record points to the wrong IP, or no record exists at all.
+                    $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $clusterIP }
+                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $clusterIP }
+                    if ($wrong -or -not $correct) { return $false }
+                }
+            }
+        }
+        catch {
+            # If we cannot check, assume OK.
         }
 
         return $true
