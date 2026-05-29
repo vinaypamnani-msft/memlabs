@@ -574,7 +574,7 @@ function Start-PhaseJobs {
                     $opt15 = Get-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -ErrorAction SilentlyContinue
                     if ($opt15) {
                         Write-Log "Removing DHCP option 15 (domain suffix) from cluster reservation $($res.IPAddress) ($($res.Description))"
-                        Remove-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -Force -ErrorAction SilentlyContinue
+                        Remove-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -ErrorAction SilentlyContinue
                     }
                 }
             }
