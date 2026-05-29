@@ -820,11 +820,103 @@ WHERE drs.is_local = 1
             }
 
             # ==============================================================
-            # 8. Cross-node replication test (write on PRIMARY, read from other)
+            # 8. TESTDB recovery model and log backup health (PRIMARY only)
             # ==============================================================
             if ($otherNode -and $healthy) {
                 $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
                 $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+
+                if ($localRole -eq 'PRIMARY') {
+                    # 8a. Recovery model must be FULL for AG databases
+                    $results.Details.Add("CMD: Check TESTDB recovery model")
+                    try {
+                        $rmQuery = "SELECT name, recovery_model_desc FROM sys.databases WHERE name = 'TESTDB'"
+                        $rmResult = Invoke-Sqlcmd -Query $rmQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        if ($rmResult.recovery_model_desc -eq 'FULL') {
+                            $results.Details.Add("OK: TESTDB recovery model is FULL")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: TESTDB recovery model is '$($rmResult.recovery_model_desc)' (expected FULL)")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Recovery model check failed: $($_.Exception.Message)")
+                    }
+
+                    # 8b. Log backup agent jobs exist and are enabled
+                    $results.Details.Add("CMD: Check MemLabs backup agent jobs in msdb")
+                    try {
+                        $jobQuery = @"
+SELECT j.name, j.enabled,
+       h.run_status AS LastRunStatus,
+       msdb.dbo.agent_datetime(h.run_date, h.run_time) AS LastRunTime
+FROM msdb.dbo.sysjobs j
+LEFT JOIN (
+    SELECT job_id, run_status, run_date, run_time,
+           ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY run_date DESC, run_time DESC) AS rn
+    FROM msdb.dbo.sysjobhistory WHERE step_id = 0
+) h ON h.job_id = j.job_id AND h.rn = 1
+WHERE j.name LIKE 'MemLabs DatabaseBackup%'
+"@
+                        $jobs = @(Invoke-Sqlcmd -Query $jobQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                        if ($jobs.Count -eq 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: No MemLabs DatabaseBackup agent jobs found")
+                        }
+                        else {
+                            foreach ($j in $jobs) {
+                                $enabledText = if ($j.enabled -eq 1) { 'enabled' } else { 'DISABLED' }
+                                $historyText = ''
+                                if ($null -ne $j.LastRunStatus) {
+                                    $statusMap = @{ 0 = 'Failed'; 1 = 'Succeeded'; 2 = 'Retry'; 3 = 'Cancelled'; 4 = 'In Progress' }
+                                    $statusText = if ($statusMap.ContainsKey([int]$j.LastRunStatus)) { $statusMap[[int]$j.LastRunStatus] } else { "Status $($j.LastRunStatus)" }
+                                    $historyText = ", last run: $statusText at $($j.LastRunTime)"
+                                }
+                                if ($j.enabled -ne 1) {
+                                    $results.Passed = $false
+                                    $results.Details.Add("FAIL: Agent job '$($j.name)' is $enabledText$historyText")
+                                }
+                                else {
+                                    $results.Details.Add("OK: Agent job '$($j.name)' is $enabledText$historyText")
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Agent job check failed: $($_.Exception.Message)")
+                    }
+
+                    # 8c. TESTDB log_reuse_wait should not be LOG_BACKUP (means no
+                    #     log backup has ever run — the log will grow unbounded)
+                    $results.Details.Add("CMD: Check TESTDB log reuse wait reason")
+                    try {
+                        $logQuery = "SELECT log_reuse_wait_desc FROM sys.databases WHERE name = 'TESTDB'"
+                        $logResult = Invoke-Sqlcmd -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $waitReason = $logResult.log_reuse_wait_desc
+                        if ($waitReason -eq 'LOG_BACKUP') {
+                            $results.Details.Add("WARN: TESTDB log_reuse_wait is LOG_BACKUP — no log backup has run yet (expected on fresh build)")
+                        }
+                        else {
+                            $results.Details.Add("OK: TESTDB log_reuse_wait is '$waitReason' (log backups are cycling)")
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Log reuse wait check failed: $($_.Exception.Message)")
+                    }
+                }
+            }
+
+            # ==============================================================
+            # 9. Cross-node replication test (write on PRIMARY, read from other)
+            # ==============================================================
+            if ($otherNode -and $healthy) {
+                # Reuse localRole from check #8 if available, otherwise query it
+                if (-not $localRole) {
+                    $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
+                    $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+                }
 
                 $secondaryConnStr = $otherNode
                 if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
