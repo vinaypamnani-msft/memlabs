@@ -3200,24 +3200,43 @@ function Format-TestResult {
     $Phase = 11
 
     if (-not $Result -or $Result.ScriptBlockFailed) {
-        $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
-        # ScriptBlockFailed is often just $true (boolean) which prints as "True"
-        # with no context. Pull in ScriptBlockOutput for the real error detail.
-        if ($Result -and $errMsg -is [bool]) {
-            $detail = $Result.ScriptBlockOutput
-            if ($detail -and $detail -is [string]) {
-                $errMsg = $detail
+        # ScriptBlockFailed can be set by Invoke-VmCommand's -ErrorVariable even
+        # when the script block itself returned a valid Passed result. This happens
+        # when a cmdlet inside the script (e.g. Get-Volume -EA SilentlyContinue)
+        # writes a benign non-terminating error that the outer Invoke-Command
+        # captures. If the output has the expected shape with Passed=$true, trust
+        # the script's verdict over the error variable — fall through to normal
+        # output processing instead of short-circuiting to FAIL.
+        $hasValidPass = $Result -and $Result.ScriptBlockOutput -is [hashtable] -and
+            $Result.ScriptBlockOutput.ContainsKey('Passed') -and $Result.ScriptBlockOutput.Passed -eq $true
+        if (-not $hasValidPass) {
+            $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
+            # ScriptBlockFailed is often just $true (boolean) which prints as "True"
+            # with no context. Pull in ScriptBlockOutput for the real error detail.
+            if ($Result -and $errMsg -is [bool]) {
+                $detail = $Result.ScriptBlockOutput
+                if ($detail -and $detail -is [string]) {
+                    $errMsg = $detail
+                }
+                elseif ($detail) {
+                    $errMsg = ($detail | Out-String).Trim()
+                }
+                if (-not $errMsg -or $errMsg -is [bool]) {
+                    $errMsg = 'ScriptBlock failed (no error detail returned; check log for PSDirect/session errors)'
+                }
             }
-            elseif ($detail) {
-                $errMsg = ($detail | Out-String).Trim()
-            }
-            if (-not $errMsg -or $errMsg -is [bool]) {
-                $errMsg = 'ScriptBlock failed (no error detail returned; check log for PSDirect/session errors)'
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg"; Level = 'Failure' })
+            return $false
+        }
+        # ScriptBlockFailed was set but the script returned Passed=$true — log
+        # the non-terminating error for diagnostics but continue to normal path.
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Invoke-VmCommand reported ScriptBlockFailed but test script returned Passed=True; continuing" -Warning -LogOnly
+        if ($Result.ErrorDetails) {
+            foreach ($errLine in $Result.ErrorDetails) {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Non-terminating error: $errLine" -Warning -LogOnly
             }
         }
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg"; Level = 'Failure' })
-        return $false
     }
 
     $output = $Result.ScriptBlockOutput

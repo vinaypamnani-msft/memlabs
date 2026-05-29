@@ -3659,6 +3659,7 @@ function Invoke-VmCommand {
             CommandResult     = $false
             ScriptBlockFailed = $false
             ScriptBlockOutput	= $null
+            ErrorDetails      = $null
         }
 
         # Prepare args
@@ -3785,13 +3786,19 @@ function Invoke-VmCommand {
             # return $return
         }
 
-        # Populate ScriptBlockOutput with error text when command failed but output is null
-        if ($failed -and $null -eq $return.ScriptBlockOutput) {
+        # Capture error details on the return object for callers to inspect
+        if ($failed) {
             if ($Err2 -and $Err2.Count -gt 0) {
-                $return.ScriptBlockOutput = $Err2[0].ToString().Trim()
+                $return.ErrorDetails = @($Err2 | ForEach-Object { $_.ToString().Trim() })
             }
             elseif ($caughtException) {
-                $return.ScriptBlockOutput = "$caughtException".Trim()
+                $return.ErrorDetails = @("$caughtException".Trim())
+            }
+            # Populate ScriptBlockOutput with error text when command failed but output is null
+            if ($null -eq $return.ScriptBlockOutput) {
+                if ($return.ErrorDetails) {
+                    $return.ScriptBlockOutput = $return.ErrorDetails[0]
+                }
             }
         }
 
