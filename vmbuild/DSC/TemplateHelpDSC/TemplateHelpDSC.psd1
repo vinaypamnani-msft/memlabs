@@ -51,7 +51,8 @@ DscResourcesToExport = @(
     'InstallRootCertificate',
     'RunPkiSync',
     'GpUpdate',
-    'SetDNSAddress'
+    'SetDNSAddress',
+    'DisableClusterNicDnsRegistration'
 
 
 )
