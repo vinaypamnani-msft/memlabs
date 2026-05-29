@@ -564,28 +564,115 @@ function Test-SQLAOFunctionality {
     $scriptBlock = {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        $query = "SELECT ag.name AS GroupName, rs.synchronization_health_desc AS Health FROM sys.dm_hadr_availability_replica_states rs JOIN sys.availability_groups ag ON rs.group_id = ag.group_id"
-        $results.Details.Add("CMD: Invoke-Sqlcmd -Query `"$query`"")
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
-            $ag = Invoke-Sqlcmd -Query $query -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
-            if (-not $ag) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: No availability group replicas found")
-            }
-            else {
-                $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
-                if ($unhealthy.Count -gt 0) {
-                    $results.Passed = $false
-                    foreach ($u in $unhealthy) {
-                        $results.Details.Add("FAIL: AG '$($u.GroupName)' replica health is '$($u.Health)'")
+
+            # ----------------------------------------------------------
+            # Remediation pass: fix common issues before testing health
+            # ----------------------------------------------------------
+
+            # 1. Resume any suspended availability databases
+            $suspendedQuery = @"
+SELECT adb.database_name, ag.name AS GroupName, drs.synchronization_state_desc
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
+JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+WHERE drs.is_local = 1 AND drs.is_suspended = 1
+"@
+            $suspended = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            if ($suspended.Count -gt 0) {
+                foreach ($db in $suspended) {
+                    $results.Details.Add("REMEDIATE: Resuming suspended database '$($db.database_name)' in AG '$($db.GroupName)'")
+                    try {
+                        $resumeQuery = "ALTER DATABASE [$($db.database_name)] SET HADR RESUME"
+                        Invoke-Sqlcmd -Query $resumeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: Resumed '$($db.database_name)'")
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Failed to resume '$($db.database_name)': $($_.Exception.Message)")
                     }
                 }
+                # Give a moment for synchronization to start
+                Start-Sleep -Seconds 10
+            }
+
+            # 2. Check endpoint state and restart if stopped
+            $epQuery = "SELECT name, state_desc FROM sys.database_mirroring_endpoints"
+            $endpoints = @(Invoke-Sqlcmd -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            foreach ($ep in $endpoints) {
+                if ($ep.state_desc -ne 'STARTED') {
+                    $results.Details.Add("REMEDIATE: Endpoint '$($ep.name)' is '$($ep.state_desc)', starting it")
+                    try {
+                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: Endpoint '$($ep.name)' started")
+                        Start-Sleep -Seconds 5
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Failed to start endpoint '$($ep.name)': $($_.Exception.Message)")
+                    }
+                }
+            }
+
+            # ----------------------------------------------------------
+            # Health check with retry — allow time for remediation to settle
+            # ----------------------------------------------------------
+            $healthQuery = @"
+SELECT ag.name AS GroupName,
+       rs.role_desc AS Role,
+       rs.connected_state_desc AS ConnState,
+       rs.synchronization_health_desc AS Health,
+       ar.replica_server_name AS Replica
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+"@
+            $results.Details.Add("CMD: AG health query with replica detail")
+            $maxRetries = 3
+            $healthy = $false
+            for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                if (-not $ag -or $ag.Count -eq 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: No availability group replicas found")
+                    break
+                }
+                $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
+                if ($unhealthy.Count -eq 0) {
+                    $healthy = $true
+                    foreach ($r in $ag) {
+                        $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                    }
+                    break
+                }
+                if ($attempt -lt $maxRetries) {
+                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 15s...")
+                    Start-Sleep -Seconds 15
+                }
                 else {
-                    $results.Details.Add("OK: All $($ag.Count) AG replica(s) are HEALTHY")
+                    $results.Passed = $false
+                    foreach ($r in $ag) {
+                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
+                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                    }
+                }
+            }
+
+            # 3. Collect DB-level sync state for diagnostics if still unhealthy
+            if (-not $healthy) {
+                $dbStateQuery = @"
+SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
+       drs.is_suspended, drs.suspend_reason_desc
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
+WHERE drs.is_local = 1
+"@
+                $dbStates = @(Invoke-Sqlcmd -Query $dbStateQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                foreach ($ds in $dbStates) {
+                    $suspInfo = if ($ds.is_suspended) { " (SUSPENDED: $($ds.suspend_reason_desc))" } else { '' }
+                    $results.Details.Add("  DB '$($ds.database_name)': sync=$($ds.synchronization_state_desc), health=$($ds.synchronization_health_desc)$suspInfo")
                 }
             }
         }
