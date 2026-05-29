@@ -214,6 +214,7 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
     catch { }
 
     $dbExists = $false
+    $sqlReachable = $false
     $cmDbName = "CM_$SiteCode"
     if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
         $sqlDataSource = "$sqlServerName\$sqlInstanceName"
@@ -235,19 +236,38 @@ if ($Configuration.InstallSCCM.Status -eq 'Completed') {
             $p.Value = $cmDbName
             [int]$probeCount = $cmd.ExecuteScalar()
             $dbExists = ($probeCount -gt 0)
+            $sqlReachable = $true
         }
         finally {
             $conn.Close()
         }
     }
     catch {
-        Write-DscStatus "InstallSCCM.Status='Completed' but cannot reach SQL [$sqlDataSource] to verify [$cmDbName]: $($_.Exception.Message). Assuming CM needs re-install."
+        Write-DscStatus "InstallSCCM.Status='Completed' but cannot reach SQL [$sqlDataSource] to verify [$cmDbName]: $($_.Exception.Message)"
     }
 
-    if (-not $regPresent -or -not $dbExists) {
+    # Decision matrix:
+    #   reg=Y  db=Y             -> OK, CM is installed
+    #   reg=N  db=Y             -> FAIL, partial/corrupt install needs checkpoint
+    #   reg=N  db=N  sql=Y      -> safe retry, nothing committed
+    #   reg=Y  db=N  sql=Y      -> safe retry, DB was dropped
+    #   any    any   sql=N      -> FAIL, can't confirm state
+    if ($regPresent -and $dbExists) {
+        # CM is genuinely installed, nothing to do.
+    }
+    elseif (-not $sqlReachable) {
+        Write-DscStatus "InstallSCCM.Status='Completed' but SQL [$sqlDataSource] is unreachable. Cannot confirm whether [$cmDbName] exists; refusing to retry blind. Check SQL connectivity or restore the Phase 8 checkpoint." -Failure
+        return
+    }
+    elseif ($dbExists -and -not $regPresent) {
+        Write-DscStatus "InstallSCCM.Status='Completed' but registry key SMS\Identification is missing while [$cmDbName] exists on [$sqlDataSource]. This indicates a partial/corrupt install. Restore the Phase 8 checkpoint on this VM and re-run the deployment." -Failure
+        return
+    }
+    else {
+        # DB absent (with or without registry) — safe to re-install.
         $missing = @()
         if (-not $regPresent) { $missing += "registry key SMS\Identification" }
-        if (-not $dbExists)   { $missing += "database [$cmDbName] on [$sqlDataSource]" }
+        $missing += "database [$cmDbName] on [$sqlDataSource]"
         Write-DscStatus "InstallSCCM.Status='Completed' but CM is not actually installed (missing: $($missing -join ', ')). Resetting to 'NotStart' for re-install."
         if (Test-Path $setupExeStartedFlag) {
             Remove-Item -Path $setupExeStartedFlag -Force -ErrorAction SilentlyContinue
