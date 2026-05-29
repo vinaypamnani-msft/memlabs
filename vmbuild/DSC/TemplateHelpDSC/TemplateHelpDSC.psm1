@@ -4379,8 +4379,36 @@ class InstallPBIRS {
             }
 
 
+            # Restart the service so it picks up the (possibly new) database
+            # before we configure URLs. Without this, Set-PbiRsUrlReservation
+            # can fail with SetVirtualDirectory error -2147220930 when the DB
+            # was just recreated.
+            Write-Status "Restarting PowerBIReportServer before URL reservation"
+            Restart-Service -Name "PowerBIReportServer" -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+
             Write-Status ("Calling Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer")
-            Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+            try {
+                Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+            }
+            catch {
+                Write-Status "Set-PbiRsUrlReservation failed: $($_.Exception.Message). Removing stale URLs and retrying."
+                $wmiRsName = (Get-WmiObject -Namespace root\Microsoft\SqlServer\ReportServer -Class __Namespace -ErrorAction Stop).Name
+                $wmiRsVer = (Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$wmiRsName" -Class __Namespace -ErrorAction Stop).Name
+                $rsUrlCfg = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$wmiRsName\$wmiRsVer\Admin" -Class MSReportServer_ConfigurationSetting -ErrorAction Stop
+                $rsLcid = (Get-Culture).Lcid
+                $staleUrls = $rsUrlCfg.ListReservedUrls()
+                if ($staleUrls -and $staleUrls.UrlString) {
+                    for ($i = 0; $i -lt $staleUrls.UrlString.Count; $i++) {
+                        Write-Status "Removing stale URL: $($staleUrls.Application[$i]) -> $($staleUrls.UrlString[$i])"
+                        $rsUrlCfg.RemoveURL($staleUrls.Application[$i], $staleUrls.UrlString[$i], $rsLcid) | Out-Null
+                    }
+                }
+                Restart-Service -Name "PowerBIReportServer" -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+                Set-PbiRsUrlReservation -ReportServerInstance $($this.RSInstance) -ReportServerVersion PowerBIReportServer
+                Write-Status "Set-PbiRsUrlReservation succeeded on retry."
+            }
 
 
             if ($this.TemplateName) {
