@@ -407,6 +407,36 @@ if (-not (Test-Path $blmPortalLink)) {
     }
 }
 
+# --- Report Server (PBIRS / SSRS) shortcut ---
+$rpLink = "$desktopPath\Report Server.url"
+if (-not (Test-Path $rpLink)) {
+    $rpSvc = Get-Service -Name 'PowerBIReportServer','SQLServerReportingServices','ReportServer' -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' } | Select-Object -First 1
+    if ($rpSvc) {
+        try {
+            $rpFqdn = "$env:COMPUTERNAME.$((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).Domain)"
+            # Detect HTTPS by checking for an HTTPS URL reservation in WMI
+            $rpScheme = 'http'
+            try {
+                $rpWmiNs = Get-WmiObject -Namespace root\Microsoft\SqlServer\ReportServer -Class __Namespace -ErrorAction Stop
+                $rpRsName = $rpWmiNs.Name
+                $rpVer = (Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rpRsName" -Class __Namespace -ErrorAction Stop).Name
+                $rpCfg = Get-WmiObject -Namespace "root\Microsoft\SqlServer\ReportServer\$rpRsName\$rpVer\Admin" -Class MSReportServer_ConfigurationSetting -ErrorAction Stop
+                $rpUrls = $rpCfg.ListReservedUrls()
+                if ($rpUrls -and $rpUrls.UrlString) {
+                    $rpHttps = $rpUrls.UrlString | Where-Object { $_ -like 'https:*' -and $_ -match 'Reports' }
+                    if ($rpHttps) { $rpScheme = 'https' }
+                }
+            } catch {}
+            $rpUrl = "$rpScheme`://$rpFqdn/Reports"
+            $rpBody = @("[InternetShortcut]", "URL=$rpUrl")
+            $rpIconDll = "$env:windir\System32\imageres.dll"
+            if (Test-Path $rpIconDll) { $rpBody += @("IconFile=$rpIconDll", "IconIndex=77") }
+            $rpBody | Out-File -FilePath $rpLink -Encoding ASCII -Force
+            if (Test-Path $rpLink) { $script:shortcutsCreated = $true }
+        } catch {}
+    }
+}
+
 # --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
 if (Test-Path $wsus) {

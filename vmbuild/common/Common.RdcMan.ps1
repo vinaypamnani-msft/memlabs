@@ -585,6 +585,12 @@ function New-RDCManFileFromHyperV {
                 $supTag = "WSUS"
             }
 
+            # Reporting Point tag for non-SiteSystem VMs with installRP
+            $rpTag = $null
+            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") {
+                $rpTag = "RP"
+            }
+
             # Proxy-client tag: VM is opted in to route HTTP(S) through the
             # Linux Squid proxy (per-VM useProxy=true, set from genconfig).
             $proxyTag = $null
@@ -601,6 +607,7 @@ function New-RDCManFileFromHyperV {
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
             if ($caTag) { $tagParts += $caTag }
+            if ($rpTag) { $tagParts += $rpTag }
             if ($supTag) { $tagParts += $supTag }
             if ($proxyTag) { $tagParts += $proxyTag }
 

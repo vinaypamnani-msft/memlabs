@@ -1090,6 +1090,9 @@ function New-MRemoteNGFileFromHyperV {
             $supTag = $null
             if (($vm.installSUP -or $vm.InstallSUP) -and $vm.Role -ne "SiteSystem") { $supTag = "WSUS" }
 
+            $rpTag = $null
+            if ($vm.InstallRP -and $vm.Role -ne "SiteSystem") { $rpTag = "RP" }
+
             $proxyTag = $null
             if ($vm.useProxy) { $proxyTag = "Proxy" }
 
@@ -1098,6 +1101,7 @@ function New-MRemoteNGFileFromHyperV {
             $tagParts = @()
             if ($roleTag) { $tagParts += $roleTag }
             if ($caTag) { $tagParts += $caTag }
+            if ($rpTag) { $tagParts += $rpTag }
             if ($supTag) { $tagParts += $supTag }
             if ($proxyTag) { $tagParts += $proxyTag }
 
