@@ -5396,6 +5396,15 @@ class DisableClusterNicDnsRegistration {
         $_dc     = $this.DCName
         $needsFix = $false
 
+        # Wrap all checks in a dot-sourced scriptblock piped to Out-Null.
+        # This discards any stray output that cmdlets (Get-Cluster, Resolve-DnsName, etc.)
+        # may leak to the output stream inside a class method, which otherwise pollutes
+        # the return value and causes DSC error:
+        #   "Test-TargetResource must be the boolean value True or False"
+        # Dot-sourcing keeps $needsFix in the current scope; Out-Null only suppresses
+        # stream 1 (output), so Write-Verbose messages still reach the DSC log.
+        . {
+
         # 1. Check adapter DNS registration.
         $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
@@ -5561,6 +5570,8 @@ class DisableClusterNicDnsRegistration {
                 Write-Verbose "Could not query listener DNS: $_"
             }
         }
+
+        } | Out-Null  # end of output-suppression wrapper
 
         if ($needsFix) {
             Write-Verbose "Test returning FALSE - fixes needed"
