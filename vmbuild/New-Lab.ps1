@@ -603,7 +603,7 @@ try {
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
     $domainLogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
-    Write-Log "Starting deployment. Review $domainLogPath"
+    Write-Log "Starting deployment. Review log:`n  $domainLogPath"
     try { Flush-LogBuffer -All } catch { }
     $Common.LogPath = $domainLogPath
 
