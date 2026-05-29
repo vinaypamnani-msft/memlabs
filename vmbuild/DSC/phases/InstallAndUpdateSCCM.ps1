@@ -200,6 +200,64 @@ if ($Configuration.InstallSCCM.Status -eq 'Running') {
     Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
 }
 
+# Ground truth check: if Status='Completed' from a prior deploy, verify that
+# ConfigMgr is actually installed (registry key present AND site database
+# exists).  On redeploy the VM may be rebuilt but ScriptWorkflow.json
+# survives, causing us to skip the install even though CM is gone.
+if ($Configuration.InstallSCCM.Status -eq 'Completed') {
+
+    $regPresent = $false
+    try {
+        $regSiteCode = Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
+        if ($regSiteCode) { $regPresent = $true }
+    }
+    catch { }
+
+    $dbExists = $false
+    $cmDbName = "CM_$SiteCode"
+    if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') {
+        $sqlDataSource = "$sqlServerName\$sqlInstanceName"
+    }
+    else {
+        $sqlDataSource = $sqlServerName
+    }
+    if ($sqlPort -and $sqlPort -ne 1433) {
+        $sqlDataSource = "$sqlServerName,$sqlPort"
+    }
+    try {
+        $cs = "Data Source=$sqlDataSource;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+        $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+        $conn.Open()
+        try {
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @n"
+            $p = $cmd.Parameters.Add('@n', [System.Data.SqlDbType]::NVarChar, 128)
+            $p.Value = $cmDbName
+            [int]$probeCount = $cmd.ExecuteScalar()
+            $dbExists = ($probeCount -gt 0)
+        }
+        finally {
+            $conn.Close()
+        }
+    }
+    catch {
+        Write-DscStatus "InstallSCCM.Status='Completed' but cannot reach SQL [$sqlDataSource] to verify [$cmDbName]: $($_.Exception.Message). Assuming CM needs re-install."
+    }
+
+    if (-not $regPresent -or -not $dbExists) {
+        $missing = @()
+        if (-not $regPresent) { $missing += "registry key SMS\Identification" }
+        if (-not $dbExists)   { $missing += "database [$cmDbName] on [$sqlDataSource]" }
+        Write-DscStatus "InstallSCCM.Status='Completed' but CM is not actually installed (missing: $($missing -join ', ')). Resetting to 'NotStart' for re-install."
+        if (Test-Path $setupExeStartedFlag) {
+            Remove-Item -Path $setupExeStartedFlag -Force -ErrorAction SilentlyContinue
+        }
+        $Configuration.InstallSCCM.Status = 'NotStart'
+        $Configuration.InstallSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+        Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+    }
+}
+
 if ($Configuration.InstallSCCM.Status -ne "Completed" -and $Configuration.InstallSCCM.Status -ne "Running") {
 
     # Set Install action as Running
