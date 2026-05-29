@@ -684,6 +684,7 @@ function Invoke-StopVMs {
     if (-not $vmList) {
         $vmList = get-list -type vm -DomainName $domain -SmartUpdate
     }
+    $vmNames = @()
     foreach ($vm in $vmList) {
         $vm2 = $null
         if ($vm -is [String]) {
@@ -697,14 +698,49 @@ function Invoke-StopVMs {
             if (-not $quiet) {
                 Write-GreenCheck "$($vm.vmName) is [$($vm2.State)]. Shutting down VM. Will forcefully stop after 5 mins"
             }
+            $vmNames += $vm2.Name
             stop-vm -VM $VM2 -force -AsJob | Out-Null
         }
     }
 
-    Show-JobsProgress -Activity "Stopping VMs"
+    # Show-JobsProgress but break out early when all target VMs are actually off.
+    # Stop-VM jobs can hang even after the VM has stopped (Hyper-V WMI quirk).
+    $jobs = get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }
+    [int]$total = $jobs.count -as [int]
+    if ($total -gt 0) {
+        $stallCheck = [System.Diagnostics.Stopwatch]::StartNew()
+        [int]$lastRunning = $total
+        while ($true) {
+            [int]$runningjobs = (get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" }).Count -as [int]
+            if ($runningjobs -eq 0) { break }
+
+            $percent = [math]::Round((($total - $runningjobs) / $total * 100), 2)
+            Write-Progress2 -activity "Stopping VMs" -status "Progress: $percent%" -percentcomplete $percent
+
+            # Reset stall timer whenever a job finishes
+            if ($runningjobs -lt $lastRunning) {
+                $lastRunning = $runningjobs
+                $stallCheck.Restart()
+            }
+
+            # If no job has finished in 30 seconds, check whether the VMs are actually off
+            if ($stallCheck.Elapsed.TotalSeconds -ge 30 -and $vmNames.Count -gt 0) {
+                $stillRunning = @($vmNames | ForEach-Object { Get-VM2 -Name $_ -ErrorAction SilentlyContinue } | Where-Object { $_.State -eq "Running" })
+                if ($stillRunning.Count -eq 0) {
+                    # All VMs are off; stop the zombie jobs and break out
+                    get-job | Where-Object { $_.state -ne "completed" -and $_.state -ne "stopped" -and $_.state -ne "failed" } | Stop-Job -ErrorAction SilentlyContinue
+                    break
+                }
+                $stallCheck.Restart()
+            }
+
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Progress2 -activity "Stopping VMs" -Completed
+    }
 
     try {
-        get-job | remove-job | Out-Null
+        get-job | remove-job -Force | Out-Null
     }
     catch {}
     # Invalidate the Get-List cache so the refresh below picks up
