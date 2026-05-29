@@ -1755,23 +1755,53 @@ function Set-MouseHoverHighlight {
         }
     }
 
-    # Highlight the new hovered item with the dedicated hover color.
-    # Uses GenConfigHover (HotPink) which is deliberately not used by any
-    # menu item color, so the highlight is always visually distinct.
+    # Highlight the new hovered item with a blue foreground + dark background.
+    # Renders the line as a single Write-Host call to avoid Write-Host2's
+    # per-segment $PSStyle.Reset (ESC[0m) which kills background color.
     # Only the text from column 3 onward is redrawn; columns 0-2 are never touched.
     if ($hoveredIndex -ge 0) {
         $item = $menuItems[$hoveredIndex]
-        $hoverColor = $Global:Common.Colors.GenConfigHover
+        $fgAnsi = Get-AnsiColorCached $Global:Common.Colors.GenConfigHover
+        $bgAnsi = "`e[48;5;236m"  # dark gray background (xterm-256 #236)
         Set-CursorPosition -x 3 -y $item.CurrentPosition
         Write-Host "`e[K" -NoNewline
         Set-CursorPosition -x 3 -y $item.CurrentPosition
-        # Strip any embedded ANSI color sequences so the hover color applies
-        # uniformly. Items with hardcoded ANSI (e.g. domain stats lines)
-        # would otherwise keep their original colors and ignore the hover.
+
+        # Strip embedded ANSI so hover color applies uniformly
         $hoverText = if ($item.Text -and $item.Text.Contains([char]27)) {
             (Get-AnsiCsiPattern).Replace($item.Text, '')
         } else { $item.Text }
-        Write-Option $item.ItemName $hoverText -color $hoverColor -Color2 $hoverColor -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
+
+        # Build multiselect prefix
+        $msPrefix = ""
+        if ($MultiSelect) {
+            $optionInt = $item.ItemName -as [int]
+            if ($optionInt) {
+                $check = if ($item.MultiSelected) { [char]8730 } else { " " }
+                $msPrefix = "[$check] "
+            } else {
+                $msPrefix = "    "
+            }
+        }
+
+        # Build line: [key]  text  (same layout as Write-Option)
+        $pad = " " * [Math]::Max(0, 4 - $item.ItemName.Length)
+        $line = "${msPrefix}[$($item.ItemName)]${pad}${hoverText}"
+
+        # Truncate to fit terminal width (mirror Write-Option's truncation)
+        $termWidth = 0
+        try {
+            $live = Get-LiveWindowSize
+            if ($live) { $termWidth = [int]$live.Width }
+        } catch { }
+        if (-not $termWidth) { $termWidth = [Console]::WindowWidth }
+        $available = $termWidth - 3 - 2  # col 3 start, 2 margin
+        if ($available -gt 0 -and $line.Length -gt $available) {
+            $line = $line.Substring(0, [Math]::Max(0, $available - 3)) + "..."
+        }
+
+        # Single Write-Host: fg + bg + content + reset. No intermediate resets.
+        Write-Host "${fgAnsi}${bgAnsi}${line}`e[0m" -NoNewline
     }
 
     $script:_lastHoveredIndex = $hoveredIndex
