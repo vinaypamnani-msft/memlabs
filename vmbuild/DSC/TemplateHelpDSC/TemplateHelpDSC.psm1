@@ -4475,6 +4475,60 @@ class InstallPBIRS {
                 }
             }
 
+            # HTTP health probe: all the config artifacts exist but the portal
+            # may still be returning 500/503 if the database connection is
+            # broken or the service is in a bad state. Probe a reserved URL
+            # to catch this; if it fails, return $false so Set() re-runs
+            # Set-RsDatabase / Initialize-Rs to repair the configuration.
+            try {
+                $probeUrl = $null
+                foreach ($u in $urls.UrlString) {
+                    if ($u -match 'Reports') { $probeUrl = $u.TrimEnd('/'); break }
+                }
+                if (-not $probeUrl) {
+                    # Fall back to localhost
+                    $scheme = if ($this.TemplateName) { 'https' } else { 'http' }
+                    $probeUrl = "$scheme`://localhost/Reports"
+                }
+                $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                try {
+                    $req = [System.Net.HttpWebRequest]::Create($probeUrl)
+                    $req.Timeout = 15000
+                    $req.UseDefaultCredentials = $true
+                    $req.AllowAutoRedirect = $true
+                    $resp = $req.GetResponse()
+                    $statusCode = [int]$resp.StatusCode
+                    $resp.Close()
+                    Write-Verbose "InstallPBIRS Test: portal probe '$probeUrl' returned $statusCode"
+                }
+                catch [System.Net.WebException] {
+                    $statusCode = 0
+                    if ($_.Exception.Response) {
+                        $statusCode = [int]$_.Exception.Response.StatusCode
+                    }
+                    # 401/403 = portal is serving, just needs auth — that's OK
+                    if ($statusCode -in 401, 403) {
+                        Write-Verbose "InstallPBIRS Test: portal probe returned $statusCode (auth required = serving)"
+                    }
+                    elseif ($statusCode -ge 500) {
+                        Write-Verbose "InstallPBIRS Test: portal probe returned $statusCode — service unhealthy, need re-configure"
+                        return $false
+                    }
+                    else {
+                        Write-Verbose "InstallPBIRS Test: portal probe failed ($statusCode): $($_.Exception.Message)"
+                        return $false
+                    }
+                }
+                finally {
+                    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
+                }
+            }
+            catch {
+                Write-Verbose "InstallPBIRS Test: portal probe exception: $($_.Exception.Message) (treating as unhealthy)"
+                return $false
+            }
+
             return $true
         }
         catch {
