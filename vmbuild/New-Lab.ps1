@@ -604,7 +604,7 @@ try {
     $domainName = $deployConfig.vmOptions.domainName
     $domainLogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
     Write-Log "Starting deployment. Review log:"
-    Write-Host "  $domainLogPath"
+    Write-Host2 "  $domainLogPath"
     try { Flush-LogBuffer -All } catch { }
     $Common.LogPath = $domainLogPath
 
