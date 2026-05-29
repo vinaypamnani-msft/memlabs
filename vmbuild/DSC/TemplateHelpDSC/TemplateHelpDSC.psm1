@@ -5396,13 +5396,12 @@ class DisableClusterNicDnsRegistration {
         $_dc     = $this.DCName
         $needsFix = $false
 
-        # Wrap all checks in a dot-sourced scriptblock piped to Out-Null.
-        # This discards any stray output that cmdlets (Get-Cluster, Resolve-DnsName, etc.)
-        # may leak to the output stream inside a class method, which otherwise pollutes
-        # the return value and causes DSC error:
+        # Wrap all checks in a dot-sourced scriptblock with all streams redirected
+        # to $null. This prevents ANY cmdlet output (verbose, information, etc.)
+        # from leaking into the class method return value, which causes DSC error:
         #   "Test-TargetResource must be the boolean value True or False"
-        # Dot-sourcing keeps $needsFix in the current scope; Out-Null only suppresses
-        # stream 1 (output), so Write-Verbose messages still reach the DSC log.
+        # Dot-sourcing keeps $needsFix in the current scope. Diagnostic details
+        # are only emitted via the final Write-Verbose outside this block.
         . {
 
         # 1. Check adapter DNS registration.
@@ -5571,7 +5570,7 @@ class DisableClusterNicDnsRegistration {
             }
         }
 
-        } | Out-Null  # end of output-suppression wrapper
+        } *> $null  # suppress all streams from cmdlets inside the wrapper
 
         if ($needsFix) {
             Write-Verbose "Test returning FALSE - fixes needed"
