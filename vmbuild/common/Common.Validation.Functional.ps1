@@ -888,22 +888,26 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                         $results.Details.Add("WARN: Agent job check failed: $($_.Exception.Message)")
                     }
 
-                    # 8c. TESTDB log_reuse_wait should not be LOG_BACKUP (means no
-                    #     log backup has ever run — the log will grow unbounded)
-                    $results.Details.Add("CMD: Check TESTDB log reuse wait reason")
+                    # 8c. Run a log backup and verify log space is recycled
+                    $results.Details.Add("CMD: BACKUP LOG [TESTDB] TO DISK = 'NUL' (validate log backup works)")
                     try {
+                        Invoke-Sqlcmd -Query "BACKUP LOG [TESTDB] TO DISK = 'NUL'" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: Log backup of TESTDB completed successfully")
+
+                        # After a successful log backup, log_reuse_wait should no longer be LOG_BACKUP
                         $logQuery = "SELECT log_reuse_wait_desc FROM sys.databases WHERE name = 'TESTDB'"
                         $logResult = Invoke-Sqlcmd -Query $logQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                         $waitReason = $logResult.log_reuse_wait_desc
                         if ($waitReason -eq 'LOG_BACKUP') {
-                            $results.Details.Add("WARN: TESTDB log_reuse_wait is LOG_BACKUP — no log backup has run yet (expected on fresh build)")
+                            $results.Details.Add("WARN: TESTDB log_reuse_wait is still LOG_BACKUP after backup (may need a checkpoint)")
                         }
                         else {
-                            $results.Details.Add("OK: TESTDB log_reuse_wait is '$waitReason' (log backups are cycling)")
+                            $results.Details.Add("OK: TESTDB log_reuse_wait is '$waitReason' (log space recycled)")
                         }
                     }
                     catch {
-                        $results.Details.Add("WARN: Log reuse wait check failed: $($_.Exception.Message)")
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Log backup of TESTDB failed: $($_.Exception.Message)")
                     }
                 }
             }
