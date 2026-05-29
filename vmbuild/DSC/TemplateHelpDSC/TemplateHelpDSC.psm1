@@ -5396,13 +5396,12 @@ class DisableClusterNicDnsRegistration {
         $_dc     = $this.DCName
         $needsFix = $false
 
-        # Wrap all checks in a dot-sourced scriptblock with all streams redirected
-        # to $null. This prevents ANY cmdlet output (verbose, information, etc.)
-        # from leaking into the class method return value, which causes DSC error:
+        # Suppress verbose/information output from cmdlets (Get-Cluster, etc.)
+        # to prevent leaking into the class method return value, which causes:
         #   "Test-TargetResource must be the boolean value True or False"
-        # Dot-sourcing keeps $needsFix in the current scope. Diagnostic details
-        # are only emitted via the final Write-Verbose outside this block.
-        . {
+        # DSC sets $VerbosePreference='Continue', making every cmdlet's internal
+        # Write-Verbose emit to stream 4 — which PS class methods collect as output.
+        $VerbosePreference = 'SilentlyContinue'
 
         # 1. Check adapter DNS registration.
         $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
@@ -5570,7 +5569,7 @@ class DisableClusterNicDnsRegistration {
             }
         }
 
-        } *> $null  # suppress all streams from cmdlets inside the wrapper
+        $VerbosePreference = 'Continue'
 
         if ($needsFix) {
             Write-Verbose "Test returning FALSE - fixes needed"
