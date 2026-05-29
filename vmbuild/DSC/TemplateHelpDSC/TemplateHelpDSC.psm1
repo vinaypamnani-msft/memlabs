@@ -5285,6 +5285,8 @@ class DisableClusterNicDnsRegistration {
         catch { }
         if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
         if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
+        # Strip CIDR mask if present (config stores "10.250.250.98/24").
+        if ($cIP -and $cIP -match '/') { $cIP = $cIP.Split('/')[0] }
 
         if ($cName -and $cIP) {
             try {
@@ -5400,6 +5402,8 @@ class DisableClusterNicDnsRegistration {
         }
         if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName; Write-Verbose "Cluster name (from config): $cName" }
         if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress; Write-Verbose "Cluster IP (from config): $cIP" }
+        # Strip CIDR mask if present (config stores "10.250.250.98/24").
+        if ($cIP -and $cIP -match '/') { $cIP = $cIP.Split('/')[0]; Write-Verbose "Cluster IP (stripped CIDR): $cIP" }
 
         # 4. Validate cluster DNS records.
         if ($cName -and $cIP) {
