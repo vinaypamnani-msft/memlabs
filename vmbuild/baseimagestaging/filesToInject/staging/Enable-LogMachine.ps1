@@ -437,6 +437,21 @@ if (-not (Test-Path $rpLink)) {
     }
 }
 
+# --- Report Server Logs shortcut ---
+if (-not (Test-Path "$desktopPath\Report Server Logs.lnk")) {
+    $rpLogPath = $null
+    # PBIRS default install path
+    if (Test-Path "C:\PBIRS\PBIRS\LogFiles") { $rpLogPath = "C:\PBIRS\PBIRS\LogFiles" }
+    # SSRS default install path
+    if (-not $rpLogPath -and (Test-Path "C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles")) {
+        $rpLogPath = "C:\Program Files\Microsoft SQL Server Reporting Services\SSRS\LogFiles"
+    }
+    if ($rpLogPath) {
+        New-Shortcut -LinkPath "$desktopPath\Report Server Logs.lnk" -TargetPath $rpLogPath | Out-Null
+        $script:shortcutsCreated = $true
+    }
+}
+
 # --- WSUS shortcuts ---
 $wsus = "$env:ProgramFiles\Update Services\AdministrationSnapin\wsus.msc"
 if (Test-Path $wsus) {
