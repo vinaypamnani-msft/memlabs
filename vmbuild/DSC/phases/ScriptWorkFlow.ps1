@@ -369,15 +369,10 @@ if ($scenario -eq "Standalone") {
         . $ScriptFile $ConfigFilePath $LogPath
     }
 
-    if ($Configuration.InstallSUP.Status -ne "Completed") {
-        Write-DscStatus "$scenario Running InstallRoles.ps1"
-        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-        Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
-    }
-    else {
-        Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
-    }
+    Write-DscStatus "$scenario Running InstallRoles.ps1"
+    $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+    Set-Location $LogPath
+    . $ScriptFile $ConfigFilePath $LogPath
 
     # ConfigureCMProxy is cheap and idempotent; always run it so latched
     # Completed state from a deploy that ran before the Proxy was hydrated
@@ -406,15 +401,10 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
-        if ($Configuration.InstallSUP.Status -ne "Completed") {
-            Write-DscStatus "$scenario Running InstallRoles.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-            Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
-        }
-        else {
-            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
-        }
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
@@ -466,15 +456,10 @@ if ($scenario -eq "Hierarchy") {
             . $ScriptFile $ConfigFilePath $LogPath
         }
 
-        if ($Configuration.InstallSUP.Status -ne "Completed") {
-            Write-DscStatus "$scenario Running InstallRoles.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
-            Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
-        }
-        else {
-            Write-DscStatus "$scenario Skipping InstallRoles.ps1 (already completed)"
-        }
+        Write-DscStatus "$scenario Running InstallRoles.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"

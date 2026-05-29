@@ -81,6 +81,43 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $topSite = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq "" }
 $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
+# Early exit: check if all configured roles (RP + SUP) are already installed.
+# InstallRoles.ps1 is called on every ScriptWorkflow pass, so this avoids
+# redundant work when everything is already in place.
+$allRolesInstalled = $true
+
+$rpVMs = @($deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true -and ($_.SiteCode -eq $thisVM.SiteCode -or $_.vmName -eq $thisVM.RemoteSQLVM) })
+foreach ($rp in $rpVMs) {
+    $rpFQDN = $rp.vmName + "." + $DomainFullName
+    if (-not (Get-CMReportingServicePoint -SiteSystemServerName $rpFQDN)) {
+        $allRolesInstalled = $false
+        break
+    }
+}
+
+if ($allRolesInstalled) {
+    $ValidSiteCodes = @($SiteCode)
+    if ($ThisVM.role -eq "Primary") {
+        $ValidSiteCodes += (Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode)
+    }
+    $supVMs = @($deployConfig.virtualMachines | Where-Object { $_.installSUP -eq $true -and $_.siteCode -in $ValidSiteCodes })
+    foreach ($sup in $supVMs) {
+        $supFQDN = $sup.vmName.Trim() + "." + $DomainFullName
+        if (-not (Get-CMSoftwareUpdatePoint -SiteSystemServerName $supFQDN)) {
+            $allRolesInstalled = $false
+            break
+        }
+    }
+}
+
+if ($allRolesInstalled) {
+    Write-DscStatus "All roles (RP + SUP) already installed. Nothing to do."
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    return
+}
+
 # Reporting Install
 Write-DscStatus "Installing Reporting Point"
 $rpFailed = $false
