@@ -1761,19 +1761,8 @@ function Test-Configuration {
         if ($final) {
             Write-Progress2 -Activity "Validating Configuration" -Status "Testing Memory" -PercentComplete 75
 
-            $vms = $deployConfig.virtualMachines
-            $runningVMs = (get-vm | Where-Object { $_.State -eq "Running" }).Name
-            $newvms = @()
-            foreach ($vm in $vms) {
-                if ($vm.vmName -in $runningVMs) {
-                    continue;
-                }
-
-                $newvms += $vm
-            }
-            $totalMemory = $newvms.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-            $totalMemory = $totalMemory.Sum / 1GB
-            $availableMemory = Get-AvailableMemoryGB
+            $totalMemory = ($deployConfig.virtualMachines.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB
+            $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $deployConfig.virtualMachines.vmName
 
             if ($totalMemory -gt $availableMemory) {
                 if (-not $enableDebug) {

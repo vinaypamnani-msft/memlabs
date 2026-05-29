@@ -3319,10 +3319,13 @@ Function Show-Summary {
         Write-Host " [Default Network $($deployConfig.vmOptions.network)]"
         #Write-GreenCheck "Virtual Machine files will be stored in $($deployConfig.vmOptions.basePath) on host machine"
 
-        $totalMemory = $fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum
-        $totalMemory = $totalMemory.Sum / 1GB
-        $availableMemory = Get-AvailableMemoryGB
-        Write-GreenCheck "This configuration will use $($totalMemory)GB out of $($availableMemory)GB Available RAM on host machine [8GB Buffer]"
+        $totalMemory = ($fixedConfig.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB
+        $runningVMNames = (Get-VM | Where-Object { $_.State -eq "Running" }).Name
+        $runningConfigVMs = @($fixedConfig | Where-Object { $_.vmName -in $runningVMNames })
+        $alreadyRunningMemory = if ($runningConfigVMs.Count -gt 0) { ($runningConfigVMs.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum / 1GB } else { 0 }
+        $availableMemory = Get-AvailableMemoryGB -ExcludeVMs $fixedConfig.vmName
+        $runningInfo = if ($alreadyRunningMemory -gt 0) { " ($($alreadyRunningMemory)GB already running)" } else { "" }
+        Write-GreenCheck "This configuration will use $($totalMemory)GB$runningInfo out of $($availableMemory)GB Available RAM on host machine [8GB Buffer]"
     }
 
     if (-not $Common.DevBranch) {

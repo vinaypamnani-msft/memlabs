@@ -3265,9 +3265,27 @@ function New-VirtualMachine {
 }
 
 function Get-AvailableMemoryGB {
-    $availableMemory = Get-CimInstance win32_operatingsystem | Select-Object -Expand FreePhysicalMemory
-    $availableMemory = ($availableMemory - ("8GB" / 1kB)) * 1KB / 1GB
-    $availableMemory = [Math]::Round($availableMemory, 2)
+    param(
+        [Parameter(Mandatory = $false)]
+        [string[]]$ExcludeVMs
+    )
+
+    # Use total physical RAM instead of free memory for a stable, deterministic
+    # calculation that isn't affected by OS cache fluctuations.
+    $totalPhysical = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    $usableBytes = $totalPhysical - 8GB
+
+    # Subtract memory assigned to running Hyper-V VMs, optionally excluding
+    # VMs that belong to the caller's deployment (so their memory stays in the
+    # "available" pool for that deployment's total calculation).
+    $runningVMs = Get-VM | Where-Object { $_.State -eq "Running" }
+    if ($ExcludeVMs) {
+        $runningVMs = $runningVMs | Where-Object { $_.Name -notin $ExcludeVMs }
+    }
+    $runningVMMemory = ($runningVMs | Measure-Object -Property MemoryAssigned -Sum).Sum
+    if (-not $runningVMMemory) { $runningVMMemory = 0 }
+
+    $availableMemory = [Math]::Round(($usableBytes - $runningVMMemory) / 1GB, 2)
     if ($availableMemory -lt 0) {
         $availableMemory = 0
     }
