@@ -3258,7 +3258,7 @@ class InstallFeatureForSCCM {
     [string[]] $Role
 
     [DscProperty(NotConfigurable)]
-    [string] $Version = "7"
+    [string] $Version = "8"
 
     [void] Set() {
         $_Role = $this.Role
@@ -3316,7 +3316,7 @@ class InstallFeatureForSCCM {
             }
 
             if ($_Role -contains "SQLAO") {
-                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt")) {
+                foreach ($f in @("Failover-Clustering", "RSAT-Clustering-PowerShell", "RSAT-Clustering-CmdInterface", "RSAT-Clustering-Mgmt", "RSAT-DNS-Server")) {
                     [void]$features.Add($f)
                 }
             }
