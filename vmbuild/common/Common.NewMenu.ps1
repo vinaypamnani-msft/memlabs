@@ -2215,15 +2215,59 @@ function Start-Navigation {
                     if ($script:_lastHoveredIndex -ge 0) {
                         Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
                     }
-                    # Translate the click into a synthetic Enter keypress on the
-                    # clicked item. The existing keyboard Enter handler below
-                    # processes it — multiselect toggles, D/A/N, single-select
-                    # confirm, delete, etc. — without duplicating any logic here.
                     $selectedIndex = $clickedIndex
                     $buffer = $null
-                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
-                    $key = [pscustomobject]@{ VirtualKeyCode = 13; Character = [char]13 }
+
+                    if ($MultiSelect) {
+                        # In multiselect, clicking a numbered item toggles its
+                        # check mark; clicking A/N toggles all/none; clicking D
+                        # confirms. This mirrors the keyboard handler exactly.
+                        $itemName = $menuItems[$selectedIndex].ItemName
+                        $optionInt = ($itemName -as [int])
+                        if ($optionInt) {
+                            $menuItems[$selectedIndex].MultiSelected = -not $menuItems[$selectedIndex].MultiSelected
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'A') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $true
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'N') {
+                            foreach ($mi2 in $menuItems) {
+                                if ($mi2.Selectable -and ($mi2.ItemName -as [int])) {
+                                    $mi2.MultiSelected = $false
+                                }
+                            }
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
+                            continue
+                        }
+                        elseif ($itemName -eq 'D') {
+                            # Done: collect selected items (same as keyboard D handler)
+                            Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect -Wait
+                            Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                            $return = [array]($menuItems | Where-Object { $_.MultiSelected -eq $true })
+                            if (-not $return) {
+                                return "NOITEMS"
+                            }
+                            return $return
+                        }
+                        # Other letter items: fall through to confirm
+                    }
+
+                    # Single-select (or non-numeric multiselect item): confirm
+                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait -MultiSelect:$MultiSelect
+                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
+                    Set-CursorPosition -X $CPosition.x -Y $CPosition.y
+                    return $menuItems[$selectedIndex]
                 }
                 elseif ($PgIndicatorY -ge 0 -and $key.MouseY -eq $PgIndicatorY) {
                     # Click on the PgUp/PgDn indicator line.
@@ -2258,9 +2302,7 @@ function Start-Navigation {
                     Set-PgIndicatorHoverHighlight -MouseX $key.MouseX -MouseY $key.MouseY -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
                 }
             }
-            # When a click was translated into a synthetic Enter key, $key no
-            # longer has IsMouseEvent, so we fall through to the keyboard handler.
-            if ($key.IsMouseEvent) { continue }
+            continue
         }
 
         # Keyboard event: clear any active hover highlight so arrow/type
