@@ -2163,6 +2163,7 @@ function Start-Navigation {
     Enable-MouseInput
     $script:_lastHoveredIndex = -1
     $script:_lastHoveredPgWord = $null
+    $pendingClickBuffer = $null
     try {
     while ($true) {
         $currentsize = Get-LiveWindowSize
@@ -2172,12 +2173,21 @@ function Start-Navigation {
 
         #Update-Prompt -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
 
-        # Poll-mode keystroke wait: returns $null if window is resized while idle.
-        # Show-Menu's outer loop treats a null return as "redraw" because $return
-        # falsiness skips the action-dispatch branch and re-enters the render path.
-        $key = Get-KeyStroke -WatchSize $startSize
-        if ($null -eq $key) {
-            return
+        if ($null -ne $pendingClickBuffer) {
+            # A mouse click set the buffer to the clicked item's key.
+            # Process it as if the user typed the key and pressed Enter.
+            $buffer = $pendingClickBuffer
+            $pendingClickBuffer = $null
+            $key = [pscustomobject]@{ VirtualKeyCode = 13; Character = [char]13 }
+        }
+        else {
+            # Poll-mode keystroke wait: returns $null if window is resized while idle.
+            # Show-Menu's outer loop treats a null return as "redraw" because $return
+            # falsiness skips the action-dispatch branch and re-enters the render path.
+            $key = Get-KeyStroke -WatchSize $startSize
+            if ($null -eq $key) {
+                return
+            }
         }
         write-log -Verbose -HostOnly "key: $key"
 
@@ -2215,15 +2225,12 @@ function Start-Navigation {
                     if ($script:_lastHoveredIndex -ge 0) {
                         Set-MouseHoverHighlight -menuItems $menuItems -mouseY -1 -MultiSelect:$MultiSelect
                     }
-                    # Translate the click into a synthetic Enter keypress on the
-                    # clicked item. The existing keyboard Enter handler below
-                    # processes it — multiselect toggles, D/A/N, single-select
-                    # confirm, delete, etc. — without duplicating any logic here.
-                    $selectedIndex = $clickedIndex
-                    $buffer = $null
-                    Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -MultiSelect:$MultiSelect
-                    Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer -MenuItems $menuItems -SelectedIndex $selectedIndex
-                    $key = [pscustomobject]@{ VirtualKeyCode = 13; Character = [char]13 }
+                    # Fill the keyboard buffer with the clicked item's key
+                    # (e.g. "C" for "Create new domain"). The next iteration
+                    # skips Get-KeyStroke and feeds this into the existing
+                    # Enter handler's buffer-match logic.
+                    $pendingClickBuffer = $menuItems[$clickedIndex].ItemName
+                    continue
                 }
                 elseif ($PgIndicatorY -ge 0 -and $key.MouseY -eq $PgIndicatorY) {
                     # Click on the PgUp/PgDn indicator line.
@@ -2258,9 +2265,7 @@ function Start-Navigation {
                     Set-PgIndicatorHoverHighlight -MouseX $key.MouseX -MouseY $key.MouseY -PgIndicatorY $PgIndicatorY -PgClickUp:$PgClickUp -PgClickDn:$PgClickDn
                 }
             }
-            # When a click was translated into a synthetic Enter key, $key no
-            # longer has IsMouseEvent, so we fall through to the keyboard handler.
-            if ($key.IsMouseEvent) { continue }
+            continue
         }
 
         # Keyboard event: clear any active hover highlight so arrow/type
@@ -2409,16 +2414,18 @@ function Start-Navigation {
                     $buffer = $null
                     continue
                 }
+                $bufferMatchIdx = 0
                 foreach ($menuItem in $menuItems) {
                     if ($menuItem.ItemName) {
                         if ($menuItem.ItemName.ToString().ToUpperInvariant() -eq $buffer.ToUpperInvariant()) {
-                            $selectedIndex = $i
+                            $selectedIndex = $bufferMatchIdx
                             Set-PointerDisplayAsPerMenu -menuItems $menuItems -selectedIndex $selectedIndex -Wait
                             Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -wait
                             Set-CursorPosition -X $CPosition.x -Y $CPosition.y # Set the cursor position to the current position
                             return $menuItems[$selectedIndex]
                         }
                     }
+                    $bufferMatchIdx++
                 }
                 $selectedIndex = -1
                 Update-Prompt -HelpPosition $HelpPosition -PromptPosition $PromptPosition -buffer $buffer
