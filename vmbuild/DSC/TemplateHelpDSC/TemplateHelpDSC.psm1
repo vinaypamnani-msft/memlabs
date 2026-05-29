@@ -5391,6 +5391,9 @@ class DisableClusterNicDnsRegistration {
     }
 
     [bool] Test() {
+        # Version marker — confirm the deployed code version via file (no stream output).
+        [System.IO.File]::WriteAllText("$env:windir\temp\DnsRegTest.txt", "v4 $((Get-Date).ToString('HH:mm:ss'))")
+
         $_subnet = $this.ClusterSubnet
         $_domain = $this.DomainName
         $_dc     = $this.DCName
