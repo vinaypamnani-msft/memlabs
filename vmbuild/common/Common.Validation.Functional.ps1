@@ -571,6 +571,9 @@ function Test-SQLAOFunctionality {
     $agIP = ''
     $listenerPort = '1500'
 
+    $clusterName = ''
+    $clusterIP = ''
+
     if ($primaryAO) {
         $listenerName = $primaryAO.AlwaysOnListenerName
         $agName = $primaryAO.AlwaysOnGroupName
@@ -583,13 +586,15 @@ function Test-SQLAOFunctionality {
         $fileServerVM = $primaryAO.FileServerVM
         $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
         $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
+        $clusterName = $primaryAO.ClusterName
+        $clusterIP = $primaryAO.ClusterIPAddress   # raw IP without CIDR
     }
 
     $sqlInstName = $CurrentItem.sqlInstanceName
     if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
 
     $scriptBlock = {
-        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName)
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP)
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -622,6 +627,54 @@ function Test-SQLAOFunctionality {
 
                 $quorum = Get-ClusterQuorum -ErrorAction Stop
                 $results.Details.Add("OK: Quorum type '$($quorum.QuorumType)', resource '$($quorum.QuorumResource)'")
+
+                # Validate cluster resource IPs
+                $results.Details.Add("CMD: Validate cluster resource IPs and DNS")
+                $clusterIPRes = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' }
+                foreach ($ipRes in $clusterIPRes) {
+                    $ip = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                    $network = ($ipRes | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
+                    $results.Details.Add("OK: Cluster IP resource '$($ipRes.Name)' = $ip on '$network' ($($ipRes.State))")
+                    if ($ipRes.State -ne 'Online') {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cluster IP resource '$($ipRes.Name)' is $($ipRes.State), expected Online")
+                    }
+                }
+
+                # Validate cluster name DNS points to the correct IP
+                if ($clusterName) {
+                    $results.Details.Add("CMD: Resolve-DnsName '$clusterName'")
+                    $clusterDns = @(Resolve-DnsName -Name $clusterName -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
+                    $resolvedIPs = @($clusterDns | Select-Object -ExpandProperty IPAddress)
+                    if ($resolvedIPs.Count -eq 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
+                    }
+                    else {
+                        $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($resolvedIPs -join ', ')")
+                        if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($resolvedIPs -join ', '))")
+                        }
+                        # Check for stale non-cluster IPs
+                        foreach ($rip in $resolvedIPs) {
+                            if ($clusterIP -and $rip -ne $clusterIP) {
+                                $results.Details.Add("WARN: Cluster DNS has unexpected IP '$rip' (expected '$clusterIP')")
+                            }
+                        }
+                    }
+
+                    # Verify RPC connectivity to cluster name
+                    $results.Details.Add("CMD: Test-NetConnection '$clusterName' -Port 135")
+                    $rpc = Test-NetConnection -ComputerName $clusterName -Port 135 -WarningAction SilentlyContinue
+                    if ($rpc.TcpTestSucceeded) {
+                        $results.Details.Add("OK: RPC port 135 reachable on '$clusterName' ($($rpc.RemoteAddress))")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: RPC port 135 not reachable on '$clusterName' ($($rpc.RemoteAddress)) - cluster management will fail")
+                    }
+                }
             }
             catch {
                 $results.Passed = $false
@@ -985,7 +1038,7 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
-        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName `
+        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
         -DisplayName "Phase11-SQLAO-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
