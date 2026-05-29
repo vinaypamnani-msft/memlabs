@@ -578,6 +578,8 @@ function Install-SRP {
         }
 
     } until ($installed -or $installFailure)
+
+    return (-not $installFailure)
 }
 
 function Write-ScriptWorkFlowData {

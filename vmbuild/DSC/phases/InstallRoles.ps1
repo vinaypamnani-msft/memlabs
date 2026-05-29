@@ -83,6 +83,7 @@ $thisSiteIsTopSite = $topSite.SiteCode -eq $SiteCode
 
 # Reporting Install
 Write-DscStatus "Installing Reporting Point"
+$rpFailed = $false
 foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true } ) {
 
     $thisSiteCode = $thisVM.SiteCode
@@ -137,7 +138,11 @@ foreach ($rp in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq 
     }
 
     Add-ReportingUser -SiteCode $thisSiteCode -UserName $username -Unencrypted $unencrypted
-    Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
+    $rpResult = Install-SRP -ServerSiteCode $thisSiteCode -ServerFQDN $PBIRSMachine -UserName $username -SqlServerName $sqlServerName -DatabaseName $databaseName
+    if ($rpResult -eq $false) {
+        Write-DscStatus "Reporting Point installation failed for $($rp.vmName). InstallRoles will retry on next ScriptWorkflow pass."
+        $rpFailed = $true
+    }
 }
 
 # End Reporting Install
@@ -193,15 +198,23 @@ foreach ($SUP in $SUPs) {
 }
 if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
     Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
-    $Configuration.InstallSUP.Status = 'Completed'
-    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    if (-not $rpFailed) {
+        $Configuration.InstallSUP.Status = 'Completed'
+        $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    } else {
+        Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+    }
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }
 if ($SUPs.Count -eq 0) {
     Write-DscStatus "No SUPs configured. Skipping SUP install."
-    $Configuration.InstallSUP.Status = 'Completed'
-    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    if (-not $rpFailed) {
+        $Configuration.InstallSUP.Status = 'Completed'
+        $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    } else {
+        Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+    }
     $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     return
 }
@@ -319,8 +332,13 @@ if ($configureSUP) {
         }                         
     }
 }
-$Configuration.InstallSUP.Status = 'Completed'
-$Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+
+if (-not $rpFailed) {
+    $Configuration.InstallSUP.Status = 'Completed'
+    $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+} else {
+    Write-DscStatus "Not marking InstallSUP as Completed because Reporting Point failed."
+}
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # CM site-role proxy is now applied by phases/ConfigureCMProxy.ps1, invoked
