@@ -1978,16 +1978,15 @@ class DownloadFile {
     }
 
     [bool] Test() {
-        #if (!(Test-Path $this.FilePath)) {
-        #    return $false
-        #}
+        if (!(Test-Path $this.FilePath)) {
+            return $false
+        }
 
-        #If (!(Get-Item $this.FilePath).length -gt 0kb) {
-        #    return $false
-        #}
+        if (!((Get-Item $this.FilePath).Length -gt 0)) {
+            return $false
+        }
 
-        #Let logic in Invoke-DownloadFile handle this
-        return $false
+        return $true
     }
 
     [DownloadFile] Get() {
