@@ -1785,8 +1785,8 @@ function Set-MouseHoverHighlight {
         }
 
         # Build line: [key]  text  (same layout as Write-Option)
-        $pad = " " * [Math]::Max(0, 4 - $item.ItemName.Length)
-        $line = "${msPrefix}[$($item.ItemName)]${pad}${hoverText}"
+        $bracketSuffix = "] ".PadRight([Math]::Max(0, 4 - $item.ItemName.Length))
+        $line = "${msPrefix}[$($item.ItemName)${bracketSuffix}${hoverText}"
 
         # Truncate to fit terminal width (mirror Write-Option's truncation)
         $termWidth = 0
