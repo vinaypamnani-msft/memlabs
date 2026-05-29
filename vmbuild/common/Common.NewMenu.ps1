@@ -1755,21 +1755,23 @@ function Set-MouseHoverHighlight {
         }
     }
 
-    # Highlight the new hovered item with underline + dark background.
-    # Uses ANSI underline (ESC[4m) and a dark-gray background (ESC[48;5;236m)
-    # so the hover is visible regardless of the item's foreground color.
+    # Highlight the new hovered item with the dedicated hover color.
+    # Uses GenConfigHover (HotPink) which is deliberately not used by any
+    # menu item color, so the highlight is always visually distinct.
     # Only the text from column 3 onward is redrawn; columns 0-2 are never touched.
     if ($hoveredIndex -ge 0) {
         $item = $menuItems[$hoveredIndex]
+        $hoverColor = $Global:Common.Colors.GenConfigHover
         Set-CursorPosition -x 3 -y $item.CurrentPosition
         Write-Host "`e[K" -NoNewline
         Set-CursorPosition -x 3 -y $item.CurrentPosition
-        # Enable underline + background before rendering, reset after.
-        Write-Host "`e[4m`e[48;5;236m" -NoNewline
-        Write-Option $item.ItemName $item.Text -color $item.Color1 -Color2 $item.Color1 -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
-        # Move back to end of the rendered line and reset attributes so the
-        # underline/background don't bleed into subsequent output.
-        Write-Host "`e[0m" -NoNewline
+        # Strip any embedded ANSI color sequences so the hover color applies
+        # uniformly. Items with hardcoded ANSI (e.g. domain stats lines)
+        # would otherwise keep their original colors and ignore the hover.
+        $hoverText = if ($item.Text -and $item.Text.Contains([char]27)) {
+            (Get-AnsiCsiPattern).Replace($item.Text, '')
+        } else { $item.Text }
+        Write-Option $item.ItemName $hoverText -color $hoverColor -Color2 $hoverColor -MultiSelect:$MultiSelect -MultiSelected:$item.MultiSelected
     }
 
     $script:_lastHoveredIndex = $hoveredIndex

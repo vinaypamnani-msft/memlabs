@@ -249,6 +249,9 @@ function Get-Colors {
         #"Tip: You can enable Configuration Manager High Availability by editing the properties of a CAS or Primary VM, and selecting ""H"""
         GenConfigTip               = "Violet"
 
+        # Mouse hover highlight (must not match any other GenConfig color)
+        GenConfigHover             = "HotPink"
+
         # Prompt
         GenConfigPrompt            = "SkyBlue"
         GenConfigPromptCurrentItem = "PaleGoldenRod"
