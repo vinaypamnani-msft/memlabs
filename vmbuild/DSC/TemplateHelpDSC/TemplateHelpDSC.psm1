@@ -5392,7 +5392,11 @@ class DisableClusterNicDnsRegistration {
 
     [bool] Test() {
         # Version marker — confirm the deployed code version via file (no stream output).
-        [System.IO.File]::WriteAllText("$env:windir\temp\DnsRegTest.txt", "v4 $((Get-Date).ToString('HH:mm:ss'))")
+        [System.IO.File]::WriteAllText("$env:windir\temp\DnsRegTest.txt", "v5-minimal $((Get-Date).ToString('HH:mm:ss'))")
+
+        # TEMPORARY: return $false to isolate whether the method body causes the
+        # DSC "must be boolean" error, or the issue is in the class/resource itself.
+        return $false
 
         $_subnet = $this.ClusterSubnet
         $_domain = $this.DomainName
