@@ -3641,7 +3641,11 @@ class ClusterRemoveUnwantedIPs {
                     start-sleep 60
                 }
             }
-            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            # Only clean IPs from the "Cluster Group" (the cluster's own identity).
+            # Do NOT touch IP resources in AG listener groups — those belong to
+            # the availability group and use domain-subnet IPs by design.
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $ResourcesToRemove = ($clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
                     Write-Status "Cluster Removing $($resource.Name)"
@@ -3686,7 +3690,8 @@ class ClusterRemoveUnwantedIPs {
                     start-sleep 60
                 }
             }
-            $ResourcesToRemove = ($Cluster | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+            $ResourcesToRemove = ($clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
 
             if ($ResourcesToRemove) {
                 return $false
