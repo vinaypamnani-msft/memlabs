@@ -2144,8 +2144,10 @@ $global:VM_Config = {
                     $percent = [Math]::Min($attempts, $maxAttempts)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
 
-                    # Periodically fetch detailed status from stuck nodes (every 15 attempts, plus first attempt)
-                    $detailedCheck = ($attempts -eq 1 -or ($attempts % 15) -eq 0)
+                    # Periodically check DSC_Init.log to see if DSC_ClearStatus started/progressed.
+                    # Do NOT read DSC_Status.txt here - it contains stale content from the previous
+                    # phase until DSC_ClearStatus deletes it, which is exactly what this loop waits for.
+                    $detailedCheck = ($attempts -ge 15 -and ($attempts % 15) -eq 0)
 
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
@@ -2158,23 +2160,15 @@ $global:VM_Config = {
                                 Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $errDetail" -Warning
                             }
                             elseif ($detailedCheck) {
-                                # Read the status file content to see what the node is stuck on
-                                $statusResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
-                                    $info = @{}
-                                    $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
-                                    $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 5 -ErrorAction SilentlyContinue
-                                    $info
-                                } -DisplayName "DSC: Diagnose Node Status"
-                                if (-not $statusResult.ScriptBlockFailed -and $statusResult.ScriptBlockOutput) {
-                                    $diag = $statusResult.ScriptBlockOutput
-                                    $statusText = if ($diag.StatusContent) { $diag.StatusContent } else { '(empty)' }
-                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_Status: $statusText"
-                                    if ($diag.InitLogTail) {
-                                        Write-Log "[Phase $Phase]: Node $node DSC_Init.log tail: $($diag.InitLogTail -join ' | ')" -LogOnly
-                                    }
+                                # Only read DSC_Init.log (written at the start of DSC_ClearStatus) to check cleanup progress
+                                $initResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
+                                    Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 5 -ErrorAction SilentlyContinue
+                                } -DisplayName "DSC: Check Init Log"
+                                if (-not $initResult.ScriptBlockFailed -and $initResult.ScriptBlockOutput) {
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_Init.log tail: $($initResult.ScriptBlockOutput -join ' | ')"
                                 }
                                 else {
-                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). File Exists: $($result.ScriptBlockOutput)"
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_ClearStatus may not have started yet."
                                 }
                             }
                             else {
@@ -2196,18 +2190,17 @@ $global:VM_Config = {
 
                     if ($attempts -eq 80) {
                         foreach ($node in $nodeList) {
-                            # Log diagnostics before rebooting
+                            # Log DSC_Init.log before rebooting to see what DSC_ClearStatus did
                             Write-Log "[Phase $Phase]: Rebooting stuck node $node at attempt $attempts" -Warning
                             $preRebootResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
                                 $info = @{}
-                                $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
                                 $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 10 -ErrorAction SilentlyContinue
                                 $info.LcmState = try { (Get-DscLocalConfigurationManager).LCMState } catch { 'Unknown' }
                                 $info
                             } -DisplayName "DSC: Pre-Reboot Diagnostics"
                             if (-not $preRebootResult.ScriptBlockFailed -and $preRebootResult.ScriptBlockOutput) {
                                 $diag = $preRebootResult.ScriptBlockOutput
-                                Write-Log "[Phase $Phase]: Node $node pre-reboot: DSC_Status='$($diag.StatusContent)' LCM='$($diag.LcmState)'" -Warning
+                                Write-Log "[Phase $Phase]: Node $node pre-reboot: LCM='$($diag.LcmState)'" -Warning
                                 if ($diag.InitLogTail) {
                                     Write-Log "[Phase $Phase]: Node $node DSC_Init.log (last 10 lines):" -LogOnly
                                     foreach ($logLine in $diag.InitLogTail) { Write-Log "  $logLine" -LogOnly }
@@ -2228,7 +2221,9 @@ $global:VM_Config = {
                 } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
-                    # Gather final diagnostics from each stuck node
+                    # Gather final diagnostics from each stuck node.
+                    # After 150 attempts + a reboot, DSC_ClearStatus has either completed or failed,
+                    # so reading DSC_Status.txt here is safe - its presence means cleanup genuinely failed.
                     foreach ($node in $nodeList) {
                         Write-Log "[Phase $Phase]: FINAL DIAGNOSTICS for stuck node $node" -Failure
                         $diagResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
