@@ -71,6 +71,9 @@ function Install-MRemoteNG {
         }
     }
 
+    # Enable description tooltips in the connection tree so hovering shows VM info.
+    Set-MRemoteNGSettings -InstallDir (Split-Path $mRemoteNGExe)
+
     # Workaround: mRemoteNG 1.78.2 /cons: CLI argument is broken — GetStartupConnectionFileName()
     # reads OptionsConnectionsPage.Default.ConnectionFilePath but /cons: writes to the old
     # OptionsBackupPage.Default.BackupLocation (dead code path). Symlink the default confCons.xml
@@ -102,6 +105,218 @@ function Install-MRemoteNG {
                 Write-Log "Could not create symlink at $defaultFile`: $_" -Warning -LogOnly
             }
         }
+    }
+}
+
+function Format-MRemoteNGTooltip {
+    # Build a human-readable multi-line description for mRemoteNG connection tooltips.
+    # Replaces the raw JSON blob so hovering a connection shows useful VM info at a glance.
+    param(
+        [PSCustomObject]$Vm,
+        [string]$CmVersion = "",
+        [PSCustomObject[]]$VmListFull = @(),
+        [string]$ResolvedIp = ""
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $vmIsLinux = Test-VmIsLinux -Vm $Vm
+
+    # --- Line 1: Role description ---
+    $roleLabel = switch ($Vm.Role) {
+        'DC'               { 'Domain Controller' }
+        'BDC'              { 'Backup Domain Controller' }
+        'CAS'              { 'CAS Site Server' }
+        'Primary'          { 'Primary Site Server' }
+        'Secondary'        { 'Secondary Site Server' }
+        'PassiveSite'      { 'Passive Site Server' }
+        'SiteSystem'       { 'Site System' }
+        'DomainMember'     { if ($Vm.deployedOS -match 'Server') { 'Domain Member (Server)' } else { 'Domain Member (Client)' } }
+        'WorkgroupMember'  { 'Workgroup Member' }
+        'InternetClient'   { 'Internet Client' }
+        'AADClient'        { 'Entra ID Client' }
+        'OSDClient'        { 'OSD Client' }
+        'WSUS'             { 'WSUS Server' }
+        'FileServer'       { 'File Server' }
+        'SQLAO'            { 'SQL Always On' }
+        'StandaloneRootCA' { 'Standalone Root CA' }
+        'Proxy'            { 'Proxy' }
+        'LinuxServer'      { 'Linux Server' }
+        'LinuxClient'      { 'Linux Client' }
+        default            { $Vm.Role }
+    }
+    $os = if ($Vm.deployedOS) { $Vm.deployedOS } elseif ($Vm.operatingSystem) { $Vm.operatingSystem } else { '' }
+    if ($os) { $lines.Add("$roleLabel  `u{2022}  $os") } else { $lines.Add($roleLabel) }
+
+    # --- Line 2: IP / Memory / vCPUs ---
+    $infoParts = @()
+    $ip = if (-not [string]::IsNullOrWhiteSpace($ResolvedIp)) { $ResolvedIp } elseif ($Vm.LastKnownIP) { $Vm.LastKnownIP } else { $null }
+    if ($ip) { $infoParts += "IP: $ip" }
+    if ($Vm.memory) { $infoParts += "$($Vm.memory) RAM" }
+    if ($Vm.virtualProcs) {
+        $cpuLabel = if ([int]$Vm.virtualProcs -eq 1) { 'vCPU' } else { 'vCPUs' }
+        $infoParts += "$($Vm.virtualProcs) $cpuLabel"
+    }
+    if ($infoParts.Count -gt 0) { $lines.Add($infoParts -join '  `u{2022}  ') }
+
+    # --- Domain ---
+    if ($Vm.Domain) { $lines.Add("Domain: $($Vm.Domain)") }
+
+    # --- Site info (CM roles) ---
+    if ($Vm.SiteCode) {
+        $siteLine = "Site: $($Vm.SiteCode)"
+        if ($Vm.ParentSiteCode) { $siteLine += " -> $($Vm.ParentSiteCode)" }
+        if ($Vm.siteName) { $siteLine += " ($($Vm.siteName))" }
+        $lines.Add($siteLine)
+    }
+    if ($CmVersion -and $Vm.Role -in 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite') {
+        $lines.Add("ConfigMgr: $CmVersion")
+    }
+
+    # --- SQL ---
+    if ($Vm.SqlVersion) {
+        $sqlLine = "SQL: $($Vm.SqlVersion)"
+        if ($Vm.sqlInstanceName -and $Vm.sqlInstanceName -ne 'MSSQLSERVER') { $sqlLine += " ($($Vm.sqlInstanceName))" }
+        if ($Vm.RemoteSQLVM) { $sqlLine += " (remote: $($Vm.RemoteSQLVM))" }
+        $lines.Add($sqlLine)
+    } elseif ($Vm.Role -in 'CAS', 'Primary' -and $VmListFull.Count -gt 0) {
+        # Show remote SQL if this site server uses one
+        $remoteSql = $Vm.RemoteSQLVM
+        if ($remoteSql) {
+            $sqlVm = $VmListFull | Where-Object { $_.vmName -eq $remoteSql } | Select-Object -First 1
+            $sqlLine = "SQL: $remoteSql"
+            if ($sqlVm.SqlVersion) { $sqlLine += " ($($sqlVm.SqlVersion))" }
+            $lines.Add($sqlLine)
+        }
+    }
+
+    # --- SQLAO details ---
+    if ($Vm.Role -eq 'SQLAO') {
+        if ($Vm.OtherNode) { $lines.Add("AG Partner: $($Vm.OtherNode)") }
+        if ($Vm.AlwaysOnListenerName) { $lines.Add("Listener: $($Vm.AlwaysOnListenerName)") }
+        if ($Vm.ClusterName) { $lines.Add("Cluster: $($Vm.ClusterName)") }
+    }
+
+    # --- Site System roles ---
+    if ($Vm.Role -eq 'SiteSystem') {
+        $sr = @()
+        if ($Vm.installMP)     { $sr += 'MP' }
+        if ($Vm.installDP)     { $sr += 'DP' }
+        if ($Vm.installSUP -or $Vm.InstallSUP) { $sr += 'SUP' }
+        if ($Vm.InstallRP)     { $sr += 'RP' }
+        if ($Vm.InstallSMSProv) { $sr += 'SMS Provider' }
+        if ($sr.Count -gt 0)   { $lines.Add("Roles: $($sr -join ', ')") }
+    } else {
+        # Non-SiteSystem with SUP (e.g. Primary w/ co-located SUP)
+        if ($Vm.installSUP -or $Vm.InstallSUP) { $lines.Add('WSUS / SUP co-located') }
+    }
+
+    # --- Features ---
+    $features = @()
+    if ($Vm.InstallCA) {
+        $caLabel = 'Issuing CA'
+        if ($Vm.SubordinateCA -or $Vm.UseOfflineRoot) { $caLabel += ' (Subordinate)' }
+        $features += $caLabel
+    }
+    if ($Vm.tpmEnabled)  { $features += 'TPM' }
+    if ($Vm.BitLocker)   { $features += 'BitLocker' }
+    if ($Vm.useProxy)    { $features += 'Proxy' }
+    if ($Vm.enablePullDP) { $features += 'Pull DP' }
+    if ($Vm.InstallRP -and $Vm.Role -ne 'SiteSystem') { $features += 'Reporting Point' }
+    if ($features.Count -gt 0) { $lines.Add($features -join '  `u{2022}  ') }
+
+    # --- User ---
+    if ($Vm.domainUser) { $lines.Add("User: $($Vm.domainUser)") }
+
+    # --- Linux extras ---
+    if ($vmIsLinux) {
+        if ($Vm.Role -eq 'Proxy') {
+            $lines.Add("Squid logs: /var/log/squid")
+            if ($ip) { $lines.Add("Proxy Admin: http://${ip}:8443") }
+        }
+        $rdpOn = ($Vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$Vm.enableRDP
+        if ($rdpOn) { $lines.Add('xRDP enabled') }
+        $joinOn = ($Vm.PSObject.Properties.Name -contains 'joinDomain') -and [bool]$Vm.joinDomain
+        if ($joinOn) { $lines.Add('AD domain joined') }
+    }
+
+    # --- Network ---
+    if ($Vm.network) { $lines.Add("Network: $($Vm.network)") }
+
+    return ($lines -join "`n")
+}
+
+function Set-MRemoteNGSettings {
+    # Enable ShowDescriptionTooltipsInTree in mRemoteNG settings.
+    # Handles both portable (mRemoteNG.settings next to exe) and
+    # non-portable (user.config in %LocalAppData%) editions.
+    param([string]$InstallDir)
+
+    if (-not $InstallDir) { return }
+
+    $settingName = 'ShowDescriptionTooltipsInTree'
+
+    # --- Portable edition: mRemoteNG.settings ---
+    $portableFile = Join-Path $InstallDir 'mRemoteNG.settings'
+    try {
+        if (Test-Path $portableFile) {
+            [xml]$sx = Get-Content -Path $portableFile -Raw
+        }
+        else {
+            [xml]$sx = '<?xml version="1.0" encoding="utf-8"?><settings><localSettings></localSettings><globalSettings></globalSettings></settings>'
+        }
+        $local = $sx.SelectSingleNode('//localSettings')
+        if (-not $local) {
+            $local = $sx.CreateElement('localSettings')
+            [void]$sx.DocumentElement.AppendChild($local)
+        }
+        $node = $local.SelectSingleNode("setting[@name='$settingName']")
+        if (-not $node) {
+            $node = $sx.CreateElement('setting')
+            $node.SetAttribute('name', $settingName)
+            $node.InnerText = 'True'
+            [void]$local.AppendChild($node)
+            $sx.Save($portableFile)
+            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+        }
+        elseif ($node.InnerText -ne 'True') {
+            $node.InnerText = 'True'
+            $sx.Save($portableFile)
+            Write-Log "mRemoteNG: enabled $settingName in portable settings" -LogOnly -Verbose
+        }
+    }
+    catch {
+        Write-Log "mRemoteNG: could not update portable settings: $_" -Warning -LogOnly
+    }
+
+    # --- Non-portable edition: user.config in %LocalAppData% ---
+    try {
+        $userConfigs = @(Get-ChildItem -Path "$env:LOCALAPPDATA\mRemoteNG" -Filter 'user.config' -Recurse -ErrorAction SilentlyContinue)
+        foreach ($uc in $userConfigs) {
+            [xml]$ucx = Get-Content -Path $uc.FullName -Raw
+            $sectionPath = '//userSettings/mRemoteNG.Properties.OptionsAppearancePage'
+            $section = $ucx.SelectSingleNode($sectionPath)
+            if (-not $section) { continue }
+            $existing = $section.SelectSingleNode("setting[@name='$settingName']")
+            if (-not $existing) {
+                $el = $ucx.CreateElement('setting')
+                $el.SetAttribute('name', $settingName)
+                $el.SetAttribute('serializeAs', 'String')
+                $val = $ucx.CreateElement('value')
+                $val.InnerText = 'True'
+                [void]$el.AppendChild($val)
+                [void]$section.AppendChild($el)
+                $ucx.Save($uc.FullName)
+                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+            }
+            elseif ($existing.value -ne 'True') {
+                $existing.value = 'True'
+                $ucx.Save($uc.FullName)
+                Write-Log "mRemoteNG: enabled $settingName in $($uc.FullName)" -LogOnly -Verbose
+            }
+        }
+    }
+    catch {
+        Write-Log "mRemoteNG: could not update user.config: $_" -Warning -LogOnly
     }
 }
 
@@ -790,14 +1005,7 @@ function New-MRemoteNGFileFromHyperV {
                 $sshDisplayName = "$($vm.VmName) [Linux SSH]"
                 if ($vm.SiteCode) { $sshDisplayName += " ($($vm.SiteCode))" }
 
-                $cSSH = [PSCustomObject]@{}
-                foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                    $cSSH | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-                }
-                $commentValue = "Linux"
-                if ($vm.Role -eq 'Proxy') { $commentValue = "Linux - Squid logs: /var/log/squid | Proxy Admin: http://${sshHost}:8443" }
-                $cSSH | Add-Member -MemberType NoteProperty -Name "Comment" -Value $commentValue -Force
-                $sshComment = ($cSSH | ConvertTo-Json -Depth 4 -Compress)
+                $sshComment = Format-MRemoteNGTooltip -Vm $vm -ResolvedIp $sshHost
 
                 if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxContainer `
                         -Name $vm.VmName -DisplayName $sshDisplayName -Hostname $sshHost `
@@ -840,52 +1048,7 @@ function New-MRemoteNGFileFromHyperV {
             # --- Windows VMs ---
             Write-Verbose "mRemoteNG: Adding VM $($vm.VmName)"
 
-            $c = [PSCustomObject]@{}
-            foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                $c | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-            }
-
-            # Set Comment property for description (mirrors RDCMan logic)
-            if ($vm.Role -eq "DomainMember" -or $vm.Role -eq "WorkgroupMember") {
-                $deployedOS = $vm.deployedOS
-                $isServer = $deployedOS -match "Server"
-                if ($null -eq $vm.SqlVersion -and $isServer) {
-                    if ($vm.InstallCA) {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "IssuingCA" -Force
-                    }
-                    else {
-                        $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
-                    }
-                }
-                elseif (-not $isServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberClient" -Force
-                }
-            }
-            if ($vm.Role -eq "WSUS") {
-                if ($vm.installSUP) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SUPForSiteServer" -Value "$($vm.SiteCode)" -Force
-                }
-                else {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
-                }
-            }
-            if ($vm.SqlVersion) {
-                $PrimaryNode = $vm
-                if ($vm.role -eq "SQLAO") {
-                    if (-not $vm.OtherNode) {
-                        $primaryNode = $vmListFull | Where-Object { $_.OtherNode -eq $vm.vmName }
-                    }
-                }
-                $SiteServer = $vmListFull | Where-Object { $_.RemoteSQLVM -eq $PrimaryNode.vmName -and $_.Role -in "Primary", "CAS" }
-                if ($SiteServer) {
-                    $c | Add-Member -MemberType NoteProperty -Name "SQLForSiteServer" -Value "$($SiteServer.SiteCode)" -Force
-                }
-                elseif ($vm.Role -eq "DomainMember") {
-                    $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -Force
-                }
-            }
-
-            $comment = $c | ConvertTo-Json -Depth 4 -Compress
+            $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
             $ForceOverwrite = $true
             $vmID = $null
@@ -991,7 +1154,7 @@ function New-MRemoteNGFileFromHyperV {
 
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
                     -Name $name -DisplayName $displayName -Hostname $name `
-                    -Protocol "RDP" -Port "3389" -Description $comment.ToString() `
+                    -Protocol "RDP" -Port "3389" -Description $comment `
                     -Username $connUsername -Domain $connDomain -Password $connPassword `
                     -GuidSeed "rdp:${domain}:$($vm.VmName)" `
                     -VmId $(if ($vmID) { $vmID } else { "" }) `
@@ -1052,11 +1215,7 @@ function New-MRemoteNGFileFromHyperV {
         Write-Verbose "mRemoteNG: Adding Unknown VMs"
         $unknownContainer = Get-MRemoteNGContainerForDomain -Doc $doc -Domain "UnknownVMs" -Username "" -Password ""
         foreach ($vm in $unknownVMs) {
-            $c = [PSCustomObject]@{}
-            foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
-                $c | Add-Member -MemberType NoteProperty -Name $item.Name -Value $vm."$($item.Name)" -Force
-            }
-            $comment = $c | ConvertTo-Json -Depth 4 -Compress
+            $comment = Format-MRemoteNGTooltip -Vm $vm
             $displayName = $vm.VmName
 
             $protocol = "RDP"
@@ -1080,7 +1239,7 @@ function New-MRemoteNGFileFromHyperV {
 
             if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $unknownContainer `
                     -Name $vm.VmName -DisplayName $displayName -Hostname $hostname `
-                    -Protocol $protocol -Port $port -Description $comment.ToString() `
+                    -Protocol $protocol -Port $port -Description $comment `
                     -GuidSeed "${protocol}:unknown:$($vm.VmName)" `
                     -ForceOverwrite $false) {
                 $shouldSave = $true
