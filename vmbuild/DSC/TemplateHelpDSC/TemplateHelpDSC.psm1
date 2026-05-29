@@ -4310,6 +4310,39 @@ class InstallPBIRS {
             }
 
 
+            # Pre-flight: if the ReportServer database already exists but is
+            # corrupt (e.g. missing dbo.Subscriptions), Set-RsDatabase's upgrade
+            # scripts will fail. Drop the corrupt DB so Set-RsDatabase creates a
+            # clean one instead of trying to upgrade.
+            try {
+                $checkConn = New-Object System.Data.SqlClient.SqlConnection
+                $checkConn.ConnectionString = "Server=$($this.SqlServer);Database=master;Integrated Security=True;TrustServerCertificate=True"
+                $checkConn.Open()
+                $checkCmd = $checkConn.CreateCommand()
+                $checkCmd.CommandText = "SELECT DB_ID('ReportServer')"
+                $dbExists = $checkCmd.ExecuteScalar()
+                if ($null -ne $dbExists -and $dbExists -ne [DBNull]::Value) {
+                    $checkCmd.CommandText = "SELECT OBJECT_ID('ReportServer.dbo.Subscriptions')"
+                    $tblExists = $checkCmd.ExecuteScalar()
+                    if ($null -eq $tblExists -or $tblExists -eq [DBNull]::Value) {
+                        Write-Status "ReportServer database exists but is corrupt (dbo.Subscriptions missing). Dropping and re-creating."
+                        Stop-Service -Name 'PowerBIReportServer' -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 3
+                        foreach ($dbName in 'ReportServerTempDB', 'ReportServer') {
+                            $checkCmd.CommandText = "IF DB_ID('$dbName') IS NOT NULL BEGIN ALTER DATABASE [$dbName] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$dbName]; END"
+                            $checkCmd.ExecuteNonQuery() | Out-Null
+                            Write-Status "Dropped corrupt database $dbName"
+                        }
+                        Start-Service -Name 'PowerBIReportServer' -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                    }
+                }
+                $checkConn.Close()
+            }
+            catch {
+                Write-Status "Warning: could not check ReportServer database health: $($_.Exception.Message)"
+            }
+
             try {
                 Write-Status "Calling Set-RsDatabase"
                 if ($this.IsRemoteDatabaseServer) {
@@ -4399,6 +4432,36 @@ class InstallPBIRS {
                 Get-Service | Where-Object { $_.Name -eq "SQLSERVERAGENT" -or $_.Name -like "SqlAgent*" } | Start-Service
             }
             catch {}
+
+            # Post-install SOAP health probe: since LCM will not call Test()
+            # again after Set(), verify the portal is actually functional now.
+            # If the database is still corrupt the probe will fail and we throw
+            # so DSC marks this resource as failed rather than silently passing.
+            if (-not $needsReboot) {
+                Start-Sleep -Seconds 10
+                $scheme = if ($this.TemplateName) { 'https' } else { 'http' }
+                $probeFqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
+                $soapUri = "$scheme`://$probeFqdn/ReportServer/ReportService2005.asmx"
+                $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                try {
+                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                    $itemType = $ssrsProxy.GetItemType("/")
+                    if ($itemType -eq 'Folder') {
+                        Write-Status "PBIRS SOAP health check passed after install."
+                    }
+                    else {
+                        throw "PBIRS SOAP health check: unexpected root type '$itemType'"
+                    }
+                }
+                catch {
+                    Write-Status "PBIRS SOAP health check FAILED after install: $($_.Exception.Message)"
+                    throw "PBIRS installed but portal is not functional. SOAP probe at $soapUri failed: $($_.Exception.Message)"
+                }
+                finally {
+                    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
+                }
+            }
 
             if ($needsReboot) {
                 Write-Status "Requesting reboot for pending PBIRS prerequisite updates (exit 3010)."
