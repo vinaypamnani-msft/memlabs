@@ -561,7 +561,36 @@ function Test-SQLAOFunctionality {
 
     Write-Log "[Phase $Phase] $VMName [SQLAO]: Testing Availability Group health" -LogOnly
 
+    # Gather SQLAO config from the primary node definition (the one with OtherNode)
+    $primaryAO = $DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode }
+    $listenerName = ''
+    $agName = ''
+    $otherNode = ''
+    $witnessShare = ''
+    $backupShare = ''
+    $agIP = ''
+    $listenerPort = '1500'
+
+    if ($primaryAO) {
+        $listenerName = $primaryAO.AlwaysOnListenerName
+        $agName = $primaryAO.AlwaysOnGroupName
+        $agIP = $primaryAO.AGIPAddress   # without CIDR
+        # "Other node" relative to THIS VM
+        $otherNode = if ($VMName -eq $primaryAO.vmName) { $primaryAO.OtherNode } else { $primaryAO.vmName }
+        # Derive share UNC paths (same logic as Get-SQLAOConfig)
+        $prefix = $DeployConfig.vmOptions.prefix
+        $clusterNameNoPrefix = $primaryAO.ClusterName.Replace($prefix, "")
+        $fileServerVM = $primaryAO.FileServerVM
+        $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
+        $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
+    }
+
+    $sqlInstName = $CurrentItem.sqlInstanceName
+    if (-not $sqlInstName) { $sqlInstName = 'MSSQLSERVER' }
+
     $scriptBlock = {
+        param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName)
+
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         try {
@@ -570,11 +599,40 @@ function Test-SQLAOFunctionality {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
 
-            # ----------------------------------------------------------
-            # Remediation pass: fix common issues before testing health
-            # ----------------------------------------------------------
+            # ==============================================================
+            # 1. Failover Cluster health
+            # ==============================================================
+            $results.Details.Add("CMD: Get-Cluster / Get-ClusterNode / Get-ClusterQuorum")
+            try {
+                Import-Module FailoverClusters -ErrorAction SilentlyContinue
+                $cluster = Get-Cluster -ErrorAction Stop
+                $results.Details.Add("OK: Cluster '$($cluster.Name)' is online")
 
-            # 1. Resume any suspended availability databases
+                $nodes = @(Get-ClusterNode -ErrorAction Stop)
+                $downNodes = @($nodes | Where-Object { $_.State -ne 'Up' })
+                if ($downNodes.Count -gt 0) {
+                    $results.Passed = $false
+                    foreach ($n in $downNodes) {
+                        $results.Details.Add("FAIL: Cluster node '$($n.Name)' is $($n.State)")
+                    }
+                }
+                else {
+                    $results.Details.Add("OK: All $($nodes.Count) cluster node(s) are Up ($($nodes.Name -join ', '))")
+                }
+
+                $quorum = Get-ClusterQuorum -ErrorAction Stop
+                $results.Details.Add("OK: Quorum type '$($quorum.QuorumType)', resource '$($quorum.QuorumResource)'")
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Cluster health check failed: $($_.Exception.Message)")
+            }
+
+            # ==============================================================
+            # 2. Remediation pass: fix common issues before testing AG health
+            # ==============================================================
+
+            # 2a. Resume any suspended availability databases
             $suspendedQuery = @"
 SELECT adb.database_name, ag.name AS GroupName, drs.synchronization_state_desc
 FROM sys.dm_hadr_database_replica_states drs
@@ -599,7 +657,7 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
                 Start-Sleep -Seconds 10
             }
 
-            # 2. Check endpoint state and restart if stopped
+            # 2b. Check endpoint state and restart if stopped
             $epQuery = "SELECT name, state_desc FROM sys.database_mirroring_endpoints"
             $endpoints = @(Invoke-Sqlcmd -Query $epQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
             foreach ($ep in $endpoints) {
@@ -616,9 +674,9 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
                 }
             }
 
-            # ----------------------------------------------------------
-            # Health check with retry — allow time for remediation to settle
-            # ----------------------------------------------------------
+            # ==============================================================
+            # 3. AG replica health check with retry
+            # ==============================================================
             $healthQuery = @"
 SELECT ag.name AS GroupName,
        rs.role_desc AS Role,
@@ -660,7 +718,7 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                 }
             }
 
-            # 3. Collect DB-level sync state for diagnostics if still unhealthy
+            # 3b. Collect DB-level sync state for diagnostics if still unhealthy
             if (-not $healthy) {
                 $dbStateQuery = @"
 SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
@@ -675,17 +733,164 @@ WHERE drs.is_local = 1
                     $results.Details.Add("  DB '$($ds.database_name)': sync=$($ds.synchronization_state_desc), health=$($ds.synchronization_health_desc)$suspInfo")
                 }
             }
+
+            # ==============================================================
+            # 4. TESTDB membership in availability group
+            # ==============================================================
+            if ($agName) {
+                $results.Details.Add("CMD: Check TESTDB membership in AG '$agName'")
+                try {
+                    $agDBs = @(Invoke-Sqlcmd -Query "SELECT database_name FROM sys.availability_databases_cluster" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                    if ($agDBs.database_name -contains 'TESTDB') {
+                        $results.Details.Add("OK: TESTDB is a member of the availability group")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $dbList = if ($agDBs.Count -gt 0) { $agDBs.database_name -join ', ' } else { '(none)' }
+                        $results.Details.Add("FAIL: TESTDB not found in AG databases: $dbList")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: AG database membership query failed: $($_.Exception.Message)")
+                }
+            }
+
+            # ==============================================================
+            # 5. Listener DNS resolution
+            # ==============================================================
+            if ($listenerName) {
+                $results.Details.Add("CMD: Resolve-DnsName '$listenerName'")
+                try {
+                    $dns = @(Resolve-DnsName -Name $listenerName -Type A -ErrorAction Stop)
+                    $resolvedIPs = @($dns | Where-Object { $_.QueryType -eq 'A' } | Select-Object -ExpandProperty IPAddress)
+                    if ($resolvedIPs.Count -gt 0) {
+                        $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')")
+                        if ($agIP -and $agIP -notin $resolvedIPs) {
+                            $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                        }
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: '$listenerName' did not resolve to any A records")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: DNS resolution for '$listenerName' failed: $($_.Exception.Message)")
+                }
+            }
+
+            # ==============================================================
+            # 6. Listener SQL connectivity
+            # ==============================================================
+            if ($listenerName -and $listenerPort) {
+                $listenerConnStr = "$listenerName,$listenerPort"
+                $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$listenerConnStr' -Query 'SELECT 1'")
+                try {
+                    $lr = Invoke-Sqlcmd -ServerInstance $listenerConnStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                    if ($lr.TestResult -eq 1) {
+                        $results.Details.Add("OK: SQL query via listener '$listenerConnStr' succeeded")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Listener query returned unexpected result")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: SQL connection via listener '$listenerConnStr' failed: $($_.Exception.Message)")
+                }
+            }
+
+            # ==============================================================
+            # 7. Backup and Witness share accessibility
+            # ==============================================================
+            foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare }, @{Name = 'Backup'; Path = $backupShare })) {
+                if ($share.Path) {
+                    $results.Details.Add("CMD: Test-Path '$($share.Path)'")
+                    if (Test-Path $share.Path -ErrorAction SilentlyContinue) {
+                        $results.Details.Add("OK: $($share.Name) share '$($share.Path)' is accessible")
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: $($share.Name) share '$($share.Path)' is not accessible")
+                    }
+                }
+            }
+
+            # ==============================================================
+            # 8. Cross-node replication test (write on PRIMARY, read from other)
+            # ==============================================================
+            if ($otherNode -and $healthy) {
+                $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
+                $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
+
+                $secondaryConnStr = $otherNode
+                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
+                    $secondaryConnStr = "$otherNode\$sqlInstName"
+                }
+
+                if ($localRole -eq 'PRIMARY') {
+                    $results.Details.Add("CMD: Cross-node replication test (write local PRIMARY, read from '$secondaryConnStr')")
+                    try {
+                        # Create a validation table if needed and insert a timestamped row
+                        $testId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+                        $writeQuery = @"
+USE [TESTDB];
+IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE name = 'MemLabsValidation' AND type = 'U')
+    CREATE TABLE dbo.MemLabsValidation (Id INT IDENTITY(1,1), TestValue NVARCHAR(100), CreatedAt DATETIME2 DEFAULT SYSUTCDATETIME());
+DELETE FROM dbo.MemLabsValidation WHERE CreatedAt < DATEADD(HOUR, -1, SYSUTCDATETIME());
+INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
+"@
+                        Invoke-Sqlcmd -Query $writeQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: Wrote test value '$testId' to TESTDB on primary")
+
+                        # SynchronousCommit hardens the log on both replicas before commit
+                        # returns, but redo on the secondary may lag slightly.
+                        Start-Sleep -Seconds 5
+
+                        $readQuery = "SELECT TOP 1 TestValue FROM [TESTDB].dbo.MemLabsValidation WHERE TestValue = '$testId'"
+                        $readResult = Invoke-Sqlcmd -ServerInstance $secondaryConnStr -Query $readQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        if ($readResult -and $readResult.TestValue -eq $testId) {
+                            $results.Details.Add("OK: Read test value '$testId' from secondary '$secondaryConnStr' — replication verified")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Could not read test value '$testId' from secondary '$secondaryConnStr'")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cross-node replication test failed: $($_.Exception.Message)")
+                    }
+                }
+                elseif ($localRole -eq 'SECONDARY') {
+                    # On secondary role, verify TESTDB is readable
+                    $results.Details.Add("CMD: Verify TESTDB readable on secondary role")
+                    try {
+                        $readCheck = Invoke-Sqlcmd -Query "USE [TESTDB]; SELECT COUNT(*) AS Cnt FROM sys.tables" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: TESTDB is readable on secondary ($($readCheck.Cnt) user table(s))")
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cannot read TESTDB on secondary: $($_.Exception.Message)")
+                    }
+                }
+            }
         }
         catch {
             $results.Passed = $false
-            $results.Details.Add("FAIL: AG health query failed: $($_.Exception.Message)")
+            $results.Details.Add("FAIL: SQLAO validation failed: $($_.Exception.Message)")
         }
 
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-SQLAO-Test" -SuppressLog
+        -ScriptBlock $scriptBlock `
+        -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName `
+        -DisplayName "Phase11-SQLAO-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
 }
