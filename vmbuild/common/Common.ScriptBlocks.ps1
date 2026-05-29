@@ -1202,6 +1202,21 @@ $global:VM_Config = {
                 Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
                 Stop-DscConfiguration -Verbose -Force
             }
+
+            # Stop the ScriptWorkflow scheduled task if still running from a previous phase.
+            # Phase 8/9 register this task to run ScriptWorkflow.ps1 which writes to DSC_Status.txt
+            # independently of DSC LCM. Without stopping it, stale status from a prior phase
+            # bleeds into the monitoring loop of the current phase.
+            try {
+                $swTask = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                if ($swTask) {
+                    if ($swTask.State -eq 'Running') {
+                        Stop-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                    }
+                    Unregister-ScheduledTask -TaskName 'ScriptWorkflow' -Confirm:$false -ErrorAction SilentlyContinue
+                }
+            }
+            catch {}
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
