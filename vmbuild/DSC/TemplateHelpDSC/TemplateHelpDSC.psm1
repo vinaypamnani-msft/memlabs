@@ -4466,6 +4466,15 @@ class InstallPBIRS {
                 return $false
             }
 
+            # When HTTPS is expected, verify HTTPS URL reservations exist
+            if ($this.TemplateName) {
+                $httpsUrls = $urls.UrlString | Where-Object { $_ -like 'https:*' }
+                if (-not $httpsUrls -or $httpsUrls.Count -eq 0) {
+                    Write-Verbose "InstallPBIRS Test: TemplateName set but no HTTPS URL reservations found"
+                    return $false
+                }
+            }
+
             return $true
         }
         catch {
