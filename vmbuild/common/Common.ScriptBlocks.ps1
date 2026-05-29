@@ -1454,7 +1454,6 @@ $global:VM_Config = {
                         Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
                         Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 15 -value $deployConfig.vmOptions.DomainName -ReservedIP $ip -Force -ErrorAction Stop | out-null
                         Start-DHCP | out-null
                         Start-Sleep -seconds 30
                         $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"

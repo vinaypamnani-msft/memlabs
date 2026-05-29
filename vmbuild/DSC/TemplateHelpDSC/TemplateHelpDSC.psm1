@@ -5105,3 +5105,83 @@ class SetDNSAddress {
         return $this
     }
 }
+
+[DscResource()]
+class DisableClusterNicDnsRegistration {
+    [DscProperty(Key)]
+    [string] $ClusterSubnet = '10.250.250.'
+
+    [DscProperty(Mandatory)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [string] $DCName
+
+    [void] Set() {
+        $_subnet = $this.ClusterSubnet
+        $_domain = $this.DomainName
+        $_dc     = $this.DCName
+
+        # Find all adapters whose IPv4 address is on the cluster subnet.
+        $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) { $_ }
+        }
+
+        foreach ($adapter in $clusterAdapters) {
+            Write-Status "Disabling DNS registration on adapter '$($adapter.Name)' ($_subnet*)"
+            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction Stop
+        }
+
+        # Re-register only the domain adapter so the correct A record stays.
+        Register-DnsClient -ErrorAction SilentlyContinue
+
+        # Remove stale A records from the DC that point to the cluster subnet.
+        $hostname = $env:COMPUTERNAME
+        try {
+            $records = Get-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -ComputerName $_dc -ErrorAction Stop
+            $stale = $records | Where-Object { $_.RecordData.IPv4Address.ToString() -like "${_subnet}*" }
+            foreach ($rec in $stale) {
+                $ip = $rec.RecordData.IPv4Address.ToString()
+                Write-Status "Removing stale DNS A record $hostname -> $ip from $_dc"
+                Remove-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Verbose "Could not clean stale DNS records: $_"
+        }
+    }
+
+    [bool] Test() {
+        $_subnet = $this.ClusterSubnet
+
+        $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) { $_ }
+        }
+
+        foreach ($adapter in $clusterAdapters) {
+            $dns = Get-DnsClient -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+            if ($dns.RegisterThisConnectionsAddress) {
+                return $false
+            }
+        }
+
+        # Also check for stale A records.
+        try {
+            $hostname = $env:COMPUTERNAME
+            $records = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $hostname -RRType A -ComputerName $this.DCName -ErrorAction Stop
+            $stale = $records | Where-Object { $_.RecordData.IPv4Address.ToString() -like "${_subnet}*" }
+            if ($stale) { return $false }
+        }
+        catch {
+            # If we cannot reach the DC to check, assume OK to avoid blocking.
+        }
+
+        return $true
+    }
+
+    [DisableClusterNicDnsRegistration] Get() {
+        return $this
+    }
+}

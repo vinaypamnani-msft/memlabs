@@ -566,6 +566,17 @@ function Start-PhaseJobs {
                 #Vm_Config captures this variable
                 $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
                 $reservation = $reservation -replace "-", ""
+
+                # Strip DHCP option 15 (domain suffix) from existing cluster-scope
+                # reservations so the cluster NIC never triggers DNS registration.
+                $clusterReservations = Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
+                foreach ($res in $clusterReservations) {
+                    $opt15 = Get-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -ErrorAction SilentlyContinue
+                    if ($opt15) {
+                        Write-Log "Removing DHCP option 15 (domain suffix) from cluster reservation $($res.IPAddress) ($($res.Description))"
+                        Remove-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -Force -ErrorAction SilentlyContinue
+                    }
+                }
             }
             $alreadyCopiedDSC = $false
             if (-not $global:DSC_Copied) {

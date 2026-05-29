@@ -3114,6 +3114,20 @@ function Format-TestResult {
 
     if (-not $Result -or $Result.ScriptBlockFailed) {
         $errMsg = if ($Result) { $Result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result (PSDirect session may have failed)' }
+        # ScriptBlockFailed is often just $true (boolean) which prints as "True"
+        # with no context. Pull in ScriptBlockOutput for the real error detail.
+        if ($Result -and $errMsg -is [bool]) {
+            $detail = $Result.ScriptBlockOutput
+            if ($detail -and $detail -is [string]) {
+                $errMsg = $detail
+            }
+            elseif ($detail) {
+                $errMsg = ($detail | Out-String).Trim()
+            }
+            if (-not $errMsg -or $errMsg -is [bool]) {
+                $errMsg = 'ScriptBlock failed (no error detail returned; check log for PSDirect/session errors)'
+            }
+        }
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg" -Failure -LogOnly
         $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $errMsg"; Level = 'Failure' })
         return $false

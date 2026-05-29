@@ -250,6 +250,19 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
+        $dcNode1 = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+        WriteStatus DisableClusterNicDns {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC and removing stale A records"
+        }
+
+        DisableClusterNicDnsRegistration DisableClusterNicDns {
+            ClusterSubnet = '10.250.250.'
+            DomainName    = $DomainName
+            DCName        = $dcNode1
+            DependsOn     = $nextDepend
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 
         WriteStatus CreateCluster {
             DependsOn = $nextDepend
@@ -693,6 +706,20 @@ Configuration Phase5
 
 
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+
+        WriteStatus DisableClusterNicDns {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC and removing stale A records"
+        }
+
+        DisableClusterNicDnsRegistration DisableClusterNicDns {
+            ClusterSubnet = '10.250.250.'
+            DomainName    = $DomainName
+            DCName        = $DC
+            DependsOn     = $nextDepend
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
+
         WriteStatus WaitForDC {
             Status    = "Waiting for $DC to Complete [ADGroup]SQLAOGroup$node1"
             DependsOn = $nextDepend
