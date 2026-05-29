@@ -1853,70 +1853,41 @@ function Test-ReportingFunctionality {
         }
         $results.Details.Add("OK: Reporting service '$($svc.Name)' is Running")
 
-        # Probe the configured PBIRS/SSRS portal URL. memlabs binds the
-        # portal to the FQDN (URL reservations in IIS/HTTP.SYS often don't
-        # include 'localhost', and HTTPS bindings may use a cert with a CN
-        # that doesn't match 'localhost'). Pull the configured URL from
-        # WMI when possible, then fall back to FQDN/COMPUTERNAME guesses.
-        $urls = @()
-        try {
-            $rsConfig = Get-WmiObject -Namespace 'root\Microsoft\SqlServer\ReportServer\RS_PBIRS\v15\Admin' `
-                -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if (-not $rsConfig) {
-                $rsConfig = Get-WmiObject -Namespace 'root\Microsoft\SqlServer\ReportServer\RS_SSRS\v15\Admin' `
-                    -Class MSReportServer_ConfigurationSetting -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-            }
-            if ($rsConfig) {
-                $listing = $rsConfig.ListReservedUrls()
-                if ($listing -and $listing.UrlString) {
-                    foreach ($u in $listing.UrlString) {
-                        if ($u -match 'Reports') { $urls += $u.TrimEnd('/') }
-                    }
-                }
-            }
-        }
-        catch { }
-
+        # SOAP API health check: call ReportService2005.asmx GetItemType("/")
+        # This is the same check ConfigMgr uses to validate reporting services.
+        # Try HTTPS first (HTTPS sites), then HTTP. Proves the report server
+        # database is accessible and the web service is functional.
         $fqdn = "$env:COMPUTERNAME.$((Get-WmiObject Win32_ComputerSystem).Domain)"
-        $urls += @(
-            "http://$fqdn/Reports",
-            "http://$env:COMPUTERNAME/Reports",
-            "https://$fqdn/Reports",
-            'http://localhost/Reports'
+        $soapUrls = @(
+            "https://$fqdn/ReportServer/ReportService2005.asmx",
+            "http://$fqdn/ReportServer/ReportService2005.asmx",
+            "http://$env:COMPUTERNAME/ReportServer/ReportService2005.asmx"
         )
-        $urls = $urls | Select-Object -Unique
 
-        # Bypass cert validation (self-signed lab cert) and force TLS 1.2
         $origCb = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
         $origProto = [System.Net.ServicePointManager]::SecurityProtocol
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls11 -bor [System.Net.SecurityProtocolType]::Tls
 
-        $results.Details.Add("CMD: Invoke-WebRequest -UseDefaultCredentials (trying: $($urls -join ', '))")
-        $reachable = $false
+        $results.Details.Add("CMD: New-WebServiceProxy ReportService2005.asmx / GetItemType('/')")
+        $soapOk = $false
         $lastErr = ''
         try {
-            foreach ($url in $urls) {
+            foreach ($soapUri in $soapUrls) {
                 try {
-                    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -UseDefaultCredentials `
-                        -TimeoutSec 15 -MaximumRedirection 5 -ErrorAction Stop
-                    if ($response.StatusCode -in 200, 301, 302) {
-                        $results.Details.Add("OK: Reporting portal reachable at '$url' (status $([int]$response.StatusCode))")
-                        $reachable = $true
+                    $ssrsProxy = New-WebServiceProxy -Uri $soapUri -UseDefaultCredential -ErrorAction Stop
+                    $itemType = $ssrsProxy.GetItemType("/")
+                    if ($itemType -eq 'Folder') {
+                        $results.Details.Add("OK: SOAP API healthy at '$soapUri' (root = Folder)")
+                        $soapOk = $true
                         break
+                    }
+                    else {
+                        $lastErr = "$soapUri -> unexpected root type '$itemType'"
                     }
                 }
                 catch {
-                    # 401/403 also means IIS is answering; portal just requires different auth
-                    $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-                    if ($code -in 401, 403) {
-                        $results.Details.Add("OK: Reporting portal responding at '$url' (status $code -- requires auth)")
-                        $reachable = $true
-                        break
-                    }
-                    $lastErr = "$url -> $($_.Exception.Message)"
+                    $lastErr = "$soapUri -> $($_.Exception.Message)"
                 }
             }
         }
@@ -1924,10 +1895,9 @@ function Test-ReportingFunctionality {
             [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $origCb
             [System.Net.ServicePointManager]::SecurityProtocol = $origProto
         }
-        if (-not $reachable) {
-            # Portal unreachable is a WARN, not a FAIL - the service being
-            # Running is the critical check. Portal may need auth or different URL.
-            $results.Details.Add("WARN: Reporting portal not reachable on standard URLs (last error: $lastErr)")
+        if (-not $soapOk) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Reporting SOAP API not functional (last error: $lastErr)")
         }
 
         return $results
