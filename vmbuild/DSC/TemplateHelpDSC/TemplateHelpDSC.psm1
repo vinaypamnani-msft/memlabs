@@ -3772,7 +3772,7 @@ class ModuleAdd {
         if ($null -eq $module) {
             if ($this.Clobber -eq 'Yes') {
                 try {
-                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope."
+                    write-Status "Installing powershell module $_moduleName for scope $_userScope."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
                 }
                 catch {
@@ -3785,7 +3785,7 @@ class ModuleAdd {
             }
             else {
                 try {
-                    write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope..."
+                    write-Status "Installing powershell module $_moduleName for scope $_userScope..."
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
                 }
                 catch {

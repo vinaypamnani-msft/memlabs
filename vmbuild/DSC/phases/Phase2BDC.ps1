@@ -201,7 +201,7 @@
 
         WriteStatus PromoteDC {
             DependsOn = $nextDepend
-            Status    = "Promoting to Backup Domain Controller (this takes 10-20 minutes)"
+            Status    = "Promoting to Domain Controller (this takes 10-20 minutes)"
         }
 
         ADDomainController 'DomainControllerAllProperties' {
