@@ -2143,13 +2143,43 @@ $global:VM_Config = {
                     $nonReadyNodes = $nodeList.Clone()
                     $percent = [Math]::Min($attempts, $maxAttempts)
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
+
+                    # Periodically fetch detailed status from stuck nodes (every 15 attempts, plus first attempt)
+                    $detailedCheck = ($attempts -eq 1 -or ($attempts % 15) -eq 0)
+
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
                             continue
                         }
                         $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
                         if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -eq $true)) {
-                            Write-Log "[Phase $Phase]: Node $node is NOT ready. File Exists: $($result.ScriptBlockOutput) Fail: $($result.ScriptBlockFailed)"
+                            if ($result.ScriptBlockFailed) {
+                                $errDetail = if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' }
+                                Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $errDetail" -Warning
+                            }
+                            elseif ($detailedCheck) {
+                                # Read the status file content to see what the node is stuck on
+                                $statusResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
+                                    $info = @{}
+                                    $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
+                                    $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 5 -ErrorAction SilentlyContinue
+                                    $info
+                                } -DisplayName "DSC: Diagnose Node Status"
+                                if (-not $statusResult.ScriptBlockFailed -and $statusResult.ScriptBlockOutput) {
+                                    $diag = $statusResult.ScriptBlockOutput
+                                    $statusText = if ($diag.StatusContent) { $diag.StatusContent } else { '(empty)' }
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). DSC_Status: $statusText"
+                                    if ($diag.InitLogTail) {
+                                        Write-Log "[Phase $Phase]: Node $node DSC_Init.log tail: $($diag.InitLogTail -join ' | ')" -LogOnly
+                                    }
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: Node $node is NOT ready (attempt $attempts). File Exists: $($result.ScriptBlockOutput)"
+                                }
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: Node $node is NOT ready. File Exists: $($result.ScriptBlockOutput) (attempt $attempts)" -LogOnly
+                            }
                             $allNodesReady = $false
                         }
                         else {
@@ -2166,6 +2196,26 @@ $global:VM_Config = {
 
                     if ($attempts -eq 80) {
                         foreach ($node in $nodeList) {
+                            # Log diagnostics before rebooting
+                            Write-Log "[Phase $Phase]: Rebooting stuck node $node at attempt $attempts" -Warning
+                            $preRebootResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
+                                $info = @{}
+                                $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
+                                $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 10 -ErrorAction SilentlyContinue
+                                $info.LcmState = try { (Get-DscLocalConfigurationManager).LCMState } catch { 'Unknown' }
+                                $info
+                            } -DisplayName "DSC: Pre-Reboot Diagnostics"
+                            if (-not $preRebootResult.ScriptBlockFailed -and $preRebootResult.ScriptBlockOutput) {
+                                $diag = $preRebootResult.ScriptBlockOutput
+                                Write-Log "[Phase $Phase]: Node $node pre-reboot: DSC_Status='$($diag.StatusContent)' LCM='$($diag.LcmState)'" -Warning
+                                if ($diag.InitLogTail) {
+                                    Write-Log "[Phase $Phase]: Node $node DSC_Init.log (last 10 lines):" -LogOnly
+                                    foreach ($logLine in $diag.InitLogTail) { Write-Log "  $logLine" -LogOnly }
+                                }
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: Node $node pre-reboot: Could not retrieve diagnostics (VM unreachable)" -Warning
+                            }
                             Write-Progress2 "Restarting $node" -PercentComplete $percent
                             Stop-Vm2 -Name $node
                             Start-Sleep -seconds 20
@@ -2178,8 +2228,36 @@ $global:VM_Config = {
                 } until ($allNodesReady -or $attempts -ge $maxAttempts)
 
                 if (-not $allNodesReady) {
+                    # Gather final diagnostics from each stuck node
+                    foreach ($node in $nodeList) {
+                        Write-Log "[Phase $Phase]: FINAL DIAGNOSTICS for stuck node $node" -Failure
+                        $diagResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
+                            $info = @{}
+                            $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
+                            $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 20 -ErrorAction SilentlyContinue
+                            $info.LcmState = try { (Get-DscLocalConfigurationManager).LCMState } catch { 'Unknown' }
+                            $info.LastDscStatus = try { (Get-DscConfigurationStatus -ErrorAction SilentlyContinue).Status } catch { 'Unknown' }
+                            $info.PendingReboot = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+                            $info.StagingFiles = try { (Get-ChildItem "C:\staging\DSC" -File -ErrorAction SilentlyContinue).Name -join ', ' } catch { 'N/A' }
+                            $info
+                        } -DisplayName "DSC: Final Diagnostics"
+                        if (-not $diagResult.ScriptBlockFailed -and $diagResult.ScriptBlockOutput) {
+                            $diag = $diagResult.ScriptBlockOutput
+                            Write-Log "[Phase $Phase]: Node ${node}: DSC_Status.txt = '$($diag.StatusContent)'" -Failure
+                            Write-Log "[Phase $Phase]: Node ${node}: LCM State = $($diag.LcmState), Last DSC Status = $($diag.LastDscStatus), Reboot Pending = $($diag.PendingReboot)" -Failure
+                            Write-Log "[Phase $Phase]: Node ${node}: Staging files: $($diag.StagingFiles)" -LogOnly
+                            if ($diag.InitLogTail) {
+                                Write-Log "[Phase $Phase]: Node $node DSC_Init.log (last 20 lines):" -Failure
+                                foreach ($logLine in $diag.InitLogTail) { Write-Log "  $logLine" -LogOnly }
+                            }
+                        }
+                        else {
+                            $errDetail = if ($diagResult.ErrorDetails) { $diagResult.ErrorDetails -join '; ' } else { 'No session / VM unreachable' }
+                            Write-Log "[Phase $Phase]: Node ${node}: Could not retrieve diagnostics: $errDetail" -Failure
+                        }
+                    }
                     Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase."
-                    write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after 100 attempts." -failure -OutputStream
+                    write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after $maxAttempts attempts." -failure -OutputStream
                     return $false
                 }
 
