@@ -257,10 +257,12 @@ Configuration Phase5
         }
 
         DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet = '10.250.250.'
-            DomainName    = $DomainName
-            DCName        = $dcNode1
-            DependsOn     = $nextDepend
+            ClusterSubnet     = '10.250.250.'
+            DomainName        = $DomainName
+            DCName            = $dcNode1
+            ClusterName       = $thisVM.ClusterName
+            ClusterIPAddress  = $thisVM.thisParams.SQLAO.ClusterIPAddress
+            DependsOn         = $nextDepend
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 
@@ -713,10 +715,12 @@ Configuration Phase5
         }
 
         DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet = '10.250.250.'
-            DomainName    = $DomainName
-            DCName        = $DC
-            DependsOn     = $nextDepend
+            ClusterSubnet     = '10.250.250.'
+            DomainName        = $DomainName
+            DCName            = $DC
+            ClusterName       = $Node1VM.ClusterName
+            ClusterIPAddress  = $Node1VM.thisParams.SQLAO.ClusterIPAddress
+            DependsOn         = $nextDepend
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 

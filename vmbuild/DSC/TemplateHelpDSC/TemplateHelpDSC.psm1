@@ -5229,6 +5229,12 @@ class DisableClusterNicDnsRegistration {
     [DscProperty(Mandatory)]
     [string] $DCName
 
+    [DscProperty()]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [string] $ClusterIPAddress
+
     [void] Set() {
         $_subnet = $this.ClusterSubnet
         $_domain = $this.DomainName
@@ -5263,36 +5269,43 @@ class DisableClusterNicDnsRegistration {
             Write-Verbose "Could not clean stale DNS records: $_"
         }
 
-        # If a cluster already exists on this node, ensure the cluster name has a
-        # DNS A record pointing to the cluster IP (heartbeat subnet).  When the
-        # cluster was originally created the Cluster Name resource registered DNS
-        # via the domain NIC, producing a stale A record on the domain subnet.
-        # On redeploy xCluster resolves that stale IP, RPC fails, and DSC is stuck.
+        # Ensure the cluster name has a DNS A record pointing to the cluster IP
+        # (heartbeat subnet).  When the cluster was originally created the Cluster
+        # Name resource registered DNS via the domain NIC, producing a stale A
+        # record on the domain subnet.  On redeploy xCluster resolves that stale
+        # IP, RPC fails, and DSC is stuck.
+        #
+        # Prefer live cluster data; fall back to the explicit properties so this
+        # works even on node2 before it has joined the cluster.
         try {
+            $cName = $null
+            $cIP   = $null
             $cluster = Get-Cluster -ErrorAction SilentlyContinue
             if ($cluster) {
-                $clusterName = $cluster.Name
-                $clusterIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
-                $clusterIP = ($clusterIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                $cName = $cluster.Name
+                $cIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
+                $cIP = ($cIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+            }
+            if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
+            if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
 
-                if ($clusterName -and $clusterIP) {
-                    $dnsRecords = Get-DnsServerResourceRecord -ZoneName $_domain -Name $clusterName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue
+            if ($cName -and $cIP) {
+                $dnsRecords = Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue
 
-                    # Remove any A records that don't match the actual cluster IP.
-                    foreach ($rec in $dnsRecords) {
-                        $ip = $rec.RecordData.IPv4Address.ToString()
-                        if ($ip -ne $clusterIP) {
-                            Write-Status "Removing stale cluster DNS A record $clusterName -> $ip (expected $clusterIP)"
-                            Remove-DnsServerResourceRecord -ZoneName $_domain -Name $clusterName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
-                        }
+                # Remove any A records that don't match the actual cluster IP.
+                foreach ($rec in $dnsRecords) {
+                    $ip = $rec.RecordData.IPv4Address.ToString()
+                    if ($ip -ne $cIP) {
+                        Write-Status "Removing stale cluster DNS A record $cName -> $ip (expected $cIP)"
+                        Remove-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
                     }
+                }
 
-                    # Ensure the correct A record exists.
-                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $clusterIP }
-                    if (-not $correct) {
-                        Write-Status "Adding cluster DNS A record $clusterName -> $clusterIP"
-                        Add-DnsServerResourceRecordA -ZoneName $_domain -Name $clusterName -IPv4Address $clusterIP -ComputerName $_dc -ErrorAction Stop
-                    }
+                # Ensure the correct A record exists.
+                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
+                if (-not $correct) {
+                    Write-Status "Adding cluster DNS A record $cName -> $cIP"
+                    Add-DnsServerResourceRecordA -ZoneName $_domain -Name $cName -IPv4Address $cIP -ComputerName $_dc -ErrorAction Stop
                 }
             }
         }
@@ -5327,21 +5340,24 @@ class DisableClusterNicDnsRegistration {
             # If we cannot reach the DC to check, assume OK to avoid blocking.
         }
 
-        # Check that the cluster name (if a cluster exists) has the correct DNS record.
+        # Check that the cluster name has the correct DNS record.
         try {
+            $cName = $null
+            $cIP   = $null
             $cluster = Get-Cluster -ErrorAction SilentlyContinue
             if ($cluster) {
-                $clusterName = $cluster.Name
-                $clusterIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
-                $clusterIP = ($clusterIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                $cName = $cluster.Name
+                $cIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
+                $cIP = ($cIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+            }
+            if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
+            if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
 
-                if ($clusterName -and $clusterIP) {
-                    $dnsRecords = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $clusterName -RRType A -ComputerName $this.DCName -ErrorAction SilentlyContinue
-                    # Fail if any record points to the wrong IP, or no record exists at all.
-                    $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $clusterIP }
-                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $clusterIP }
-                    if ($wrong -or -not $correct) { return $false }
-                }
+            if ($cName -and $cIP) {
+                $dnsRecords = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $cName -RRType A -ComputerName $this.DCName -ErrorAction SilentlyContinue
+                $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $cIP }
+                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
+                if ($wrong -or -not $correct) { return $false }
             }
         }
         catch {
