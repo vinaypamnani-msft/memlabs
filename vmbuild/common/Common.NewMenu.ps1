@@ -1767,12 +1767,10 @@ function Set-MouseHoverHighlight {
         Write-Host "`e[K" -NoNewline
         Set-CursorPosition -x 3 -y $item.CurrentPosition
 
-        # Strip embedded ANSI so hover color applies uniformly,
-        # and expand tabs to spaces so the background covers the full width.
+        # Strip embedded ANSI so hover color applies uniformly
         $hoverText = if ($item.Text -and $item.Text.Contains([char]27)) {
             (Get-AnsiCsiPattern).Replace($item.Text, '')
         } else { $item.Text }
-        if ($hoverText) { $hoverText = $hoverText.Replace("`t", "    ") }
 
         # Build multiselect prefix
         $msPrefix = ""
@@ -1810,7 +1808,6 @@ function Set-MouseHoverHighlight {
                 $plainText = if ($mi.Text.Contains([char]27)) {
                     (Get-AnsiCsiPattern).Replace($mi.Text, '')
                 } else { $mi.Text }
-                if ($plainText) { $plainText = $plainText.Replace("`t", "    ") }
                 $msBracketLen = 1 + $mi.ItemName.Length + [Math]::Max(0, 4 - $mi.ItemName.Length)
                 if ($MultiSelect -and ($mi.ItemName -as [int])) { $msBracketLen += 4 }
                 elseif ($MultiSelect) { $msBracketLen += 4 }

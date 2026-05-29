@@ -906,7 +906,7 @@ function Build-MainMenuOptions {
     $preOptions = [ordered]@{}
     $preOptions += [ordered]@{ "*F1" = "Show-GenConfigErrorMessages" }
     $preOptions += [ordered]@{ "*B" = "Global Options%$($Global:Common.Colors.GenConfigHeader)" }
-    $preOptions += [ordered]@{ "V" = "Global VM Options `t $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "V" = "$('Global VM Options'.PadRight(20)) $(get-VMOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HV" = "Change Global Options, such as domain name, netbios name, timezone, etc" }
     # Top-level site servers (CAS, or standalone Primary) own cmOptions per-VM.
     # Display rules:
@@ -942,10 +942,10 @@ function Build-MainMenuOptions {
             }
             $cmSummary = $parts -join $sep
         }
-        $preOptions += [ordered]@{"C" = "ConfigMgr Options `t $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+        $preOptions += [ordered]@{"C" = "$('ConfigMgr Options'.PadRight(20)) $cmSummary %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
         $preOptions += [ordered]@{ "HC" = "Change Configuration Manager Options on the top-level site server (Version, licensing, PKI, BitLocker, etc.)" }
     }
-    $preOptions += [ordered]@{ "P" = "PKI Settings      `t $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
+    $preOptions += [ordered]@{ "P" = "$('PKI Settings'.PadRight(20)) $(Get-PKIOptionsSummary) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigHelpHighlight)" }
     $preOptions += [ordered]@{ "HP" = "Configure PKI Certificate Authority settings, Issuing CA, and Offline Root CA" }
 
     $customOptions = [ordered]@{}
