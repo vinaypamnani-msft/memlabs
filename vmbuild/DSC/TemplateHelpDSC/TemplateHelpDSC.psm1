@@ -5240,7 +5240,7 @@ class DisableClusterNicDnsRegistration {
         $_domain = $this.DomainName
         $_dc     = $this.DCName
 
-        # Find all adapters whose IPv4 address is on the cluster subnet.
+        # 1. Disable DNS registration on cluster/heartbeat adapters.
         $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
             if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) { $_ }
@@ -5254,7 +5254,7 @@ class DisableClusterNicDnsRegistration {
         # Re-register only the domain adapter so the correct A record stays.
         Register-DnsClient -ErrorAction SilentlyContinue
 
-        # Remove stale A records from the DC that point to the cluster subnet.
+        # 2. Remove stale hostname A records that point to the cluster subnet.
         $hostname = $env:COMPUTERNAME
         try {
             $records = Get-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -ComputerName $_dc -ErrorAction Stop
@@ -5266,31 +5266,29 @@ class DisableClusterNicDnsRegistration {
             }
         }
         catch {
-            Write-Verbose "Could not clean stale DNS records: $_"
+            Write-Verbose "Could not clean stale hostname DNS records: $_"
         }
 
-        # Ensure the cluster name has a DNS A record pointing to the cluster IP
-        # (heartbeat subnet).  When the cluster was originally created the Cluster
-        # Name resource registered DNS via the domain NIC, producing a stale A
-        # record on the domain subnet.  On redeploy xCluster resolves that stale
-        # IP, RPC fails, and DSC is stuck.
-        #
-        # Prefer live cluster data; fall back to the explicit properties so this
-        # works even on node2 before it has joined the cluster.
+        # 3. Fix cluster name DNS.
+        #    Prefer live cluster data; fall back to explicit properties (works on
+        #    node2 before it has joined).
+        $cName = $null
+        $cIP   = $null
         try {
-            $cName = $null
-            $cIP   = $null
             $cluster = Get-Cluster -ErrorAction SilentlyContinue
             if ($cluster) {
                 $cName = $cluster.Name
                 $cIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
                 $cIP = ($cIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
             }
-            if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
-            if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
+        }
+        catch { }
+        if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
+        if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
 
-            if ($cName -and $cIP) {
-                $dnsRecords = Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue
+        if ($cName -and $cIP) {
+            try {
+                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
 
                 # Remove any A records that don't match the actual cluster IP.
                 foreach ($rec in $dnsRecords) {
@@ -5307,19 +5305,35 @@ class DisableClusterNicDnsRegistration {
                     Write-Status "Adding cluster DNS A record $cName -> $cIP"
                     Add-DnsServerResourceRecordA -ZoneName $_domain -Name $cName -IPv4Address $cIP -ComputerName $_dc -ErrorAction Stop
                 }
-
-                # Flush local DNS cache so xCluster resolves the corrected name immediately.
-                Clear-DnsClientCache -ErrorAction SilentlyContinue
             }
-        }
-        catch {
-            Write-Verbose "Could not fix cluster name DNS: $_"
+            catch {
+                Write-Verbose "Could not fix cluster name DNS: $_"
+            }
+
+            # 4. Flush local DNS cache so xCluster resolves the corrected name immediately.
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
+
+            # 5. Verify RPC connectivity to cluster name after DNS fix.
+            try {
+                $rpc = Test-NetConnection -ComputerName $cName -Port 135 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                if ($rpc.TcpTestSucceeded) {
+                    Write-Status "Verified: RPC port 135 reachable on $cName ($($rpc.RemoteAddress))"
+                }
+                else {
+                    Write-Status "WARNING: RPC port 135 NOT reachable on $cName ($($rpc.RemoteAddress)) after DNS fix"
+                }
+            }
+            catch { }
         }
     }
 
     [bool] Test() {
         $_subnet = $this.ClusterSubnet
+        $_domain = $this.DomainName
+        $_dc     = $this.DCName
+        $needsFix = $false
 
+        # 1. Check adapter DNS registration.
         $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
             if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) { $_ }
@@ -5327,47 +5341,116 @@ class DisableClusterNicDnsRegistration {
 
         foreach ($adapter in $clusterAdapters) {
             $dns = Get-DnsClient -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+            $adapterIPs = (Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress -join ', '
             if ($dns.RegisterThisConnectionsAddress) {
-                return $false
+                Write-Verbose "NEEDS FIX: Adapter '$($adapter.Name)' ($adapterIPs) has DNS registration enabled"
+                $needsFix = $true
+            }
+            else {
+                Write-Verbose "OK: Adapter '$($adapter.Name)' ($adapterIPs) DNS registration disabled"
             }
         }
 
-        # Also check for stale A records.
+        # 2. Check for stale hostname A records.
+        $hostname = $env:COMPUTERNAME
         try {
-            $hostname = $env:COMPUTERNAME
-            $records = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $hostname -RRType A -ComputerName $this.DCName -ErrorAction Stop
+            $records = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $hostname -RRType A -ComputerName $_dc -ErrorAction Stop)
+            $hostIPs = ($records | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+            Write-Verbose "DNS records for $hostname`: $hostIPs"
             $stale = $records | Where-Object { $_.RecordData.IPv4Address.ToString() -like "${_subnet}*" }
-            if ($stale) { return $false }
+            if ($stale) {
+                $staleIPs = ($stale | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+                Write-Verbose "NEEDS FIX: Stale hostname A records on cluster subnet: $staleIPs"
+                $needsFix = $true
+            }
         }
         catch {
-            # If we cannot reach the DC to check, assume OK to avoid blocking.
+            Write-Verbose "Could not query hostname DNS: $_"
         }
 
-        # Check that the cluster name has the correct DNS record.
+        # 3. Check cluster state and DNS.
+        $cName = $null
+        $cIP   = $null
         try {
-            $cName = $null
-            $cIP   = $null
             $cluster = Get-Cluster -ErrorAction SilentlyContinue
             if ($cluster) {
+                Write-Verbose "Cluster: '$($cluster.Name)' (live)"
+                $nodes = @(Get-ClusterNode -ErrorAction SilentlyContinue)
+                Write-Verbose "Cluster nodes: $(($nodes | ForEach-Object { "$($_.Name)=$($_.State)" }) -join ', ')"
+
+                $allResources = @(Get-ClusterResource -ErrorAction SilentlyContinue)
+                $ipResources = $allResources | Where-Object { $_.ResourceType -eq 'IP Address' }
+                foreach ($ipRes in $ipResources) {
+                    $resIP = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                    $resNet = ($ipRes | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
+                    Write-Verbose "Cluster IP resource: '$($ipRes.Name)' = $resIP on '$resNet' [$($ipRes.OwnerGroup)] $($ipRes.State)"
+                }
+
                 $cName = $cluster.Name
                 $cIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
                 $cIP = ($cIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                Write-Verbose "Cluster IP (from resource): $cIP"
             }
-            if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
-            if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
-
-            if ($cName -and $cIP) {
-                $dnsRecords = Get-DnsServerResourceRecord -ZoneName $this.DomainName -Name $cName -RRType A -ComputerName $this.DCName -ErrorAction SilentlyContinue
-                $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $cIP }
-                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
-                if ($wrong -or -not $correct) { return $false }
+            else {
+                Write-Verbose "No local cluster found"
             }
         }
         catch {
-            # If we cannot check, assume OK.
+            Write-Verbose "Could not query cluster: $_"
+        }
+        if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName; Write-Verbose "Cluster name (from config): $cName" }
+        if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress; Write-Verbose "Cluster IP (from config): $cIP" }
+
+        # 4. Validate cluster DNS records.
+        if ($cName -and $cIP) {
+            try {
+                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
+                $clusterDnsIPs = ($dnsRecords | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+                if ($dnsRecords.Count -eq 0) {
+                    Write-Verbose "NEEDS FIX: No DNS A records for cluster '$cName'"
+                    $needsFix = $true
+                }
+                else {
+                    Write-Verbose "DNS records for $cName`: $clusterDnsIPs (expected: $cIP)"
+                    $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $cIP }
+                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
+                    if ($wrong) {
+                        $wrongIPs = ($wrong | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+                        Write-Verbose "NEEDS FIX: Stale cluster DNS records: $wrongIPs"
+                        $needsFix = $true
+                    }
+                    if (-not $correct) {
+                        Write-Verbose "NEEDS FIX: Correct cluster DNS record ($cIP) is missing"
+                        $needsFix = $true
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Could not query cluster DNS: $_"
+            }
+
+            # 5. Check RPC connectivity to cluster name.
+            try {
+                $resolved = @(Resolve-DnsName -Name $cName -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
+                $resolvedIPs = ($resolved | Select-Object -ExpandProperty IPAddress) -join ', '
+                Write-Verbose "Local DNS resolution for $cName`: $resolvedIPs"
+                if ($resolved.Count -gt 0 -and $resolved[0].IPAddress -ne $cIP) {
+                    Write-Verbose "NEEDS FIX: Local DNS cache has wrong IP for $cName (resolved $resolvedIPs, expected $cIP)"
+                    $needsFix = $true
+                }
+            }
+            catch {
+                Write-Verbose "Could not resolve cluster name locally: $_"
+            }
         }
 
-        return $true
+        if ($needsFix) {
+            Write-Verbose "Test returning FALSE - fixes needed"
+        }
+        else {
+            Write-Verbose "Test returning TRUE - all checks passed"
+        }
+        return (-not $needsFix)
     }
 
     [DisableClusterNicDnsRegistration] Get() {
