@@ -5235,6 +5235,12 @@ class DisableClusterNicDnsRegistration {
     [DscProperty()]
     [string] $ClusterIPAddress
 
+    [DscProperty()]
+    [string] $ListenerName
+
+    [DscProperty()]
+    [string] $ListenerIPAddress
+
     [void] Set() {
         $_subnet = $this.ClusterSubnet
         $_domain = $this.DomainName
@@ -5326,6 +5332,61 @@ class DisableClusterNicDnsRegistration {
                 }
             }
             catch { }
+        }
+
+        # 6. Fix AG listener DNS.
+        #    Same approach as cluster name: prefer live cluster data, fall back
+        #    to explicit properties (works before the listener is created).
+        $lName = $null
+        $lIP   = $null
+        try {
+            $cluster = Get-Cluster -ErrorAction SilentlyContinue
+            if ($cluster) {
+                # Find AG listener Network Name resources (not the Cluster Name itself).
+                $nnResources = Get-ClusterResource -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.Name -ne 'Cluster Name' }
+                foreach ($nn in $nnResources) {
+                    $nnName = ($nn | Get-ClusterParameter -Name Name -ErrorAction SilentlyContinue).Value
+                    # Find the IP Address resource in the same owner group.
+                    $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $nn.OwnerGroup -and $_.Name -ne 'Cluster IP Address' }
+                    $nnIP = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue | Select-Object -First 1).Value
+                    if ($nnName -and $nnIP) {
+                        $lName = $nnName
+                        $lIP   = $nnIP
+                        Write-Status "Found AG listener from cluster: $lName -> $lIP"
+                    }
+                }
+            }
+        }
+        catch { }
+        if (-not $lName -and $this.ListenerName)      { $lName = $this.ListenerName }
+        if (-not $lIP   -and $this.ListenerIPAddress)  { $lIP   = $this.ListenerIPAddress }
+        if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
+
+        if ($lName -and $lIP) {
+            try {
+                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
+
+                foreach ($rec in $dnsRecords) {
+                    $ip = $rec.RecordData.IPv4Address.ToString()
+                    if ($ip -ne $lIP) {
+                        Write-Status "Removing stale listener DNS A record $lName -> $ip (expected $lIP)"
+                        Remove-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
+                    }
+                }
+
+                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $lIP }
+                if (-not $correct) {
+                    Write-Status "Adding listener DNS A record $lName -> $lIP"
+                    Add-DnsServerResourceRecordA -ZoneName $_domain -Name $lName -IPv4Address $lIP -ComputerName $_dc -ErrorAction Stop
+                }
+            }
+            catch {
+                Write-Verbose "Could not fix listener DNS: $_"
+            }
+
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
         }
     }
 
@@ -5445,6 +5506,59 @@ class DisableClusterNicDnsRegistration {
             }
             catch {
                 Write-Verbose "Could not resolve cluster name locally: $_"
+            }
+        }
+
+        # 6. Check AG listener DNS.
+        $lName = $null
+        $lIP   = $null
+        try {
+            $cluster = Get-Cluster -ErrorAction SilentlyContinue
+            if ($cluster) {
+                $nnResources = Get-ClusterResource -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.Name -ne 'Cluster Name' }
+                foreach ($nn in $nnResources) {
+                    $nnName = ($nn | Get-ClusterParameter -Name Name -ErrorAction SilentlyContinue).Value
+                    $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $nn.OwnerGroup -and $_.Name -ne 'Cluster IP Address' }
+                    $nnIP = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue | Select-Object -First 1).Value
+                    if ($nnName -and $nnIP) {
+                        $lName = $nnName
+                        $lIP   = $nnIP
+                    }
+                }
+            }
+        }
+        catch { }
+        if (-not $lName -and $this.ListenerName)      { $lName = $this.ListenerName; Write-Verbose "Listener name (from config): $lName" }
+        if (-not $lIP   -and $this.ListenerIPAddress)  { $lIP   = $this.ListenerIPAddress; Write-Verbose "Listener IP (from config): $lIP" }
+        if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
+
+        if ($lName -and $lIP) {
+            try {
+                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
+                if ($dnsRecords.Count -eq 0) {
+                    Write-Verbose "NEEDS FIX: No DNS A records for listener '$lName'"
+                    $needsFix = $true
+                }
+                else {
+                    $listenerDnsIPs = ($dnsRecords | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+                    Write-Verbose "DNS records for $lName`: $listenerDnsIPs (expected: $lIP)"
+                    $wrong = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -ne $lIP }
+                    $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $lIP }
+                    if ($wrong) {
+                        $wrongIPs = ($wrong | ForEach-Object { $_.RecordData.IPv4Address.ToString() }) -join ', '
+                        Write-Verbose "NEEDS FIX: Stale listener DNS records: $wrongIPs"
+                        $needsFix = $true
+                    }
+                    if (-not $correct) {
+                        Write-Verbose "NEEDS FIX: Correct listener DNS record ($lIP) is missing"
+                        $needsFix = $true
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Could not query listener DNS: $_"
             }
         }
 
