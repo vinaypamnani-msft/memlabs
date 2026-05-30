@@ -1,0 +1,401 @@
+{
+  "vmOptions": {
+    "prefix": "ZZ-",
+    "basePath": "E:\\VirtualMachines",
+    "domainName": "wacky.sandwich.lab",
+    "domainNetBiosName": "TACO",
+    "adminName": "admin",
+    "network": "172.19.77.0",
+    "timeZone": "Hawaiian Standard Time",
+    "locale": "en-US"
+  },
+  "domainDefaults": {
+    "DeploymentType": "CAS and Primary",
+    "CMVersion": "2503",
+    "DomainName": "wacky.sandwich.lab",
+    "Network": "172.19.77.0",
+    "DefaultClientOS": "Windows 11 25H2",
+    "DefaultServerOS": "Server 2025",
+    "DefaultSqlVersion": "SQL Server 2022",
+    "UseDynamicMemory": true,
+    "IncludeClients": true,
+    "IncludeSSMSOnNONSQL": true
+  },
+  "pkiOptions": {
+    "EnablePKI": true,
+    "IssuingCAVM": "NACHO",
+    "UseOfflineRoot": true,
+    "OfflineRootCAVM": "OLIVE"
+  },
+  "cmOptions": {
+    "version": "2503",
+    "install": true,
+    "pushClientToDomainMembers": true,
+    "EVALVersion": false,
+    "UsePKI": true,
+    "EnableBLM": true,
+    "PrePopulateObjects": true,
+    "OfflineSCP": false,
+    "OfflineSUP": false
+  },
+  "virtualMachines": [
+    {
+      "vmName": "NACHO",
+      "role": "DC",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "InstallCA": true,
+      "UseOfflineRoot": true,
+      "ForestTrust": "NONE"
+    },
+    {
+      "vmName": "SALSA",
+      "role": "BDC",
+      "operatingSystem": "Server 2019 March 2021",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "network": "172.19.78.0"
+    },
+    {
+      "vmName": "OLIVE",
+      "role": "StandaloneRootCA",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "2GB",
+      "virtualProcs": 2
+    },
+    {
+      "vmName": "PANTRY",
+      "role": "FileServer",
+      "operatingSystem": "Server 2025",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "600GB",
+        "F": "200GB"
+      }
+    },
+    {
+      "vmName": "BIGMAC",
+      "role": "CAS",
+      "operatingSystem": "Server 2025",
+      "memory": "5GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "siteCode": "YUM",
+      "installSUP": true,
+      "installRP": true,
+      "siteName": "The Grand Burrito CAS",
+      "remoteSQLVM": "FRIES",
+      "wsusDataBaseServer": "WID",
+      "wsusContentDir": "E:\\WSUS",
+      "InstallPatchMyPC": true,
+      "PatchMyPCFileServer": "PANTRY"
+    },
+    {
+      "vmName": "FRIES",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "G:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "G": "250GB"
+      },
+      "OtherNode": "SHAKE",
+      "fileServerVM": "PANTRY",
+      "ClusterName": "DEEPFRYER",
+      "AlwaysOnGroupName": "YUM Availibility Group",
+      "AlwaysOnListenerName": "KETCHUP",
+      "SqlServiceAccount": "FryerSvc",
+      "SqlAgentAccount": "FryerAgent",
+      "installRP": false,
+      "InstallSMSProv": false
+    },
+    {
+      "vmName": "SHAKE",
+      "role": "SQLAO",
+      "operatingSystem": "Server 2025",
+      "memory": "7GB",
+      "virtualProcs": 8,
+      "tpmEnabled": false,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2022",
+      "sqlInstanceName": "MSSQLSERVER",
+      "sqlInstanceDir": "G:\\SQL",
+      "sqlPort": "1433",
+      "additionalDisks": {
+        "G": "250GB"
+      },
+      "SqlServiceAccount": "FryerSvc",
+      "SqlAgentAccount": "FryerAgent"
+    },
+    {
+      "vmName": "GYRO",
+      "role": "Primary",
+      "operatingSystem": "Server 2022",
+      "memory": "10GB",
+      "virtualProcs": 8,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "YUM",
+      "sqlVersion": "SQL Server 2025",
+      "sqlInstanceName": "TAHINI",
+      "sqlInstanceDir": "H:\\SQL",
+      "sqlPort": "5433",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "600GB",
+        "H": "250GB"
+      },
+      "siteCode": "NOM",
+      "installSUP": true,
+      "installRP": true,
+      "siteName": "Falafel Primary",
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "GYRO-P",
+      "role": "PassiveSite",
+      "operatingSystem": "Server 2022",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "siteCode": "NOM",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "remoteContentLibVM": "PANTRY"
+    },
+    {
+      "vmName": "WAFFLE",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2022 21H2 February 2024",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": true,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "NOM"
+    },
+    {
+      "vmName": "CREPE",
+      "role": "SiteSystem",
+      "operatingSystem": "Server 2019",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "installDP": true,
+      "installMP": false,
+      "installSUP": false,
+      "installRP": false,
+      "siteCode": "NOM",
+      "enablePullDP": true,
+      "pullDPSourceDP": "WAFFLE",
+      "InstallSMSProv": true
+    },
+    {
+      "vmName": "DUMPLING",
+      "role": "Secondary",
+      "operatingSystem": "Server 2022 November 2024",
+      "memory": "3GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "parentSiteCode": "NOM",
+      "siteCode": "DIM",
+      "cmInstallDir": "E:\\ConfigMgr",
+      "installSUP": true,
+      "siteName": "Dim Sum Secondary",
+      "additionalDisks": {
+        "E": "250GB"
+      },
+      "network": "172.19.79.0",
+      "wsusContentDir": "E:\\WSUS"
+    },
+    {
+      "vmName": "RAMEN",
+      "role": "WSUS",
+      "operatingSystem": "Server 2016",
+      "memory": "6GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "vmGeneration": "1",
+      "installSSMS": true,
+      "wsusContentDir": "E:\\WSUS",
+      "additionalDisks": {
+        "E": "250GB",
+        "F": "200GB"
+      },
+      "sqlVersion": "SQL Server 2017",
+      "sqlInstanceName": "BROTH",
+      "sqlInstanceDir": "F:\\SQL",
+      "sqlPort": "4433",
+      "network": "172.19.80.0"
+    },
+    {
+      "vmName": "SQUID",
+      "role": "Proxy",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "1GB",
+      "virtualProcs": 1
+    },
+    {
+      "vmName": "TOFU",
+      "role": "LinuxServer",
+      "operatingSystem": "Ubuntu Server 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "enableRDP": true
+    },
+    {
+      "vmName": "TEMPEH",
+      "role": "LinuxClient",
+      "operatingSystem": "Ubuntu Desktop 24.04 LTS",
+      "osFamily": "Linux",
+      "memory": "4GB",
+      "virtualProcs": 4
+    },
+    {
+      "vmName": "MOCHI",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 11 25H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "installSSMS": false,
+      "useFakeWSUSServer": false,
+      "domainUser": "user1",
+      "useProxy": true,
+      "BitLocker": true,
+      "dynamicMinRam": "2GB"
+    },
+    {
+      "vmName": "PRETZEL",
+      "role": "DomainMember",
+      "operatingSystem": "Windows 10 1909 (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "installSSMS": false,
+      "useFakeWSUSServer": true,
+      "domainUser": "user2"
+    },
+    {
+      "vmName": "CHURRO",
+      "role": "InternetClient",
+      "operatingSystem": "Windows 10 Latest (64-bit)",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "useFakeWSUSServer": true
+    },
+    {
+      "vmName": "BISCUIT",
+      "role": "AADClient",
+      "operatingSystem": "Windows 11 24H2",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2"
+    },
+    {
+      "vmName": "BOOT1",
+      "role": "OSDClient",
+      "memory": "2GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2"
+    },
+    {
+      "vmName": "SCONE",
+      "role": "WorkgroupMember",
+      "operatingSystem": "Server 2025",
+      "memory": "4GB",
+      "virtualProcs": 2,
+      "tpmEnabled": true,
+      "vmGeneration": "2",
+      "installSSMS": false,
+      "dynamicMinRam": "1GB"
+    },
+    {
+      "vmName": "TURNIP",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2016 February 2018",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": false,
+      "vmGeneration": "1",
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2016",
+      "sqlInstanceName": "PARSNIP",
+      "sqlInstanceDir": "E:\\SQL",
+      "sqlPort": "2433",
+      "additionalDisks": {
+        "E": "250GB"
+      }
+    },
+    {
+      "vmName": "BEET",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2019",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2017",
+      "sqlInstanceName": "RADISH",
+      "sqlInstanceDir": "G:\\SQL",
+      "sqlPort": "3433",
+      "additionalDisks": {
+        "G": "250GB"
+      }
+    },
+    {
+      "vmName": "PICKLE",
+      "role": "DomainMember",
+      "operatingSystem": "Server 2022",
+      "memory": "4GB",
+      "virtualProcs": 4,
+      "tpmEnabled": true,
+      "installSSMS": true,
+      "sqlVersion": "SQL Server 2019",
+      "sqlInstanceName": "BRINE",
+      "sqlInstanceDir": "H:\\SQL",
+      "sqlPort": "6433",
+      "additionalDisks": {
+        "H": "250GB"
+      }
+    }
+  ]
+}
