@@ -156,6 +156,18 @@ function Start-Phase {
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"
 
+    # Record per-phase stats
+    if ($global:BuildStats) {
+        $vmCount = ($start.Success + $start.Failed)
+        $global:BuildStats.Phases[$Phase] = @{
+            Elapsed = $result.Elapsed
+            Success = $result.Success
+            Warning = $result.Warning
+            Failed  = $result.Failed
+            VMCount = $vmCount
+        }
+    }
+
     if ($result.Failed -gt 0) {
         return $false
     }
@@ -717,6 +729,24 @@ function Wait-Phase {
                     Write-Log "[Phase $Phase] Job failed: $jobJson" -LogOnly
                     Write-RedX "[Phase $Phase] Job failed: $jobOutput" -ForegroundColor Red
                     Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
+
+                    # Capture per-VM timing for failed jobs too
+                    if ($global:BuildStats -and $job.Name -match '^(.+?)\s+\[(.+?)\]') {
+                        $fvmName = $Matches[1]
+                        $fRole = $Matches[2]
+                        $fStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
+                        $fEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                        if (-not $global:BuildStats.VMs.ContainsKey($fvmName)) {
+                            $global:BuildStats.VMs[$fvmName] = @{ Role = $fRole; Phases = @{} }
+                        }
+                        $global:BuildStats.VMs[$fvmName].Phases[$Phase] = @{
+                            Elapsed = ($fEnd - $fStart)
+                            Start   = $fStart
+                            End     = $fEnd
+                            Failed  = $true
+                        }
+                    }
+
                     $jobs.Remove($job)
                     $return.Failed++
                 }
@@ -726,6 +756,35 @@ function Wait-Phase {
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name
+
+                # Capture per-VM timing into $global:BuildStats
+                if ($global:BuildStats) {
+                    $parsedVmName = $null
+                    $parsedRole = $null
+                    if ($jobName -match '^(.+?)\s+\[(.+?)\]') {
+                        $parsedVmName = $Matches[1]
+                        $parsedRole = $Matches[2]
+                    }
+                    if ($parsedVmName) {
+                        # Use PSBeginTime/PSEndTime when available (Start-Job); fall back to phase start/now (ThreadJob)
+                        $jobStart = if ($job.PSBeginTime) { $job.PSBeginTime } else { $StartTime }
+                        $jobEnd = if ($job.PSEndTime) { $job.PSEndTime } else { Get-Date }
+                        $jobElapsed = $jobEnd - $jobStart
+
+                        if (-not $global:BuildStats.VMs.ContainsKey($parsedVmName)) {
+                            $global:BuildStats.VMs[$parsedVmName] = @{
+                                Role   = $parsedRole
+                                Phases = @{}
+                            }
+                        }
+                        $global:BuildStats.VMs[$parsedVmName].Phases[$Phase] = @{
+                            Elapsed = $jobElapsed
+                            Start   = $jobStart
+                            End     = $jobEnd
+                        }
+                    }
+                }
+
                 # ThreadJob has no ChildJobs -- streams live directly on the job.
                 $streamSource = Get-JobStreamSource -Job $job
                 $jobOutput = $streamSource | Select-Object -ExpandProperty Output
@@ -1456,4 +1515,303 @@ function Get-Phase9ConfigurationData {
     }
     return $cd
 
+}
+
+function Get-GuestTimingStats {
+    param (
+        [object]$deployConfig
+    )
+
+    if (-not $global:BuildStats) { return }
+
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.hidden) { continue }
+        if (Test-VmIsLinux -Vm $vm) { continue }
+
+        try {
+            $json = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -TimeoutSeconds 30 -ScriptBlock {
+                $path = "C:\staging\DSC\ScriptWorkflow.json"
+                if (Test-Path $path) { Get-Content $path -Raw } else { $null }
+            }
+
+            if (-not $json -or -not $json.ScriptBlockOutput) { continue }
+            $raw = $json.ScriptBlockOutput
+            $wf = $raw | ConvertFrom-Json
+
+            $components = @{}
+            foreach ($prop in $wf.PSObject.Properties) {
+                $comp = $prop.Value
+                if (-not $comp.StartTime -or -not $comp.EndTime -or $comp.StartTime -eq '' -or $comp.EndTime -eq '') { continue }
+                try {
+                    $cStart = [datetime]::ParseExact($comp.StartTime, "yyyy-MM-dd HH:mm:ss", $null)
+                    $cEnd = [datetime]::ParseExact($comp.EndTime, "yyyy-MM-dd HH:mm:ss", $null)
+                    $components[$prop.Name] = @{
+                        Elapsed = ($cEnd - $cStart)
+                        Status  = $comp.Status
+                    }
+                }
+                catch {
+                    # Skip components with unparseable timestamps
+                }
+            }
+
+            if ($components.Count -gt 0) {
+                if (-not $global:BuildStats.ContainsKey('Components')) {
+                    $global:BuildStats['Components'] = @{}
+                }
+                $global:BuildStats.Components[$vm.vmName] = $components
+            }
+        }
+        catch {
+            Write-Log "[BuildStats] Could not retrieve timing from $($vm.vmName): $_" -LogOnly
+        }
+    }
+}
+
+function Write-BuildSummary {
+
+    if (-not $global:BuildStats) { return }
+
+    $stats = $global:BuildStats
+    $hasPhases = $stats.Phases.Count -gt 0
+    $hasVMs = $stats.VMs.Count -gt 0
+    $hasComponents = $stats.ContainsKey('Components') -and $stats.Components.Count -gt 0
+
+    if (-not $hasPhases -and -not $hasVMs) { return }
+
+    Write-Host
+    Write-Log "============================== Build Summary ==============================" -Activity
+
+    # --- Phase Summary ---
+    if ($hasPhases) {
+        Write-Log ""
+        Write-Log "  Phase Summary:" -Activity
+        Write-Log "  $("Phase".PadRight(12))$("VMs".PadRight(8))$("Success".PadRight(10))$("Warn".PadRight(8))$("Fail".PadRight(8))Elapsed"
+        Write-Log "  $("-----".PadRight(12))$("---".PadRight(8))$("-------".PadRight(10))$("----".PadRight(8))$("----".PadRight(8))-------"
+        foreach ($phaseNum in $stats.Phases.Keys | Sort-Object) {
+            $p = $stats.Phases[$phaseNum]
+            $elapsed = if ($p.Elapsed) { $p.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
+            Write-Log "  $("Phase $phaseNum".PadRight(12))$($p.VMCount.ToString().PadRight(8))$($p.Success.ToString().PadRight(10))$($p.Warning.ToString().PadRight(8))$($p.Failed.ToString().PadRight(8))$elapsed"
+
+            # Show per-VM breakdown within this phase and identify the slowest
+            if ($hasVMs) {
+                $phaseVMs = @()
+                foreach ($vmName in $stats.VMs.Keys) {
+                    $vmData = $stats.VMs[$vmName]
+                    if ($vmData.Phases.ContainsKey($phaseNum)) {
+                        $phaseEntry = $vmData.Phases[$phaseNum]
+                        $phaseVMs += [PSCustomObject]@{
+                            Name    = $vmName
+                            Role    = $vmData.Role
+                            Elapsed = $phaseEntry.Elapsed
+                            Ticks   = if ($phaseEntry.Elapsed) { $phaseEntry.Elapsed.Ticks } else { 0 }
+                            Failed  = [bool]$phaseEntry.Failed
+                        }
+                    }
+                }
+                if ($phaseVMs.Count -gt 0) {
+                    $phaseVMs = $phaseVMs | Sort-Object -Property Ticks -Descending
+                    foreach ($pvm in $phaseVMs) {
+                        $vmElapsed = if ($pvm.Elapsed) { $pvm.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
+                        $failMark = if ($pvm.Failed) { " (FAILED)" } else { "" }
+                        Write-Log "    $($pvm.Name) [$($pvm.Role)] $vmElapsed$failMark"
+                    }
+                    $slowestInPhase = $phaseVMs[0]
+                    if ($phaseVMs.Count -gt 1) {
+                        $slowElapsed = if ($slowestInPhase.Elapsed) { $slowestInPhase.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
+                        Write-Log "    >> Slowest: $($slowestInPhase.Name) [$($slowestInPhase.Role)] at $slowElapsed"
+                    }
+                }
+            }
+        }
+    }
+
+    # --- VM Summary ---
+    if ($hasVMs) {
+        # Calculate total time per VM across all phases
+        $vmTotals = @()
+        foreach ($vmName in $stats.VMs.Keys) {
+            $vmData = $stats.VMs[$vmName]
+            $totalTicks = [long]0
+            $phaseList = @()
+            foreach ($phaseNum in $vmData.Phases.Keys | Sort-Object) {
+                $phaseEntry = $vmData.Phases[$phaseNum]
+                if ($phaseEntry.Elapsed) {
+                    $totalTicks += $phaseEntry.Elapsed.Ticks
+                }
+                $phaseList += $phaseNum
+            }
+            $vmTotals += [PSCustomObject]@{
+                Name       = $vmName
+                Role       = $vmData.Role
+                TotalTicks = $totalTicks
+                Total      = [TimeSpan]::FromTicks($totalTicks)
+                Phases     = ($phaseList -join ",")
+            }
+        }
+        $vmTotals = $vmTotals | Sort-Object -Property TotalTicks -Descending
+
+        $maxName = ($vmTotals | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+        $maxRole = ($vmTotals | ForEach-Object { $_.Role.Length } | Measure-Object -Maximum).Maximum
+        if ($maxName -lt 4) { $maxName = 4 }
+        if ($maxRole -lt 4) { $maxRole = 4 }
+        $namePad = $maxName + 2
+        $rolePad = $maxRole + 2
+
+        Write-Log ""
+        Write-Log "  VM Summary (sorted by total time, longest first):" -Activity
+        Write-Log "  $("VM".PadRight($namePad))$("Role".PadRight($rolePad))$("Phases".PadRight(14))Total"
+        Write-Log "  $("--".PadRight($namePad))$("----".PadRight($rolePad))$("------".PadRight(14))-----"
+        foreach ($vm in $vmTotals) {
+            Write-Log "  $($vm.Name.PadRight($namePad))$($vm.Role.PadRight($rolePad))$($vm.Phases.PadRight(14))$($vm.Total.ToString("hh\:mm\:ss"))"
+        }
+
+        # Highlight the slowest VM
+        if ($vmTotals.Count -gt 0) {
+            $slowest = $vmTotals[0]
+            Write-Log ""
+            Write-Log "  Slowest VM: $($slowest.Name) [$($slowest.Role)] - $($slowest.Total.ToString("hh\:mm\:ss"))"
+        }
+    }
+
+    # --- Component Breakdown ---
+    if ($hasComponents) {
+        Write-Log ""
+        Write-Log "  Component Breakdown (guest-side ScriptWorkflow timing):" -Activity
+
+        $globalSlowest = $null
+        $globalSlowestTicks = [long]0
+
+        foreach ($vmName in $stats.Components.Keys | Sort-Object) {
+            $comps = $stats.Components[$vmName]
+            if ($comps.Count -eq 0) { continue }
+
+            # Sort components by elapsed time descending
+            $sorted = $comps.GetEnumerator() | Sort-Object { $_.Value.Elapsed.Ticks } -Descending
+
+            Write-Log ""
+            Write-Log "  $vmName`:"
+            foreach ($entry in $sorted) {
+                $elapsed = $entry.Value.Elapsed.ToString("hh\:mm\:ss")
+                $status = $entry.Value.Status
+                $marker = if ($status -eq 'Completed') { "" } else { " ($status)" }
+                Write-Log "    $($entry.Key.PadRight(35))$elapsed$marker"
+
+                if ($entry.Value.Elapsed.Ticks -gt $globalSlowestTicks) {
+                    $globalSlowestTicks = $entry.Value.Elapsed.Ticks
+                    $globalSlowest = @{ VM = $vmName; Component = $entry.Key; Elapsed = $entry.Value.Elapsed }
+                }
+            }
+        }
+
+        if ($globalSlowest) {
+            Write-Log ""
+            Write-Log "  Slowest component: $($globalSlowest.Component) on $($globalSlowest.VM) - $($globalSlowest.Elapsed.ToString("hh\:mm\:ss"))"
+        }
+    }
+
+    Write-Log ""
+    Write-Log "===========================================================================" -Activity
+    Write-Host
+}
+
+function Save-BuildStats {
+    param (
+        [string]$Configuration,
+        [TimeSpan]$TotalElapsed,
+        [bool]$Success
+    )
+
+    if (-not $global:BuildStats) { return }
+    if (-not $Configuration) { return }
+
+    $stats = $global:BuildStats
+
+    try {
+        # Build the stats directory under logs\stats
+        $logsPath = Split-Path $Common.LogPath -Parent
+        $statsDir = Join-Path $logsPath "stats"
+        if (-not (Test-Path $statsDir)) {
+            $null = New-Item -ItemType Directory -Path $statsDir -Force
+        }
+
+        # Gather metadata
+        $configShort = Split-Path $Configuration -LeafBase
+        $branch = try { Get-BranchName } catch { "unknown" }
+        $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+        # Convert phase timing to serializable form
+        $phasesOut = @{}
+        foreach ($phaseNum in $stats.Phases.Keys) {
+            $p = $stats.Phases[$phaseNum]
+            $phasesOut["$phaseNum"] = @{
+                ElapsedSeconds = if ($p.Elapsed) { [Math]::Round($p.Elapsed.TotalSeconds, 1) } else { $null }
+                VMCount        = $p.VMCount
+                Success        = $p.Success
+                Warning        = $p.Warning
+                Failed         = $p.Failed
+            }
+        }
+
+        # Convert VM timing to serializable form
+        $vmsOut = @{}
+        foreach ($vmName in $stats.VMs.Keys) {
+            $vmData = $stats.VMs[$vmName]
+            $vmPhases = @{}
+            $totalSeconds = [double]0
+            foreach ($pNum in $vmData.Phases.Keys) {
+                $pe = $vmData.Phases[$pNum]
+                $elSec = if ($pe.Elapsed) { [Math]::Round($pe.Elapsed.TotalSeconds, 1) } else { 0 }
+                $totalSeconds += $elSec
+                $vmPhases["$pNum"] = @{
+                    ElapsedSeconds = $elSec
+                    Failed         = [bool]$pe.Failed
+                }
+            }
+            $vmsOut[$vmName] = @{
+                Role           = $vmData.Role
+                TotalSeconds   = [Math]::Round($totalSeconds, 1)
+                Phases         = $vmPhases
+            }
+        }
+
+        # Convert component timing to serializable form
+        $compsOut = @{}
+        if ($stats.ContainsKey('Components') -and $stats.Components.Count -gt 0) {
+            foreach ($vmName in $stats.Components.Keys) {
+                $comps = $stats.Components[$vmName]
+                $vmComps = @{}
+                foreach ($compName in $comps.Keys) {
+                    $c = $comps[$compName]
+                    $vmComps[$compName] = @{
+                        ElapsedSeconds = if ($c.Elapsed) { [Math]::Round($c.Elapsed.TotalSeconds, 1) } else { $null }
+                        Status         = $c.Status
+                    }
+                }
+                $compsOut[$vmName] = $vmComps
+            }
+        }
+
+        $statsObj = [ordered]@{
+            Timestamp       = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+            Configuration   = $configShort
+            MemLabsVersion  = $Common.MemLabsVersion
+            Branch          = $branch
+            Success         = $Success
+            TotalElapsed    = if ($TotalElapsed) { $TotalElapsed.ToString("hh\:mm\:ss") } else { $null }
+            TotalSeconds    = if ($TotalElapsed) { [Math]::Round($TotalElapsed.TotalSeconds, 1) } else { $null }
+            HostName        = $env:COMPUTERNAME
+            Phases          = $phasesOut
+            VMs             = $vmsOut
+            Components      = $compsOut
+        }
+
+        $fileName = "${configShort}_${timestamp}.json"
+        $filePath = Join-Path $statsDir $fileName
+        $statsObj | ConvertTo-Json -Depth 5 | Out-File -FilePath $filePath -Encoding utf8 -Force
+        Write-Log "Build stats saved to: $filePath" -LogOnly
+    }
+    catch {
+        Write-Log "[BuildStats] Failed to save stats: $_" -LogOnly
+    }
 }

@@ -600,6 +600,12 @@ try {
     $timer = New-Object -TypeName System.Diagnostics.Stopwatch
     $timer.Start()
 
+    # Build stats: accumulate per-phase and per-VM timing throughout the build
+    $global:BuildStats = @{
+        Phases = @{}   # keyed by phase number -> @{ Elapsed; Success; Warning; Failed; VMCount }
+        VMs    = @{}   # keyed by vmName      -> @{ Role; Phases = @{ N -> @{ Elapsed } } }
+    }
+
     # Change log location
     $domainName = $deployConfig.vmOptions.domainName
     $domainLogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainName.log"
@@ -893,6 +899,9 @@ try {
 
 
         }
+        # Show build stats collected so far (partial build)
+        Write-BuildSummary
+        Save-BuildStats -Configuration $Configuration -TotalElapsed $timer.Elapsed -Success $false
         Write-Host
     }
     else {
@@ -985,6 +994,13 @@ try {
             }
         }
 
+        # Retrieve guest-side component timing from ScriptWorkflow.json
+        Get-GuestTimingStats -deployConfig $deployConfig
+
+        # Show complete build stats
+        Write-BuildSummary
+        Save-BuildStats -Configuration $Configuration -TotalElapsed $timer.Elapsed -Success $true
+
         Write-Host
         Set-TitleBar "SCRIPT FINISHED"
         Write-Log "### SCRIPT FINISHED (Configuration '$Configuration'). Elapsed Time: $($timer.Elapsed.ToString("hh\:mm\:ss"))" -Activity
@@ -1010,6 +1026,7 @@ finally {
 
     }
     $global:mutexes = @()
+    $global:BuildStats = $null
 
     if ($enableDebug) {
         Write-Host 'Config Stored in $global:DebugConfig'
