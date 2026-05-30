@@ -246,8 +246,6 @@
       "operatingSystem": "Server 2016",
       "memory": "6GB",
       "virtualProcs": 4,
-      "tpmEnabled": false,
-      "vmGeneration": "1",
       "installSSMS": true,
       "wsusContentDir": "E:\\WSUS",
       "additionalDisks": {

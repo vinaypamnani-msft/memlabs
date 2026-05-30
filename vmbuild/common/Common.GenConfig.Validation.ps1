@@ -232,6 +232,10 @@ function Get-AdditionalValidations {
             if ($value -notin ("1", "2")) {
                 $property.$name = "2"
             }
+            if ($value -eq "1" -and $property.role -ne "OSDClient") {
+                Add-ErrorMessage -property $name "Gen 1 is only supported for OSDClient (base images are GPT/UEFI and cannot boot on Gen 1). Changing to Gen 2."
+                $property.$name = "2"
+            }
             if ($value -eq "1" -and ($property.tpmEnabled -eq $true)) {
                 Add-ErrorMessage -property $name -Warning "Setting generation to 1 will disable TPM support."
             }
