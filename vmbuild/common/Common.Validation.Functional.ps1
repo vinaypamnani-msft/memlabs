@@ -3603,3 +3603,258 @@ function Format-TestResult {
 }
 
 #endregion
+
+####################################
+### Post-Phase-5 SQLAO Validation
+####################################
+
+function Test-SQLAOPostPhase5 {
+    <#
+    .SYNOPSIS
+        Lightweight SQLAO validation run immediately after Phase 5 DSC.
+    .DESCRIPTION
+        Catches SQLAO failures early (cluster, AG, listener, shares) so
+        the build can stop before Phase 8 rather than wasting hours.
+        Runs from the host via Invoke-VmCommand against the primary
+        SQLAO node only. Returns $true if all checks pass.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 5
+
+    # Find SQLAO primary nodes (the ones with OtherNode defined)
+    $primaryNodes = @($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })
+    if ($primaryNodes.Count -eq 0) {
+        return $true
+    }
+
+    $domain = $DeployConfig.vmOptions.domainName
+    $allPassed = $true
+
+    foreach ($primaryAO in $primaryNodes) {
+        $VMName = $primaryAO.vmName
+        $listenerName = $primaryAO.AlwaysOnListenerName
+        $agName = $primaryAO.AlwaysOnGroupName
+        $agIP = $primaryAO.AGIPAddress
+        $clusterName = $primaryAO.ClusterName
+        $clusterIP = $primaryAO.ClusterIPAddress
+        $otherNode = $primaryAO.OtherNode
+        $listenerPort = '1500'
+
+        $prefix = $DeployConfig.vmOptions.prefix
+        $clusterNameNoPrefix = $clusterName.Replace($prefix, "")
+        $fileServerVM = $primaryAO.fileServerVM
+        $witnessShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Witness"
+        $backupShare = "\\$fileServerVM\$($clusterNameNoPrefix)-Backup"
+
+        Write-Log "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation" -OutputStream
+
+        $scriptBlock = {
+            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP)
+
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+            try {
+                Import-Module FailoverClusters -ErrorAction SilentlyContinue
+                Import-Module SqlServer -ErrorAction SilentlyContinue
+                if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+                    Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
+                }
+
+                # 1. Failover Cluster health
+                $results.Details.Add("CMD: Get-Cluster / Get-ClusterNode")
+                try {
+                    $cluster = Get-Cluster -ErrorAction Stop
+                    $results.Details.Add("OK: Cluster '$($cluster.Name)' is online")
+
+                    $nodes = @(Get-ClusterNode -ErrorAction Stop)
+                    $downNodes = @($nodes | Where-Object { $_.State -ne 'Up' })
+                    if ($downNodes.Count -gt 0) {
+                        $results.Passed = $false
+                        foreach ($n in $downNodes) {
+                            $results.Details.Add("FAIL: Cluster node '$($n.Name)' is $($n.State)")
+                        }
+                    }
+                    else {
+                        $results.Details.Add("OK: All $($nodes.Count) cluster node(s) are Up ($($nodes.Name -join ', '))")
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Cluster not found or inaccessible: $($_.Exception.Message)")
+                }
+
+                # 2. Cluster name DNS
+                if ($clusterName) {
+                    $results.Details.Add("CMD: Resolve-DnsName '$clusterName'")
+                    $clusterDns = @(Resolve-DnsName -Name $clusterName -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
+                    $resolvedIPs = @($clusterDns | Select-Object -ExpandProperty IPAddress)
+                    if ($resolvedIPs.Count -eq 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
+                    }
+                    else {
+                        $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($resolvedIPs -join ', ')")
+                        if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($resolvedIPs -join ', '))")
+                        }
+                    }
+                }
+
+                # 3. AG replica health (single attempt, no remediation — just report)
+                $results.Details.Add("CMD: AG replica health query")
+                try {
+                    $healthQuery = @"
+SELECT ag.name AS GroupName,
+       rs.role_desc AS Role,
+       rs.connected_state_desc AS ConnState,
+       rs.synchronization_health_desc AS Health,
+       ar.replica_server_name AS Replica
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+"@
+                    $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                    if (-not $ag -or $ag.Count -eq 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: No availability group replicas found")
+                    }
+                    else {
+                        $unhealthy = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
+                        foreach ($r in $ag) {
+                            $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
+                            $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                        }
+                        if ($unhealthy.Count -gt 0) {
+                            $results.Passed = $false
+                        }
+                    }
+                }
+                catch {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: AG health query failed: $($_.Exception.Message)")
+                }
+
+                # 4. Listener DNS
+                if ($listenerName) {
+                    $results.Details.Add("CMD: Resolve-DnsName '$listenerName'")
+                    try {
+                        $dns = @(Resolve-DnsName -Name $listenerName -Type A -ErrorAction Stop)
+                        $resolvedIPs = @($dns | Where-Object { $_.QueryType -eq 'A' } | Select-Object -ExpandProperty IPAddress)
+                        if ($resolvedIPs.Count -gt 0) {
+                            $results.Details.Add("OK: Listener '$listenerName' resolves to $($resolvedIPs -join ', ')")
+                            if ($agIP -and $agIP -notin $resolvedIPs) {
+                                $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                            }
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Listener '$listenerName' did not resolve to any A records")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DNS resolution for '$listenerName' failed: $($_.Exception.Message)")
+                    }
+                }
+
+                # 5. Listener SQL connectivity
+                if ($listenerName -and $listenerPort) {
+                    $connStr = "$listenerName,$listenerPort"
+                    $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Query 'SELECT 1'")
+                    try {
+                        $lr = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        if ($lr.TestResult -eq 1) {
+                            $results.Details.Add("OK: SQL query via listener '$connStr' succeeded")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Listener query returned unexpected result")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: SQL connection via listener '$connStr' failed: $($_.Exception.Message)")
+                    }
+                }
+
+                # 6. Backup and Witness shares
+                foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare}, @{Name = 'Backup'; Path = $backupShare})) {
+                    if ($share.Path) {
+                        $results.Details.Add("CMD: Test-Path '$($share.Path)'")
+                        if (Test-Path $share.Path -ErrorAction SilentlyContinue) {
+                            $results.Details.Add("OK: $($share.Name) share '$($share.Path)' is accessible")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: $($share.Name) share '$($share.Path)' is not accessible")
+                        }
+                    }
+                }
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Post-Phase-5 SQLAO validation failed: $($_.Exception.Message)")
+            }
+
+            return $results
+        }
+
+        $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $scriptBlock `
+            -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP `
+            -DisplayName "Phase5-SQLAO-Validate" -SuppressLog
+
+        # Process results inline (Format-TestResult hardcodes Phase 11)
+        $passed = $true
+        if (-not $result -or $result.ScriptBlockFailed) {
+            $hasValidPass = $result -and $result.ScriptBlockOutput -is [hashtable] -and
+                $result.ScriptBlockOutput.ContainsKey('Passed') -and $result.ScriptBlockOutput.Passed -eq $true
+            if (-not $hasValidPass) {
+                $errMsg = if ($result) { $result.ScriptBlockFailed } else { 'Invoke-VmCommand returned no result' }
+                if ($result -and $errMsg -is [bool]) {
+                    $detail = $result.ScriptBlockOutput
+                    if ($detail -and $detail -is [string]) { $errMsg = $detail }
+                    elseif ($detail) { $errMsg = ($detail | Out-String).Trim() }
+                    if (-not $errMsg -or $errMsg -is [bool]) { $errMsg = 'ScriptBlock failed (no detail)' }
+                }
+                Write-Log "[Phase $Phase] $VMName [SQLAO]: FAIL - $errMsg" -Failure
+                $allPassed = $false
+                continue
+            }
+        }
+
+        $output = $result.ScriptBlockOutput
+        if (-not $output -or -not $output.ContainsKey('Passed')) {
+            Write-Log "[Phase $Phase] $VMName [SQLAO]: FAIL - Unexpected output from validation script" -Failure
+            $allPassed = $false
+            continue
+        }
+
+        foreach ($line in $output.Details) {
+            if ($line -match '^FAIL:') {
+                Write-Log "[Phase $Phase] $VMName [SQLAO]: $line" -Failure
+            }
+            elseif ($line -match '^WARN:') {
+                Write-Log "[Phase $Phase] $VMName [SQLAO]: $line" -Warning
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [SQLAO]: $line" -LogOnly
+            }
+        }
+
+        if ($output.Passed) {
+            Write-Log "[Phase $Phase] $VMName [SQLAO]: Post-Phase-5 SQLAO validation PASSED" -Success
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [SQLAO]: Post-Phase-5 SQLAO validation FAILED" -Failure
+            $allPassed = $false
+        }
+    }
+
+    return $allPassed
+}

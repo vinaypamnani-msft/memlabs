@@ -819,6 +819,20 @@ try {
                     # must run before the proxy client config / enforcement so
                     # the Proxy is fully configured before clients route to it.
                 }
+                if ($i -eq 5) {
+                    # Validate SQLAO health immediately after Phase 5 DSC so
+                    # cluster/AG/listener problems surface now instead of
+                    # waiting until Phase 8 (CAS install) or Phase 11.
+                    $hasSQLAO = @($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden }).Count -gt 0
+                    if ($hasSQLAO) {
+                        $sqlaoValid = Test-SQLAOPostPhase5 -DeployConfig $deployConfig
+                        if (-not $sqlaoValid) {
+                            Write-Log "[Phase 5] SQLAO validation failed. Stopping build." -Failure
+                            $configured = $false
+                            break
+                        }
+                    }
+                }
                 if ($i -eq 11) {
                     # Phase 11 passed: merge the Phase 8 auto-snapshot if it exists
                     if (-not $global:NoSnapshot) {
