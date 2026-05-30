@@ -3740,8 +3740,9 @@ class ModuleAdd {
 
         # Pre-import package modules quietly to prevent DSC verbose log
         # flooding with hundreds of "Importing cmdlet ..." lines.
-        Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module PowerShellGet -Verbose:$false -ErrorAction SilentlyContinue
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { Import-Module PackageManagement, PowerShellGet -ErrorAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
 
         $Nuget = $null
         try {
@@ -3774,7 +3775,9 @@ class ModuleAdd {
         # Without this, the first Install-Module call for the target module fails
         # because the session still has stale provider state from bootstrapping.
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-        Import-Module PowerShellGet -Force -Verbose:$false -ErrorAction SilentlyContinue
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
@@ -3847,7 +3850,9 @@ class ConfigureWSUS {
     hidden [void] CleanupWSUS() {
         Write-Status "Cleaning up WSUS IIS configuration..."
         
-        Import-Module WebAdministration -Verbose:$false -ErrorAction SilentlyContinue
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { Import-Module WebAdministration -ErrorAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
         
         # Stop WSUS Service
         $ServiceName = 'WSUSService'
@@ -4311,7 +4316,9 @@ class InstallPBIRS {
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
-                Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
+                $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+                try { Import-Module PackageManagement -ErrorAction SilentlyContinue }
+                finally { $global:VerbosePreference = $savedVP }
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
             }
@@ -4775,7 +4782,9 @@ class AddCertificateTemplate {
 
             IF ($null -eq $module) {
                 Write-Status "Installing PSPKI Module"  
-                Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
+                $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+                try { Import-Module PackageManagement -ErrorAction SilentlyContinue }
+                finally { $global:VerbosePreference = $savedVP }
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
@@ -5254,13 +5263,19 @@ class DisableClusterNicDnsRegistration {
         $_dc     = $this.DCName
 
         # Pre-import modules quietly so DSC verbose logging doesn't flood
-        # with hundreds of "Exporting function ..." lines.
-        Import-Module NetAdapter -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module NetTCPIP -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module DnsServer -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
-        Import-Module NetSecurity -Verbose:$false -ErrorAction SilentlyContinue
+        # with hundreds of "Exporting function ..." lines. Import-Module
+        # -Verbose:$false is insufficient because DSC sets $VerbosePreference
+        # = 'Continue' session-wide, and module manifest processing respects
+        # the preference variable, not the cmdlet switch. Temporarily override
+        # the preference variable during imports.
+        $savedVerbose = $global:VerbosePreference
+        $global:VerbosePreference = 'SilentlyContinue'
+        try {
+            Import-Module NetAdapter, NetTCPIP, DnsClient, DnsServer, FailoverClusters, NetSecurity -ErrorAction SilentlyContinue
+        }
+        finally {
+            $global:VerbosePreference = $savedVerbose
+        }
 
         # 1. Disable DNS registration on cluster/heartbeat adapters and rename NICs.
         $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
@@ -5392,14 +5407,16 @@ class DisableClusterNicDnsRegistration {
             $cluster = Get-Cluster -ErrorAction SilentlyContinue
             if ($cluster) {
                 # Find AG listener Network Name resources (not the Cluster Name itself).
-                $nnResources = Get-ClusterResource -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.Name -ne 'Cluster Name' }
+                $nnResources = @(Get-ClusterResource -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.Name -ne 'Cluster Name' })
+                Write-Status "Listener DNS: found $($nnResources.Count) non-cluster Network Name resource(s) in cluster"
                 foreach ($nn in $nnResources) {
                     $nnName = ($nn | Get-ClusterParameter -Name Name -ErrorAction SilentlyContinue).Value
                     # Find the IP Address resource in the same owner group.
                     $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
-                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $nn.OwnerGroup -and $_.Name -ne 'Cluster IP Address' }
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup.Name -eq $nn.OwnerGroup.Name -and $_.Name -ne 'Cluster IP Address' }
                     $nnIP = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue | Select-Object -First 1).Value
+                    Write-Status "Listener DNS: cluster resource '$($nn.Name)' -> Name='$nnName' IP='$nnIP'"
                     if ($nnName -and $nnIP) {
                         $lName = $nnName
                         $lIP   = $nnIP
@@ -5408,9 +5425,17 @@ class DisableClusterNicDnsRegistration {
                 }
             }
         }
-        catch { }
-        if (-not $lName -and $this.ListenerName)      { $lName = $this.ListenerName }
-        if (-not $lIP   -and $this.ListenerIPAddress)  { $lIP   = $this.ListenerIPAddress }
+        catch {
+            Write-Status "Listener DNS: error querying cluster for listener: $_"
+        }
+        if (-not $lName -and $this.ListenerName)      {
+            $lName = $this.ListenerName
+            Write-Status "Listener DNS: using config ListenerName='$lName'"
+        }
+        if (-not $lIP   -and $this.ListenerIPAddress)  {
+            $lIP   = $this.ListenerIPAddress
+            Write-Status "Listener DNS: using config ListenerIPAddress='$lIP'"
+        }
         if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
 
         if ($lName -and $lIP) {
