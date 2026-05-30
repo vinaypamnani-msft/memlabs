@@ -3760,7 +3760,17 @@ function Invoke-VmCommand {
                     }
                 }
                 else {
-                    $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                    # Suppress Invoke-Command's auto-generated progress record whose Activity
+                    # is the raw scriptblock text.  Explicit Write-Progress2 calls in the
+                    # calling code provide the meaningful progress instead.
+                    $savedProgressPref = $ProgressPreference
+                    $ProgressPreference = 'SilentlyContinue'
+                    try {
+                        $return.ScriptBlockOutput = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue
+                    }
+                    finally {
+                        $ProgressPreference = $savedProgressPref
+                    }
                 }
             }
             catch {

@@ -835,7 +835,7 @@ $global:VM_Create = {
             $diskNum = 1
             foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
                 $label = $null
-                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Log
+                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Status "Initializing" -Log
 
                 if ($currentItem.Role -eq "FileServer") {
                     if ($diskNum -eq 1) {
@@ -875,7 +875,7 @@ $global:VM_Create = {
                     return
                 }
                 else {
-                    Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Completed -Log
+                    Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Status "Done" -Completed -Log
                 }
             
             }
