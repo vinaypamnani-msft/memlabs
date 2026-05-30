@@ -1731,6 +1731,7 @@ class DelegateControl {
 
         $retries = 0
         $maxretries = 15
+        $forcedReplication = $false
         while ($retries -le $maxretries) {
 
             Clear-DnsClientCache -ErrorAction SilentlyContinue
@@ -1757,6 +1758,63 @@ class DelegateControl {
             Write-Verbose "Result $result"
             Write-Verbose "dsacls.exe exit code: $dsaclsExitCode"
 
+            # Error 1332 = "No Sid Found" — the computer account hasn't
+            # replicated to this DC yet. Force AD replication once, then
+            # try targeting the PDC emulator directly.
+            if ($dsaclsExitCode -eq 1332 -and -not $forcedReplication) {
+                $forcedReplication = $true
+                try {
+                    $domainControllers = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    if ($domainControllers.Count -gt 1) {
+                        $dn = (Get-ADDomain -ErrorAction SilentlyContinue).DistinguishedName
+                        Write-Status "SID not found locally. Forcing AD replication across $($domainControllers.Count) DCs..."
+                        $dcNames = @($domainControllers.Name)
+                        $replJob = Start-Job -ScriptBlock {
+                            param($dcNames, $dn)
+                            $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
+                        } -ArgumentList $dcNames, $dn
+                        $null = Wait-Job $replJob -Timeout 60
+                        if ($replJob.State -eq 'Running') {
+                            Stop-Job $replJob -ErrorAction SilentlyContinue
+                        }
+                        Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        Write-Status "Replication sync completed. Retrying dsacls..."
+                    }
+                }
+                catch {
+                    Write-Verbose "Forced replication failed: $_"
+                }
+            }
+
+            # If dsacls failed with 1332 (SID not found on this DC), try
+            # targeting each DC directly. The PDC or the DC where the
+            # computer account was created may already have the SID.
+            $successDcArg1 = $null
+            if ($dsaclsExitCode -eq 1332) {
+                try {
+                    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    foreach ($dc in $allDCs) {
+                        if ($dc.HostName -eq (hostname)) { continue }
+                        $serverArg1 = "\\$($dc.HostName)\$arg1"
+                        Write-Status "Trying dsacls via $($dc.Name)... (Try $retries/$maxretries)"
+                        Write-Verbose "Running $cmd $serverArg1 $arg2 $arg3 $arg4"
+                        $dcResult = & $cmd $serverArg1 $arg2 $arg3 $arg4 *>&1
+                        $dcExitCode = $LASTEXITCODE
+                        Write-Verbose "dsacls via $($dc.Name) exit code: $dcExitCode"
+                        if ($dcExitCode -eq 0) {
+                            Write-Status "dsacls succeeded via $($dc.Name)"
+                            $dsaclsExitCode = 0
+                            $successDcArg1 = $serverArg1
+                            break
+                        }
+                    }
+                }
+                catch {
+                    Write-Verbose "Multi-DC dsacls attempt failed: $_"
+                }
+            }
+
             # If dsacls.exe reported success (exit code 0), trust it and
             # do a quick verify. The old 60s-per-retry logic turned a
             # simple pattern-match problem into a 90-minute wait.
@@ -1772,6 +1830,16 @@ class DelegateControl {
             if ($this.CheckPermissions($permissioninfo, $_machinename, $DomainName)) {
                 Write-Verbose "Permissions verified successfully"
                 break
+            }
+
+            # If dsacls succeeded on a remote DC, verify against that DC
+            # (the ACL may not have replicated locally yet).
+            if ($successDcArg1) {
+                $remotePerm = & $tcmd $successDcArg1
+                if ($this.CheckPermissions($remotePerm, $_machinename, $DomainName)) {
+                    Write-Status "Permissions verified on remote DC"
+                    break
+                }
             }
 
             # If dsacls.exe said it succeeded but our pattern match failed,
