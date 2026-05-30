@@ -3769,7 +3769,7 @@ class ModuleAdd {
         # Without this, the first Install-Module call for the target module fails
         # because the session still has stale provider state from bootstrapping.
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-        Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
+        Import-Module PowerShellGet -Force -Verbose:$false -ErrorAction SilentlyContinue
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
@@ -3842,7 +3842,7 @@ class ConfigureWSUS {
     hidden [void] CleanupWSUS() {
         Write-Status "Cleaning up WSUS IIS configuration..."
         
-        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        Import-Module WebAdministration -Verbose:$false -ErrorAction SilentlyContinue
         
         # Stop WSUS Service
         $ServiceName = 'WSUSService'
