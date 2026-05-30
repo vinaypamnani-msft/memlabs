@@ -406,13 +406,18 @@ function Get-UserConfiguration {
                 }
             }
 
-            # BitLocker property: auto-add when BLM is enabled and VM has TPM
-            if ($blmEnabledForDomain -and $vm.tpmEnabled) {
+            # BitLocker property: auto-add when BLM is enabled and VM has TPM.
+            # Skip non-domain roles — they never receive ConfigMgr BLM policy.
+            if ($blmEnabledForDomain -and $vm.tpmEnabled -and $vm.role -notin 'InternetClient', 'WorkgroupMember', 'AADClient') {
                 if ($null -eq $vm.BitLocker) {
                     # Default true on client OS, false on server OS
                     $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
                     $vm | Add-Member -MemberType NoteProperty -Name "BitLocker" -Value ([bool]$isClientOS) -Force
                 }
+            }
+            # Strip BitLocker from non-domain roles in case it was set manually
+            if ($vm.role -in 'InternetClient', 'WorkgroupMember', 'AADClient' -and $null -ne $vm.BitLocker) {
+                $vm.PsObject.Members.Remove("BitLocker")
             }
 
             # pushClient property: auto-add for DomainMember and site system VMs.

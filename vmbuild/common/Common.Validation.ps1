@@ -245,13 +245,20 @@ function Test-ValidCmOptions {
             Add-ValidationMessage -Message "CM Options Validation: BitLocker Management requires ConfigMgr version 2002 or later. Current version is [$cmVer]." -ReturnObject $ReturnObject -Failure
         }
 
-        # Warn if no client VMs have tpmEnabled
-        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -in ("DomainMember", "InternetClient", "AADClient") -and -not $_.Hidden }
+        # Warn if domain-joined client VMs lack TPM (non-domain roles excluded — they don't receive BLM policy)
+        $clientVMs = $ConfigObject.virtualMachines | Where-Object { $_.role -eq "DomainMember" -and -not $_.Hidden }
         if ($clientVMs) {
             $noTPM = $clientVMs | Where-Object { $_.tpmEnabled -eq $false }
             if ($noTPM) {
                 Add-ValidationMessage -Message "BLM Warning: The following client VMs have tpmEnabled=false and will require a startup password for BitLocker: $($noTPM.vmName -join ', '). Consider enabling vTPM for unattended encryption." -ReturnObject $ReturnObject -Warning
             }
+        }
+
+        # Reject BitLocker on non-domain roles
+        $badBLM = $ConfigObject.virtualMachines | Where-Object { $_.BitLocker -eq $true -and $_.role -in 'InternetClient', 'WorkgroupMember', 'AADClient' -and -not $_.Hidden }
+        if ($badBLM) {
+            Add-ValidationMessage -Message "BLM Validation: BitLocker cannot be used on non-domain-joined VMs (they never receive ConfigMgr BLM policy). Removing BitLocker from: $($badBLM.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $badBLM) { $vm.PsObject.Members.Remove("BitLocker") }
         }
     }
 

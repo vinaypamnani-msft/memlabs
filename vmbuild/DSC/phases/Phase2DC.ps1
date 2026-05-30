@@ -31,7 +31,6 @@
     # migration shape) or when no site servers are in this deploy.
     $usePKI = $false
     $prePopulate = $false
-    $enableBLM = $false
     $topLevelCmOptions = @($deployConfig.virtualMachines | Where-Object {
             $_.Role -in 'CAS', 'Primary' -and -not $_.parentSiteCode -and $_.cmOptions
         }).cmOptions
@@ -41,7 +40,6 @@
     foreach ($cmo in $topLevelCmOptions) {
         if ($cmo.UsePKI) { $usePKI = $true }
         if ($cmo.PrePopulateObjects) { $prePopulate = $true }
-        if ($cmo.EnableBLM) { $enableBLM = $true }
     }
 
 
@@ -105,17 +103,6 @@
 
         if (-not $waitOnDomainJoin.Contains($member.vmName)) {
             $waitOnDomainJoin += $member.vmName
-        }
-    }
-
-    # BitLocker Management: ensure DC waits for BLM client VMs to domain-join
-    if ($enableBLM) {
-        foreach ($vm in $deployConfig.virtualMachines) {
-            if ($vm.BitLocker -eq $true -and -not $vm.Hidden) {
-                if (-not $waitOnDomainJoin.Contains($vm.vmName)) {
-                    $waitOnDomainJoin += $vm.vmName
-                }
-            }
         }
     }
 
