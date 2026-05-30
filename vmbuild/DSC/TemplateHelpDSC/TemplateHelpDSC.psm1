@@ -5255,6 +5255,18 @@ class DisableClusterNicDnsRegistration {
         foreach ($adapter in $clusterAdapters) {
             Write-Status "Disabling DNS registration on adapter '$($adapter.Name)' ($_subnet*)"
             Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction Stop
+
+            # Rename to something descriptive if still using a generic Windows name.
+            if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
+                $newName = 'Cluster'
+                try {
+                    Rename-NetAdapter -InputObject $adapter -NewName $newName -ErrorAction Stop
+                    Write-Status "Renamed adapter '$($adapter.Name)' -> '$newName'"
+                }
+                catch {
+                    Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
+                }
+            }
         }
 
         # Re-register only the domain adapter so the correct A record stays.
