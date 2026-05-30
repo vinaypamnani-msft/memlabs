@@ -5246,6 +5246,15 @@ class DisableClusterNicDnsRegistration {
         $_domain = $this.DomainName
         $_dc     = $this.DCName
 
+        # Pre-import modules quietly so DSC verbose logging doesn't flood
+        # with hundreds of "Exporting function ..." lines.
+        Import-Module NetAdapter -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module NetTCPIP -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsServer -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module NetSecurity -Verbose:$false -ErrorAction SilentlyContinue
+
         # 1. Disable DNS registration on cluster/heartbeat adapters and rename NICs.
         $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
         $clusterAdapters = @()
