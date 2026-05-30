@@ -5246,10 +5246,19 @@ class DisableClusterNicDnsRegistration {
         $_domain = $this.DomainName
         $_dc     = $this.DCName
 
-        # 1. Disable DNS registration on cluster/heartbeat adapters.
-        $clusterAdapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
-            $ips = Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-            if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) { $_ }
+        # 1. Disable DNS registration on cluster/heartbeat adapters and rename NICs.
+        $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
+        $clusterAdapters = @()
+        $domainAdapters = @()
+
+        foreach ($a in $allAdapters) {
+            $ips = Get-NetIPAddress -InterfaceIndex $a.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($ips | Where-Object { $_.IPAddress -like "${_subnet}*" }) {
+                $clusterAdapters += $a
+            }
+            else {
+                $domainAdapters += $a
+            }
         }
 
         foreach ($adapter in $clusterAdapters) {
@@ -5258,10 +5267,22 @@ class DisableClusterNicDnsRegistration {
 
             # Rename to something descriptive if still using a generic Windows name.
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
-                $newName = 'Cluster'
                 try {
-                    Rename-NetAdapter -InputObject $adapter -NewName $newName -ErrorAction Stop
-                    Write-Status "Renamed adapter '$($adapter.Name)' -> '$newName'"
+                    Rename-NetAdapter -InputObject $adapter -NewName 'Cluster' -ErrorAction Stop
+                    Write-Status "Renamed adapter '$($adapter.Name)' -> 'Cluster'"
+                }
+                catch {
+                    Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
+                }
+            }
+        }
+
+        # Also rename the domain adapter for consistency.
+        foreach ($adapter in $domainAdapters) {
+            if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
+                try {
+                    Rename-NetAdapter -InputObject $adapter -NewName 'Domain' -ErrorAction Stop
+                    Write-Status "Renamed adapter '$($adapter.Name)' -> 'Domain'"
                 }
                 catch {
                     Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
