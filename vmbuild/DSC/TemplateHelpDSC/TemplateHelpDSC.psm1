@@ -5339,128 +5339,76 @@ class DisableClusterNicDnsRegistration {
             Write-Verbose "Could not clean stale hostname DNS records: $_"
         }
 
-        # 3. Fix cluster name DNS.
-        #    Prefer live cluster data; fall back to explicit properties (works on
-        #    node2 before it has joined).
-        $cName = $null
-        $cIP   = $null
-        try {
-            $cluster = Get-Cluster -ErrorAction SilentlyContinue
-            if ($cluster) {
-                $cName = $cluster.Name
-                $cIPRes = Get-ClusterResource "Cluster IP Address" -ErrorAction SilentlyContinue
-                $cIP = ($cIPRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
-            }
-        }
-        catch { }
-        if (-not $cName -and $this.ClusterName)      { $cName = $this.ClusterName }
-        if (-not $cIP   -and $this.ClusterIPAddress)  { $cIP   = $this.ClusterIPAddress }
-        # Strip CIDR mask if present (config stores "10.250.250.98/24").
+        # 3. Ensure cluster name DNS A record exists.
+        #    Use config properties directly — this resource runs before xCluster
+        #    creates the cluster, so cluster cmdlets are not available. On re-runs
+        #    the cluster exists but cmdlets can be flaky under DSC/LCM context.
+        #    Pre-creating the A record is harmless; the cluster will adopt it.
+        $cName = $this.ClusterName
+        $cIP   = $this.ClusterIPAddress
         if ($cIP -and $cIP -match '/') { $cIP = $cIP.Split('/')[0] }
 
         if ($cName -and $cIP) {
             try {
-                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
-
-                # Remove any A records that don't match the actual cluster IP.
-                foreach ($rec in $dnsRecords) {
+                $existing = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
+                foreach ($rec in $existing) {
                     $ip = $rec.RecordData.IPv4Address.ToString()
                     if ($ip -ne $cIP) {
                         Write-Status "Removing stale cluster DNS A record $cName -> $ip (expected $cIP)"
                         Remove-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
                     }
                 }
-
-                # Ensure the correct A record exists.
-                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
+                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
                 if (-not $correct) {
                     Write-Status "Adding cluster DNS A record $cName -> $cIP"
                     Add-DnsServerResourceRecordA -ZoneName $_domain -Name $cName -IPv4Address $cIP -ComputerName $_dc -ErrorAction Stop
                 }
             }
             catch {
-                Write-Verbose "Could not fix cluster name DNS: $_"
-            }
-
-            # 4. Flush local DNS cache so xCluster resolves the corrected name immediately.
-            Clear-DnsClientCache -ErrorAction SilentlyContinue
-
-            # 5. Verify RPC connectivity to cluster name after DNS fix.
-            try {
-                $rpc = Test-NetConnection -ComputerName $cName -Port 135 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                if ($rpc.TcpTestSucceeded) {
-                    Write-Status "Verified: RPC port 135 reachable on $cName ($($rpc.RemoteAddress))"
-                }
-                else {
-                    Write-Status "WARNING: RPC port 135 NOT reachable on $cName ($($rpc.RemoteAddress)) after DNS fix"
-                }
-            }
-            catch { }
-        }
-
-        # 6. Fix AG listener DNS.
-        #    Same approach as cluster name: prefer live cluster data, fall back
-        #    to explicit properties (works before the listener is created).
-        $lName = $null
-        $lIP   = $null
-        try {
-            $cluster = Get-Cluster -ErrorAction SilentlyContinue
-            if ($cluster) {
-                # Find AG listener Network Name resources (not the Cluster Name itself).
-                $nnResources = @(Get-ClusterResource -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.Name -ne 'Cluster Name' })
-                Write-Status "Listener DNS: found $($nnResources.Count) non-cluster Network Name resource(s) in cluster"
-                foreach ($nn in $nnResources) {
-                    $nnName = ($nn | Get-ClusterParameter -Name Name -ErrorAction SilentlyContinue).Value
-                    # Find the IP Address resource in the same owner group.
-                    $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
-                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup.Name -eq $nn.OwnerGroup.Name -and $_.Name -ne 'Cluster IP Address' }
-                    $nnIP = ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue | Select-Object -First 1).Value
-                    Write-Status "Listener DNS: cluster resource '$($nn.Name)' -> Name='$nnName' IP='$nnIP'"
-                    if ($nnName -and $nnIP) {
-                        $lName = $nnName
-                        $lIP   = $nnIP
-                        Write-Status "Found AG listener from cluster: $lName -> $lIP"
-                    }
-                }
+                Write-Status "WARNING: Could not fix cluster DNS ($cName -> $cIP): $_"
             }
         }
-        catch {
-            Write-Status "Listener DNS: error querying cluster for listener: $_"
-        }
-        if (-not $lName -and $this.ListenerName)      {
-            $lName = $this.ListenerName
-            Write-Status "Listener DNS: using config ListenerName='$lName'"
-        }
-        if (-not $lIP   -and $this.ListenerIPAddress)  {
-            $lIP   = $this.ListenerIPAddress
-            Write-Status "Listener DNS: using config ListenerIPAddress='$lIP'"
-        }
+
+        # 4. Ensure listener DNS A record exists (same approach).
+        $lName = $this.ListenerName
+        $lIP   = $this.ListenerIPAddress
         if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
 
         if ($lName -and $lIP) {
             try {
-                $dnsRecords = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
-
-                foreach ($rec in $dnsRecords) {
+                $existing = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
+                foreach ($rec in $existing) {
                     $ip = $rec.RecordData.IPv4Address.ToString()
                     if ($ip -ne $lIP) {
                         Write-Status "Removing stale listener DNS A record $lName -> $ip (expected $lIP)"
                         Remove-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
                     }
                 }
-
-                $correct = $dnsRecords | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $lIP }
+                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $lIP }
                 if (-not $correct) {
                     Write-Status "Adding listener DNS A record $lName -> $lIP"
                     Add-DnsServerResourceRecordA -ZoneName $_domain -Name $lName -IPv4Address $lIP -ComputerName $_dc -ErrorAction Stop
                 }
             }
             catch {
-                Write-Verbose "Could not fix listener DNS: $_"
+                Write-Status "WARNING: Could not fix listener DNS ($lName -> $lIP): $_"
             }
+        }
 
-            Clear-DnsClientCache -ErrorAction SilentlyContinue
+        # 5. Flush DNS cache and verify cluster name reachability.
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+
+        if ($cName -and $cIP) {
+            try {
+                $rpc = Test-NetConnection -ComputerName $cName -Port 135 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+                if ($rpc.TcpTestSucceeded) {
+                    Write-Status "Verified: RPC port 135 reachable on $cName ($($rpc.RemoteAddress))"
+                }
+                else {
+                    Write-Status "INFO: RPC port 135 not yet reachable on $cName (cluster may not exist yet)"
+                }
+            }
+            catch { }
         }
     }
 
