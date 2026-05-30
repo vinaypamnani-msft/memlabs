@@ -112,6 +112,13 @@ $global:Phase11Job = {
         }
 
         if ($passed) {
+            # Remove the Read-DSCLog desktop shortcut now that validation passed
+            $domainName = $deployConfig.vmOptions.domainName
+            Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+                Remove-Item (Join-Path $desktop 'Read DSC Log.lnk') -Force -ErrorAction SilentlyContinue
+                Remove-Item (Join-Path $desktop 'DSC ConfigurationStatus.lnk') -Force -ErrorAction SilentlyContinue
+            } -DisplayName "Phase11: Remove DSC shortcuts" -SuppressLog
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
         }
         else {
@@ -1657,6 +1664,32 @@ $global:VM_Config = {
         }
         else {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipped expanding and installing modules since DSC.zip is not newer."
+        }
+
+        # Create a desktop shortcut to Read-DSCLog.ps1 on Phase 2 (first DSC phase)
+        if ($Phase -eq 2) {
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                try {
+                    $desktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
+                    $shell = New-Object -ComObject WScript.Shell
+
+                    $linkPath = Join-Path $desktopPath 'Read DSC Log.lnk'
+                    if (-not (Test-Path $linkPath)) {
+                        $shortcut = $shell.CreateShortcut($linkPath)
+                        $shortcut.TargetPath = 'powershell.exe'
+                        $shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "C:\staging\DSC\Read-DSCLog.ps1"'
+                        $shortcut.WorkingDirectory = 'C:\staging\DSC'
+                        $shortcut.Save()
+                    }
+
+                    $linkPath2 = Join-Path $desktopPath 'DSC ConfigurationStatus.lnk'
+                    if (-not (Test-Path $linkPath2)) {
+                        $shortcut2 = $shell.CreateShortcut($linkPath2)
+                        $shortcut2.TargetPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
+                        $shortcut2.Save()
+                    }
+                } catch { }
+            } -DisplayName "DSC: Create desktop shortcuts"
         }
 
         $DSC_ClearStatus = {
