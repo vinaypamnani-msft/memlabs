@@ -3738,6 +3738,11 @@ class ModuleAdd {
         # causing Install-Module to hang or time out for up to 30 minutes.
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+        # Pre-import package modules quietly to prevent DSC verbose log
+        # flooding with hundreds of "Importing cmdlet ..." lines.
+        Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module PowerShellGet -Verbose:$false -ErrorAction SilentlyContinue
+
         $Nuget = $null
         try {
             $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
@@ -4306,6 +4311,7 @@ class InstallPBIRS {
 
             try {
                 write-Status ("Installing Module ReportingServicesTools")
+                Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Install-Module -Name ReportingServicesTools -Force -AllowClobber -Confirm:$false
             }
@@ -4769,6 +4775,7 @@ class AddCertificateTemplate {
 
             IF ($null -eq $module) {
                 Write-Status "Installing PSPKI Module"  
+                Import-Module PackageManagement -Verbose:$false -ErrorAction SilentlyContinue
                 Write-Verbose "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force"
                 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
                 Write-Verbose "Install-Module -Name PSPKI -Force:$true -Confirm:$false -MaximumVersion 4.2.0"
