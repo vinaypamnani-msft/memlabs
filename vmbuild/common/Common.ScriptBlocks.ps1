@@ -1666,10 +1666,24 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Skipped expanding and installing modules since DSC.zip is not newer."
         }
 
-        # Create a desktop shortcut to Read-DSCLog.ps1 on Phase 2 (first DSC phase)
+        # Create DSC troubleshooting shortcuts on Phase 2 (first DSC phase)
         if ($Phase -eq 2) {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                 try {
+                    # Grant Users read access to DSC configuration folders
+                    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                        'BUILTIN\Users', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+                    foreach ($folder in @(
+                        'C:\Windows\System32\Configuration',
+                        'C:\Windows\System32\Configuration\ConfigurationStatus'
+                    )) {
+                        if (Test-Path $folder) {
+                            $acl = Get-Acl $folder
+                            $acl.AddAccessRule($rule)
+                            Set-Acl $folder $acl
+                        }
+                    }
+
                     $desktopPath = [Environment]::GetFolderPath('CommonDesktopDirectory')
                     $shell = New-Object -ComObject WScript.Shell
 
