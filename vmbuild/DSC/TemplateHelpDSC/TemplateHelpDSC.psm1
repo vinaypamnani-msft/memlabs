@@ -5349,24 +5349,7 @@ class DisableClusterNicDnsRegistration {
         if ($cIP -and $cIP -match '/') { $cIP = $cIP.Split('/')[0] }
 
         if ($cName -and $cIP) {
-            try {
-                $existing = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
-                foreach ($rec in $existing) {
-                    $ip = $rec.RecordData.IPv4Address.ToString()
-                    if ($ip -ne $cIP) {
-                        Write-Status "Removing stale cluster DNS A record $cName -> $ip (expected $cIP)"
-                        Remove-DnsServerResourceRecord -ZoneName $_domain -Name $cName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
-                    }
-                }
-                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $cIP }
-                if (-not $correct) {
-                    Write-Status "Adding cluster DNS A record $cName -> $cIP"
-                    Add-DnsServerResourceRecordA -ZoneName $_domain -Name $cName -IPv4Address $cIP -ComputerName $_dc -ErrorAction Stop
-                }
-            }
-            catch {
-                Write-Status "WARNING: Could not fix cluster DNS ($cName -> $cIP): $_"
-            }
+            $this.EnsureDnsRecord($_domain, $_dc, $cName, $cIP, 'cluster')
         }
 
         # 4. Ensure listener DNS A record exists (same approach).
@@ -5375,24 +5358,7 @@ class DisableClusterNicDnsRegistration {
         if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
 
         if ($lName -and $lIP) {
-            try {
-                $existing = @(Get-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -ComputerName $_dc -ErrorAction SilentlyContinue)
-                foreach ($rec in $existing) {
-                    $ip = $rec.RecordData.IPv4Address.ToString()
-                    if ($ip -ne $lIP) {
-                        Write-Status "Removing stale listener DNS A record $lName -> $ip (expected $lIP)"
-                        Remove-DnsServerResourceRecord -ZoneName $_domain -Name $lName -RRType A -RecordData $ip -ComputerName $_dc -Force -ErrorAction Stop
-                    }
-                }
-                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $lIP }
-                if (-not $correct) {
-                    Write-Status "Adding listener DNS A record $lName -> $lIP"
-                    Add-DnsServerResourceRecordA -ZoneName $_domain -Name $lName -IPv4Address $lIP -ComputerName $_dc -ErrorAction Stop
-                }
-            }
-            catch {
-                Write-Status "WARNING: Could not fix listener DNS ($lName -> $lIP): $_"
-            }
+            $this.EnsureDnsRecord($_domain, $_dc, $lName, $lIP, 'listener')
         }
 
         # 5. Flush DNS cache and verify cluster name reachability.
@@ -5410,6 +5376,52 @@ class DisableClusterNicDnsRegistration {
             }
             catch { }
         }
+    }
+
+    # Helper: ensure a DNS A record exists with the correct IP, verify after
+    # add, and retry up to 3 times if verification fails.
+    [void] EnsureDnsRecord([string]$zone, [string]$dc, [string]$name, [string]$ip, [string]$label) {
+        $maxRetries = 3
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $existing = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+
+                # Remove any A records that don't match the desired IP.
+                foreach ($rec in $existing) {
+                    $recIP = $rec.RecordData.IPv4Address.ToString()
+                    if ($recIP -ne $ip) {
+                        Write-Status "Removing stale $label DNS A record $name -> $recIP (expected $ip)"
+                        Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -RecordData $recIP -ComputerName $dc -Force -ErrorAction Stop
+                    }
+                }
+
+                # Add the record only if it doesn't already exist.
+                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $ip }
+                if (-not $correct) {
+                    Write-Status "Adding $label DNS A record $name -> $ip (attempt $attempt/$maxRetries)"
+                    Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ComputerName $dc -ErrorAction Stop
+                }
+
+                # Verify the record exists.
+                Start-Sleep -Milliseconds 500
+                $verify = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+                $match = $verify | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $ip }
+                if ($match) {
+                    Write-Status "Verified $label DNS A record $name -> $ip"
+                    return
+                }
+
+                Write-Status "WARNING: $label DNS verification failed for $name -> $ip (attempt $attempt/$maxRetries)"
+            }
+            catch {
+                Write-Status "WARNING: $label DNS error for $name -> $ip (attempt $attempt/$maxRetries): $_"
+            }
+
+            if ($attempt -lt $maxRetries) {
+                Start-Sleep -Seconds 2
+            }
+        }
+        Write-Status "ERROR: Failed to ensure $label DNS A record $name -> $ip after $maxRetries attempts"
     }
 
     [bool] Test() {
