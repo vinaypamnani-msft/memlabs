@@ -257,14 +257,15 @@ Configuration Phase5
         }
 
         DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet      = '10.250.250.'
-            DomainName         = $DomainName
-            DCName             = $dcNode1
-            ClusterName        = $thisVM.ClusterName
-            ClusterIPAddress   = $thisVM.thisParams.SQLAO.ClusterIPAddress
-            ListenerName       = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
-            ListenerIPAddress  = $thisVM.thisParams.SQLAO.AGIPAddress
-            DependsOn          = $nextDepend
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $dcNode1
+            ClusterName          = $thisVM.ClusterName
+            ClusterIPAddress     = $thisVM.thisParams.SQLAO.ClusterIPAddress
+            ListenerName         = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
+            ListenerIPAddress    = $thisVM.thisParams.SQLAO.AGIPAddress
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 
@@ -717,14 +718,15 @@ Configuration Phase5
         }
 
         DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet      = '10.250.250.'
-            DomainName         = $DomainName
-            DCName             = $DC
-            ClusterName        = $Node1VM.ClusterName
-            ClusterIPAddress   = $Node1VM.thisParams.SQLAO.ClusterIPAddress
-            ListenerName       = $Node1VM.thisParams.SQLAO.AlwaysOnListenerName
-            ListenerIPAddress  = $Node1VM.thisParams.SQLAO.AGIPAddress
-            DependsOn          = $nextDepend
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $DC
+            ClusterName          = $Node1VM.ClusterName
+            ClusterIPAddress     = $Node1VM.thisParams.SQLAO.ClusterIPAddress
+            ListenerName         = $Node1VM.thisParams.SQLAO.AlwaysOnListenerName
+            ListenerIPAddress    = $Node1VM.thisParams.SQLAO.AGIPAddress
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 
