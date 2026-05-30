@@ -1,4 +1,4 @@
-﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.Linux.ps1
 # Building blocks for Linux (Ubuntu) VMs in memlabs.
 #
@@ -1851,7 +1851,10 @@ function Invoke-LinuxVmCommand {
         [switch]$SuppressLog,
 
         [Parameter(Mandatory = $false)]
-        [switch]$WhatIf
+        [switch]$WhatIf,
+
+        [Parameter(Mandatory = $false)]
+        [string]$UserName = 'vmbuildadmin'
     )
 
     if (-not $DisplayName) {
@@ -1905,7 +1908,7 @@ function Invoke-LinuxVmCommand {
         '-o', 'ConnectTimeout=10',
         '-o', "ServerAliveInterval=$([Math]::Max(15, [int]($TimeoutSeconds / 4)))",
         '-o', 'LogLevel=ERROR',
-        "vmbuildadmin@$IPAddress",
+        "$UserName@$IPAddress",
         $remoteShell
     )
 
@@ -2797,22 +2800,21 @@ echo "[memlabs-rdp] done: $(date -Is)"
 function Get-LinuxClientBashScript {
     <#
     .SYNOPSIS
-        Bash body that configures GNOME Desktop for LinuxClient VMs:
-        .xsession for xrdp, Windows-like GNOME layout (Dash to Panel),
-        Edge, Intune, and sensible lab defaults. Idempotent.
+        Bash body that configures per-user GNOME settings for LinuxClient VMs:
+        .xsession for xrdp and per-user dconf fixups. Idempotent.
 
     .DESCRIPTION
         LinuxClient VMs use the UbuntuDesktop2404.vhdx base which has
-        xrdp + GNOME + GDM3 baked in.  This Phase 3 script:
-          1. Creates ~/.xsession so xrdp starts a GNOME session on X11
-          2. Installs gnome-shell-extension-dash-to-panel (Windows taskbar)
-          3. Applies dconf system defaults for a Windows-like layout:
-             - Taskbar at bottom with Windows-style element positions
-             - Minimize / maximize / close buttons on titlebars
-             - Activities hot corner disabled
-             - Screen lock & idle blank disabled (lab VM)
-             - Welcome dialog suppressed
-          4. Installs Microsoft Edge + Intune app from packages.microsoft.com
+        xrdp, GNOME, GDM3, Edge, Intune, dash-to-panel, dconf system
+        defaults, and all supporting packages baked in during image build.
+
+        This Phase 3 script handles only per-user configuration:
+          1. Creates ~/.xsession + ~/.xsessionrc so xrdp starts a GNOME
+             session on X11 (per-user files, can't be baked since
+             vmbuildadmin doesn't exist until deploy time)
+          2. Patches per-user dconf to replace Firefox with Edge in
+             taskbar favorites (safety net for users who logged in before
+             the system-wide default was applied)
         Returns: [string] bash source.  Assumes it will be run as root.
     #>
     [CmdletBinding()]
@@ -2852,208 +2854,14 @@ XSESSIONRC
     chmod 0644 "$UHOME/.xsession"
 done
 
-# --- Packages: dconf-cli + gnome-tweaks + Firefox prereqs ----------------
-apt-get update
-apt-get install -y \
-    gnome-tweaks \
-    dconf-cli \
-    unzip \
-    apt-transport-https ca-certificates gnupg wget
-
-# --- dash-to-panel: install from extensions.gnome.org --------------------
-# Not packaged in Ubuntu 24.04 repos (GNOME 46 was too new at Noble freeze).
-# Query the API for the download URL matching the installed GNOME Shell.
-EXT_UUID="dash-to-panel@jderose9.github.com"
-SHELL_VER=$(gnome-shell --version 2>/dev/null | grep -oP '[\d.]+' | cut -d. -f1)
-if [ -n "$SHELL_VER" ]; then
-    DL_URL=$(wget -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
-    if [ -n "$DL_URL" ]; then
-        wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
-        install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-        unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
-        chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-        rm -f /tmp/dash-to-panel.zip
-        echo "[memlabs-gnome] dash-to-panel installed from extensions.gnome.org (shell ${SHELL_VER})"
-    else
-        echo "[memlabs-gnome] WARNING: could not resolve dash-to-panel download URL for GNOME ${SHELL_VER}" >&2
-    fi
-else
-    echo "[memlabs-gnome] WARNING: could not detect GNOME Shell version" >&2
-fi
-
-# --- Polkit: allow colord without auth for xrdp sessions ------------------
-# Without this rule xrdp logins trigger a "color managed device" auth dialog.
-install -d -m 0755 /etc/polkit-1/rules.d
-cat > /etc/polkit-1/rules.d/45-allow-colord.rules << 'RULES'
-polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.freedesktop.color-manager.") == 0) {
-        return polkit.Result.YES;
-    }
-});
-RULES
-
-# --- dconf: Windows-like GNOME defaults (system-wide) --------------------
-# Uses the 'local' system-db which is Ubuntu desktop's default.
-install -d -m 0755 /etc/dconf/profile
-if ! [ -f /etc/dconf/profile/user ] || ! grep -q 'system-db:local' /etc/dconf/profile/user 2>/dev/null; then
-    printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
-fi
-
-install -d -m 0755 /etc/dconf/db/local.d
-cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
-# ── Windows-like GNOME defaults ── memlabs LinuxClient ──
-
-# Minimize + maximize buttons  (left: app-menu │ right: min, max, close)
-[org/gnome/desktop/wm/preferences]
-button-layout='appmenu:minimize,maximize,close'
-
-# Enable extensions + pin Edge (not Firefox) to the dash/taskbar
-[org/gnome/shell]
-enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
-welcome-dialog-last-shown-version='99.0'
-favorite-apps=['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
-
-# Dash-to-panel: taskbar at bottom, Windows 10/11 style
-#   Left:   Show Apps (≈ Start), Left Box
-#   Center: Taskbar (running windows)
-#   Right:  System tray, Date/Time, System Menu, Show Desktop button
-[org/gnome/shell/extensions/dash-to-panel]
-panel-positions='{"0":"BOTTOM"}'
-panel-sizes='{"0":40}'
-panel-element-positions='{"0":[{"element":"showAppsButton","visible":true,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"centerMonitor"},{"element":"centerBox","visible":false,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
-appicon-margin=4
-appicon-padding=4
-animate-appicon-hover=false
-dot-style-focused='DASHES'
-dot-style-unfocused='DOTS'
-trans-use-custom-opacity=false
-hide-overview-on-startup=true
-show-apps-icon-file=''
-
-# Disable Activities hot-corner
-[org/gnome/desktop/interface]
-enable-hot-corners=false
-
-# Desktop icons (Home + Trash)
-[org/gnome/shell/extensions/ding]
-show-home=true
-show-trash=true
-
-# No screen lock / idle blank (lab VM, not production)
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-
-[org/gnome/desktop/notifications]
-show-banners=true
-DCONF
-
-dconf update
-
-# --- Microsoft Edge: Intune enrollment requires Edge 102+ ----------------
-install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
-    | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
-    > /etc/apt/sources.list.d/microsoft-edge.list
-apt-get update
-apt-get install -y microsoft-edge-stable
-
-# Wire Edge as default browser system-wide.
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200 || true
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200 || true
-update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable || true
-update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable || true
-
-# Suppress GNOME keyring password prompt on Edge launch. xrdp sessions don't
-# auto-unlock the keyring via PAM, so Edge prompts for a keyring password on
-# every start. --password-store=basic stores credentials in Edge's profile dir
-# instead (plaintext, acceptable for a lab VM with no real secrets).
-if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
-    sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        /usr/share/applications/microsoft-edge.desktop
-fi
-
-# Login script: auto-repair Edge .desktop after apt upgrades (which reset it)
-# and ensure the user's taskbar favorites have Edge instead of Firefox.
-# Runs via /etc/profile.d/ so it fires on every interactive login (xrdp, SSH).
-cat > /etc/profile.d/memlabs-edge-fixup.sh << 'FIXUP'
-#!/bin/bash
-# memlabs: ensure Edge .desktop has --password-store=basic and taskbar has Edge.
-# Runs once per login; exits immediately if nothing to fix.
-
-# Fix 1: re-patch .desktop if Edge update removed --password-store=basic
-DESKTOP=/usr/share/applications/microsoft-edge.desktop
-if [ -f "$DESKTOP" ] && grep -q 'Exec=/usr/bin/microsoft-edge-stable ' "$DESKTOP" \
-   && ! grep -q '\-\-password-store=basic' "$DESKTOP"; then
-    sudo sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        "$DESKTOP" 2>/dev/null
-fi
-
-# Fix 2: swap firefox.desktop for microsoft-edge.desktop in taskbar favorites
-if command -v dconf >/dev/null 2>&1; then
-    FAVS=$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
-    if echo "$FAVS" | grep -q 'firefox.desktop'; then
-        NEW=$(echo "$FAVS" | sed "s/'firefox.desktop'/'microsoft-edge.desktop'/g")
-        dconf write /org/gnome/shell/favorite-apps "$NEW" 2>/dev/null
-    fi
-fi
-FIXUP
-chmod 0644 /etc/profile.d/memlabs-edge-fixup.sh
-
-# Allow vmbuildadmin to run the sed without a password (needed for .desktop fixup)
-if ! grep -q 'memlabs-edge-fixup' /etc/sudoers.d/memlabs-edge-fixup 2>/dev/null; then
-    echo 'ALL ALL=(root) NOPASSWD: /usr/bin/sed -i s*Exec=/usr/bin/microsoft-edge-stable*Exec=/usr/bin/microsoft-edge-stable --password-store=basic* /usr/share/applications/microsoft-edge.desktop' \
-        > /etc/sudoers.d/memlabs-edge-fixup
-    chmod 0440 /etc/sudoers.d/memlabs-edge-fixup
-fi
-
-install -d -m 0755 /etc/xdg
-cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
-[Default Applications]
-x-scheme-handler/http=microsoft-edge.desktop
-x-scheme-handler/https=microsoft-edge.desktop
-text/html=microsoft-edge.desktop
-MIMEEOF
-
-# --- PAM: auto-unlock GNOME Keyring on xrdp login -------------------------
-# microsoft-identity-broker (pulled in by intune-portal) stores Entra ID
-# auth tokens in GNOME Keyring via libsecret / Secret Service D-Bus API.
-# xrdp's default PAM config doesn't include pam_gnome_keyring.so, so the
-# keyring stays locked → broker can't persist tokens → enrollment fails
-# or re-prompts every session.
-# Add auth + session hooks to /etc/pam.d/xrdp-sesman so the keyring is
-# unlocked (or created) automatically using the login password.
-if [ -f /etc/pam.d/xrdp-sesman ]; then
-    if ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
-        sed -i '/^@include common-auth/a auth       optional     pam_gnome_keyring.so' \
-            /etc/pam.d/xrdp-sesman
-        sed -i '/^@include common-session/a session    optional     pam_gnome_keyring.so auto_start' \
-            /etc/pam.d/xrdp-sesman
-        echo '[memlabs-gnome] added pam_gnome_keyring.so to xrdp-sesman PAM config'
-    fi
-fi
-
-# --- Microsoft Intune app (intune-portal) --------------------------------
-# Uses the same Microsoft signing key already imported above.
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
-    > /etc/apt/sources.list.d/microsoft-prod.list
-apt-get update
-apt-get install -y intune-portal
-
 # --- Per-user fixup: replace Firefox with Edge in taskbar favorites -------
-# System-wide dconf defaults only apply to keys the user hasn't set yet.
-# Once a user logs in, GNOME writes per-user favorite-apps (including
-# firefox.desktop from Ubuntu's default). Patch every existing user's
-# dconf database so Edge replaces Firefox in the taskbar on next login.
+# System-wide dconf defaults (baked into the base image) only apply to keys
+# the user hasn't set yet. Once a user logs in, GNOME writes per-user
+# favorite-apps (including firefox.desktop from Ubuntu's default). Patch
+# every existing user's dconf database so Edge replaces Firefox in the
+# taskbar on next login.
 for UHOME in /home/vmbuildadmin /root; do
     UNAME=$(stat -c '%U' "$UHOME" 2>/dev/null) || continue
-    # dbus-launch + dconf requires the user's XDG_RUNTIME_DIR; using
-    # gsettings/dconf as root with DCONF_PROFILE won't write to the
-    # per-user db. Instead, use the dconf CLI under su.
     if [ -d "$UHOME/.config/dconf" ]; then
         su - "$UNAME" -c "
             export DCONF_PROFILE=/etc/dconf/profile/user
@@ -4427,33 +4235,36 @@ function Invoke-LinuxBaseImageBake {
     <#
     .SYNOPSIS
         First-boot a base VHDX on an internet-connected switch, install
-        Hyper-V integration daemons + agents via apt, then cloud-init clean
-        so the image is pristine for downstream lab deploys.
+        Hyper-V integration daemons, desktop environment, Edge, Intune, and
+        supporting packages via SSH-driven steps with per-step error checking.
 
     .DESCRIPTION
-        memlabs lab subnets DNS-forward to the domain DC. Until the DC is
-        provisioned, Linux VMs created in phase 1 cannot resolve
-        archive.ubuntu.com and apt fails. The Hyper-V KVP daemon is what
-        publishes the guest IP back to the host via
-        Get-VMNetworkAdapter.IPAddresses; without it, host-side IP discovery
-        breaks. Solution: bake the daemons + qemu-guest-agent into the base
-        VHDX during image build (which has internet) so deploy time needs
-        zero apt.
+        SSH-driven bake: cloud-init creates a temporary user with SSH key,
+        then the host SSHes in and drives each installation step sequentially.
+        Every step is validated before proceeding. On failure the bake aborts
+        with a detailed error and leaves the VM running so you can SSH in to
+        diagnose.
 
-        Creates a temp Gen2 VM from $VhdxPath, attaches a NoCloud seed ISO
-        that installs the packages, runs `cloud-init clean --logs --seed
-        --machine-id`, and powers off. Removes the temp VM, leaves the
-        modified VHDX in place. Re-runnable; safe if interrupted.
+        Server variant bakes: HV daemons, qemu-guest-agent, system updates.
+        Desktop variant additionally bakes: ubuntu-desktop-minimal, GDM3,
+        NetworkManager, xrdp, Microsoft Edge, Intune Portal, dash-to-panel,
+        GNOME dconf defaults, and supporting system configuration.
+
+        Re-runnable; stale VMs from interrupted runs are cleaned up on entry.
 
     .PARAMETER VhdxPath
         Path to the VHDX to modify in place.
 
     .PARAMETER SwitchName
-        Hyper-V switch with outbound internet (e.g. 'Default Switch',
-        'MemLabsNAT'). Default tries 'Default Switch'.
+        Hyper-V switch with outbound internet. Default: 'Default Switch'
+        (mapped to MemLabsNAT with static IP 172.16.200.10).
 
     .PARAMETER TimeoutMinutes
-        Wall-clock cap on the bake VM. Hard powers off on timeout.
+        Wall-clock cap for the entire bake. Hard powers off on timeout.
+
+    .PARAMETER BakeIPAddress
+        IP address to SSH into the bake VM. Auto-set to 172.16.200.10 for
+        MemLabsNAT. Required for custom switches.
     #>
     [CmdletBinding()]
     param (
@@ -4466,16 +4277,12 @@ function Invoke-LinuxBaseImageBake {
         [Parameter(Mandatory = $false)]
         [int]$TimeoutMinutes = 20,
 
-        # Server: minimal cloud-image + Hyper-V daemons (existing behavior).
-        # Desktop: additionally bake `ubuntu-desktop-minimal` + GDM3 + NetworkManager
-        # + xrdp into the image so the resulting VHDX boots straight into a real
-        # Ubuntu Desktop session for MDM/EDR testing (Intune for Linux, Defender
-        # for Endpoint, etc.). Cloud-init still runs at deploy time to consume
-        # the per-VM seed ISO; the renderer override below makes it emit netplan
-        # configs that NetworkManager owns instead of systemd-networkd.
         [Parameter(Mandatory = $false)]
         [ValidateSet('Server', 'Desktop')]
-        [string]$Variant = 'Server'
+        [string]$Variant = 'Server',
+
+        [Parameter(Mandatory = $false)]
+        [string]$BakeIPAddress
     )
 
     if (-not (Test-Path $VhdxPath)) {
@@ -4500,30 +4307,23 @@ function Invoke-LinuxBaseImageBake {
         $SwitchName = 'MemLabsNAT'
 
         # Migration: earlier bake code created a NAT named 'MemLabsNATNat'
-        # with prefix 172.16.200.0/24.  Test-NetworkNat (called by
-        # Add-SwitchAndDhcp) names NATs by subnet ('172.16.200.0') and will
-        # fail to create a duplicate-prefix NAT.  Remove the legacy name so
-        # the standard pipeline succeeds.
+        # with prefix 172.16.200.0/24.  Remove the legacy name so the
+        # standard pipeline succeeds.
         $legacyNat = Get-NetNat -Name 'MemLabsNATNat' -ErrorAction SilentlyContinue
         if ($legacyNat) {
             Write-Log "Bake: removing legacy NAT 'MemLabsNATNat' (replaced by '172.16.200.0')." -Warning
             Remove-NetNat -Name 'MemLabsNATNat' -Confirm:$false -ErrorAction SilentlyContinue
         }
 
-        # Reuse the same Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope
-        # pipeline that New-Lab uses for domain networks. This creates the
-        # internal switch, sets host IP to .200, adds the NetNat, installs
-        # DHCP if needed, and creates a scope (.20-.199, gateway .200, DNS
-        # 8.8.8.8).  The bake VM will get an address via DHCP; the static
-        # network-config in the seed ISO is a belt-and-suspenders fallback.
         $switchOk = Add-SwitchAndDhcp -NetworkName $SwitchName -NetworkSubnet '172.16.200.0' -DNSServer '8.8.8.8'
         if (-not $switchOk) {
             throw "Bake: failed to create/verify switch + DHCP for '$SwitchName' (172.16.200.0/24)."
         }
         $isMemLabsNAT = $true
+        if (-not $BakeIPAddress) { $BakeIPAddress = '172.16.200.10' }
     }
     else {
-        # Caller picked a custom switch (e.g. 'External' on host that already has internet); just verify it exists.
+        # Caller picked a custom switch; just verify it exists.
         $switch = @(Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $SwitchName })
         if ($switch.Count -eq 0) {
             throw "Bake: Hyper-V switch '$SwitchName' not found. Pick a switch with outbound internet (-BakeSwitchName), or use 'MemLabsNAT' to auto-create one. Available: $((Get-VMSwitch | Select-Object -ExpandProperty Name) -join ', ')"
@@ -4531,6 +4331,23 @@ function Invoke-LinuxBaseImageBake {
         if ($switch.Count -gt 1) {
             throw "Bake: found $($switch.Count) Hyper-V switches named '$SwitchName'; remove the duplicates and re-run."
         }
+        if (-not $BakeIPAddress) {
+            throw "Bake: -BakeIPAddress is required when using a custom switch ('$SwitchName'). MemLabsNAT auto-assigns 172.16.200.10."
+        }
+    }
+
+    # SSH keypair for connecting to the bake VM.  Same ed25519 key used for
+    # deployed VMs; the bake user 'memlabs' gets it via cloud-init.
+    $keyPair = Get-LinuxAdminSshKeyPair
+    $sshPubKey = $keyPair.PublicKey
+
+    # Password for bake console user (vmconnect debugging).
+    if (-not $Common -or -not $Common.LocalAdmin) {
+        throw "Bake: `$Common.LocalAdmin not available. Run via New-LinuxBaseImage.ps1."
+    }
+    try { $bakePwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $bakePwd = $null }
+    if (-not $bakePwd) {
+        throw "Bake: could not extract password from `$Common.LocalAdmin."
     }
 
     $vmName = "memlabs-bake-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -4547,10 +4364,7 @@ local-hostname: memlabs-bake
     # Static network config for the MemLabsNAT switch (172.16.200.0/24).
     # Belt-and-suspenders with the DHCP scope created by Add-SwitchAndDhcp
     # above -- if cloud-init reads this file the static config wins; if not,
-    # DHCP provides the address.  Gateway is .200 (the host vNIC IP set by
-    # Test-NetworkSwitch, matching every other memlabs network).
-    # cloud-init reads 'network-config' from the NoCloud seed alongside
-    # meta-data and user-data.
+    # DHCP provides the address.
     $networkConfig = @"
 version: 2
 renderer: networkd
@@ -4566,48 +4380,18 @@ ethernets:
       addresses: [8.8.8.8, 1.1.1.1]
 "@
 
-    # cloud-init bake recipe:
-    #   - install KVP/VSS daemons (Hyper-V integration), qemu-guest-agent,
-    #     openssh-server (already present but be explicit)
-    #   - enable the services (will auto-start at deploy time, no apt needed)
-    #   - cloud-init clean: wipe instance state so next boot (with a new
-    #     instance-id from the deploy seed) re-runs the full first-boot flow
-    #   - truncate machine-id so each deployed VM regenerates a unique one
-    #   - remove cloud-init netplan so deploy seed's network config wins
-    #   - power off; the script polls VM state and removes the temp VM
-    #
-    # Desktop variant adds: ubuntu-desktop-minimal + GDM3 + NetworkManager
-    # (real Ubuntu Desktop package surface for MDM/EDR posture checks) and
-    # xrdp/xorgxrdp so a baked image can be RDP'd into without per-deploy
-    # apt traffic.
-    #
-    # Networking notes:
-    #   Previous bake forced cloud-init's netplan renderer to NetworkManager
-    #   and disabled systemd-networkd. That looked clean but it removed the
-    #   only DHCP mechanism that actually works on first boot:
-    #     - Ubuntu 24.04 dropped isc-dhcp-client entirely (no dhclient
-    #       fallback for anyone).
-    #     - NetworkManager doesn't auto-claim eth0 in the first ~60s after a
-    #       cloud-init reseed, so the deploy's Wait-ForLinuxVm loop times
-    #       out with no IPv4.
-    #   Fix: leave netplan on its default systemd-networkd renderer (same as
-    #   the Server variant, which is proven working), keep NM installed +
-    #   enabled for the GUI session, but tell NM to leave eth* unmanaged so
-    #   the two don't race for the lease. NM still owns wifi / dynamic GUI
-    #   connections; networkd owns the static lab interface.
-    $desktopPackagesYaml = ''
-    $desktopRuncmdYaml = ''
-    # Always bake the hv-kvp-daemon.service override so the deployed VHDX
-    # boots with our race-free unit on disk from the start.  Without this
-    # the upstream unit (BindsTo= + ConditionPathExists= on /dev/vmbus/hv_kvp)
-    # runs before cloud-init's write_files writes the override, fails due
-    # to the ~40s device-registration race, and systemd marks the unit
-    # dependency-failed for the rest of the boot.  KVP stays dark and the
-    # host can't read the guest IP.
-    #
+    # ── Minimal cloud-init seed ──────────────────────────────────────────
+    # Cloud-init ONLY creates the bake user (with SSH key + passwordless
+    # sudo) and writes the hv-kvp-daemon.service override.  Everything else
+    # (packages, services, config) is driven via SSH from the host so each
+    # step gets validated individually with detailed error reporting.
+    # On failure the VM is left running for interactive SSH debugging.
+    $bakePwdQuoted = "'" + ($bakePwd -replace "'", "''") + "'"
+
+    # hv-kvp-daemon.service override: race-free polling for /dev/vmbus/hv_kvp.
     # The deploy seed ISO writes the same file via its own write_files
-    # (idempotent overwrite); having it baked in just ensures the very
-    # first systemd pass uses the override.
+    # (idempotent overwrite); having it baked in ensures the very first
+    # systemd pass uses the override.
     $bakeWriteFilesYaml = @'
 
 write_files:
@@ -4634,23 +4418,9 @@ write_files:
 '@
 
     if ($Variant -eq 'Desktop') {
-        $desktopPackagesYaml = @'
-  - ubuntu-desktop-minimal
-  - gdm3
-  - network-manager
-  - xrdp
-  - xorgxrdp
-'@
-
         # NetworkManager keyfile config: keep NM running for the GUI, but
         # ignore the lab interface so systemd-networkd's DHCP wins
         # unambiguously on every boot.
-        # NOTE: "`n" is required because PowerShell here-strings do NOT
-        # include a trailing newline. Without it, the last line of the
-        # previous write_files entry (WantedBy=multi-user.target) runs
-        # into this entry's '- path:' on the same line, producing a
-        # duplicate 'content:' key that makes cloud-init write NM keyfile
-        # config into the KVP service path.
         $bakeWriteFilesYaml += "`n"
         $bakeWriteFilesYaml += @'
   - path: /etc/NetworkManager/conf.d/10-memlabs-unmanage-eth.conf
@@ -4658,29 +4428,12 @@ write_files:
       [keyfile]
       unmanaged-devices=interface-name:eth*
 '@
-
-        $desktopRuncmdYaml = @'
-  - systemctl set-default graphical.target
-  - systemctl enable gdm3.service || true
-  - systemctl enable NetworkManager.service || true
-  - systemctl enable xrdp.service || true
-  - adduser xrdp ssl-cert || true
-  - ufw allow 3389/tcp || true
-  - "dpkg -l ubuntu-desktop-minimal xrdp xorgxrdp | grep -c '^ii' | grep -q '^3$' || { echo 'BAKE FAILED: desktop packages not installed'; shutdown -c; poweroff; }"
-'@
     }
 
-    # Temporary console user for bake debugging (vmconnect).  Password comes
-    # from $Common.LocalAdmin so nothing is hardcoded in the repo.  The user
-    # is deleted from /etc/shadow before cloud-init clean so the baked VHDX
-    # ships with no stale credentials.
-    $bakeUserYaml = ''
-    $bakeUserCleanupYaml = ''
-    if ($Common -and $Common.LocalAdmin) {
-        try { $bakePwd = $Common.LocalAdmin.GetNetworkCredential().Password } catch { $bakePwd = $null }
-        if ($bakePwd) {
-            $bakePwdQuoted = "'" + ($bakePwd -replace "'", "''") + "'"
-            $bakeUserYaml = @"
+    $userData = @"
+#cloud-config
+hostname: memlabs-bake
+preserve_hostname: false
 
 users:
   - name: memlabs
@@ -4688,43 +4441,11 @@ users:
     lock_passwd: false
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
+    ssh_authorized_keys:
+      - $sshPubKey
 
 ssh_pwauth: true
-"@
-            $bakeUserCleanupYaml = '  - userdel -r memlabs 2>/dev/null || true'
-        }
-    }
-
-    $userData = @"
-#cloud-config
-hostname: memlabs-bake
-preserve_hostname: false
-$bakeUserYaml
-
-package_update: true
-package_upgrade: false
-packages:
-  - linux-tools-virtual
-  - linux-cloud-tools-virtual
-  - qemu-guest-agent
-  - openssh-server
-$desktopPackagesYaml
 $bakeWriteFilesYaml
-runcmd:
-  - systemctl daemon-reload || true
-  - systemctl enable qemu-guest-agent.service || true
-  - systemctl enable hv-kvp-daemon.service || true
-  - systemctl enable hv-vss-daemon.service || true
-  - dpkg -s "linux-cloud-tools-`$(uname -r)" >/dev/null 2>&1 || apt-get install -y "linux-tools-`$(uname -r)" "linux-cloud-tools-`$(uname -r)" || true
-$desktopRuncmdYaml
-$bakeUserCleanupYaml
-  - systemctl stop unattended-upgrades.service 2>/dev/null || true
-  - systemctl disable unattended-upgrades.service 2>/dev/null || true
-  - cloud-init clean --logs --seed --machine-id || true
-  - truncate -s 0 /etc/machine-id
-  - rm -f /var/lib/dbus/machine-id
-  - rm -f /etc/netplan/50-cloud-init.yaml
-  - shutdown -h now
 "@
 
     [System.IO.File]::WriteAllText((Join-Path $stageDir 'meta-data'), ($metaData -replace "`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
@@ -4749,13 +4470,11 @@ $bakeUserCleanupYaml
     }
 
     Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName' (variant=$Variant)" -Activity
-    # Desktop bake pulls ~1.5GB of packages and runs through dpkg postinst
-    # hooks for the full GNOME stack; 2GB OOMs partway through. 4GB is plenty
-    # for the duration of the bake (the resulting deployed VMs use their own
-    # memory setting from the deploy config, this is just for the bake VM).
+    # Desktop bake pulls ~2GB+ of packages; 4GB RAM avoids OOM during dpkg.
     $bakeMemoryBytes = if ($Variant -eq 'Desktop') { 4GB } else { 2GB }
     $bakeProcs = if ($Variant -eq 'Desktop') { 4 } else { 2 }
     $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes $bakeMemoryBytes -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
+    $bakeSucceeded = $false
     try {
         Set-VM -VM $vm -ProcessorCount $bakeProcs -CheckpointType Disabled -ErrorAction Stop
         Set-VMFirmware -VM $vm -EnableSecureBoot Off -ErrorAction Stop
@@ -4768,15 +4487,13 @@ $bakeUserCleanupYaml
         Write-Log "Bake: VM started; monitoring NIC traffic to verify network connectivity..."
 
         # Enable Hyper-V resource metering so we can read NIC byte counters.
-        # Without metering, Get-VMNetworkAdapter.BytesReceived is always 0.
         Enable-VMResourceMetering -VM $vm -ErrorAction SilentlyContinue
 
-        # NIC traffic check.  We can't rely on KVP for an IP (the daemon is
-        # being installed during this bake), but we CAN verify the NIC is
-        # sending/receiving traffic.  If the interface name doesn't match the
-        # network-config (e.g. eth0 vs enp1s0), netplan silently ignores the
-        # config and the NIC stays completely dark -- zero bytes in/out.
-        # Catch that within 90s instead of waiting the full bake timeout.
+        # ── NIC traffic check ────────────────────────────────────────────
+        # Can't rely on KVP for an IP (the daemon is being installed during
+        # this bake), but we CAN verify the NIC is sending/receiving traffic.
+        # If the interface name doesn't match the network-config, netplan
+        # silently ignores the config and the NIC stays completely dark.
         $nicWaitSec = 90
         $nicElapsed = 0
         $nicOk = $false
@@ -4786,8 +4503,6 @@ $bakeUserCleanupYaml
             $nic = Get-VMNetworkAdapter -VMName $vmName -ErrorAction SilentlyContinue
             $rxBytes = 0; $txBytes = 0
             if ($nic) {
-                # Measure-VM aggregates metered traffic; fall back to NIC
-                # counters if metering data isn't available yet.
                 try {
                     $report = (Measure-VM -VM $vm -ErrorAction SilentlyContinue).NetworkMeteredTrafficReport
                     if ($report) {
@@ -4807,39 +4522,448 @@ $bakeUserCleanupYaml
         }
         if (-not $nicOk) {
             Write-Log "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. Network config likely failed (interface name mismatch?). Aborting." -Failure
-            Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
-            throw "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. The guest interface name may not match the network-config. Check 'ip link' in the guest console."
+            throw "Bake: VM '$vmName' has zero NIC traffic after ${nicWaitSec}s. The guest interface name may not match the network-config. Check 'ip link' via console: vmconnect localhost $vmName"
         }
 
-        Write-Log "Bake: waiting up to $TimeoutMinutes min for cloud-init + shutdown..."
+        # ── Wait for SSH ─────────────────────────────────────────────────
+        Write-Log "Bake: waiting for SSH at $BakeIPAddress (memlabs user)..." -Activity
+        $sshDeadline = (Get-Date).AddMinutes(5)
+        $sshReady = $false
+        while ((Get-Date) -lt $sshDeadline) {
+            Start-Sleep -Seconds 5
+            # TCP/22 probe
+            $tcpOk = $false
+            try {
+                $tc = [System.Net.Sockets.TcpClient]::new()
+                $iar = $tc.BeginConnect($BakeIPAddress, 22, $null, $null)
+                if ($iar.AsyncWaitHandle.WaitOne(2000, $false)) {
+                    $tc.EndConnect($iar) | Out-Null
+                    $tcpOk = $tc.Connected
+                }
+                $tc.Close()
+            } catch { }
+            if (-not $tcpOk) { continue }
 
-        $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-        $clean = $false
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 10
+            # SSH probe
+            $probe = Invoke-LinuxVmCommand -VmName $vmName -BashCommand 'echo BAKE_SSH_OK' `
+                -IPAddress $BakeIPAddress -UserName 'memlabs' -TimeoutSeconds 15 -SuppressLog
+            if ($probe.CommandResult -and $probe.ScriptBlockOutput -match 'BAKE_SSH_OK') {
+                $sshReady = $true
+                break
+            }
+        }
+        if (-not $sshReady) {
+            throw "Bake: SSH not reachable at $BakeIPAddress within 5 minutes. Console: vmconnect localhost $vmName"
+        }
+        Write-Log "Bake: SSH connected to memlabs@$BakeIPAddress." -Success
+
+        # ── Bake step helper ─────────────────────────────────────────────
+        # Runs a bash script via SSH as root (sudo), checks the exit code,
+        # and throws with detailed output on failure. Uses a hashtable for
+        # the mutable step counter (reference type survives inner function
+        # scope).
+        $totalSteps = if ($Variant -eq 'Desktop') { 9 } else { 4 }
+        $ctx = @{ Step = 0 }
+
+        function Invoke-BakeStep {
+            param([string]$Name, [string]$Script, [int]$Timeout = 180)
+            $ctx.Step++
+            $label = "[$($ctx.Step)/$totalSteps]"
+            Write-Log "Bake $label $Name" -Activity
+            $r = Invoke-LinuxVmCommand -VmName $vmName -BashCommand $Script `
+                -IPAddress $BakeIPAddress -UserName 'memlabs' -Sudo `
+                -TimeoutSeconds $Timeout -DisplayName "Bake: $Name"
+            if (-not $r.CommandResult) {
+                $out = if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' }
+                if ($out.Length -gt 2000) { $out = '...' + $out.Substring($out.Length - 2000) }
+                Write-Log "Bake $label FAILED: $Name (exit=$($r.ExitCode))" -Failure
+                Write-Log $out -LogOnly
+                throw "Bake FAILED at step $label '$Name' (exit=$($r.ExitCode)).`n`nLast output:`n$out`n`nVM '$vmName' left running at $BakeIPAddress for debugging.`nSSH: ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress"
+            }
+            $lines = if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 }
+            Write-Log "Bake $label $Name - OK ($lines lines)" -Success
+            return $r
+        }
+
+        # ── Step 1: System updates ───────────────────────────────────────
+        $updTimeout = if ($Variant -eq 'Desktop') { 1200 } else { 600 }
+        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Script @'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+echo "=== apt-get update ==="
+apt-get update
+echo "=== apt-get dist-upgrade ==="
+apt-get dist-upgrade -y
+echo "=== System updates complete ==="
+'@
+
+        # ── Step 2: Base packages ────────────────────────────────────────
+        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Script @'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server
+echo "=== Base packages installed ==="
+'@
+
+        # ── Step 3: Enable base services ─────────────────────────────────
+        Invoke-BakeStep -Name "Enable base services" -Timeout 120 -Script @'
+set -euo pipefail
+systemctl daemon-reload
+systemctl enable qemu-guest-agent.service
+systemctl enable hv-kvp-daemon.service
+systemctl enable hv-vss-daemon.service
+# Install kernel-exact HV tools if the meta-package version doesn't match
+# the running kernel (can happen if dist-upgrade bumped the kernel).
+dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
+  || apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
+echo "=== Base services enabled ==="
+'@
+
+        if ($Variant -eq 'Desktop') {
+            # ── Step 4: Desktop packages ─────────────────────────────────
+            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Script @'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -y \
+  ubuntu-desktop-minimal gdm3 network-manager xrdp xorgxrdp \
+  gnome-tweaks dconf-cli unzip \
+  apt-transport-https ca-certificates gnupg wget
+echo "=== Desktop packages installed ==="
+'@
+
+            # ── Step 5: Desktop services ─────────────────────────────────
+            Invoke-BakeStep -Name "Enable desktop services" -Timeout 120 -Script @'
+set -euo pipefail
+systemctl set-default graphical.target
+systemctl enable gdm3.service
+systemctl enable NetworkManager.service
+systemctl enable xrdp.service
+adduser xrdp ssl-cert || true
+ufw allow 3389/tcp || true
+echo "=== Desktop services enabled ==="
+'@
+
+            # ── Step 6: Microsoft repos + Edge + Intune ──────────────────
+            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Script @'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+install -d -m 0755 /etc/apt/keyrings
+wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
+  | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
+  > /etc/apt/sources.list.d/microsoft-edge.list
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
+  > /etc/apt/sources.list.d/microsoft-prod.list
+apt-get update
+apt-get install -y microsoft-edge-stable intune-portal
+echo "=== Microsoft Edge + Intune installed ==="
+'@
+
+            # ── Step 7: Desktop system configuration ─────────────────────
+            # Edge default browser, --password-store=basic, fixup scripts,
+            # PAM hooks for GNOME Keyring, polkit colord rule, dconf defaults
+            Invoke-BakeStep -Name "Desktop system configuration" -Timeout 120 -Script @'
+set -euo pipefail
+
+# --- Edge as default browser ---
+update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200
+update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200
+update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable
+update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable
+
+# --- Edge --password-store=basic (suppress GNOME Keyring prompt) ---
+if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
+    sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
+        /usr/share/applications/microsoft-edge.desktop
+fi
+
+# --- Edge fixup login script ---
+cat > /etc/profile.d/memlabs-edge-fixup.sh << 'FIXUP'
+#!/bin/bash
+DESKTOP=/usr/share/applications/microsoft-edge.desktop
+if [ -f "$DESKTOP" ] && grep -q 'Exec=/usr/bin/microsoft-edge-stable ' "$DESKTOP" \
+   && ! grep -q '\-\-password-store=basic' "$DESKTOP"; then
+    sudo sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
+        "$DESKTOP" 2>/dev/null
+fi
+if command -v dconf >/dev/null 2>&1; then
+    FAVS=$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
+    if echo "$FAVS" | grep -q 'firefox.desktop'; then
+        NEW=$(echo "$FAVS" | sed "s/'firefox.desktop'/'microsoft-edge.desktop'/g")
+        dconf write /org/gnome/shell/favorite-apps "$NEW" 2>/dev/null
+    fi
+fi
+FIXUP
+chmod 0644 /etc/profile.d/memlabs-edge-fixup.sh
+
+# --- Sudoers for Edge fixup ---
+echo 'ALL ALL=(root) NOPASSWD: /usr/bin/sed -i s*Exec=/usr/bin/microsoft-edge-stable*Exec=/usr/bin/microsoft-edge-stable --password-store=basic* /usr/share/applications/microsoft-edge.desktop' \
+    > /etc/sudoers.d/memlabs-edge-fixup
+chmod 0440 /etc/sudoers.d/memlabs-edge-fixup
+
+# --- XDG mimeapps (Edge as default handler) ---
+install -d -m 0755 /etc/xdg
+cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
+[Default Applications]
+x-scheme-handler/http=microsoft-edge.desktop
+x-scheme-handler/https=microsoft-edge.desktop
+text/html=microsoft-edge.desktop
+MIMEEOF
+
+# --- PAM: auto-unlock GNOME Keyring on xrdp login ---
+# microsoft-identity-broker (pulled in by intune-portal) stores Entra ID
+# auth tokens in GNOME Keyring via libsecret / Secret Service D-Bus API.
+# Without this, the keyring stays locked and enrollment fails.
+if [ -f /etc/pam.d/xrdp-sesman ]; then
+    if ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
+        sed -i '/^@include common-auth/a auth       optional     pam_gnome_keyring.so' \
+            /etc/pam.d/xrdp-sesman
+        sed -i '/^@include common-session/a session    optional     pam_gnome_keyring.so auto_start' \
+            /etc/pam.d/xrdp-sesman
+    fi
+fi
+
+# --- Polkit: allow colord without auth for xrdp ---
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/45-allow-colord.rules << 'RULES'
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.color-manager.") == 0) {
+        return polkit.Result.YES;
+    }
+});
+RULES
+
+# --- dconf: Windows-like GNOME defaults (system-wide) ---
+install -d -m 0755 /etc/dconf/profile
+printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
+
+install -d -m 0755 /etc/dconf/db/local.d
+cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
+[org/gnome/desktop/wm/preferences]
+button-layout='appmenu:minimize,maximize,close'
+
+[org/gnome/shell]
+enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
+welcome-dialog-last-shown-version='99.0'
+favorite-apps=['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
+
+[org/gnome/shell/extensions/dash-to-panel]
+panel-positions='{"0":"BOTTOM"}'
+panel-sizes='{"0":40}'
+panel-element-positions='{"0":[{"element":"showAppsButton","visible":true,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"centerMonitor"},{"element":"centerBox","visible":false,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
+appicon-margin=4
+appicon-padding=4
+animate-appicon-hover=false
+dot-style-focused='DASHES'
+dot-style-unfocused='DOTS'
+trans-use-custom-opacity=false
+hide-overview-on-startup=true
+show-apps-icon-file=''
+
+[org/gnome/desktop/interface]
+enable-hot-corners=false
+
+[org/gnome/shell/extensions/ding]
+show-home=true
+show-trash=true
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+
+[org/gnome/desktop/notifications]
+show-banners=true
+DCONF
+
+dconf update
+
+echo "=== Desktop system configuration complete ==="
+'@
+
+            # ── Step 8: dash-to-panel extension ──────────────────────────
+            Invoke-BakeStep -Name "dash-to-panel extension" -Timeout 120 -Script @'
+set -euo pipefail
+EXT_UUID="dash-to-panel@jderose9.github.com"
+SHELL_VER=$(gnome-shell --version 2>/dev/null | grep -oP '[\d.]+' | cut -d. -f1)
+if [ -z "$SHELL_VER" ]; then
+    echo "ERROR: could not detect GNOME Shell version" >&2
+    exit 1
+fi
+echo "GNOME Shell version: $SHELL_VER"
+DL_URL=$(wget -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
+if [ -z "$DL_URL" ]; then
+    echo "ERROR: could not resolve dash-to-panel download URL for GNOME Shell ${SHELL_VER}" >&2
+    exit 1
+fi
+echo "Downloading from: https://extensions.gnome.org${DL_URL}"
+wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
+install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
+unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
+chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
+rm -f /tmp/dash-to-panel.zip
+echo "=== dash-to-panel installed (GNOME Shell ${SHELL_VER}) ==="
+'@
+        } # end Desktop-only steps
+
+        # ── Validation ───────────────────────────────────────────────────
+        # Check ALL expected artifacts in one pass. Collect every failure
+        # and report them all before aborting.
+        $validationScript = if ($Variant -eq 'Desktop') {
+            @'
+set -euo pipefail
+FAIL=0
+ERRORS=""
+
+for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server \
+           ubuntu-desktop-minimal gdm3 network-manager xrdp xorgxrdp \
+           gnome-tweaks dconf-cli \
+           microsoft-edge-stable intune-portal; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        ERRORS="${ERRORS}  MISSING package: $pkg\n"
+        FAIL=1
+    fi
+done
+
+for svc in hv-kvp-daemon gdm3 NetworkManager xrdp; do
+    if ! systemctl is-enabled "${svc}.service" >/dev/null 2>&1; then
+        ERRORS="${ERRORS}  NOT enabled: ${svc}.service\n"
+        FAIL=1
+    fi
+done
+
+if [ ! -d "/usr/share/gnome-shell/extensions/dash-to-panel@jderose9.github.com" ]; then
+    ERRORS="${ERRORS}  MISSING: dash-to-panel extension directory\n"
+    FAIL=1
+fi
+
+if [ ! -f "/etc/dconf/db/local" ]; then
+    ERRORS="${ERRORS}  MISSING: compiled dconf database /etc/dconf/db/local\n"
+    FAIL=1
+fi
+
+if [ -f /etc/pam.d/xrdp-sesman ] && ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
+    ERRORS="${ERRORS}  MISSING: pam_gnome_keyring.so in xrdp-sesman PAM config\n"
+    FAIL=1
+fi
+
+if ! update-alternatives --query x-www-browser 2>/dev/null | grep -q 'microsoft-edge'; then
+    ERRORS="${ERRORS}  NOT default: Edge not set as x-www-browser\n"
+    FAIL=1
+fi
+
+if [ ! -f "/etc/polkit-1/rules.d/45-allow-colord.rules" ]; then
+    ERRORS="${ERRORS}  MISSING: polkit colord rule\n"
+    FAIL=1
+fi
+
+if [ $FAIL -ne 0 ]; then
+    echo "=== VALIDATION FAILED ==="
+    printf "$ERRORS"
+    exit 1
+fi
+echo "=== Validation passed: all packages, services, and configs verified ==="
+'@
+        }
+        else {
+            @'
+set -euo pipefail
+FAIL=0
+ERRORS=""
+
+for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+        ERRORS="${ERRORS}  MISSING package: $pkg\n"
+        FAIL=1
+    fi
+done
+
+if ! systemctl is-enabled hv-kvp-daemon.service >/dev/null 2>&1; then
+    ERRORS="${ERRORS}  NOT enabled: hv-kvp-daemon.service\n"
+    FAIL=1
+fi
+
+if [ $FAIL -ne 0 ]; then
+    echo "=== VALIDATION FAILED ==="
+    printf "$ERRORS"
+    exit 1
+fi
+echo "=== Validation passed: all packages installed, services enabled ==="
+'@
+        }
+
+        Invoke-BakeStep -Name "Validation" -Timeout 60 -Script $validationScript
+
+        # ── Cleanup + shutdown ───────────────────────────────────────────
+        # Only runs after validation passed. Removes the bake user, cleans
+        # cloud-init state, and shuts down so the VHDX is pristine.
+        Write-Log "Bake: all steps passed. Running cleanup and shutdown..." -Activity
+        $cleanupResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $BakeIPAddress `
+            -UserName 'memlabs' -Sudo -TimeoutSeconds 120 `
+            -DisplayName "Bake: Cleanup + shutdown" -BashCommand @'
+set -euo pipefail
+# Delete bake user so the VHDX ships with no stale credentials
+userdel -r memlabs 2>/dev/null || true
+# Disable unattended upgrades (avoids dpkg lock races on deployed VMs)
+systemctl stop unattended-upgrades.service 2>/dev/null || true
+systemctl disable unattended-upgrades.service 2>/dev/null || true
+# Clean cloud-init state so next boot re-runs with the deploy seed
+cloud-init clean --logs --seed --machine-id || true
+truncate -s 0 /etc/machine-id
+rm -f /var/lib/dbus/machine-id
+rm -f /etc/netplan/50-cloud-init.yaml
+echo "=== Cleanup complete, shutting down ==="
+shutdown -h now
+'@
+        # Cleanup+shutdown may report exit code 1 because the shutdown command
+        # kills the SSH session before it can return. That's expected - check
+        # for the success marker in output instead of exit code.
+        if ($cleanupResult.ScriptBlockOutput -notmatch 'Cleanup complete') {
+            $out = if ($cleanupResult.ScriptBlockOutput) { $cleanupResult.ScriptBlockOutput.Trim() } else { '(no output)' }
+            Write-Log "Bake: cleanup script may not have completed fully:`n$out" -Warning
+        }
+
+        # ── Wait for shutdown ────────────────────────────────────────────
+        Write-Log "Bake: waiting for VM to power off..."
+        $shutdownDeadline = (Get-Date).AddMinutes(5)
+        $cleanShutdown = $false
+        while ((Get-Date) -lt $shutdownDeadline) {
+            Start-Sleep -Seconds 5
             $state = (Get-VM -Name $vmName -ErrorAction SilentlyContinue).State
-            if ($state -eq 'Off') { $clean = $true; break }
+            if ($state -eq 'Off') { $cleanShutdown = $true; break }
         }
-        if (-not $clean) {
-            Write-Log "Bake: VM did not shutdown within $TimeoutMinutes min; forcing off." -Warning
+        if (-not $cleanShutdown) {
+            Write-Log "Bake: VM did not power off within 5 min after shutdown command; forcing off." -Warning
             Stop-VM -Name $vmName -TurnOff -Force -ErrorAction SilentlyContinue
-            throw "Bake VM '$vmName' did not shutdown within $TimeoutMinutes minutes."
         }
-        Write-Log "Bake: VM shut down cleanly." -Success
+        else {
+            Write-Log "Bake: VM shut down cleanly." -Success
+        }
+
+        $bakeSucceeded = $true
     }
     finally {
-        # Stop the VM before removing it.  Remove-VM -Force should handle
-        # running VMs, but an explicit TurnOff is more reliable at releasing
-        # the VHDX file handle so the caller can move/delete it immediately.
+        # On success: remove the temp VM (keeps the VHDX).
+        # On failure: leave the VM running for SSH/console debugging.
+        # Stale VMs from failed runs are cleaned up at the top of the next invocation.
         $bakeVM = Get-VM -Name $vmName -ErrorAction SilentlyContinue
         if ($bakeVM) {
-            if ($bakeVM.State -ne 'Off') {
-                Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
+            if ($bakeSucceeded) {
+                if ($bakeVM.State -ne 'Off') {
+                    Stop-VM -VM $bakeVM -TurnOff -Force -ErrorAction SilentlyContinue
+                }
+                Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
+                Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
             }
-            Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
-            # Remove-VM keeps the VHDX file; we only want to drop the VM
-            # config and DVD attachment.
-            Remove-VM -VM $bakeVM -Force -ErrorAction SilentlyContinue
+            else {
+                Disable-VMResourceMetering -VM $bakeVM -ErrorAction SilentlyContinue
+                Write-Log "Bake: FAILED - VM '$vmName' left running for debugging:" -Warning
+                Write-Log "  SSH:     ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress" -Warning
+                Write-Log "  Console: vmconnect localhost $vmName" -Warning
+                Write-Log "  Cleanup: Stop-VM '$vmName' -TurnOff; Remove-VM '$vmName' -Force" -Warning
+            }
         }
         Remove-Item $stageDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -4847,7 +4971,5 @@ $bakeUserCleanupYaml
     Write-Log "Bake complete on $VhdxPath" -Success
     return $true
 }
-
-
 
 
