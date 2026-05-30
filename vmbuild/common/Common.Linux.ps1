@@ -4562,7 +4562,7 @@ $bakeWriteFilesYaml
         # and throws with detailed output on failure. Uses a hashtable for
         # the mutable step counter (reference type survives inner function
         # scope).
-        $totalSteps = if ($Variant -eq 'Desktop') { 9 } else { 4 }
+        $totalSteps = if ($Variant -eq 'Desktop') { 10 } else { 5 }
         $ctx = @{ Step = 0 }
 
         function Invoke-BakeStep {
@@ -4619,8 +4619,61 @@ dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
 echo "=== Base services enabled ==="
 '@
 
+        # ── Step 4: DHCP watchdog service ────────────────────────────────
+        # systemd-networkd's default DHCP retry is not aggressive enough
+        # under heavy host load (25+ VMs booting). This oneshot service
+        # runs after networkd, checks for an IPv4 address, and restarts
+        # networkd with retries until DHCP succeeds. Runs on every boot.
+        Invoke-BakeStep -Name "DHCP watchdog service" -Timeout 60 -Script @'
+set -euo pipefail
+
+cat > /usr/local/bin/memlabs-dhcp-watchdog << 'WATCHDOG'
+#!/bin/bash
+# memlabs-dhcp-watchdog: retry systemd-networkd DHCP if no IPv4 address.
+MAX_RETRIES=10
+RETRY_INTERVAL=15
+INITIAL_WAIT=30
+
+# Wait for networkd to have a chance to acquire a lease on its own.
+sleep $INITIAL_WAIT
+
+for i in $(seq 1 $MAX_RETRIES); do
+    if ip -4 addr show scope global | grep -q 'inet '; then
+        logger -t memlabs-dhcp-watchdog "IPv4 address found on attempt $i"
+        exit 0
+    fi
+    logger -t memlabs-dhcp-watchdog "No IPv4 address (attempt $i/$MAX_RETRIES), restarting systemd-networkd"
+    systemctl restart systemd-networkd
+    sleep $RETRY_INTERVAL
+done
+logger -t memlabs-dhcp-watchdog "FAILED: no IPv4 address after $MAX_RETRIES retries"
+exit 1
+WATCHDOG
+chmod 0755 /usr/local/bin/memlabs-dhcp-watchdog
+
+cat > /etc/systemd/system/memlabs-dhcp-watchdog.service << 'SVCUNIT'
+[Unit]
+Description=MemLabs DHCP Watchdog (retry networkd DHCP)
+After=systemd-networkd.service cloud-init-local.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/memlabs-dhcp-watchdog
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+SVCUNIT
+
+systemctl daemon-reload
+systemctl enable memlabs-dhcp-watchdog.service
+echo "=== DHCP watchdog service installed ==="
+'@
+
         if ($Variant -eq 'Desktop') {
-            # ── Step 4: Desktop packages ─────────────────────────────────
+            # ── Step 5: Desktop packages ─────────────────────────────────
             Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -4631,7 +4684,7 @@ apt-get install -y \
 echo "=== Desktop packages installed ==="
 '@
 
-            # ── Step 5: Desktop services ─────────────────────────────────
+            # ── Step 6: Desktop services ─────────────────────────────────
             Invoke-BakeStep -Name "Enable desktop services" -Timeout 120 -Script @'
 set -euo pipefail
 systemctl set-default graphical.target
@@ -4643,7 +4696,7 @@ ufw allow 3389/tcp || true
 echo "=== Desktop services enabled ==="
 '@
 
-            # ── Step 6: Microsoft repos + Edge + Intune ──────────────────
+            # ── Step 7: Microsoft repos + Edge + Intune ──────────────────
             Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -4659,7 +4712,7 @@ apt-get install -y microsoft-edge-stable intune-portal
 echo "=== Microsoft Edge + Intune installed ==="
 '@
 
-            # ── Step 7: Desktop system configuration ─────────────────────
+            # ── Step 8: Desktop system configuration ─────────────────────
             # Edge default browser, --password-store=basic, fixup scripts,
             # PAM hooks for GNOME Keyring, polkit colord rule, dconf defaults
             Invoke-BakeStep -Name "Desktop system configuration" -Timeout 120 -Script @'
@@ -4782,7 +4835,7 @@ dconf update
 echo "=== Desktop system configuration complete ==="
 '@
 
-            # ── Step 8: dash-to-panel extension ──────────────────────────
+            # ── Step 9: dash-to-panel extension ──────────────────────────
             Invoke-BakeStep -Name "dash-to-panel extension" -Timeout 120 -Script @'
 set -euo pipefail
 EXT_UUID="dash-to-panel@jderose9.github.com"
@@ -4827,7 +4880,7 @@ for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openss
     fi
 done
 
-for svc in hv-kvp-daemon gdm3 NetworkManager xrdp; do
+for svc in hv-kvp-daemon gdm3 NetworkManager xrdp memlabs-dhcp-watchdog; do
     if ! systemctl is-enabled "${svc}.service" >/dev/null 2>&1; then
         ERRORS="${ERRORS}  NOT enabled: ${svc}.service\n"
         FAIL=1
@@ -4836,6 +4889,11 @@ done
 
 if [ ! -d "/usr/share/gnome-shell/extensions/dash-to-panel@jderose9.github.com" ]; then
     ERRORS="${ERRORS}  MISSING: dash-to-panel extension directory\n"
+    FAIL=1
+fi
+
+if [ ! -f /usr/local/bin/memlabs-dhcp-watchdog ]; then
+    ERRORS="${ERRORS}  MISSING: /usr/local/bin/memlabs-dhcp-watchdog\n"
     FAIL=1
 fi
 
@@ -4882,6 +4940,16 @@ done
 
 if ! systemctl is-enabled hv-kvp-daemon.service >/dev/null 2>&1; then
     ERRORS="${ERRORS}  NOT enabled: hv-kvp-daemon.service\n"
+    FAIL=1
+fi
+
+if [ ! -f /usr/local/bin/memlabs-dhcp-watchdog ]; then
+    ERRORS="${ERRORS}  MISSING: /usr/local/bin/memlabs-dhcp-watchdog\n"
+    FAIL=1
+fi
+
+if ! systemctl is-enabled memlabs-dhcp-watchdog.service >/dev/null 2>&1; then
+    ERRORS="${ERRORS}  NOT enabled: memlabs-dhcp-watchdog.service\n"
     FAIL=1
 fi
 
