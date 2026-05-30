@@ -1714,7 +1714,14 @@ class DelegateControl {
             Write-Status "Creating new AD Object: CN=System Management,CN=System,$root"
             $ou = New-ADObject -Type Container -name "System Management" -Path "CN=System,$root" -Passthru
         }
-        $DomainName = $this.DomainFullName.split('.')[0]
+        # Use actual NetBIOS name for SID resolution, not the first DNS
+        # label. In disjoint namespaces (e.g. DNS "wacky.sandwich.lab" with
+        # NetBIOS "TACO"), .split('.')[0] gives "wacky" which dsacls can't
+        # resolve to a SID. Get-ADDomain.NetBIOSName is authoritative.
+        $DomainName = (Get-ADDomain -ErrorAction SilentlyContinue).NetBIOSName
+        if (-not $DomainName) {
+            $DomainName = $this.DomainFullName.split('.')[0]
+        }
         #Delegate Control
         $cmd = "dsacls.exe"
         $arg1 = "CN=System Management,CN=System,$root"
@@ -1874,7 +1881,10 @@ class DelegateControl {
     [bool] Test() {
         Write-Status "Checking AD System Management container delegation"
         $_machinename = $this.Machine
-        $DomainName = $this.DomainFullName.split('.')[0]
+        $DomainName = (Get-ADDomain -ErrorAction SilentlyContinue).NetBIOSName
+        if (-not $DomainName) {
+            $DomainName = $this.DomainFullName.split('.')[0]
+        }
         $root = (Get-ADRootDSE).defaultNamingContext
         try {
             Get-ADObject "CN=System Management,CN=System,$root"
