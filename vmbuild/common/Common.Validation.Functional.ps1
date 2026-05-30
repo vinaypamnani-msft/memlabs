@@ -922,7 +922,7 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                             foreach ($j in $jobs) {
                                 $enabledText = if ($j.enabled -eq 1) { 'enabled' } else { 'DISABLED' }
                                 $historyText = ''
-                                if ($null -ne $j.LastRunStatus) {
+                                if ($null -ne $j.LastRunStatus -and $j.LastRunStatus -isnot [System.DBNull]) {
                                     $statusMap = @{ 0 = 'Failed'; 1 = 'Succeeded'; 2 = 'Retry'; 3 = 'Cancelled'; 4 = 'In Progress' }
                                     $statusText = if ($statusMap.ContainsKey([int]$j.LastRunStatus)) { $statusMap[[int]$j.LastRunStatus] } else { "Status $($j.LastRunStatus)" }
                                     $historyText = ", last run: $statusText at $($j.LastRunTime)"
