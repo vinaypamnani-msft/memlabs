@@ -350,8 +350,16 @@ function Select-StartDomain {
         [Parameter(Mandatory = $true, HelpMessage = "Domain To Stop")]
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "Prepopulate response")]
-        [string] $response = $null
+        [string] $response = $null,
+        [switch] $Sync
     )
+
+    # If a background VM operation is already running, warn and return
+    if (-not $Sync -and $global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+        Write-Host
+        Write-OrangePoint "A background $($global:PendingVMOperation.Type) operation is already in progress in '$($global:PendingVMOperation.Domain)'."
+        return
+    }
 
     $preResponse = $null
     if ($response) {
@@ -371,13 +379,10 @@ function Select-StartDomain {
         else {
             $customOptions = [ordered]@{"*B" = "*** All VMs in '$domain' are already Running ***" }
             return
-            #Write-GreenCheck "All VMs in '$domain' are already Running"
-            #return
         }
 
 
         $vmsname = $notRunning | Select-Object -ExpandProperty vmName
-        #$customOptions = [ordered]@{"A" = "Start All VMs" ; "C" = "Start Critical VMs only (DC/SiteServers/Sql)" ; "X" = "Do not start any VMs" }
 
         if (-not $preResponse) {
             $response = $null
@@ -402,10 +407,17 @@ function Select-StartDomain {
             $ReturnVal = $null
             $crit = Get-CriticalVMs -domain $domain
 
-            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
-
-            if ($failures -ne 0) {
-                Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+            if ($Sync) {
+                $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+                if ($failures -ne 0) {
+                    Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+                }
+            }
+            else {
+                Invoke-SmartStartVMsBackground -CritList $crit -CriticalOnly:$CriticalOnly -domain $domain
+                $count = @($crit.ALLCRIT).Count
+                if (-not $CriticalOnly) { $count += @($crit.NONCRIT).Count }
+                Write-GreenCheck "Starting $count VM(s) in '$domain' in the background..."
             }
 
             return
@@ -413,18 +425,18 @@ function Select-StartDomain {
         }
         else {
             write-Log -Verbose "$($ReturnVal.Count) VMs returned $ReturnVal"
-            $crit = Get-CriticalVMs -domain $domain -vmNames $ReturnVal            
-            
-            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+            $crit = Get-CriticalVMs -domain $domain -vmNames $ReturnVal
 
-            if ($failures -ne 0) {
-                Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+            if ($Sync) {
+                $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$CriticalOnly
+                if ($failures -ne 0) {
+                    Write-RedX "$failures VM(s) could not be started" -foregroundColor red
+                }
             }
-            #start-vm2 $response
-            #get-job | wait-job | out-null
-            #Show-JobsProgress -Activity "Starting VMs"
-            #get-job | remove-job | out-null
-            #get-list -type VM -SmartUpdate | out-null
+            else {
+                Invoke-SmartStartVMsBackground -CritList $crit -CriticalOnly:$CriticalOnly -domain $domain
+                Write-GreenCheck "Starting $($ReturnVal.Count) VM(s) in '$domain' in the background..."
+            }
             $ReturnVal = $null
         }
     }
@@ -439,8 +451,16 @@ function Select-StopDomain {
         [string] $domain,
         [Parameter(Mandatory = $false, HelpMessage = "Prepopulate response")]
         [string] $response = $null,
-        [switch] $AllSelected
+        [switch] $AllSelected,
+        [switch] $Sync
     )
+
+    # If a background VM operation is already running, warn and return
+    if (-not $Sync -and $global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+        Write-Host
+        Write-OrangePoint "A background $($global:PendingVMOperation.Type) operation is already in progress in '$($global:PendingVMOperation.Domain)'."
+        return
+    }
 
     $customOptions = @{}
     if ($response) {
@@ -462,7 +482,6 @@ function Select-StopDomain {
         }
 
         $vmsname = $running | Select-Object -ExpandProperty vmName
-        #$customOptions = [ordered]@{"A" = "Stop All VMs" ; "N" = "Stop non-critical VMs (All except: DC/SiteServers/SQL)"; "C" = "Stop Critical VMs (DC/SiteServers/SQL)" }
         if (-not $preResponse) {
             $results = @()
             $results = Get-Menu2 -MenuName "Select VMs to Stop in $domain" -Prompt "Select VMs to Stop" -additionalOptions $CustomOptions -OptionArray $vmsname -test:$false -MultiSelect -AllSelected:$AllSelected
@@ -501,14 +520,26 @@ function Select-StopDomain {
                 }
             }
 
-            Invoke-StopVMs -domain $domain -vmList $vmList
+            if ($Sync) {
+                Invoke-StopVMs -domain $domain -vmList $vmList
+            }
+            else {
+                Invoke-StopVMsBackground -domain $domain -vmList $vmList
+                Write-GreenCheck "Stopping $(@($vmList).Count) VM(s) in '$domain' in the background..."
+            }
 
             return
         }
         else {
             If ($results -and $results.Count -ge 1) {
-                Invoke-StopVMs -domain $domain -vmList $results
-                get-list -type VM -SmartUpdate | out-null
+                if ($Sync) {
+                    Invoke-StopVMs -domain $domain -vmList $results
+                    get-list -type VM -SmartUpdate | out-null
+                }
+                else {
+                    Invoke-StopVMsBackground -domain $domain -vmList $results
+                    Write-GreenCheck "Stopping $($results.Count) VM(s) in '$domain' in the background..."
+                }
                 return
             }
         }

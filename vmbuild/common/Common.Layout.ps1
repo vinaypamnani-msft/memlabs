@@ -32,7 +32,7 @@ Function Get-LabVMs {
     if ($vms) {
         
         # Define colors for state and role
-        $stateColor = @{ "Running" = "Green"; "Off" = "Red" }
+        $stateColor = @{ "Running" = "Green"; "Off" = "Red"; "Stopping" = "DarkGoldenrod"; "Starting" = "DarkGoldenrod" }
         $roleColor = @{ "CAS" = "Yellow"; "Primary" = "Yellow"; "DC" = "White"; "SiteSystem" = "Yellow"; "DomainMember" = "Cyan" }
 
         # Extract properties and headers

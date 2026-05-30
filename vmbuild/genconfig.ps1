@@ -479,6 +479,9 @@ function Select-DomainMenu {
         Write-Verbose "2 Select-DomainMenu"
         while ($true) {
 
+            # Check whether a background Stop/Start operation has finished
+            Complete-PendingVMOperation | Out-Null
+
             $vms = get-list -type vm -DomainName $domain -SmartUpdate
             if (-not $vms) { break }
 
@@ -496,7 +499,7 @@ function Select-DomainMenu {
             }
 
             switch ($response.ToLowerInvariant()) {
-                "2" { Select-StopDomain -domain $domain }
+                "2" { Select-StopDomain -domain $domain -AllSelected }
                 "1" { Select-StartDomain -domain $domain }
                 "3" { select-OptimizeDomain -domain $domain }
                 "d" { Select-DeleteDomain -domain $domain }
@@ -530,6 +533,8 @@ function Build-DomainSubMenuOptions {
 
     $notRunning = ($vms | Where-Object { $_.State -ne "Running" }).Count
     $running = ($vms | Where-Object { $_.State -eq "Running" }).Count
+    $stopping = ($vms | Where-Object { $_.State -eq "Stopping" }).Count
+    $starting = ($vms | Where-Object { $_.State -eq "Starting" }).Count
 
     $checkPoint = $null
     $DC = $vms | Where-Object { $_.role -eq "DC" }
@@ -537,11 +542,25 @@ function Build-DomainSubMenuOptions {
         $checkPoint = (Get-VMCheckpoint2 -vmname $DC.vmName | where-object { $_.Name -like '*MemLabs*' }).Count
     }
 
+    # Background operation status banner
+    $bgBanner = [ordered]@{}
+    if ($global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+        $op = $global:PendingVMOperation
+        $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
+        $transitioning = if ($op.Type -eq 'Stop') { $stopping } else { $starting }
+        $bgBanner = [ordered]@{
+            "*BG" = "Background $($op.Type): $($op.VMCount) VM(s) in progress ($($elapsedSec)s)$(if ($transitioning) { " [$transitioning $($op.Type.ToLower())ing]" })%DarkGoldenrod"
+        }
+    }
+
     $customOptions = [ordered]@{
         "*F1"   = "Get-LabVMs -DomainName $domain"
         "*BZ"   = ""
         "*HELP" = "Update-HelpText"
         "*B0"   = ""
+    }
+    if ($bgBanner.Count -gt 0) { $customOptions += $bgBanner }
+    $customOptions += [ordered]@{
         "*B1"   = "VM Management%$($Global:Common.Colors.GenConfigHeader)"
         "M"     = "Modify - Edit or Add VMs to this domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)"
         "HM"    = "Use this option to modify the domain, adding new roles, or new VMs"
@@ -1214,7 +1233,7 @@ if ($InternalUseOnly.IsPresent) {
         Write-OrangePoint -NoIndent "Without a snapshot, if something fails it may not be possible to recover"
         $response = Read-YesOrNoWithTimeout -Prompt "Do you wish to take a Hyper-V snapshot of the domain now? (y/N)" -HideHelp -Default "n" -timeout 30
         if (-not [String]::IsNullOrWhiteSpace($response) -and $response.ToLowerInvariant() -eq "y") {
-            $result = Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C"
+            $result = Select-StopDomain -domain $Global:Config.vmOptions.DomainName -response "C" -Sync
             $filename = $splitpath = Split-Path -Path $return.ConfigFileName -Leaf
             $comment = [System.Io.Path]::GetFileNameWithoutExtension($filename)
             if ($comment -ne $splitpath) {
@@ -1223,7 +1242,7 @@ if ($InternalUseOnly.IsPresent) {
             else {
                 get-SnapshotDomain -domain $Global:Config.vmOptions.DomainName
             }
-            Select-StartDomain -domain $Global:Config.vmOptions.DomainName -response "C"
+            Select-StartDomain -domain $Global:Config.vmOptions.DomainName -response "C" -Sync
         }
     }
     return $return
