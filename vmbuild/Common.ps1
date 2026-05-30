@@ -3048,8 +3048,10 @@ function New-VirtualMachine {
         Set-VM -Name $vmName -ProcessorCount $Processors | out-null
 
         Write-Progress2 $Activity -Status "Adding OS Disk to VM" -percentcomplete 65 -force
-        Write-Log "$VmName`: Adding virtual disk $osDiskPath"
-        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $DiskControllerType -ControllerNumber 0 | out-null
+        # Gen 1 VMs can only boot from IDE; force the OS disk onto IDE 0 regardless of $DiskControllerType.
+        $osDiskController = if ($Generation -eq 1) { "IDE" } else { $DiskControllerType }
+        Write-Log "$VmName`: Adding virtual disk $osDiskPath (controller: $osDiskController)"
+        Add-VMHardDiskDrive -VMName $VmName -Path $osDiskPath -ControllerType $osDiskController -ControllerNumber 0 | out-null
 
         Write-Progress2 $Activity -Status "Adding DVD disk to VM" -percentcomplete 70 -force
         Write-Log "$VmName`: Adding a DVD drive"
@@ -3057,7 +3059,10 @@ function New-VirtualMachine {
 
         Write-Progress2 $Activity -Status "Changing Boot Order" -percentcomplete 75 -force
         Write-Log "$VmName`: Changing boot order"
-        $f = Get-VM2 -Fallback -Name $VmName | Get-VMFirmware
+        # Get-VMFirmware / Set-VMFirmware are Gen 2 only. Gen 1 uses BIOS boot
+        # order (CD, IDE, LegacyNetworkAdapter, Floppy) which is correct by default
+        # once the OS disk is on IDE.
+        $f = if ($Generation -eq 2) { Get-VM2 -Fallback -Name $VmName | Get-VMFirmware } else { $null }
         $f_file = $f.BootOrder | Where-Object { $_.BootType -eq "File" }
         $f_net = $f.BootOrder | Where-Object { $_.BootType -eq "Network" }
         $f_hd = $f.BootOrder | Where-Object { $_.BootType -eq "Drive" -and $_.Device -is [Microsoft.HyperV.PowerShell.HardDiskDrive] }
@@ -3085,21 +3090,24 @@ function New-VirtualMachine {
         }
 
         Write-Progress2 $Activity -Status "Setting Firmware" -percentcomplete 85 -force
-        # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
-        if ($null -ne $f_file) {
-            if (-not $OSDClient.IsPresent) {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+        # Set-VMFirmware is Gen 2 only. Gen 1 BIOS boot order is fine by default.
+        if ($Generation -eq 2) {
+            # 'File' firmware is not present on new VM, seems like it's created after Windows setup.
+            if ($null -ne $f_file) {
+                if (-not $OSDClient.IsPresent) {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_hd, $f_net | out-null
+                }
+                else {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
+                }
             }
             else {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_file, $f_dvd, $f_net, $f_hd | out-null
-            }
-        }
-        else {
-            if (-not $OSDClient.IsPresent) {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
-            }
-            else {
-                Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+                if (-not $OSDClient.IsPresent) {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_hd, $f_net | out-null
+                }
+                else {
+                    Set-VMFirmware -VMName $VmName -BootOrder $f_dvd, $f_net, $f_hd | out-null
+                }
             }
         }
 
@@ -3372,18 +3380,24 @@ function Wait-ForVm {
 
         [int]$failures = 0
         [int]$maxFailures = ([int]$TimeoutMinutes * 4)
+        [int]$powerCycles = 0
+        [int]$maxPowerCycles = 3
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
         do {
             # Check OOBE complete registry key
+            $oobeStatusText = "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
+            if ($powerCycles -gt 0) {
+                $oobeStatusText += " (power-cycled $powerCycles/$maxPowerCycles)"
+            }
 
             try {
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Testing HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State\ImageState = IMAGE_STATE_COMPLETE"
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $oobeStatusText
             }
             catch {}
 
             $stopwatch2 = [System.Diagnostics.Stopwatch]::new()
             $stopwatch2.Start()
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState }
             $stopwatch2.Stop()
             Write-Log "$VmName`: $out" -Verbose
             if ($null -eq $out.ScriptBlockOutput -and -not $readyOobe) {
@@ -3406,6 +3420,21 @@ function Wait-ForVm {
                     [int]$failures++
                 }
                 if ($failures -ge $maxFailures) {
+                    # Before power-cycling, check if the VM is running but has no heartbeat.
+                    # NoContact after 2+ min means no OS loaded (boot failure).
+                    # OkApplicationsUnknown/OkApplicationsHealthy = OS is booting normally.
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Uptime.TotalMinutes -ge 2 -and $vmCheck.Heartbeat -eq "NoContact") {
+                        Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat NoContact — possible boot failure. Check VM console: vmconnect localhost $VmName" -Warning
+                    }
+                    $powerCycles++
+                    if ($powerCycles -gt $maxPowerCycles) {
+                        Write-Log "$VmName`: OOBE not responding after $maxPowerCycles power-cycles ($([int]$stopWatch.Elapsed.TotalMinutes) min elapsed). Giving up." -Warning
+                        break
+                    }
+                    Write-Log "$VmName`: OOBE not responding after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles)." -Warning
+                    $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
+                    Write-Log "$VmName`: VM state before power-cycle: $vmState" -Warning
                     stop-vm2 -name $VmName -TurnOff
                     start-sleep -seconds 8
                     Start-vm2 -name $VmName
@@ -3439,7 +3468,7 @@ function Wait-ForVm {
 
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE complete. Checking SMB access"
                 Start-Sleep -Seconds 3
-                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
+                $out = Invoke-VmCommand -VmName $VmName -AsJob -VmDomainName $VmDomainName -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Test-Path -Path "\\localhost\c$" -ErrorAction SilentlyContinue }
                 if ($null -ne $out.ScriptBlockOutput -and -not $readySmb) { Write-Log "$VmName`: OOBE complete. \\localhost\c$ access result is $($out.ScriptBlockOutput)" }
                 $readySmb = $true -eq $out.ScriptBlockOutput
                 if ($readySmb) { Start-Sleep -Seconds 10 } # Extra wait to ensure wwahost has had a chance to start
@@ -3447,7 +3476,7 @@ function Wait-ForVm {
 
             # Wait until wwahost.exe is not found, or not longer running
             if ($readySmb) {
-                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+                $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
                 if ($wwahost.ScriptBlockOutput) {
                     $wwahostrunning = $true
@@ -3482,7 +3511,7 @@ function Wait-ForVm {
         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
         do {
-            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
 
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
@@ -3628,6 +3657,10 @@ function Invoke-VmCommand {
         [switch]$AsJob,
         [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
         [int]$TimeoutSeconds = 180,
+        [Parameter(Mandatory = $false, HelpMessage = "Skip domain credential fallback via VMNote. Use during OOBE polling when VM is not yet domain-joined.")]
+        [switch]$SkipDomainFallback,
+        [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
+        [int]$SessionMaxRetries = 3,
         [Parameter(Mandatory = $false, HelpMessage = "What If")]
         [switch]$WhatIf
     )
@@ -3674,21 +3707,21 @@ function Invoke-VmCommand {
         # Get VM Session
         $ps = $null
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
         }
 
         if (-not $ps) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
         }
 
-        if (-not $ps -and $VmDomainName -eq "WORKGROUP") {
+        if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
             $note = Get-VMNote -VMName $VmName
             $domain2 = $note.domain
             $adminName = $note.adminName
             if (-not $adminName) {
                 $adminName = "admin"
             }
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
         }
 
         $failed = ($null -eq $ps)
@@ -3827,7 +3860,9 @@ function Get-VmSession {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
-        [switch]$ShowVMSessionError
+        [switch]$ShowVMSessionError,
+        [Parameter(Mandatory = $false, HelpMessage = "Max retry attempts (default 3). Reduce for tight polling loops.")]
+        [int]$MaxRetries = 3
     )
 
 
@@ -3880,7 +3915,7 @@ function Get-VmSession {
             start-sleep -seconds 5
         }
 
-        if ($failCount -gt 3) {
+        if ($failCount -gt $MaxRetries) {
             break
         }
 
