@@ -2302,56 +2302,20 @@ function Install-LinuxProxyServer {
         return $false
     }
 
-    # Build ACL list: every subnet used by any VM in the domain, not just
-    # VMs in the current deployConfig (which only has hidden refs to VMs
-    # relevant to this deployment).  Query Get-List for the full picture
-    # so a 2nd deployment on a new subnet is automatically allowed.
-    $subnets = New-Object System.Collections.Generic.HashSet[string]
-    if ($deployConfig.vmOptions.network) {
-        [void]$subnets.Add($deployConfig.vmOptions.network)
-    }
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.network) { [void]$subnets.Add($vm.network) }
-    }
-    # Also scan all existing VMs in the domain for subnets not represented
-    # in deployConfig (e.g. VMs from a prior deployment on a different subnet).
-    try {
-        $domainVms = @(Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate)
-        foreach ($evm in $domainVms) {
-            if ($evm.network) { [void]$subnets.Add($evm.network) }
-        }
-    }
-    catch {
-        Write-Log "[Proxy] $vmName`: Warning: could not enumerate existing VMs for subnet discovery: $_" -Warning
-    }
-    # Squid ORs multiple values within the same named ACL, but ANDs
-    # multiple ACL names on a single http_access line.  Use one ACL
-    # with all subnets so traffic from ANY lab network is allowed.
-    $aclValues = @()
-    foreach ($s in $subnets) {
-        $base = $s
-        if ($base -notmatch '/\d+$') { $base = "$base/24" }
-        $aclValues += $base
-    }
-    $aclLine = "acl memlabs_nets src $($aclValues -join ' ')"
-
     $squidConf = @"
 # memlabs Squid forward proxy
 # Managed by Install-LinuxProxyServer -- changes will be overwritten.
 
 http_port 3128
 
-$aclLine
-
-http_access allow memlabs_nets
-http_access allow localhost
-
 # Blocklist: managed via the Proxy Admin web UI (port 8443).
 # Squid reads this file on start and on 'squid -k reconfigure'.
 acl blocklist dstdomain "/etc/squid/blocklist.txt"
 http_access deny blocklist
 
-http_access deny all
+# Lab proxy: allow all traffic.  Squid's role here is outbound NAT
+# control via Hyper-V port ACLs, not access restriction.
+http_access allow all
 
 # Disable disk cache; lab proxy is for outbound NAT control, not perf.
 cache deny all
@@ -2362,23 +2326,6 @@ cache_mem 64 MB
 # Honour client UA / forwarded-for for diagnostics; this is a lab.
 forwarded_for on
 via off
-
-# Standard ports allowed via CONNECT (HTTPS, etc.)
-acl SSL_ports port 443
-acl Safe_ports port 80
-acl Safe_ports port 21
-acl Safe_ports port 443
-acl Safe_ports port 70
-acl Safe_ports port 210
-acl Safe_ports port 1025-65535
-acl Safe_ports port 280
-acl Safe_ports port 488
-acl Safe_ports port 591
-acl Safe_ports port 777
-acl CONNECT method CONNECT
-
-http_access deny !Safe_ports
-http_access deny CONNECT !SSL_ports
 
 coredump_dir /var/spool/squid
 "@
