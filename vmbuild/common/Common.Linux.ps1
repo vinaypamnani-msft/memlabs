@@ -4426,6 +4426,42 @@ dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
 echo "=== Base services enabled ==="
 '@
 
+        # ── Step 3b: Prevent maintenance-mode boot on fsck failure ───────
+        # Ubuntu cloud images can drop to a "Give root password for
+        # maintenance" prompt if the journal or filesystem has minor
+        # inconsistencies after a hard shutdown. This is fatal for
+        # headless VMs because sshd never starts. Configure GRUB to
+        # auto-repair and systemd to never drop to emergency mode.
+        Invoke-BakeStep -Name "Prevent maintenance-mode boot" -Timeout 60 -Script @'
+set -euo pipefail
+# Add fsck.mode=force fsck.repair=yes to kernel command line
+GRUB_FILE="/etc/default/grub"
+if ! grep -q 'fsck.repair=yes' "$GRUB_FILE"; then
+    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
+    # Also add to GRUB_CMDLINE_LINUX if GRUB_CMDLINE_LINUX_DEFAULT doesn't exist
+    if ! grep -q 'GRUB_CMDLINE_LINUX_DEFAULT' "$GRUB_FILE"; then
+        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
+    fi
+    update-grub
+fi
+# Tell systemd to never drop to emergency/rescue on failure — just reboot
+mkdir -p /etc/systemd/system.conf.d
+cat > /etc/systemd/system.conf.d/no-emergency.conf << 'EOF'
+[Manager]
+DefaultTimeoutStartSec=180s
+DefaultTimeoutStopSec=90s
+EOF
+# Override emergency.service to just reboot instead of prompting
+mkdir -p /etc/systemd/system/emergency.service.d
+cat > /etc/systemd/system/emergency.service.d/override.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/systemctl reboot
+EOF
+systemctl daemon-reload
+echo "=== Maintenance-mode prevention configured ==="
+'@
+
         # ── Step 4: DHCP watchdog service ────────────────────────────────
         # systemd-networkd's default DHCP retry is not aggressive enough
         # under heavy host load (25+ VMs booting). This oneshot service
