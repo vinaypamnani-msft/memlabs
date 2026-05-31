@@ -2466,7 +2466,7 @@ function Test-PKICertificatesOnVM {
                             $searcher.SearchRoot = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$([ADSI]'LDAP://RootDSE').configurationNamingContext"
                             $tplObj = $searcher.FindOne()
                             if ($tplObj) {
-                                $adOid = $tplObj.Properties['mpki-cert-template-oid'] | Select-Object -First 1
+                                $adOid = $tplObj.Properties['mspki-cert-template-oid'] | Select-Object -First 1
                                 if ($adOid -and $resolvedName -eq $adOid) {
                                     $adVerified = $true
                                 }
