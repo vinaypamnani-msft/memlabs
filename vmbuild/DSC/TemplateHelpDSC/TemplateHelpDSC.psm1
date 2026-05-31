@@ -3827,6 +3827,13 @@ class ModuleAdd {
             $NuGet = Get-PackageProvider -Name Nuget -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -ListAvailable
         }
         catch { }
+
+        # Suppress verbose for all Install-Module / Install-PackageProvider
+        # calls. These internally import PackageManagement and PowerShellGet
+        # which floods the DSC log with hundreds of "Exporting function ..."
+        # and "Importing cmdlet ..." lines.
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try {
         
         IF ($null -eq $NuGet) {
             #Install-PackageProvider Nuget -force -Confirm:$false
@@ -3841,7 +3848,9 @@ class ModuleAdd {
                 Install-Module -Name PowerShellGet -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
             }
             catch {
+                $global:VerbosePreference = $savedVP
                 Write-Verbose "$_"
+                $global:VerbosePreference = 'SilentlyContinue'
                 write-Status "Retry. Installing powershell module PowerShellGet for scope $_userScope"
                 Clear-DnsClientCache -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 20
@@ -3853,9 +3862,7 @@ class ModuleAdd {
         # Without this, the first Install-Module call for the target module fails
         # because the session still has stale provider state from bootstrapping.
         Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
-        try { Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue }
-        finally { $global:VerbosePreference = $savedVP }
+        Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
 
         $module = Get-InstalledModule -Name $_moduleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
 
@@ -3866,7 +3873,9 @@ class ModuleAdd {
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -AllowClobber -ErrorAction Stop
                 }
                 catch {
+                    $global:VerbosePreference = $savedVP
                     Write-Verbose "$_"
+                    $global:VerbosePreference = 'SilentlyContinue'
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope.."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
@@ -3879,7 +3888,9 @@ class ModuleAdd {
                     Install-Module -Name $_moduleName -Force -Confirm:$false -Scope $_userScope -ErrorAction Stop
                 }
                 catch {
+                    $global:VerbosePreference = $savedVP
                     Write-Verbose "$_"
+                    $global:VerbosePreference = 'SilentlyContinue'
                     write-Status "Retry. Installing powershell module $_moduleName for scope $_userScope...."
                     Clear-DnsClientCache -ErrorAction SilentlyContinue
                     Start-Sleep -Seconds 20
@@ -3887,6 +3898,8 @@ class ModuleAdd {
                 }
             }
         }
+
+        } finally { $global:VerbosePreference = $savedVP }
     }
 
     [bool] Test() {
