@@ -5356,7 +5356,9 @@ Function Set-TitleBar {
 . $PSScriptRoot\common\Common.Health.ps1
 . $PSScriptRoot\common\Common.Layout.ps1
 . $PSScriptRoot\common\Common.HyperV.ps1
-. $PSScriptRoot\common\Common.Linux.ps1
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    . $PSScriptRoot\common\Common.Linux.ps1
+}
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.PKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
