@@ -988,6 +988,17 @@ class InstallSqlClient {
         $_URL = $this.URL
         Invoke-DownloadFile $_URL $_path
 
+        # Skip install if already registered (Set may be called just to
+        # restore the MSI file for Windows Installer source resolution).
+        $regPath = "HKLM:\SOFTWARE\Microsoft\SQLNCLI11"
+        if (Test-Path $regPath) {
+            $ver = (Get-ItemProperty $regPath -ErrorAction SilentlyContinue).InstalledVersion
+            if ($ver -and [System.Version]$ver -ge [System.Version]"11.4.7001.0") {
+                Write-Status "SQL Native Client $ver already installed, MSI restored to $_path"
+                return
+            }
+        }
+
         Install-MSIPackage `
             -MsiPath $_path `
             -DisplayName "SQL Server Native Client 11" `
@@ -1019,6 +1030,12 @@ class InstallSqlClient {
             }
 
             If ([System.Version]$($Version.InstalledVersion) -ge [System.Version]"11.4.7001.0") {
+                # Installed, but ensure the MSI file still exists at the download
+                # path so Windows Installer can find it when a CU patches it.
+                if (-not (Test-Path $this.Path)) {
+                    Write-Status "SQL Native Client is installed but MSI missing at $($this.Path) - re-downloading"
+                    return $false
+                }
                 Write-Host "Sql Client 11.4.7001.0 or greater $($Version.InstalledVersion) is installed"
                 return $true
             }
