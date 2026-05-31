@@ -39,15 +39,16 @@
       "virtualProcs": 4,
       "tpmEnabled": true,
       "installSSMS": true,
-      "cmInstallDir": "E:\\ConfigMgr",
+      "cmInstallDir": "F:\\CM",
       "additionalDisks": {
-        "E": "600GB"
+        "E": "600GB",
+        "F": "300GB"
       },
       "siteCode": "SPC",
       "installSUP": true,
       "installRP": false,
       "siteName": "Interstellar Primary",
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "E:\\WsusContent",
       "remoteSQLVM": "METEOR"
     },
     {
@@ -60,8 +61,8 @@
       "installSSMS": true,
       "sqlVersion": "SQL Server 2019",
       "sqlInstanceName": "CRATER",
-      "sqlInstanceDir": "G:\\SQL",
-      "sqlPort": "8433",
+      "sqlInstanceDir": "G:\\SQLData",
+      "sqlPort": "9433",
       "additionalDisks": {
         "G": "250GB"
       },
@@ -78,7 +79,7 @@
       "tpmEnabled": true,
       "installSSMS": true,
       "additionalDisks": {
-        "E": "250GB"
+        "F": "400GB"
       },
       "installDP": false,
       "installMP": false,
@@ -86,7 +87,7 @@
       "installRP": true,
       "siteCode": "SPC",
       "wsusDataBaseServer": "WID",
-      "wsusContentDir": "E:\\WSUS"
+      "wsusContentDir": "F:\\Updates"
     },
     {
       "vmName": "QUASAR",
@@ -96,7 +97,7 @@
       "virtualProcs": 2,
       "tpmEnabled": true,
       "additionalDisks": {
-        "E": "1000GB"
+        "J": "1000GB"
       },
       "installDP": true,
       "installMP": false,
@@ -111,9 +112,9 @@
       "memory": "4GB",
       "virtualProcs": 2,
       "tpmEnabled": true,
-      "wsusContentDir": "E:\\WSUS",
+      "wsusContentDir": "H:\\WsusStore",
       "additionalDisks": {
-        "E": "250GB"
+        "H": "500GB"
       },
       "wsusDataBaseServer": "WID",
       "network": "10.99.43.0"
@@ -147,13 +148,13 @@
       "tpmEnabled": true,
       "installSSMS": true,
       "sqlVersion": "SQL Server 2022",
-      "sqlInstanceName": "MSSQLSERVER",
-      "sqlInstanceDir": "E:\\SQL",
-      "sqlPort": "1433",
+      "sqlInstanceName": "RINGS",
+      "sqlInstanceDir": "I:\\DB",
+      "sqlPort": "7433",
       "additionalDisks": {
-        "E": "250GB",
         "F": "500GB",
-        "G": "10GB"
+        "G": "10GB",
+        "I": "250GB"
       }
     },
     {
