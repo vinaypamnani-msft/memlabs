@@ -38,7 +38,7 @@ objectClass: pKICertificateTemplate
 pKICriticalExtensions: 2.5.29.15
 pKIDefaultCSPs: 1,Microsoft RSA SChannel Cryptographic Provider
 pKIDefaultKeySpec: 1
-pKIExpirationPeriod:: AEA5hy7h/v8=
+pKIExpirationPeriod:: AEAepOhl+v8=
 pKIExtendedKeyUsage: 1.3.6.1.5.5.7.3.2
 pKIKeyUsage:: oAA=
 pKIMaxIssuingDepth: 0
