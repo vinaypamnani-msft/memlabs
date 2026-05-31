@@ -1141,6 +1141,18 @@ $global:VM_Config = {
             $domainName = "WORKGROUP"
         }
 
+        # AADClient idempotency: once OOBE has been reached, the VM has no
+        # usable accounts (sysprep /generalize wiped them).  A persistent
+        # 'oobeComplete' flag in the VM note lets us skip the entire block
+        # on reruns without probing connectivity.
+        if ($currentItem.role -eq "AADClient") {
+            $aadNote = Get-VMNote -VMName $currentItem.vmName
+            if ($aadNote -and $aadNote.oobeComplete) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): OOBE already completed on a previous run. Skipping." -OutputStream -Success
+                return
+            }
+        }
+
         # Get VM Session
         Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
 
@@ -1495,7 +1507,8 @@ $global:VM_Config = {
         $bootToOOBE = $currentItem.role -eq "AADClient"
         $oobeStarted = $false
         if ($bootToOOBE) {
-            # Run Sysprep
+            # Run Sysprep — first run only; the oobeComplete check above
+            # ensures we never reach here on a rerun.
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
             if ($result.ScriptBlockFailed) {
@@ -1521,11 +1534,15 @@ $global:VM_Config = {
                     else {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Failed to start." -OutputStream -Failure
                     }
-
                 }
             }
-            # Update VMNote and set new version, this code doesn't run when VM_Create failed
+            # Update VMNote; persist oobeComplete so reruns skip this block entirely.
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $oobeStarted
+            if ($oobeStarted) {
+                $note = Get-VMNote -VMName $currentItem.vmName
+                $note | Add-Member -MemberType NoteProperty -Name "oobeComplete" -Value $true -Force
+                Set-VMNote -VMName $currentItem.vmName -vmNote $note
+            }
             return
         }
 
