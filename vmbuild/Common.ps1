@@ -5359,6 +5359,22 @@ Function Set-TitleBar {
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     . $PSScriptRoot\common\Common.Linux.ps1
 }
+else {
+    # Stub so callers (e.g. Common.Validation.ps1) can reference Test-VmIsLinux under PS5.1
+    # without loading the full Common.Linux.ps1 which uses PS7-only syntax.
+    function Test-VmIsLinux {
+        param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
+        if (-not $Vm) { return $false }
+        if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
+        foreach ($prop in @('operatingSystem', 'deployedOS')) {
+            if ($Vm.PSObject.Properties.Name -contains $prop) {
+                $val = $Vm.$prop
+                if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
+            }
+        }
+        return $false
+    }
+}
 . $PSScriptRoot\common\Common.snapshots.ps1
 . $PSScriptRoot\common\Common.PKI.ps1
 . $PSScriptRoot\common\Common.menu.ps1
