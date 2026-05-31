@@ -1316,6 +1316,8 @@ function Wait-LinuxVmReady {
     $loggedKnownHostsForIp = $null
     $lastSshErrLogSec = -9999
     $sshErrLogIntervalSec = 30
+    $restartAttempted = $false
+    $restartAfterSec = 480  # 8 minutes; leaves ~7 min for post-restart SSH
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -1467,6 +1469,29 @@ function Wait-LinuxVmReady {
             }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: waiting for cloud-init / DHCP (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
         }
+
+        # ── Mid-wait restart: if SSH hasn't come up after 8 minutes, the
+        # VM may be stuck at a maintenance prompt or fsck wait. Power-cycle
+        # it once and use the remaining ~7 minutes for the retry.
+        if (-not $restartAttempted -and $elapsed -ge $restartAfterSec) {
+            $restartAttempted = $true
+            Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s — restarting VM and retrying" -Warning
+            write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
+            try {
+                Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                Start-Sleep -Seconds 3
+                Start-VM -Name $VmName -ErrorAction Stop
+                Write-Log "$VmName`: VM restarted; resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
+            }
+            catch {
+                Write-Log "$VmName`: VM restart failed: $($_.Exception.Message)" -Warning
+            }
+            # Reset tracking so the loop re-discovers the IP cleanly
+            $lastReportedIp = $null
+            $loggedKnownHostsForIp = $null
+            $lastHeartbeatSec = $elapsed
+        }
+
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 
