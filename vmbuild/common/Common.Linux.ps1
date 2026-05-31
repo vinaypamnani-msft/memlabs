@@ -3016,15 +3016,13 @@ function Invoke-LinuxRoleConfiguration {
 
     # Wait for cloud-init to finish before applying any configuration.
     # Quick non-blocking probe first: if cloud-init already finished (rerun,
-    # or Server image with no cloud-init), skip the expensive --wait call
-    # that can block for minutes waiting for per-boot modules.
+    # or Server image with no cloud-init), skip the wait entirely.
     Write-Progress2 -Activity $activity -Status "Checking cloud-init status" -force
     $ciProbe = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
         -BashCommand 'cloud-init status 2>/dev/null || echo "status: disabled"' `
         -Sudo -DisplayName 'cloud-init-probe' -TimeoutSeconds 30
     $ciStatus = ''
     if ($ciProbe -and $ciProbe.ScriptBlockOutput) {
-        # Parse "status: done" / "status: running" / "status: disabled" etc.
         if ($ciProbe.ScriptBlockOutput -match 'status:\s*(\S+)') { $ciStatus = $Matches[1] }
     }
 
@@ -3032,29 +3030,62 @@ function Invoke-LinuxRoleConfiguration {
         Write-Log "[LinuxConfig] $vmName`: cloud-init already finished (status: $ciStatus). Skipping wait."
     }
     else {
-        # cloud-init is still running (first boot) or status is unknown.
-        # Block until it reaches 'done' or 'error'.
-        Write-Progress2 -Activity $activity -Status "Waiting for cloud-init to finish" -force
-        Write-Log "[LinuxConfig] $vmName`: cloud-init status '$ciStatus'; waiting for completion (reboot expected after)"
-        $ciResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
-            -BashCommand 'cloud-init status --wait 2>/dev/null; echo "cloud-init exit=$?"' `
-            -Sudo -DisplayName 'cloud-init-wait' -TimeoutSeconds 600
-        $ciCleanExit = $ciResult -and $ciResult.CommandResult
-        if ($ciCleanExit) {
-            $ciOutput = ($ciResult.ScriptBlockOutput -split "`n" | Select-Object -Last 5) -join ' | '
-            Write-Log "[LinuxConfig] $vmName`: cloud-init done: $ciOutput"
-        }
-        else {
-            # Connection reset by reboot — normal for Desktop images on first boot.
-            Write-Log "[LinuxConfig] $vmName`: cloud-init wait session ended (likely rebooting)"
-            Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
-            Start-Sleep -Seconds 15
-            $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
-            if (-not $ip) {
-                Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
-                return $false
+        # cloud-init is still running (first boot). Poll status + last log
+        # line so the progress row shows what cloud-init is actually doing
+        # (similar to how CM DSC shows ConfigMgr log tails).
+        Write-Log "[LinuxConfig] $vmName`: cloud-init status '$ciStatus'; polling until done (reboot expected after)"
+        $ciStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $ciTimeoutSec = 600
+        $ciDone = $false
+        while ($ciStopwatch.Elapsed.TotalSeconds -lt $ciTimeoutSec) {
+            # Single SSH call: get status + last useful log line in one round-trip.
+            $ciPoll = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip `
+                -BashCommand '{ cloud-init status 2>/dev/null || echo "status: unknown"; } && echo "---LOGTAIL---" && tail -n 5 /var/log/cloud-init.log 2>/dev/null | grep -v "^$" | tail -n 1' `
+                -Sudo -DisplayName 'cloud-init-poll' -TimeoutSeconds 30
+
+            if (-not ($ciPoll -and $ciPoll.CommandResult)) {
+                # SSH failed — VM is likely rebooting (cloud-init final reboot).
+                Write-Log "[LinuxConfig] $vmName`: SSH lost during cloud-init poll (likely rebooting)"
+                Write-Progress2 -Activity $activity -Status "Waiting for post-cloud-init reboot" -force
+                Start-Sleep -Seconds 15
+                $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
+                if (-not $ip) {
+                    Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable after cloud-init reboot." -Failure
+                    return $false
+                }
+                Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
+                $ciDone = $true
+                break
             }
-            Write-Log "[LinuxConfig] $vmName`: SSH ready after cloud-init reboot at $ip"
+
+            # Parse status and log tail from combined output.
+            $pollOutput = $ciPoll.ScriptBlockOutput
+            $pollStatus = ''
+            $pollLogLine = ''
+            if ($pollOutput -match 'status:\s*(\S+)') { $pollStatus = $Matches[1] }
+            if ($pollOutput -match '---LOGTAIL---\s*(.+)') {
+                $pollLogLine = $Matches[1].Trim()
+                # Strip timestamp prefix (e.g. "2026-05-30 12:34:56,789 - ") for cleaner display.
+                $pollLogLine = $pollLogLine -replace '^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d+\s+-\s+', ''
+                # Truncate long lines for the progress bar.
+                if ($pollLogLine.Length -gt 120) { $pollLogLine = $pollLogLine.Substring(0, 117) + '...' }
+            }
+
+            if ($pollStatus -in @('done', 'error', 'disabled')) {
+                Write-Log "[LinuxConfig] $vmName`: cloud-init finished (status: $pollStatus)"
+                $ciDone = $true
+                break
+            }
+
+            $elapsed = $ciStopwatch.Elapsed.ToString('mm\:ss')
+            $statusMsg = "cloud-init [$elapsed]: $pollLogLine"
+            Write-Progress2 -Activity $activity -Status $statusMsg -force
+
+            Start-Sleep -Seconds 5
+        }
+
+        if (-not $ciDone) {
+            Write-Log "[LinuxConfig] $vmName`: cloud-init poll timed out after ${ciTimeoutSec}s" -Warning
         }
     }
 
