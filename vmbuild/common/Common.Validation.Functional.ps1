@@ -2797,12 +2797,56 @@ function Test-DomainMemberFunctionality {
                 $results.Details.Add("OK: CcmExec service is Running")
             }
             else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: CcmExec service is $($ccm.Status) (client is installed but not running)")
+                # CcmExec exists but won't start — check if ccmsetup is still running.
+                $setup = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
+                if ($setup) {
+                    $results.Details.Add("WARN: CcmExec is $($ccm.Status) but ccmsetup.exe is still running (client install in progress)")
+                }
+                else {
+                    # ccmsetup finished — check ccmsetup.log for failure details.
+                    $logPath = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+                    if (Test-Path $logPath) {
+                        $logTail = Get-Content $logPath -Tail 50 -ErrorAction SilentlyContinue
+                        $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
+                        if ($failLine -and $failLine -match '0x[0-9A-Fa-f]+') {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: CcmExec is $($ccm.Status); ccmsetup failed: $($failLine.Trim())")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: CcmExec is $($ccm.Status) (ccmsetup finished but service won't start)")
+                        }
+                    }
+                    else {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: CcmExec is $($ccm.Status); no ccmsetup.log found at $logPath")
+                    }
+                }
             }
         }
         else {
-            $results.Details.Add("OK: CcmExec service not installed (no client push expected for this VM)")
+            # CcmExec service doesn't exist at all — check if ccmsetup is in progress.
+            $setup = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
+            if ($setup) {
+                $results.Details.Add("WARN: CcmExec not yet installed but ccmsetup.exe is running (client install in progress)")
+            }
+            elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
+                $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
+                $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
+                if ($failLine) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: CcmExec not installed; ccmsetup failed: $($failLine.Trim())")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
+                }
+            }
+            else {
+                # No service, no ccmsetup process, no log — client was never pushed.
+                $results.Details.Add("WARN: CcmExec not installed and no ccmsetup.log — client push may not have reached this VM")
+                $results.NeedsPushCheck = $true
+            }
         }
 
         return $results
@@ -2811,6 +2855,19 @@ function Test-DomainMemberFunctionality {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $domain `
         -DisplayName "Phase11-DomainMember-Test" -SuppressLog
+
+    # If the guest reported NeedsPushCheck, enrich with deploy config context.
+    if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
+        $pushExpected = ($CurrentItem.pushClient -ne $false)
+        if ($pushExpected) {
+            $result.ScriptBlockOutput.Passed = $false
+            $result.ScriptBlockOutput.Details.Add("  pushClient=$true in config but no ccmsetup evidence on VM — push may have failed on the site server side")
+            $result.ScriptBlockOutput.Details.Add("  Check ccmsetup on the Primary: Get-CMDevice -Name '$VMName' | Select IsClient,ClientActiveStatus")
+        }
+        else {
+            $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (pushClient=false in config)"
+        }
+    }
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'DomainMember' -Result $result)
 }
