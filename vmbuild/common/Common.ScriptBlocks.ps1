@@ -2720,6 +2720,31 @@ $global:VM_Config = {
                         }
                     }
 
+                    # Special case: tail SQL Server setup log during installation
+                    if (-not $skipProgress -and $currentStatus -match "^Installing '.*SQL Server") {
+                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                            # Find the most recent Detail.txt under Setup Bootstrap
+                            $logDirs = @(Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\*\Detail.txt' -ErrorAction SilentlyContinue |
+                                Sort-Object LastWriteTime -Descending)
+                            if ($logDirs.Count -gt 0) {
+                                $last = Get-Content $logDirs[0].FullName -Tail 1 -ErrorAction SilentlyContinue
+                                if ($last -match 'Running Action:\s*(.+)') { return "SQL Setup: $($Matches[1].Trim())" }
+                                if ($last -match ':\s*([^:]+)$') { return "SQL Setup: $($Matches[1].Trim())" }
+                                return "SQL Setup: $last"
+                            }
+                            # Fallback: Summary.txt
+                            $summaryFiles = @(Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\Summary.txt' -ErrorAction SilentlyContinue |
+                                Sort-Object LastWriteTime -Descending)
+                            if ($summaryFiles.Count -gt 0) {
+                                return "SQL Setup: " + (Get-Content $summaryFiles[0].FullName -Tail 1 -ErrorAction SilentlyContinue)
+                            }
+                        } -SuppressLog
+                        if (-not $result.ScriptBlockFailed -and -not [string]::IsNullOrWhiteSpace($result.ScriptBlockOutput)) {
+                            $skipProgress = $true
+                            Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $result.ScriptBlockOutput
+                        }
+                    }
+
                     if (-not $skipProgress) {
                         # Write progress
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text $statusTextSnapshot
