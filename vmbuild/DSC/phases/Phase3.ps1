@@ -382,7 +382,7 @@ configuration Phase3
                 $friendlyName = 'ConfigMgr Client DistributionPoint Certificate'
                 CertReq SSLCert2 {
                     Subject             = "Client DistributionPoint Cert"
-                    #SubjectAltName      = "DNS=" + $subject
+                    SubjectAltName      = "DNS=" + $subject + "&DNS=" + $($ThisVM.VmName)
                     KeyLength           = '2048'
                     Exportable          = $true
                     ProviderName        = 'Microsoft RSA SChannel Cryptographic Provider'
