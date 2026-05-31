@@ -80,8 +80,6 @@ configuration Phase4
                 $nextDepend = '[DownloadFile]DownloadSQLCU'
             }
 
-<<<<<<< Updated upstream
-=======
             # Ensure sqlncli.msi is present at the Windows Installer registered
             # source path so the CU can patch the SQL Native Client (error 1706).
             # The MSI may be absent because:
@@ -105,7 +103,6 @@ configuration Phase4
                 DependsOn  = $nextDepend
             }
             $nextDepend = '[Script]RestoreSqlNcliSource'
->>>>>>> Stashed changes
 
             WriteStatus InstallSQL {
                 DependsOn = $nextDepend
