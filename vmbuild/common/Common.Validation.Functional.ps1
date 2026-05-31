@@ -2458,11 +2458,27 @@ function Test-PKICertificatesOnVM {
                         $results.Details.Add("OK: Template name resolves for '$fn' -> '$resolvedName'")
                     }
                     elseif ($resolvedName -match '^\d+\.') {
-                        # OID returned instead of name — the cert is valid but CertReq DSC
-                        # may create duplicates on reruns because it can't match by template name.
-                        # This is an AD OID mapping issue (CN=OID container) that certutil -pulse
-                        # can't always fix. Downgrade to WARN since the cert itself is functional.
-                        $results.Details.Add("WARN: Template name for '$fn' resolves to OID ($resolvedName) instead of '$expectedName' (cert is valid; OID mapping missing in AD)")
+                        # OID returned instead of friendly name — verify against AD directly.
+                        # Look up the expected template by CN and compare its msPKI-Cert-Template-OID.
+                        $adVerified = $false
+                        try {
+                            $searcher = [ADSISearcher]"(&(objectClass=pKICertificateTemplate)(cn=$expectedName))"
+                            $searcher.SearchRoot = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$([ADSI]'LDAP://RootDSE').configurationNamingContext"
+                            $tplObj = $searcher.FindOne()
+                            if ($tplObj) {
+                                $adOid = $tplObj.Properties['mpki-cert-template-oid'] | Select-Object -First 1
+                                if ($adOid -and $resolvedName -eq $adOid) {
+                                    $adVerified = $true
+                                }
+                            }
+                        }
+                        catch {}
+                        if ($adVerified) {
+                            $results.Details.Add("OK: Template OID for '$fn' matches AD template '$expectedName' (OID cache stale but cert is correct)")
+                        }
+                        else {
+                            $results.Details.Add("WARN: Template name for '$fn' resolves to OID ($resolvedName) instead of '$expectedName' (could not verify in AD)")
+                        }
                     }
                     else {
                         $results.Details.Add("WARN: Template name for '$fn' = '$resolvedName' (expected '$expectedName')")
