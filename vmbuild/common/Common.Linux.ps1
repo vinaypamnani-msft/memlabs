@@ -1352,7 +1352,7 @@ function Wait-LinuxVmReady {
                 $tc.Close()
             }
             catch { }
-            $tcpLabel = if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' }
+            $tcpLabel = $(if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' })
             write-progress2 "Wait for Linux VM" -Status "$VmName`: IP $ip ($ipSource), $tcpLabel, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
 
             # One-time per IP: scrub any stale known_hosts entries for this
@@ -1561,7 +1561,7 @@ function Wait-LinuxVmReady {
         try {
             $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
             if ($vm) {
-                $uptime = if ($vm.Uptime) { [int]$vm.Uptime.TotalSeconds } else { 0 }
+                $uptime = $(if ($vm.Uptime) { [int]$vm.Uptime.TotalSeconds } else { 0 })
                 Write-Log "$VmName`:   VM state: $($vm.State); uptime ${uptime}s; heartbeat: $($vm.Heartbeat); status: $($vm.Status)" -LogOnly
             }
             else {
@@ -1691,7 +1691,7 @@ function Invoke-LinuxVmCommand {
     )
 
     if (-not $DisplayName) {
-        $DisplayName = if ($BashCommand.Length -gt 80) { $BashCommand.Substring(0, 77) + '...' } else { $BashCommand }
+        $DisplayName = $(if ($BashCommand.Length -gt 80) { $BashCommand.Substring(0, 77) + '...' } else { $BashCommand })
     }
 
     $return = [pscustomobject]@{
@@ -1728,7 +1728,7 @@ function Invoke-LinuxVmCommand {
 
     # Pipe the command in via stdin to avoid Windows command-line quoting
     # mismatches; remote `bash -s` reads the entire script from stdin.
-    $remoteShell = if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' }
+    $remoteShell = $(if ($Sudo.IsPresent) { 'sudo -n bash -s' } else { 'bash -s' })
 
     # See Wait-LinuxVmReady probe comment: ignore host keys for internal SSH.
     # Stale known_hosts from a prior deploy with the same IP silently breaks
@@ -1806,7 +1806,7 @@ function Invoke-LinuxVmCommand {
             }
             $return.ScriptBlockOutput = $combined
             if (-not $SuppressLog) {
-                $excerpt = if ($combined) { ($combined -replace "`r`n", "`n").Trim() } else { '(no output)' }
+                $excerpt = $(if ($combined) { ($combined -replace "`r`n", "`n").Trim() } else { '(no output)' })
                 if ($excerpt.Length -gt 400) { $excerpt = $excerpt.Substring(0, 400) + '...' }
                 Write-Log "$VmName`: '$DisplayName' failed (exit=$($proc.ExitCode)): $excerpt" -Failure
             }
@@ -3100,7 +3100,7 @@ function Set-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { New-Item -Path $connPath -Force | Out-Null }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -3373,7 +3373,7 @@ function Remove-WindowsClientProxy {
                 $connPath = Join-Path $ieRegPath 'Connections'
                 if (-not (Test-Path $connPath)) { return }
                 $old = (Get-ItemProperty -Path $connPath -Name 'DefaultConnectionSettings' -EA SilentlyContinue).DefaultConnectionSettings
-                $ctr = if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 }
+                $ctr = $(if ($old -and $old.Length -ge 4) { [BitConverter]::ToUInt32($old, 0) + 1 } else { 46 })
                 if ($enable) {
                     $pB = [Text.Encoding]::ASCII.GetBytes($proxy)
                     $bB = [Text.Encoding]::ASCII.GetBytes($bypass)
@@ -4328,8 +4328,8 @@ $bakeWriteFilesYaml
 
     Write-Log "Bake: creating temp VM '$vmName' from $VhdxPath on switch '$SwitchName' (variant=$Variant)" -Activity
     # Desktop bake pulls ~2GB+ of packages; 4GB RAM avoids OOM during dpkg.
-    $bakeMemoryBytes = if ($Variant -eq 'Desktop') { 4GB } else { 2GB }
-    $bakeProcs = if ($Variant -eq 'Desktop') { 4 } else { 2 }
+    $bakeMemoryBytes = $(if ($Variant -eq 'Desktop') { 4GB } else { 2GB })
+    $bakeProcs = $(if ($Variant -eq 'Desktop') { 4 } else { 2 })
     $vm = New-VM -Name $vmName -Generation 2 -MemoryStartupBytes $bakeMemoryBytes -VHDPath $VhdxPath -SwitchName $SwitchName -ErrorAction Stop
     $bakeSucceeded = $false
     try {
@@ -4419,7 +4419,7 @@ $bakeWriteFilesYaml
         # and throws with detailed output on failure. Uses a hashtable for
         # the mutable step counter (reference type survives inner function
         # scope).
-        $totalSteps = if ($Variant -eq 'Desktop') { 10 } else { 5 }
+        $totalSteps = $(if ($Variant -eq 'Desktop') { 10 } else { 5 })
         $ctx = @{ Step = 0 }
 
         function Invoke-BakeStep {
@@ -4431,19 +4431,19 @@ $bakeWriteFilesYaml
                 -IPAddress $BakeIPAddress -UserName 'memlabs' -Sudo `
                 -TimeoutSeconds $Timeout -DisplayName "Bake: $Name"
             if (-not $r.CommandResult) {
-                $out = if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' }
+                $out = $(if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' })
                 if ($out.Length -gt 2000) { $out = '...' + $out.Substring($out.Length - 2000) }
                 Write-Log "Bake $label FAILED: $Name (exit=$($r.ExitCode))" -Failure
                 Write-Log $out -LogOnly
                 throw "Bake FAILED at step $label '$Name' (exit=$($r.ExitCode)).`n`nLast output:`n$out`n`nVM '$vmName' left running at $BakeIPAddress for debugging.`nSSH: ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress"
             }
-            $lines = if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 }
+            $lines = $(if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 })
             Write-Log "Bake $label $Name - OK ($lines lines)" -Success
             return $r
         }
 
         # ── Step 1: System updates ───────────────────────────────────────
-        $updTimeout = if ($Variant -eq 'Desktop') { 1200 } else { 600 }
+        $updTimeout = $(if ($Variant -eq 'Desktop') { 1200 } else { 600 })
         Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -4757,7 +4757,7 @@ echo "=== dash-to-panel installed (GNOME Shell ${SHELL_VER}) ==="
         # ── Validation ───────────────────────────────────────────────────
         # Check ALL expected artifacts in one pass. Collect every failure
         # and report them all before aborting.
-        $validationScript = if ($Variant -eq 'Desktop') {
+        $validationScript = $(if ($Variant -eq 'Desktop') {
             @'
 set -euo pipefail
 FAIL=0
@@ -4853,7 +4853,7 @@ if [ $FAIL -ne 0 ]; then
 fi
 echo "=== Validation passed: all packages installed, services enabled ==="
 '@
-        }
+        })
 
         Invoke-BakeStep -Name "Validation" -Timeout 60 -Script $validationScript
 
@@ -4882,7 +4882,7 @@ shutdown -h now
         # kills the SSH session before it can return. That's expected - check
         # for the success marker in output instead of exit code.
         if ($cleanupResult.ScriptBlockOutput -notmatch 'Cleanup complete') {
-            $out = if ($cleanupResult.ScriptBlockOutput) { $cleanupResult.ScriptBlockOutput.Trim() } else { '(no output)' }
+            $out = $(if ($cleanupResult.ScriptBlockOutput) { $cleanupResult.ScriptBlockOutput.Trim() } else { '(no output)' })
             Write-Log "Bake: cleanup script may not have completed fully:`n$out" -Warning
         }
 
