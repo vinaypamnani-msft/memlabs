@@ -458,17 +458,31 @@ function Install-SUP {
         $i++
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
-            Write-DscStatus "Creating new CM Site System server on $ServerFQDN"
+            Write-DscStatus "Creating new CM Site System server on $ServerFQDN SiteCode: $ServerSiteCode"
             New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }
 
-        $installed = Get-CMSoftwareUpdatePoint -SiteSystemServerName $ServerFQDN
+        $installed = Get-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN
         if (-not $installed) {
             Write-DscStatus "SUP Role not detected on $ServerFQDN. Adding Software Update Point role."
-            Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 -WsusSSL:$usePKI *>&1 | Write-StatusLogEntry
-            Start-Sleep -Seconds 60
+            try {
+                Add-CMSoftwareUpdatePoint -SiteCode $ServerSiteCode -SiteSystemServerName $ServerFQDN -WsusIisPort 8530 -WsusIisSslPort 8531 -WsusSSL:$usePKI *>&1 | Write-StatusLogEntry
+            }
+            catch {
+                if ($_.FullyQualifiedErrorId -like '*RoleExists*') {
+                    Write-DscStatus "SUP Role already exists on $ServerFQDN (detection lag). Treating as installed."
+                    $installed = $true
+                }
+                else {
+                    $_ | Write-StatusLogEntry
+                    Write-DscStatus "Failed to add SUP on $ServerFQDN`: $_"
+                }
+            }
+            if (-not $installed) {
+                Start-Sleep -Seconds 60
+            }
         }
         else {
             Write-DscStatus "SUP Role detected on $ServerFQDN"

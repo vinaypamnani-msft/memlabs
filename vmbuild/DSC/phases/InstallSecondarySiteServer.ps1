@@ -223,9 +223,18 @@ $Install_Secondary = {
         # ================
         # Monitor install
         # ================
-        # Poll cadence: 15s gives snappier UI updates than the old 30s; iteration
-        # cap is doubled to preserve the same overall timeout window (~30 min
-        # without progress, ~10 min between SMS_Executive restarts).
+        # Three timeout scenarios:
+        #   "Not started" — CM accepted the request (Status=2) but
+        #     SMS_SecondarySiteStatus has no entries yet.  The primary's
+        #     engine may still be busy (DP/MP installs, content-library
+        #     move, etc.) so the secondary install is queued.  Allow up
+        #     to 3 hours before giving up; restart SMS_Executive every
+        #     30 min as a recovery nudge.
+        #   "Stalled" — progress entries exist but nothing has changed
+        #     for 45 min.  Something is genuinely stuck.
+        #   "WMI blip" — progress was seen before but WMI returns null
+        #     on this iteration (transient).  Retry for 15 min of
+        #     consecutive nulls before treating it as a real failure.
         $i = 0
         $sleepSeconds = 15
         $startTime = Get-Date
@@ -233,6 +242,13 @@ $Install_Secondary = {
         $lastProgressTime = $startTime
         $lastSeenMessageTime = [datetime]::MinValue
         $stepNumber = 0
+        $everSeenProgress = $false
+        $notStartedTimeoutSec  = 3 * 3600        # 3 hours
+        $stalledTimeoutSec     = 45 * 60          # 45 minutes
+        $wmiBlipTimeoutSec     = 15 * 60          # 15 min of consecutive nulls
+        $smsRestartIntervalSec = 30 * 60          # 30 minutes
+        $lastSmsRestartTime    = $startTime
+        $consecutiveNullStart  = $null            # first null after progress
         do {
 
             Start-Sleep -Seconds $sleepSeconds
@@ -256,6 +272,9 @@ $Install_Secondary = {
                 $state = $allStates | Select-Object -Last 1
 
                 if ($state) {
+                    $everSeenProgress = $true
+                    $consecutiveNullStart = $null   # reset blip tracker
+
                     # MessageTime comes back as a CIM/WMI datetime string; convert
                     # for comparison. Fall back to "now" if the conversion fails so
                     # we don't blow up the monitor loop.
@@ -285,18 +304,55 @@ $Install_Secondary = {
                     # line -- no need to duplicate per-step detail that's already visible
                     # on the Secondary's row.
                     Write-DscStatus "Installing Secondary site on $secondaryFQDN" -RetrySeconds $sleepSeconds -NoLog
+
+                    # Stalled: progress was seen before but nothing changed for $stalledTimeoutSec.
+                    if ($sinceProgressSec -ge $stalledTimeoutSec) {
+                        Write-DscStatus "Secondary site install stalled on step $stepNumber for $([int]($sinceProgressSec/60)) minutes, giving up. Last status: $($state.Status)" -Failure -MachineName $SecondaryName
+                        $installFailure = $true
+                    }
                 }
 
                 if (-not $state) {
-                    if (0 -eq $i % 40) {
-                        Write-DscStatus "No Progress reported after $($i * $sleepSeconds) seconds, restarting SMS_Executive" -MachineName $SecondaryName
-                        Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
-                        Start-Sleep -Seconds ($sleepSeconds * 2)
-                    }
+                    if ($everSeenProgress) {
+                        # WMI returned null after we previously had progress entries.
+                        # This is usually a transient WMI/provider blip.  Retry for
+                        # $wmiBlipTimeoutSec before treating it as a real failure.
+                        if (-not $consecutiveNullStart) {
+                            $consecutiveNullStart = Get-Date
+                        }
+                        $nullSec = [int]((Get-Date) - $consecutiveNullStart).TotalSeconds
+                        $nullMin = [int]($nullSec / 60)
+                        $elapsedMin = [int]((Get-Date) - $startTime).TotalMinutes
 
-                    if ($i -gt 122) {
-                        Write-DscStatus "No Progress for adding secondary site reported after $($i * $sleepSeconds) seconds, giving up." -Failure -MachineName $SecondaryName
-                        $installFailure = $true
+                        Write-DscStatus "Installing Secondary site on $secondaryFQDN ($($elapsedMin)m elapsed, WMI returned no status for $($nullMin)m, last step $stepNumber): $lastStatusText" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
+                        Write-DscStatus "Installing Secondary site on $secondaryFQDN" -RetrySeconds $sleepSeconds -NoLog
+
+                        if ($nullSec -ge $wmiBlipTimeoutSec) {
+                            Write-DscStatus "WMI has returned no status entries for $($nullMin) minutes after reaching step $stepNumber. Last status: $lastStatusText. Giving up." -Failure -MachineName $SecondaryName
+                            $installFailure = $true
+                        }
+                    }
+                    else {
+                        # Install hasn't started yet — primary's engine is likely
+                        # still busy.  Wait up to $notStartedTimeoutSec.
+                        $waitingSec = [int]((Get-Date) - $startTime).TotalSeconds
+                        $waitingMin = [int]($waitingSec / 60)
+
+                        Write-DscStatus "Waiting for secondary site installation to begin on $secondaryFQDN ($($waitingMin)m elapsed)" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
+                        Write-DscStatus "Waiting for secondary site installation to begin on $secondaryFQDN" -RetrySeconds $sleepSeconds -NoLog
+
+                        # Restart SMS_Executive periodically as a recovery nudge.
+                        if (((Get-Date) - $lastSmsRestartTime).TotalSeconds -ge $smsRestartIntervalSec) {
+                            Write-DscStatus "No progress after $($waitingMin)m, restarting SMS_Executive as recovery nudge" -MachineName $SecondaryName
+                            Restart-Service -DisplayName "SMS_Executive" -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds ($sleepSeconds * 2)
+                            $lastSmsRestartTime = Get-Date
+                        }
+
+                        if ($waitingSec -ge $notStartedTimeoutSec) {
+                            Write-DscStatus "No progress for adding secondary site reported after $($waitingMin) minutes, giving up." -Failure -MachineName $SecondaryName
+                            $installFailure = $true
+                        }
                     }
                 }
             }
