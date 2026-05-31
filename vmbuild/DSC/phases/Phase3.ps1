@@ -404,6 +404,7 @@ configuration Phase3
                     FriendlyName = $friendlyName
                     Path         = 'c:\temp\ConfigMgrClientDistributionPointCertificate.pfx'
                     Password     = $Admincreds
+                    MatchSource  = $true
                     DependsOn    = $nextDepend
                 }
                 $nextDepend = "[CertificateExport]SSLCert"
