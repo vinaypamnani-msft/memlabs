@@ -81,21 +81,6 @@ configuration Phase4
             }
 
 
-            # Restore sqlncli.msi to C:\temp so Windows Installer can find it.
-            # Phase3 installs SQL Native Client from C:\temp\sqlncli.msi then deletes
-            # the file, but Windows Installer registers C:\temp\ as the MSI source.
-            # When the CU tries to patch the Native Client it fails with error 1706.
-            Script RestoreSqlNcliSource {
-                GetScript  = { @{ Result = (Test-Path 'C:\temp\sqlncli.msi') } }
-                TestScript = { Test-Path 'C:\temp\sqlncli.msi' }
-                SetScript  = {
-                    $ncli = Get-ChildItem 'C:\temp\SQL' -Recurse -Filter 'sqlncli.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($ncli) { Copy-Item $ncli.FullName 'C:\temp\sqlncli.msi' -Force }
-                }
-                DependsOn  = $nextDepend
-            }
-            $nextDepend = '[Script]RestoreSqlNcliSource'
-
             WriteStatus InstallSQL {
                 DependsOn = $nextDepend
                 Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"

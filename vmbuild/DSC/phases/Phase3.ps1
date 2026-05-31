@@ -244,7 +244,7 @@ configuration Phase3
         InstallSQLClient SQLClientInstall {
             DependsOn = "[WriteStatus]SQLClientInstall"
             URL       = $deployConfig.URLS.SQLClient
-            Path      = "C:\temp\sqlncli.msi"
+            Path      = "C:\Windows\Temp\sqlncli.msi"
             Ensure    = "Present"
         }
 
