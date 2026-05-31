@@ -410,6 +410,12 @@ chpasswd:
         # the host before the reboot, unblocking Wait-LinuxVmReady for DHCP
         # VMs (LinuxServer) that have no ExpectedIPAddress fallback.
         'systemctl restart hv-kvp-daemon.service || true',
+        # Prevent maintenance-mode boot: add fsck.mode=force fsck.repair=yes
+        # to the kernel command line so filesystem inconsistencies are auto-
+        # repaired instead of prompting. The emergency.service override and
+        # no-emergency.conf from write_files above are already picked up by
+        # the daemon-reload earlier in this runcmd list.
+        'grep -q ''fsck.repair=yes'' /etc/default/grub || { sed -i ''/^GRUB_CMDLINE_LINUX_DEFAULT=/s/"$/ fsck.mode=force fsck.repair=yes"/'' /etc/default/grub && update-grub; } || true',
         # Delete the temporary bake-time console user. The bake runcmd
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
@@ -658,6 +664,25 @@ write_files:
     content: |
       [keyfile]
       unmanaged-devices=interface-name:eth*
+  # Prevent maintenance-mode boot: if the VM hits a filesystem
+  # inconsistency or journal mismatch after a hard shutdown, systemd
+  # drops to "Give root password for maintenance" -- sshd never starts
+  # and the 20-hour deployment fails. Override emergency.service to
+  # reboot instead of prompting.
+  # Also written during bake (step 3b); having it here ensures deployed
+  # VMs always have it regardless of base image age.
+  - path: /etc/systemd/system.conf.d/no-emergency.conf
+    permissions: '0644'
+    content: |
+      [Manager]
+      DefaultTimeoutStartSec=180s
+      DefaultTimeoutStopSec=90s
+  - path: /etc/systemd/system/emergency.service.d/override.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/usr/bin/systemctl reboot
 
 package_update: true
 package_upgrade: false
