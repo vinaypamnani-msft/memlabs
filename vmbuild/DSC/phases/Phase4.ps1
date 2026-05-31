@@ -320,6 +320,10 @@ configuration Phase4
             }
         }
 
+        # Ola Hallengren MaintenanceSolution requires STRING_AGG (SQL 2017+)
+        $skipBackupSolution = $ThisVM.sqlVersion -match '201[0-6]'
+
+        if (-not $skipBackupSolution) {
         WriteStatus DownloadBackupSolution {
             DependsOn = $nextDepend
             Status    = "Downloading '$($backupSolutionURL)'"
@@ -356,6 +360,7 @@ configuration Phase4
         }
 
         $nextDepend = '[SqlScript]InstallBackupSolution'
+        }
 
 
         $AgentJobSet = "C:\staging\DSC\SQLScripts\Index-AgentJob-Set.sql"

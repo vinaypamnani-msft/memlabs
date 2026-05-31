@@ -1512,6 +1512,9 @@ function Test-Configuration {
                     if ($vm.sqlport -ne 1433) {
                         Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQL Port must be 1433 on SQLAO due to issue SqlServerDSC #329" -ReturnObject $return -Failure
                     }
+                    if ($vm.sqlVersion -match '201[0-6]') {
+                        Add-ValidationMessage -Message "SQL Validation: VM [$($vm.vmName)] SQLAO does not support $($vm.sqlVersion). Use SQL Server 2017 or later." -ReturnObject $return -Failure
+                    }
                 }
             }
 
