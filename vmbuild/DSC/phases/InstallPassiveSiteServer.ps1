@@ -105,21 +105,44 @@ $create_Share = {
 }
 
 Write-DscStatus "Creating a share on $remoteLibVMName to host the content library"
-Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share -ErrorVariable Err2
-
-if ($Err2.Count -ne 0) {
-    Write-DscStatus "Invoke-Command: Failed to create share $contentLibShare on $remoteLibVMName. Error: $Err2" -Failure
+$shareCreated = $false
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    Invoke-Command -Session (New-PSSession -ComputerName $remoteLibVMName) -ScriptBlock $create_Share -ErrorVariable Err2
+    if ($Err2.Count -eq 0) {
+        $shareCreated = $true
+        break
+    }
+    if ($attempt -lt 5) {
+        Write-DscStatus "Share creation attempt $attempt failed (likely AD replication lag). Retrying in 30s. Error: $Err2"
+        Start-Sleep -Seconds 30
+    }
+}
+if (-not $shareCreated) {
+    Write-DscStatus "Failed to create share $contentLibShare on $remoteLibVMName after 5 attempts. Error: $Err2" -Failure
     return
 }
 
 $add_local_admin = {
     param($computersToAdd, $domainName)
+    $maxRetries = 5
+    $retrySleep = 30
     foreach ($computer in $computersToAdd) {
         if ($computer -eq "$($env:COMPUTERNAME)$") { continue }
         $memberToCheck = "$domainName\$computer"
-        $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck
-        if (-not $exists) {
-            Add-LocalGroupMember -Group "Administrators" -Member $computer
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck -ErrorAction SilentlyContinue
+                if (-not $exists) {
+                    Add-LocalGroupMember -Group "Administrators" -Member $computer -ErrorAction Stop
+                }
+                break
+            }
+            catch {
+                if ($attempt -eq $maxRetries) {
+                    throw "Failed to add $memberToCheck to Administrators after $maxRetries attempts. Last error: $_"
+                }
+                Start-Sleep -Seconds $retrySleep
+            }
         }
     }
 }
@@ -131,15 +154,16 @@ $localSiteServer = "$($env:COMPUTERNAME).$($env:USERDNSDOMAIN)"
 foreach ($server in $siteSystems) {
     $serverName = $server.Substring(2, $server.Length - 2) # NetworkOSPath = \\server.domain.dom
     if ($serverName -eq $localSiteServer) {
-        Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+        Invoke-Command -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorVariable Err3
     }
     else {
-        Invoke-Command -Session (New-PSSession -ComputerName $serverName) -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $domainName -ErrorVariable Err3
+        Invoke-Command -Session (New-PSSession -ComputerName $serverName) -ScriptBlock $add_local_admin -ArgumentList $computersToAdd, $DomainName -ErrorVariable Err3
     }
 
     $displayName = $computersToAdd -join ","
     if ($Err3.Count -ne 0) {
-        Write-DscStatus "WARNING: Failed to add [$displayName] to local Administrators group on $serverName. Error: $Err3"
+        Write-DscStatus "Failed to add [$displayName] to local Administrators group on $serverName. Error: $Err3" -Failure
+        return
     }
     else {
         Write-DscStatus "Verified/added [$displayName] as members of local Administrators group on $serverName."
