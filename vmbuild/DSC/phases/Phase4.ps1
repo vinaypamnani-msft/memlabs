@@ -82,20 +82,42 @@ configuration Phase4
 
             # Ensure sqlncli.msi is present at the Windows Installer registered
             # source path so the CU can patch the SQL Native Client (error 1706).
-            # The MSI may be absent because:
-            #  - It was baked into the base image and never downloaded on this VM
-            #  - Compact-Disks purged C:\temp\*.msi and C:\Windows\Temp\*
-            #  - Phase3 skipped the download because the registry showed installed
-            # Copy from the SQL media to both possible registered source paths.
+            # Query the Installer registry for the actual InstallSource, then
+            # copy sqlncli.msi from the SQL media if the file is missing there.
             Script RestoreSqlNcliSource {
-                GetScript  = { @{ Result = (Test-Path 'C:\temp\sqlncli.msi') -and (Test-Path 'C:\Windows\Temp\sqlncli.msi') } }
-                TestScript = { (Test-Path 'C:\temp\sqlncli.msi') -and (Test-Path 'C:\Windows\Temp\sqlncli.msi') }
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = {
+                    $productsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
+                    foreach ($product in (Get-ChildItem $productsPath -ErrorAction SilentlyContinue)) {
+                        $props = Get-ItemProperty "$($product.PSPath)\InstallProperties" -ErrorAction SilentlyContinue
+                        if ($props.DisplayName -match 'SQL Server.*Native Client') {
+                            $source = $props.InstallSource
+                            if ($source -and -not (Test-Path (Join-Path $source 'sqlncli.msi'))) {
+                                Write-Verbose "sqlncli.msi missing from registered InstallSource: $source"
+                                return $false
+                            }
+                        }
+                    }
+                    return $true
+                }
                 SetScript  = {
                     $ncli = Get-ChildItem 'C:\temp\SQL' -Recurse -Filter 'sqlncli.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($ncli) {
-                        foreach ($dir in @('C:\temp', 'C:\Windows\Temp')) {
-                            if (-not (Test-Path "$dir\sqlncli.msi")) {
-                                Copy-Item $ncli.FullName "$dir\sqlncli.msi" -Force
+                    if (-not $ncli) { Write-Verbose 'sqlncli.msi not found in SQL media'; return }
+
+                    $productsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
+                    foreach ($product in (Get-ChildItem $productsPath -ErrorAction SilentlyContinue)) {
+                        $props = Get-ItemProperty "$($product.PSPath)\InstallProperties" -ErrorAction SilentlyContinue
+                        if ($props.DisplayName -match 'SQL Server.*Native Client') {
+                            $source = $props.InstallSource
+                            if ($source) {
+                                if (-not (Test-Path $source)) {
+                                    New-Item -ItemType Directory -Path $source -Force | Out-Null
+                                }
+                                $dest = Join-Path $source 'sqlncli.msi'
+                                if (-not (Test-Path $dest)) {
+                                    Copy-Item $ncli.FullName $dest -Force
+                                    Write-Verbose "Restored sqlncli.msi to $dest"
+                                }
                             }
                         }
                     }
