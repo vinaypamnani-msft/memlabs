@@ -80,6 +80,32 @@ configuration Phase4
                 $nextDepend = '[DownloadFile]DownloadSQLCU'
             }
 
+<<<<<<< Updated upstream
+=======
+            # Ensure sqlncli.msi is present at the Windows Installer registered
+            # source path so the CU can patch the SQL Native Client (error 1706).
+            # The MSI may be absent because:
+            #  - It was baked into the base image and never downloaded on this VM
+            #  - Compact-Disks purged C:\temp\*.msi and C:\Windows\Temp\*
+            #  - Phase3 skipped the download because the registry showed installed
+            # Copy from the SQL media to both possible registered source paths.
+            Script RestoreSqlNcliSource {
+                GetScript  = { @{ Result = (Test-Path 'C:\temp\sqlncli.msi') -and (Test-Path 'C:\Windows\Temp\sqlncli.msi') } }
+                TestScript = { (Test-Path 'C:\temp\sqlncli.msi') -and (Test-Path 'C:\Windows\Temp\sqlncli.msi') }
+                SetScript  = {
+                    $ncli = Get-ChildItem 'C:\temp\SQL' -Recurse -Filter 'sqlncli.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($ncli) {
+                        foreach ($dir in @('C:\temp', 'C:\Windows\Temp')) {
+                            if (-not (Test-Path "$dir\sqlncli.msi")) {
+                                Copy-Item $ncli.FullName "$dir\sqlncli.msi" -Force
+                            }
+                        }
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = '[Script]RestoreSqlNcliSource'
+>>>>>>> Stashed changes
 
             WriteStatus InstallSQL {
                 DependsOn = $nextDepend
