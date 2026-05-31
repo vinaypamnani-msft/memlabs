@@ -2302,9 +2302,10 @@ function Install-LinuxProxyServer {
         return $false
     }
 
-    # Build ACL list: every subnet referenced by any non-hidden VM in this
-    # config, plus the default vmOptions.network if set. We emit /24 ACLs
-    # because all memlabs networks are /24.
+    # Build ACL list: every subnet used by any VM in the domain, not just
+    # VMs in the current deployConfig (which only has hidden refs to VMs
+    # relevant to this deployment).  Query Get-List for the full picture
+    # so a 2nd deployment on a new subnet is automatically allowed.
     $subnets = New-Object System.Collections.Generic.HashSet[string]
     if ($deployConfig.vmOptions.network) {
         [void]$subnets.Add($deployConfig.vmOptions.network)
@@ -2312,16 +2313,27 @@ function Install-LinuxProxyServer {
     foreach ($vm in $deployConfig.virtualMachines) {
         if ($vm.network) { [void]$subnets.Add($vm.network) }
     }
-    $aclLines = @()
-    $i = 0
+    # Also scan all existing VMs in the domain for subnets not represented
+    # in deployConfig (e.g. VMs from a prior deployment on a different subnet).
+    try {
+        $domainVms = @(Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate)
+        foreach ($evm in $domainVms) {
+            if ($evm.network) { [void]$subnets.Add($evm.network) }
+        }
+    }
+    catch {
+        Write-Log "[Proxy] $vmName`: Warning: could not enumerate existing VMs for subnet discovery: $_" -Warning
+    }
+    # Squid ORs multiple values within the same named ACL, but ANDs
+    # multiple ACL names on a single http_access line.  Use one ACL
+    # with all subnets so traffic from ANY lab network is allowed.
+    $aclValues = @()
     foreach ($s in $subnets) {
-        # Normalize: memlabs stores "192.168.1.0" already, but be defensive.
         $base = $s
         if ($base -notmatch '/\d+$') { $base = "$base/24" }
-        $aclLines += "acl memlabs_net$i src $base"
-        $i++
+        $aclValues += $base
     }
-    $aclNames = (0..($i - 1) | ForEach-Object { "memlabs_net$_" }) -join ' '
+    $aclLine = "acl memlabs_nets src $($aclValues -join ' ')"
 
     $squidConf = @"
 # memlabs Squid forward proxy
@@ -2329,9 +2341,9 @@ function Install-LinuxProxyServer {
 
 http_port 3128
 
-$($aclLines -join "`n")
+$aclLine
 
-http_access allow $aclNames
+http_access allow memlabs_nets
 http_access allow localhost
 
 # Blocklist: managed via the Proxy Admin web UI (port 8443).
