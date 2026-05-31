@@ -2727,7 +2727,14 @@ $global:VM_Config = {
                             $logDirs = @(Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\*\Detail.txt' -ErrorAction SilentlyContinue |
                                 Sort-Object LastWriteTime -Descending)
                             if ($logDirs.Count -gt 0) {
-                                $last = Get-Content $logDirs[0].FullName -Tail 1 -ErrorAction SilentlyContinue
+                                # Read the last few lines and skip telemetry noise
+                                $tailLines = @(Get-Content $logDirs[0].FullName -Tail 5 -ErrorAction SilentlyContinue)
+                                for ($i = $tailLines.Count - 1; $i -ge 0; $i--) {
+                                    if ($tailLines[$i] -notmatch 'telemetry|usage and performance data') {
+                                        $last = $tailLines[$i]; break
+                                    }
+                                }
+                                if (-not $last) { return $null }
                                 if ($last -match 'Running Action:\s*(.+)') { return "SQL Setup: $($Matches[1].Trim())" }
                                 if ($last -match ':\s*([^:]+)$') { return "SQL Setup: $($Matches[1].Trim())" }
                                 return "SQL Setup: $last"
