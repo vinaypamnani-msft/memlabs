@@ -131,13 +131,21 @@ $add_local_admin = {
         $memberToCheck = "$domainName\$computer"
         for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
             try {
-                $exists = Get-LocalGroupMember -Name "Administrators" -Member $memberToCheck -ErrorAction SilentlyContinue
-                if (-not $exists) {
+                # Use ADSI to check membership; Get-LocalGroupMember -Member can fail
+                # if the group contains unresolvable SIDs (orphaned accounts).
+                $group = [ADSI]"WinNT://$env:COMPUTERNAME/Administrators"
+                $isMember = $group.Invoke('Members') | ForEach-Object {
+                    $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+                } | Where-Object { $_ -eq $computer.TrimEnd('$') -or $_ -eq $computer }
+                if (-not $isMember) {
                     Add-LocalGroupMember -Group "Administrators" -Member $computer -ErrorAction Stop
                 }
                 break
             }
             catch {
+                if ($_.Exception.Message -match 'already a member') {
+                    break
+                }
                 if ($attempt -eq $maxRetries) {
                     throw "Failed to add $memberToCheck to Administrators after $maxRetries attempts. Last error: $_"
                 }
