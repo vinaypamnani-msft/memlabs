@@ -2462,8 +2462,9 @@ function Test-PKICertificatesOnVM {
                         # Look up the expected template by CN and compare its msPKI-Cert-Template-OID.
                         $adVerified = $false
                         try {
+                            $configDN = ([ADSI]'LDAP://RootDSE').configurationNamingContext
                             $searcher = [ADSISearcher]"(&(objectClass=pKICertificateTemplate)(cn=$expectedName))"
-                            $searcher.SearchRoot = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$([ADSI]'LDAP://RootDSE').configurationNamingContext"
+                            $searcher.SearchRoot = [ADSI]"LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configDN"
                             $tplObj = $searcher.FindOne()
                             if ($tplObj) {
                                 $adOid = $tplObj.Properties['mspki-cert-template-oid'] | Select-Object -First 1
