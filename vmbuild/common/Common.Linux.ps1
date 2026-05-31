@@ -414,17 +414,7 @@ chpasswd:
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
         'userdel -r memlabs 2>/dev/null || true'
-    ) + $ExtraRunCmd + @(
-        # Diagnostic log copy: enable memlabs-loggrab service so /var/log/cloud-init*
-        # gets mirrored to /boot/efi/memlabs/ on every boot. The ESP is FAT32 and
-        # readable by Windows via Mount-VHD without ext4 support; that lets the
-        # host extract cloud-init.log post-mortem when SSH/console didn't come up.
-        # Best-effort: if any of these fail (cloud-init died early, ESP full, ...)
-        # we still want runcmd to continue.
-        'systemctl daemon-reload || true',
-        'systemctl enable memlabs-loggrab.service || true',
-        'systemctl start memlabs-loggrab.service || true'
-    )
+    ) + $ExtraRunCmd
     # Emit each runcmd item as a YAML double-quoted scalar.
     #
     # Why: plain (unquoted) YAML scalars are parsed greedily. A runcmd line
@@ -574,44 +564,6 @@ write_files:
       netplan apply
       systemctl restart systemd-resolved || true
       echo "DNS now: `$(resolvectl dns | grep -v '^`$')"
-  # Diagnostic loggrab: copies cloud-init / system logs to the EFI System
-  # Partition (FAT32 at /boot/efi) so the Windows host can read them by
-  # mounting the VHDX -- no ext4/WSL/GRUB-console gymnastics required.
-  # Runs every boot via memlabs-loggrab.service below; one-shot, fire-and-
-  # forget, never fails the boot.
-  - path: /usr/local/sbin/memlabs-loggrab
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      set +e
-      DEST=/boot/efi/memlabs
-      mkdir -p "`$DEST"
-      for f in /var/log/cloud-init.log /var/log/cloud-init-output.log /var/log/syslog /var/log/auth.log /var/log/kern.log; do
-        [ -r "`$f" ] && cp -f "`$f" "`$DEST/`$(basename `$f)" 2>/dev/null
-      done
-      {
-        echo "host: `$(hostname 2>/dev/null)"
-        echo "date: `$(date -Is 2>/dev/null)"
-        echo "uptime: `$(cat /proc/uptime 2>/dev/null)"
-        echo "kernel: `$(uname -a 2>/dev/null)"
-        echo "cloud-init-status:"
-        cloud-init status --long 2>/dev/null
-      } > "`$DEST/state.txt" 2>/dev/null
-      systemctl --no-pager --failed > "`$DEST/failed-units.txt" 2>/dev/null
-      sync
-      exit 0
-  - path: /etc/systemd/system/memlabs-loggrab.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=Copy cloud-init and system logs to ESP for host-side debug
-      After=cloud-init.target boot-efi.mount
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/sbin/memlabs-loggrab
-      RemainAfterExit=no
-      [Install]
-      WantedBy=multi-user.target
   # ----------------------------------------------------------------------
   # Why this override exists (read before touching):
   #
@@ -1284,168 +1236,6 @@ function Get-LinuxVmIPAddress {
     return $null
 }
 
-function Save-LinuxAutopsyLogs {
-    <#
-    .SYNOPSIS
-        On SSH-ready timeout, stop the VM, mount its VHDX read-only, and
-        copy cloud-init.log + state.txt off the FAT32 ESP for host-side
-        post-mortem.
-
-    .DESCRIPTION
-        The `memlabs-loggrab` service inside the guest mirrors cloud-init
-        logs to /boot/efi/memlabs on every boot. That partition is FAT32
-        and readable from Windows via Mount-VHD -- no WSL, no ext4 tooling
-        required. This function automates that mount/copy/dismount dance
-        so the operator never has to do it manually.
-
-        Sequence:
-          1. Stop-VM -TurnOff -Force  (Mount-VHD refuses a running VM's disk)
-          2. Mount-VHD -ReadOnly -NoDriveLetter
-          3. For each partition that looks like FAT and contains \memlabs\,
-             copy cloud-init.log, cloud-init-output.log, state.txt,
-             failed-units.txt to <LogsDir>\linux-autopsy\<VmName>\
-          4. Tail cloud-init.log (last 80 lines) into the deploy log so the
-             cause shows up in VMBuild.log alongside the timeout message.
-          5. Dismount-VHD (always, in finally).
-
-        Best-effort: any failure is logged but does not throw. The VM is
-        left stopped so the operator can mount the VHDX themselves if
-        more digging is needed.
-
-    .OUTPUTS
-        $true on success, $false on any failure (logged but not thrown).
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$VmName
-    )
-
-    try {
-        $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-        if (-not $vm) {
-            Write-Log "$VmName`: autopsy: VM not found, skipping ESP log dump" -LogOnly
-            return $false
-        }
-        $vhdx = ($vm.HardDrives | Select-Object -First 1).Path
-        if (-not $vhdx -or -not (Test-Path -LiteralPath $vhdx)) {
-            Write-Log "$VmName`: autopsy: VHDX path not resolvable ($vhdx), skipping ESP log dump" -LogOnly
-            return $false
-        }
-
-        # Mount-VHD needs the disk file unlocked. Stop the VM forcefully --
-        # at this point we've already declared SSH timeout, so the VM is
-        # going to be rebuilt or manually fixed; no harm in turning it off.
-        if ($vm.State -ne 'Off') {
-            Write-Log "$VmName`: autopsy: stopping VM (TurnOff) so VHDX can be mounted for log extraction" -LogOnly
-            try { Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop }
-            catch {
-                Write-Log "$VmName`: autopsy: Stop-VM failed: $($_.Exception.Message)" -LogOnly
-                return $false
-            }
-            # Hyper-V occasionally takes a beat to release the disk handle.
-            Start-Sleep -Seconds 2
-        }
-
-        $logsDir = if ($Common -and $Common.LogPath) { Split-Path -Parent $Common.LogPath } else { $env:TEMP }
-        $destDir = Join-Path $logsDir "linux-autopsy\$VmName"
-        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-
-        $mounted = $null
-        try {
-            $mounted = Mount-VHD -Path $vhdx -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
-        }
-        catch {
-            Write-Log "$VmName`: autopsy: Mount-VHD '$vhdx' failed: $($_.Exception.Message)" -LogOnly
-            return $false
-        }
-
-        $copiedAny = $false
-        try {
-            $disk = $mounted | Get-Disk -ErrorAction Stop
-            $parts = $disk | Get-Partition -ErrorAction SilentlyContinue
-            foreach ($p in $parts) {
-                # The ESP on an Ubuntu image is a small FAT32 partition.
-                # Drive-letterless mounts surface via Get-Volume off the
-                # partition, with FileSystem='FAT32' (or sometimes 'FAT').
-                $vol = $null
-                try { $vol = $p | Get-Volume -ErrorAction Stop } catch { $vol = $null }
-                if (-not $vol) { continue }
-                if ($vol.FileSystem -notmatch '^(FAT|FAT32|exFAT)$') { continue }
-
-                # Assign a temporary mount-point folder so we can read it.
-                $mountPoint = Join-Path $env:TEMP ("memlabs-esp-{0}-{1}" -f $VmName, [guid]::NewGuid().ToString('N').Substring(0, 8))
-                New-Item -ItemType Directory -Path $mountPoint -Force | Out-Null
-                try {
-                    Add-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop
-                }
-                catch {
-                    Write-Log "$VmName`: autopsy: cannot assign access path to partition $($p.PartitionNumber): $($_.Exception.Message)" -LogOnly
-                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
-                    continue
-                }
-
-                try {
-                    $memlabsDir = Join-Path $mountPoint 'memlabs'
-                    if (Test-Path -LiteralPath $memlabsDir) {
-                        Write-Log "$VmName`: autopsy: found ESP\memlabs on partition $($p.PartitionNumber); copying logs to $destDir" -LogOnly
-                        Get-ChildItem -LiteralPath $memlabsDir -File -ErrorAction SilentlyContinue | ForEach-Object {
-                            try {
-                                Copy-Item -LiteralPath $_.FullName -Destination $destDir -Force -ErrorAction Stop
-                                $copiedAny = $true
-                            }
-                            catch { Write-Log "$VmName`: autopsy: copy $($_.Name) failed: $($_.Exception.Message)" -LogOnly }
-                        }
-
-                        # Tail cloud-init.log into VMBuild.log so the cause
-                        # shows up next to the SSH timeout message and the
-                        # operator doesn't have to know about $destDir at all.
-                        $ciLog = Join-Path $destDir 'cloud-init.log'
-                        if (Test-Path -LiteralPath $ciLog) {
-                            $tail = Get-Content -LiteralPath $ciLog -Tail 80 -ErrorAction SilentlyContinue
-                            if ($tail) {
-                                Write-Log "$VmName`: autopsy: ---- cloud-init.log (last 80 lines) ----" -LogOnly
-                                foreach ($t in $tail) { Write-Log "$VmName`: ci> $t" -LogOnly }
-                                Write-Log "$VmName`: autopsy: ---- end cloud-init.log tail ----" -LogOnly
-                            }
-                        }
-
-                        # state.txt has a one-glance summary cloud-init status
-                        # + uptime + failed units; surface it on-screen too.
-                        $stateTxt = Join-Path $destDir 'state.txt'
-                        if (Test-Path -LiteralPath $stateTxt) {
-                            $stateLines = Get-Content -LiteralPath $stateTxt -ErrorAction SilentlyContinue
-                            foreach ($s in $stateLines) { Write-Log "$VmName`: state> $s" -LogOnly }
-                        }
-                    }
-                }
-                finally {
-                    try { Remove-PartitionAccessPath -DiskNumber $disk.Number -PartitionNumber $p.PartitionNumber -AccessPath $mountPoint -ErrorAction Stop }
-                    catch { Write-Log "$VmName`: autopsy: Remove-PartitionAccessPath failed: $($_.Exception.Message)" -LogOnly }
-                    Remove-Item $mountPoint -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
-        finally {
-            try { Dismount-VHD -Path $vhdx -ErrorAction Stop }
-            catch { Write-Log "$VmName`: autopsy: Dismount-VHD failed: $($_.Exception.Message)" -LogOnly }
-        }
-
-        if ($copiedAny) {
-            Write-Log "$VmName`: autopsy: ESP logs saved to $destDir" -OutputStream
-            return $true
-        }
-        else {
-            Write-Log "$VmName`: autopsy: no \memlabs\ directory found on any FAT partition (memlabs-loggrab may not have run yet)" -LogOnly
-            return $false
-        }
-    }
-    catch {
-        Write-Log "$VmName`: autopsy: unexpected error: $($_.Exception.Message)" -LogOnly
-        return $false
-    }
-}
-
 function Wait-LinuxVmReady {
     <#
     .SYNOPSIS
@@ -1797,13 +1587,6 @@ function Wait-LinuxVmReady {
     }
 
     write-progress2 "Wait for Linux VM" -Status "$VmName`: SSH-ready timeout after ${TimeoutSeconds}s" -force -Completed
-
-    # Last-resort autopsy: the guest's memlabs-loggrab service copies
-    # cloud-init.log to the FAT32 ESP on every boot. Mount the VHDX
-    # read-only and pull those logs to the host so the next iteration of
-    # this debug cycle doesn't require WSL + ext4 + ssh-agent gymnastics.
-    # Stops the VM (it's already declared dead) so Mount-VHD can attach.
-    try { Save-LinuxAutopsyLogs -VmName $VmName | Out-Null } catch { Write-Log "$VmName`: Save-LinuxAutopsyLogs threw: $($_.Exception.Message)" -LogOnly }
 
     return $null
 }
@@ -3086,6 +2869,40 @@ function Invoke-LinuxRoleConfiguration {
 
         if (-not $ciDone) {
             Write-Log "[LinuxConfig] $vmName`: cloud-init poll timed out after ${ciTimeoutSec}s" -Warning
+
+            # Dump diagnostic state before killing anything so we have a
+            # full post-mortem in the deploy log.
+            $ciDiag = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo `
+                -BashCommand @'
+echo "=== PROCESS TREE ==="
+pstree -palT $(pgrep -f "/var/lib/cloud/instance/scripts/runcmd" 2>/dev/null) 2>/dev/null || echo "(runcmd PID not found)"
+echo "=== CLOUD-INIT STATUS ==="
+cloud-init status --long 2>/dev/null || echo "status: unknown"
+echo "=== CLOUD-INIT LOG (last 40 lines) ==="
+tail -40 /var/log/cloud-init.log 2>/dev/null
+echo "=== CLOUD-INIT OUTPUT (last 40 lines) ==="
+tail -40 /var/log/cloud-init-output.log 2>/dev/null
+echo "=== FAILED SYSTEMD UNITS ==="
+systemctl --no-pager --failed 2>/dev/null
+echo "=== APT/DPKG LOCKS ==="
+fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks"
+'@ `
+                -DisplayName 'cloud-init-diag' -TimeoutSeconds 30
+            if ($ciDiag -and $ciDiag.ScriptBlockOutput) {
+                foreach ($diagLine in ($ciDiag.ScriptBlockOutput -split "`n")) {
+                    Write-Log "[LinuxConfig] $vmName`: ci-diag> $diagLine" -LogOnly
+                }
+            }
+
+            # Kill the stuck cloud-init process tree and neutralize the
+            # power_state reboot so the VM doesn't surprise-restart later.
+            Write-Log "[LinuxConfig] $vmName`: killing stuck cloud-init and cancelling pending reboot" -Warning
+            $ciKill = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo `
+                -BashCommand 'pkill -9 -f "/var/lib/cloud/instance/scripts/runcmd" 2>/dev/null; pkill -9 -f "cloud-init modules" 2>/dev/null; shutdown -c 2>/dev/null; cloud-init status 2>/dev/null || echo "status: killed"' `
+                -DisplayName 'cloud-init-kill' -TimeoutSeconds 30
+            if ($ciKill -and $ciKill.ScriptBlockOutput) {
+                Write-Log "[LinuxConfig] $vmName`: cloud-init cleanup result: $($ciKill.ScriptBlockOutput.Trim())" -LogOnly
+            }
         }
     }
 

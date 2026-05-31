@@ -667,11 +667,38 @@ try {
         }
     }
 
+    # ── Pre-fetch network state for fast verification ───────────────────
+    # On reruns every switch and DHCP scope already exists.  Querying each
+    # one individually costs ~12 WMI calls per network (switch, adapter,
+    # IPs, NAT, DHCP service ×5, scope, scope-options).  Bulk-fetch once
+    # and check in-memory to short-circuit the common case.  Any network
+    # that fails the fast check falls through to Add-SwitchAndDhcp which
+    # has full retry/recovery logic (including DHCP service restarts).
+    $_netCache = $null
+    if (-not $WhatIf.IsPresent) {
+        try {
+            $_netCache = @{
+                Switches = @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue)
+                Scopes   = @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)
+                Nats     = @(Get-NetNat -ErrorAction SilentlyContinue)
+                Adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+                IPs      = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+            }
+            Write-Log "Pre-cached network state: $($_netCache.Switches.Count) switches, $($_netCache.Scopes.Count) DHCP scopes, $($_netCache.Nats.Count) NAT rules." -LogOnly
+        }
+        catch {
+            Write-Log "Network state pre-fetch failed ($_); will verify each network individually." -LogOnly
+            $_netCache = $null
+        }
+    }
+
     # Test if hyper-v switch exists, if not create it
     $AddedScopes = @($deployConfig.vmOptions.network)
-    $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
-    if (-not $worked) {
-        exit 1
+    if (-not (Test-NetworkFastPath -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -Cache $_netCache)) {
+        $worked = Add-SwitchAndDhcp -NetworkName $deployConfig.vmOptions.network -NetworkSubnet $deployConfig.vmOptions.network -DomainName $deployConfig.vmOptions.domainName -WhatIf:$WhatIf
+        if (-not $worked) {
+            exit 1
+        }
     }
 
     # Create additional switches
@@ -681,28 +708,34 @@ try {
                 continue
             }
             $AddedScopes += $virtualMachine.network
-            $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-            $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
-            $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
-            if (-not $worked) {
-                exit 1
+            if (-not (Test-NetworkFastPath -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -Cache $_netCache)) {
+                $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
+                $DNSServer = ($DC.Network.Substring(0, $DC.Network.LastIndexOf(".")) + ".1")
+                $worked = Add-SwitchAndDhcp -NetworkName $virtualMachine.network -NetworkSubnet $virtualMachine.network -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf
+                if (-not $worked) {
+                    exit 1
+                }
             }
         }
     }
 
     # Internet Client VM Switch and DHCP Scope
     $containsIN = ($deployConfig.virtualMachines.role -contains "InternetClient") -or ($deployConfig.virtualMachines.role -contains "AADClient")
-    $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
-    if ($containsIN -and (-not $worked)) {
-        exit 1
+    if (-not (Test-NetworkFastPath -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -Cache $_netCache)) {
+        $worked = Add-SwitchAndDhcp -NetworkName "Internet" -NetworkSubnet "172.31.250.0" -WhatIf:$WhatIf
+        if ($containsIN -and (-not $worked)) {
+            exit 1
+        }
     }
 
     # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
-        $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
-        if (-not $worked) {
-            exit 1
+        if (-not (Test-NetworkFastPath -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -Cache $_netCache)) {
+            $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
+            if (-not $worked) {
+                exit 1
+            }
         }
     }
 

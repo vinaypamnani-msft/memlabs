@@ -1711,6 +1711,70 @@ function Restore-TerminalFocus {
     }
 }
 
+# Test-NetworkFastPath
+#
+# In-memory check against pre-fetched network state.  Returns $true when
+# the switch, host-side IP, NAT rule, and DHCP scope for a network all
+# exist already — skipping the dozens of per-network WMI calls that the
+# full Add-SwitchAndDhcp / Test-NetworkSwitch / Test-DHCPScope path makes.
+#
+# Callers populate $Cache once with bulk queries (Get-VMSwitch, Get-NetNat,
+# Get-NetAdapter, Get-NetIPAddress, Get-DhcpServerv4Scope) and pass it in.
+# When $Cache is $null or any check fails, returns $false so the caller
+# falls through to Add-SwitchAndDhcp which has full retry/recovery logic.
+function Test-NetworkFastPath {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Cache
+    )
+
+    if (-not $Cache) { return $false }
+
+    # 1. VM switch exists?  (replicates Get-VMSwitch2 -like match)
+    $sw = $Cache.Switches | Where-Object { $_.Name -like "*$NetworkName*" } | Select-Object -First 1
+    if (-not $sw) {
+        Write-Log "  Fast-path miss: switch '$NetworkName' not in cache." -LogOnly
+        return $false
+    }
+
+    # 2. Host adapter has the correct .200 IP?
+    $adapter = $Cache.Adapters | Where-Object { $_.Name -like "*$NetworkName*" } | Select-Object -First 1
+    if (-not $adapter) {
+        Write-Log "  Fast-path miss: adapter for '$NetworkName' not in cache." -LogOnly
+        return $false
+    }
+    $desiredIp = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf(".")) + ".200"
+    $hasIp = $Cache.IPs | Where-Object { $_.InterfaceAlias -eq $adapter.InterfaceAlias -and $_.IPAddress -eq $desiredIp }
+    if (-not $hasIp) {
+        Write-Log "  Fast-path miss: adapter '$($adapter.InterfaceAlias)' missing IP $desiredIp." -LogOnly
+        return $false
+    }
+
+    # 3. NAT rule exists?
+    $hasNat = $Cache.Nats | Where-Object { $_.Name -eq $NetworkSubnet }
+    if (-not $hasNat) {
+        Write-Log "  Fast-path miss: NAT '$NetworkSubnet' not in cache." -LogOnly
+        return $false
+    }
+
+    # 4. DHCP scope exists?
+    $hasScope = $Cache.Scopes | Where-Object { $_.ScopeId.IPAddressToString -eq $NetworkSubnet }
+    if (-not $hasScope) {
+        Write-Log "  Fast-path miss: DHCP scope '$NetworkSubnet' not in cache." -LogOnly
+        return $false
+    }
+
+    # All checks passed — emit the same log lines the full path would.
+    Write-Log "HyperV Network switch for '$NetworkName' already exists."
+    Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."
+    return $true
+}
+
 function Add-SwitchAndDhcp {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
@@ -1731,13 +1795,6 @@ function Add-SwitchAndDhcp {
         return $true
     }
 
-
-    get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' } | start-service
-    $service = get-service "DHCPServer" | Where-Object { $_.Status -eq 'Stopped' }
-    if ($service) {
-        Write-Log "DHCPServer Service could not be started." -Failure
-        return $false
-    }
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
@@ -1746,8 +1803,20 @@ function Add-SwitchAndDhcp {
         return $false
     }
 
-    # Test if DHCP scope exists, if not create it
+    # Test if DHCP scope exists, if not create it.
+    # Test-DHCPScope handles starting the DHCP service internally via
+    # Start-DHCP, so no preemptive service check is needed here.
+    # If it fails (e.g. DHCP crashed), restart the service and retry once.
     $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
+    if (-not $worked) {
+        Write-Log "DHCP scope check failed for '$NetworkName'. Restarting DHCPServer and retrying..." -Warning
+        Stop-Service "DHCPServer" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $dhcpOk = Start-DHCP
+        if ($dhcpOk) {
+            $worked = Test-DHCPScope -ScopeID $NetworkSubnet -ScopeName $NetworkName -DomainName $DomainName -DNSServer $DNSServer
+        }
+    }
     if (-not $worked) {
         Write-Log "Failed to verify/create DHCP Scope for the '$NetworkName' network. ($NetworkSubnet) Exiting." -Failure
         return $false
