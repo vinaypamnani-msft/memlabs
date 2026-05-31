@@ -83,7 +83,9 @@ configuration Phase4
             # Ensure sqlncli.msi is present at the Windows Installer registered
             # source path so the CU can patch the SQL Native Client (error 1706).
             # Query the Installer registry for the actual InstallSource, then
-            # copy sqlncli.msi from the SQL media if the file is missing there.
+            # copy sqlncli.msi from C:\Windows\Temp (where Phase3 InstallSQLClient
+            # downloads the current version). Do NOT use the SQL ISO copy — it
+            # ships an older version that mismatches the installed product.
             Script RestoreSqlNcliSource {
                 GetScript  = { @{ Result = 'N/A' } }
                 TestScript = {
@@ -101,8 +103,11 @@ configuration Phase4
                     return $true
                 }
                 SetScript  = {
-                    $ncli = Get-ChildItem 'C:\temp\SQL' -Recurse -Filter 'sqlncli.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if (-not $ncli) { Write-Verbose 'sqlncli.msi not found in SQL media'; return }
+                    $ncli = 'C:\Windows\Temp\sqlncli.msi'
+                    if (-not (Test-Path $ncli)) {
+                        Write-Verbose "sqlncli.msi not found at $ncli (Phase3 InstallSQLClient should have placed it here)"
+                        return
+                    }
 
                     $productsPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
                     foreach ($product in (Get-ChildItem $productsPath -ErrorAction SilentlyContinue)) {
@@ -115,8 +120,8 @@ configuration Phase4
                                 }
                                 $dest = Join-Path $source 'sqlncli.msi'
                                 if (-not (Test-Path $dest)) {
-                                    Copy-Item $ncli.FullName $dest -Force
-                                    Write-Verbose "Restored sqlncli.msi to $dest"
+                                    Copy-Item $ncli $dest -Force
+                                    Write-Verbose "Restored sqlncli.msi to $dest from $ncli"
                                 }
                             }
                         }
