@@ -3937,7 +3937,10 @@ class ModuleAdd {
 
         $_ModuleName = $this.CheckModuleName
         write-verbose ('Searching for module:' + $_ModuleName)
-        $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+        $GetModuleStatus = $null
+        $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+        try { $GetModuleStatus = Get-InstalledModule -Name $_ModuleName -ErrorAction SilentlyContinue -WarningAction SilentlyContinue }
+        finally { $global:VerbosePreference = $savedVP }
 
         if ($GetModuleStatus) {
             write-verbose ('Found module:' + $_ModuleName + 'ModuleStatus:' + $GetModuleStatus.Version)
