@@ -2064,6 +2064,20 @@ class DownloadFile {
             return $false
         }
 
+        # Verify SHA1 hash for files with an embedded hash in the filename
+        # (e.g. sqlserver2016-kb5014351-x64_{sha1hash}.exe)
+        if ($this.DownloadUrl -match '-x64_([\da-fA-F]{40})\.exe$') {
+            $expectedHash = $Matches[1].ToLowerInvariant()
+            $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+            if ($actualHash -ne $expectedHash) {
+                Write-Status "Hash mismatch for $(Split-Path $this.FilePath -Leaf): expected $expectedHash, got $actualHash. Deleting corrupt download."
+                $parentDir = Split-Path $this.FilePath -Parent
+                Remove-Item $parentDir -Recurse -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+            Write-Verbose "SHA1 hash verified for $(Split-Path $this.FilePath -Leaf)"
+        }
+
         return $true
     }
 
