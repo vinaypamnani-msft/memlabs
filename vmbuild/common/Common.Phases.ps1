@@ -1583,130 +1583,80 @@ function Write-BuildSummary {
     Write-Log "============================== Build Summary ==============================" -Activity
 
     # --- Phase Summary ---
-    if ($hasPhases) {
+    if ($hasPhases -and $hasVMs) {
         Write-Log ""
-        Write-Log "  Phase Summary:" -Activity
-        Write-Log "  $("Phase".PadRight(12))$("VMs".PadRight(8))$("Success".PadRight(10))$("Warn".PadRight(8))$("Fail".PadRight(8))Elapsed"
-        Write-Log "  $("-----".PadRight(12))$("---".PadRight(8))$("-------".PadRight(10))$("----".PadRight(8))$("----".PadRight(8))-------"
         foreach ($phaseNum in $stats.Phases.Keys | Sort-Object) {
             $p = $stats.Phases[$phaseNum]
             $elapsed = if ($p.Elapsed) { $p.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
-            Write-Log "  $("Phase $phaseNum".PadRight(12))$($p.VMCount.ToString().PadRight(8))$($p.Success.ToString().PadRight(10))$($p.Warning.ToString().PadRight(8))$($p.Failed.ToString().PadRight(8))$elapsed"
 
-            # Show per-VM breakdown within this phase and identify the slowest
-            if ($hasVMs) {
-                $phaseVMs = @()
-                foreach ($vmName in $stats.VMs.Keys) {
-                    $vmData = $stats.VMs[$vmName]
-                    if ($vmData.Phases.ContainsKey($phaseNum)) {
-                        $phaseEntry = $vmData.Phases[$phaseNum]
-                        $phaseVMs += [PSCustomObject]@{
-                            Name    = $vmName
-                            Role    = $vmData.Role
-                            Elapsed = $phaseEntry.Elapsed
-                            Ticks   = if ($phaseEntry.Elapsed) { $phaseEntry.Elapsed.Ticks } else { 0 }
-                            Failed  = [bool]$phaseEntry.Failed
-                        }
-                    }
-                }
-                if ($phaseVMs.Count -gt 0) {
-                    $phaseVMs = $phaseVMs | Sort-Object -Property Ticks -Descending
-                    foreach ($pvm in $phaseVMs) {
-                        $vmElapsed = if ($pvm.Elapsed) { $pvm.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
-                        $failMark = if ($pvm.Failed) { " (FAILED)" } else { "" }
-                        Write-Log "    $($pvm.Name) [$($pvm.Role)] $vmElapsed$failMark"
-                    }
-                    $slowestInPhase = $phaseVMs[0]
-                    if ($phaseVMs.Count -gt 1) {
-                        $slowElapsed = if ($slowestInPhase.Elapsed) { $slowestInPhase.Elapsed.ToString("hh\:mm\:ss") } else { "N/A" }
-                        Write-Log "    >> Slowest: $($slowestInPhase.Name) [$($slowestInPhase.Role)] at $slowElapsed"
+            # Find the slowest VM in this phase
+            $slowestName = $null
+            $slowestTicks = [long]0
+            foreach ($vmName in $stats.VMs.Keys) {
+                $vmData = $stats.VMs[$vmName]
+                if ($vmData.Phases.ContainsKey($phaseNum)) {
+                    $pe = $vmData.Phases[$phaseNum]
+                    $t = if ($pe.Elapsed) { $pe.Elapsed.Ticks } else { 0 }
+                    if ($t -gt $slowestTicks) {
+                        $slowestTicks = $t
+                        $slowestName = $vmName
+                        $slowestRole = $vmData.Role
+                        $slowestElapsed = $pe.Elapsed
                     }
                 }
             }
+
+            $line = "  Phase $phaseNum`: $elapsed ($($p.VMCount) VMs)"
+            if ($p.Failed -gt 0) { $line += ", $($p.Failed) failed" }
+            if ($p.Warning -gt 0) { $line += ", $($p.Warning) warnings" }
+            if ($slowestName -and $p.VMCount -gt 1) {
+                $line += " - slowest: $slowestName [$slowestRole] $($slowestElapsed.ToString("hh\:mm\:ss"))"
+            }
+            Write-Log $line
         }
     }
 
-    # --- VM Summary ---
+    # --- Overall Slowest VM ---
     if ($hasVMs) {
         # Calculate total time per VM across all phases
         $vmTotals = @()
         foreach ($vmName in $stats.VMs.Keys) {
             $vmData = $stats.VMs[$vmName]
             $totalTicks = [long]0
-            $phaseList = @()
-            foreach ($phaseNum in $vmData.Phases.Keys | Sort-Object) {
+            foreach ($phaseNum in $vmData.Phases.Keys) {
                 $phaseEntry = $vmData.Phases[$phaseNum]
-                if ($phaseEntry.Elapsed) {
-                    $totalTicks += $phaseEntry.Elapsed.Ticks
-                }
-                $phaseList += $phaseNum
+                if ($phaseEntry.Elapsed) { $totalTicks += $phaseEntry.Elapsed.Ticks }
             }
             $vmTotals += [PSCustomObject]@{
                 Name       = $vmName
                 Role       = $vmData.Role
                 TotalTicks = $totalTicks
                 Total      = [TimeSpan]::FromTicks($totalTicks)
-                Phases     = ($phaseList -join ",")
             }
         }
         $vmTotals = $vmTotals | Sort-Object -Property TotalTicks -Descending
 
-        $maxName = ($vmTotals | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
-        $maxRole = ($vmTotals | ForEach-Object { $_.Role.Length } | Measure-Object -Maximum).Maximum
-        if ($maxName -lt 4) { $maxName = 4 }
-        if ($maxRole -lt 4) { $maxRole = 4 }
-        $namePad = $maxName + 2
-        $rolePad = $maxRole + 2
-
-        Write-Log ""
-        Write-Log "  VM Summary (sorted by total time, longest first):" -Activity
-        Write-Log "  $("VM".PadRight($namePad))$("Role".PadRight($rolePad))$("Phases".PadRight(14))Total"
-        Write-Log "  $("--".PadRight($namePad))$("----".PadRight($rolePad))$("------".PadRight(14))-----"
-        foreach ($vm in $vmTotals) {
-            Write-Log "  $($vm.Name.PadRight($namePad))$($vm.Role.PadRight($rolePad))$($vm.Phases.PadRight(14))$($vm.Total.ToString("hh\:mm\:ss"))"
-        }
-
-        # Highlight the slowest VM
-        if ($vmTotals.Count -gt 0) {
+        if ($vmTotals.Count -gt 1) {
             $slowest = $vmTotals[0]
             Write-Log ""
-            Write-Log "  Slowest VM: $($slowest.Name) [$($slowest.Role)] - $($slowest.Total.ToString("hh\:mm\:ss"))"
+            Write-Log "  Slowest VM overall: $($slowest.Name) [$($slowest.Role)] - $($slowest.Total.ToString("hh\:mm\:ss"))"
         }
     }
 
-    # --- Component Breakdown ---
+    # --- Slowest Component ---
     if ($hasComponents) {
-        Write-Log ""
-        Write-Log "  Component Breakdown (guest-side ScriptWorkflow timing):" -Activity
-
         $globalSlowest = $null
         $globalSlowestTicks = [long]0
-
-        foreach ($vmName in $stats.Components.Keys | Sort-Object) {
-            $comps = $stats.Components[$vmName]
-            if ($comps.Count -eq 0) { continue }
-
-            # Sort components by elapsed time descending
-            $sorted = $comps.GetEnumerator() | Sort-Object { $_.Value.Elapsed.Ticks } -Descending
-
-            Write-Log ""
-            Write-Log "  $vmName`:"
-            foreach ($entry in $sorted) {
-                $elapsed = $entry.Value.Elapsed.ToString("hh\:mm\:ss")
-                $status = $entry.Value.Status
-                $marker = if ($status -eq 'Completed') { "" } else { " ($status)" }
-                Write-Log "    $($entry.Key.PadRight(35))$elapsed$marker"
-
-                if ($entry.Value.Elapsed.Ticks -gt $globalSlowestTicks) {
+        foreach ($vmName in $stats.Components.Keys) {
+            foreach ($entry in $stats.Components[$vmName].GetEnumerator()) {
+                if ($entry.Value.Elapsed -and $entry.Value.Elapsed.Ticks -gt $globalSlowestTicks) {
                     $globalSlowestTicks = $entry.Value.Elapsed.Ticks
                     $globalSlowest = @{ VM = $vmName; Component = $entry.Key; Elapsed = $entry.Value.Elapsed }
                 }
             }
         }
-
         if ($globalSlowest) {
-            Write-Log ""
-            Write-Log "  Slowest component: $($globalSlowest.Component) on $($globalSlowest.VM) - $($globalSlowest.Elapsed.ToString("hh\:mm\:ss"))"
+            Write-Log "  Slowest component:  $($globalSlowest.Component) on $($globalSlowest.VM) - $($globalSlowest.Elapsed.ToString("hh\:mm\:ss"))"
         }
     }
 
