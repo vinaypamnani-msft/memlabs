@@ -152,6 +152,17 @@ function Test-VmFunctionality {
         $testsPassed = Test-CAFunctionality -VMName $VMName -Domain $domain
     }
 
+    # If the VM received PKI IIS/DP certs (UsePKI + CM role), validate cert health
+    $hasCaVM = @($DeployConfig.virtualMachines | Where-Object { $_.InstallCA }).Count -gt 0
+    $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    $needsIISCert = $role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite') -or
+                    $CurrentItem.InstallSUP -or $CurrentItem.InstallMP -or
+                    $CurrentItem.InstallDP -or $CurrentItem.InstallRP
+    if ($testsPassed -and $hasCaVM -and $cmo.UsePKI -and $needsIISCert) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying PKI certificates"
+        $testsPassed = Test-PKICertificatesOnVM -VMName $VMName -Domain $domain -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # If the VM has SQL but is not a Primary/CAS/SQLAO (standalone SQL server)
     if ($testsPassed -and $CurrentItem.sqlVersion -and $role -notin @('CAS', 'Primary', 'SQLAO')) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL Server"
@@ -2243,6 +2254,84 @@ function Test-CAFunctionality {
             $results.Details.Add("WARN: AD Enrollment Services query failed: $($_.Exception.Message)")
         }
 
+        # ---- CRL freshness: base CRL must be valid; delta CRL must not exist or be valid ----
+        $results.Details.Add("CMD: certutil.exe -crl")
+        try {
+            $crlOut = & certutil.exe -getreg CA\CRLDeltaPeriodUnits 2>&1
+            $deltaUnits = ($crlOut | Where-Object { $_ -match 'CRLDeltaPeriodUnits REG_DWORD' }) -replace '.*= ', ''
+            if ($deltaUnits -match '^0') {
+                $results.Details.Add("OK: CA delta CRL generation is disabled (CRLDeltaPeriodUnits=0)")
+            }
+            elseif ($deltaUnits) {
+                $results.Details.Add("WARN: CA delta CRL generation is enabled (CRLDeltaPeriodUnits=$deltaUnits)")
+            }
+
+            # Check that a valid base CRL exists
+            $crlList = & certutil.exe -store CA CRL 2>&1
+            $crlText = $crlList -join "`n"
+            if ($crlText -match 'NextUpdate:\s*(.+)') {
+                $nextStr = $Matches[1].Trim()
+                try {
+                    $nextUpdate = [DateTime]::Parse($nextStr)
+                    $hoursLeft = ($nextUpdate - (Get-Date)).TotalHours
+                    if ($hoursLeft -lt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Base CRL expired at $nextStr")
+                    }
+                    elseif ($hoursLeft -lt 48) {
+                        $results.Details.Add("WARN: Base CRL expires in $([int]$hoursLeft) hours ($nextStr)")
+                    }
+                    else {
+                        $results.Details.Add("OK: Base CRL valid until $nextStr ($([int]$hoursLeft) hours)")
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not parse CRL NextUpdate: '$nextStr'")
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: CRL freshness check failed: $($_.Exception.Message)")
+        }
+
+        # ---- OID-to-name mappings in CN=OID ----
+        # Verify that each published certificate template has a corresponding
+        # msPKI-Enterprise-Oid object so member servers can resolve the
+        # template OID back to its display name (required for CertReq DSC
+        # idempotency).
+        try {
+            $cfg2 = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $tplBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$cfg2"
+            $oidBase = "CN=OID,CN=Public Key Services,CN=Services,$cfg2"
+
+            $tplSearch = New-Object System.DirectoryServices.DirectorySearcher(
+                [ADSI]"LDAP://$tplBase", "(cn=ConfigMgr*)")
+            $tplSearch.PropertiesToLoad.AddRange(@('cn','msPKI-Cert-Template-OID'))
+            $templates = $tplSearch.FindAll()
+
+            foreach ($tpl in $templates) {
+                $tplCn = $tpl.Properties['cn'][0]
+                $tplOid = ($tpl.Properties['mspki-cert-template-oid'] | Select-Object -First 1) -as [string]
+                if (-not $tplOid) { continue }
+
+                $oidSearch = New-Object System.DirectoryServices.DirectorySearcher(
+                    [ADSI]"LDAP://$oidBase", "(msPKI-Cert-Template-OID=$tplOid)")
+                $oidSearch.PropertiesToLoad.Add('displayName') | Out-Null
+                $oidObj = $oidSearch.FindOne()
+                if ($oidObj) {
+                    $results.Details.Add("OK: OID mapping exists for '$tplCn'")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: No msPKI-Enterprise-Oid in CN=OID for template '$tplCn' (OID=$tplOid)")
+                    $results.Details.Add("  Member servers cannot resolve this OID to a name, causing CertReq duplicate certs")
+                }
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: OID mapping check failed: $($_.Exception.Message)")
+        }
+
         return $results
     }
 
@@ -2250,6 +2339,184 @@ function Test-CAFunctionality {
         -ScriptBlock $scriptBlock -DisplayName "Phase11-CA-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'CA' -Result $result)
+}
+
+function Test-PKICertificatesOnVM {
+    <#
+    .SYNOPSIS
+        Validates PKI certificate health on VMs that received IIS/DP certs.
+    .DESCRIPTION
+        Checks run on the site server / site system VM:
+        - Duplicate certificate detection (same FriendlyName)
+        - CRL reachability from CDP URLs embedded in the cert
+        - Delta CRL expiry (warns if < 2 days, fails if expired)
+        - Certificate template name resolution (OID-only = will cause
+          CertReq duplication on reruns)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName [PKI-Certs]: Testing PKI certificate health" -LogOnly
+
+    $isPrimary = $CurrentItem.role -eq 'Primary'
+
+    $scriptBlock = {
+        param($IsPrimary)
+
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        # ---- Check 1: Duplicate certificate detection ----
+        $friendlyNames = @(
+            'ConfigMgr WebServer Certificate'
+            'ConfigMgr Client DistributionPoint Certificate'
+        )
+        foreach ($fn in $friendlyNames) {
+            $certs = @(Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                Where-Object { $_.FriendlyName -eq $fn })
+            if ($certs.Count -gt 1) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: $($certs.Count) duplicate certs with FriendlyName '$fn' (expected 1)")
+                foreach ($c in $certs | Sort-Object NotBefore) {
+                    $results.Details.Add("  Thumbprint=$($c.Thumbprint.Substring(0,8))... NotBefore=$($c.NotBefore)")
+                }
+            }
+            elseif ($certs.Count -eq 1) {
+                $results.Details.Add("OK: Single cert with FriendlyName '$fn'")
+            }
+            elseif ($fn -eq 'ConfigMgr WebServer Certificate') {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No cert with FriendlyName '$fn' found")
+            }
+            elseif ($fn -eq 'ConfigMgr Client DistributionPoint Certificate' -and $IsPrimary) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No cert with FriendlyName '$fn' found (required for Primary)")
+            }
+        }
+
+        # ---- Check 2: Template name resolution ----
+        $templateChecks = @{
+            'ConfigMgr WebServer Certificate'               = 'ConfigMgrWebServerCertificate'
+            'ConfigMgr Client DistributionPoint Certificate' = 'ConfigMgrClientDistributionPointCertificate'
+        }
+        foreach ($fn in $templateChecks.Keys) {
+            $cert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                Where-Object { $_.FriendlyName -eq $fn } | Select-Object -First 1
+            if (-not $cert) { continue }
+
+            $tplExt = $cert.Extensions | Where-Object { $_.Oid.Value -eq '1.3.6.1.4.1.311.21.7' }
+            if ($tplExt) {
+                $tplFormatted = $tplExt.Format($false)
+                $expectedName = $templateChecks[$fn]
+                if ($tplFormatted -match 'Template=([^(,]+)') {
+                    $resolvedName = $Matches[1].Trim()
+                    if ($resolvedName -eq $expectedName) {
+                        $results.Details.Add("OK: Template name resolves for '$fn' -> '$resolvedName'")
+                    }
+                    elseif ($resolvedName -match '^\d+\.') {
+                        # OID returned instead of name — CertReq will create duplicates on reruns
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Template name for '$fn' resolves to OID ($resolvedName) instead of '$expectedName'")
+                        $results.Details.Add("  This causes CertReq DSC to create duplicate certs on every rerun")
+                        $results.Details.Add("  Fix: Run 'certutil -pulse' or verify template is published in AD")
+                    }
+                    else {
+                        $results.Details.Add("WARN: Template name for '$fn' = '$resolvedName' (expected '$expectedName')")
+                    }
+                }
+            }
+            else {
+                $results.Details.Add("WARN: No V2 template extension on cert '$fn'")
+            }
+        }
+
+        # ---- Check 3: CRL reachability from cert CDPs ----
+        $webCert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+            Where-Object { $_.FriendlyName -eq 'ConfigMgr WebServer Certificate' } | Select-Object -First 1
+        if ($webCert) {
+            # Export cert to temp file for certutil -verify
+            $tmpCer = "$env:TEMP\phase11_crl_check.cer"
+            try {
+                Export-Certificate -Cert $webCert -FilePath $tmpCer -Force -ErrorAction Stop | Out-Null
+                $verifyOutput = & certutil.exe -verify -urlfetch $tmpCer 2>&1
+                $verifyText = $verifyOutput -join "`n"
+                Remove-Item $tmpCer -Force -ErrorAction SilentlyContinue
+
+                if ($LASTEXITCODE -eq 0 -and $verifyText -match 'revocation check passed') {
+                    $results.Details.Add("OK: Certificate chain + CRL verification passed")
+                }
+                elseif ($LASTEXITCODE -eq 0) {
+                    $results.Details.Add("OK: certutil -verify succeeded (exit 0)")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: certutil -verify -urlfetch failed (exit $LASTEXITCODE)")
+                    # Extract failed URLs
+                    $failedUrls = $verifyOutput | Where-Object { $_ -match 'FAILED' }
+                    foreach ($f in $failedUrls | Select-Object -First 5) {
+                        $results.Details.Add("  $f")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: CRL verification skipped: $($_.Exception.Message)")
+            }
+
+            # ---- Check 4: Delta CRL expiry ----
+            # Parse delta CRL NextUpdate from the certutil output
+            $deltaBlocks = @()
+            $inDelta = $false
+            foreach ($line in $verifyOutput) {
+                if ($line -match 'Delta CRL') { $inDelta = $true }
+                if ($inDelta -and $line -match 'NextUpdate:\s*(.+)') {
+                    $deltaBlocks += $Matches[1].Trim()
+                    $inDelta = $false
+                }
+            }
+            foreach ($nextUpdateStr in $deltaBlocks | Select-Object -Unique) {
+                try {
+                    $nextUpdate = [DateTime]::Parse($nextUpdateStr)
+                    $hoursLeft = ($nextUpdate - (Get-Date)).TotalHours
+                    if ($hoursLeft -lt 0) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Delta CRL expired at $nextUpdateStr")
+                    }
+                    elseif ($hoursLeft -lt 48) {
+                        $results.Details.Add("WARN: Delta CRL expires in $([int]$hoursLeft) hours ($nextUpdateStr)")
+                    }
+                    else {
+                        $results.Details.Add("OK: Delta CRL valid until $nextUpdateStr ($([int]$hoursLeft) hours)")
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not parse delta CRL NextUpdate: '$nextUpdateStr'")
+                }
+            }
+
+            # ---- Check 5: IIS 443 binding ----
+            $sslCert = netsh http show sslcert ipport=0.0.0.0:443 2>&1
+            if ($sslCert -match $webCert.Thumbprint) {
+                $results.Details.Add("OK: WebServer cert is bound to IIS 0.0.0.0:443")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: WebServer cert thumbprint not bound to IIS 0.0.0.0:443")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -ArgumentList $isPrimary `
+        -DisplayName "Phase11-PKI-Certs-Test" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'PKI-Certs' -Result $result)
 }
 
 function Test-MaintenanceTasks {

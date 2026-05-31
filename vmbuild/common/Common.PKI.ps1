@@ -189,11 +189,31 @@ function Install-PKICertificateTemplates {
             }
 
             # ---- Phase A: Import templates into AD via ldifde ----
+            # The LDF files contain both the msPKI-Enterprise-Oid object (in
+            # CN=OID) and the template object (in CN=Certificate Templates).
+            # ldifde -k skips entries that already exist, so re-running is safe.
+            $configCtxA = ([ADSI]"LDAP://RootDSE").configurationNamingContext
+            $oidContainerDN = "CN=OID,CN=Public Key Services,CN=Services,$configCtxA"
+
             foreach ($tplName in $TemplateList) {
                 $found = Find-TemplateInAD $tplName
+                $oidMissing = $false
+
                 if ($found) {
-                    _Log "Template '$tplName' already exists in AD - skipping import"
-                    continue
+                    # Template exists — but does the OID-to-name mapping?
+                    $tplOid = ($found.Properties['mspki-cert-template-oid'] | Select-Object -First 1) -as [string]
+                    if ($tplOid) {
+                        $oidSearch = New-Object System.DirectoryServices.DirectorySearcher(
+                            [ADSI]"LDAP://$oidContainerDN",
+                            "(msPKI-Cert-Template-OID=$tplOid)")
+                        $oidSearch.PropertiesToLoad.Add('cn') | Out-Null
+                        $oidMissing = ($null -eq $oidSearch.FindOne())
+                    }
+                    if (-not $oidMissing) {
+                        _Log "Template '$tplName' and OID mapping already exist in AD - skipping"
+                        continue
+                    }
+                    _Log "Template '$tplName' exists but OID mapping is missing - re-importing LDF"
                 }
 
                 $ldfSource = "C:\staging\DSC\CertificateTemplates\$tplName.ldf"
@@ -497,7 +517,7 @@ RenewalValidityPeriodUnits=5
 CRLPeriod=Weeks
 CRLPeriodUnits=2
 CRLDeltaPeriod=Days
-CRLDeltaPeriodUnits=1
+CRLDeltaPeriodUnits=0
 LoadDefaultTemplates=0
 "@
                 Set-Content -Path "C:\Windows\CAPolicy.inf" -Value $caPolicyContent -Force
@@ -1180,7 +1200,7 @@ RenewalValidityPeriodUnits=5
 CRLPeriod=Weeks
 CRLPeriodUnits=2
 CRLDeltaPeriod=Days
-CRLDeltaPeriodUnits=1
+CRLDeltaPeriodUnits=0
 LoadDefaultTemplates=0
 
 [BasicConstraintsExtension]
@@ -1819,7 +1839,7 @@ CertificateTemplate = SubCA
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLPeriod "Weeks" | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }
-                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 1 | Out-Null
+                & certutil.exe -setreg CA\CRLDeltaPeriodUnits 0 | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriodUnits exit $LASTEXITCODE"; $crlRegFailed = $true }
                 & certutil.exe -setreg CA\CRLDeltaPeriod "Days" | Out-Null
                 if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -setreg CRLDeltaPeriod exit $LASTEXITCODE"; $crlRegFailed = $true }

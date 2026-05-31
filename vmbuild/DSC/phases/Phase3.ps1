@@ -316,6 +316,36 @@ configuration Phase3
                 Status    = "Requesting IIS Certificate for PKI"
                 DependsOn = $nextDepend
             }
+
+            # Refresh template cache before CertReq so OID-to-name resolution
+            # works correctly. Without this, CertReq's Test() compares the raw
+            # OID against the template name, always fails, and re-creates the
+            # cert on every run.
+            Script RefreshTemplateCache {
+                GetScript  = { @{ Result = 'N/A' } }
+                TestScript = { $false }
+                SetScript  = {
+                    try { certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                    # Clear the local certificate template cache timestamp so
+                    # the crypto API re-queries AD for template OID→name mapping
+                    foreach ($hive in @('HKLM','HKCU')) {
+                        $k = "${hive}:\SOFTWARE\Microsoft\Cryptography\CertificateTemplateCache"
+                        Remove-ItemProperty -Path $k -Name 'Timestamp' -Force -ErrorAction SilentlyContinue
+                    }
+                    # Also remove any duplicate DP certs — keep only the newest
+                    $fn = 'ConfigMgr Client DistributionPoint Certificate'
+                    $dupes = @(Get-ChildItem Cert:\LocalMachine\My |
+                        Where-Object { $_.FriendlyName -eq $fn } | Sort-Object NotBefore -Descending)
+                    if ($dupes.Count -gt 1) {
+                        foreach ($old in $dupes | Select-Object -Skip 1) {
+                            Remove-Item "Cert:\LocalMachine\My\$($old.Thumbprint)" -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = "[Script]RefreshTemplateCache"
+
             $subject = $ThisVM.vmName + "." + $DomainName
             $friendlyName = 'ConfigMgr WebServer Certificate'
             CertReq SSLCert {

@@ -1,3 +1,13 @@
+dn: CN=1557532.11566960,CN=OID,CN=Public Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
+changetype: add
+objectClass: msPKI-Enterprise-Oid
+cn: 1557532.11566960
+displayName: ConfigMgrClientCertificate
+msPKI-Cert-Template-OID:
+ 1.3.6.1.4.1.311.21.8.5616737.12267755.3555977.7424861.9094410.141.1557532.1156
+ 6960
+flags: 2
+
 dn: CN=ConfigMgrClientCertificate,CN=Certificate Templates,CN=Public Key Services,CN=Services,CN=Configuration,DC=TEMPLATE,DC=com
 changetype: add
 cn: ConfigMgrClientCertificate
