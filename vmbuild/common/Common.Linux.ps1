@@ -2262,7 +2262,8 @@ echo PROXY_READY
 #!/usr/bin/env python3
 """memlabs Proxy Admin - Squid blocklist manager."""
 import os, re, subprocess
-from flask import Flask, request, redirect, url_for, Markup
+from flask import Flask, request, redirect, url_for
+from markupsafe import escape as _escape
 
 app = Flask(__name__)
 BLOCKLIST = "/etc/squid/blocklist.txt"
@@ -2297,14 +2298,14 @@ def _render(entries, error=None, success=None):
             '<input type="hidden" name="entry" value="{entry}">'
             '<button type="submit" class="btn btn-sm btn-del">Remove</button>'
             '</form></td></tr>'
-        ).format(entry=Markup.escape(e))
+        ).format(entry=_escape(e))
     if not entries:
         rows = '<tr><td colspan="2" class="empty">No entries — all traffic is allowed through Squid.</td></tr>'
     alert = ""
     if error:
-        alert = '<div class="alert alert-error">{}</div>'.format(Markup.escape(error))
+        alert = '<div class="alert alert-error">{}</div>'.format(_escape(error))
     if success:
-        alert = '<div class="alert alert-ok">{}</div>'.format(Markup.escape(success))
+        alert = '<div class="alert alert-ok">{}</div>'.format(_escape(success))
     return '''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Proxy Admin</title>
 <style>
