@@ -105,16 +105,12 @@ configuration Phase3
             $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
-        # Proxy clients: Set-WindowsClientProxy (Phase 2) writes the proxy to
-        # machine.config <defaultProxy>, WinHTTP, and HKU\.DEFAULT, but on some
-        # Windows builds the fresh WmiPrvSE AppDomain that hosts this DSC run
-        # does not pick up the machine.config change for [System.Net.WebRequest]::
-        # DefaultWebProxy. Net effect: WebClient/BITS/IWR bypass the proxy,
-        # Hyper-V ACLs deny the direct connection, and every download resource
-        # fails with "Unable to connect to the remote server".
-        # Explicitly read WinHTTP and stamp DefaultWebProxy in-process so all
-        # subsequent download resources (InstallVCRedist, InstallOleDb, etc.)
-        # inherit the proxy within this AppDomain.
+        # Phase 2 DSC (SetWindowsProxy resource) configures WinHTTP, machine.config
+        # <defaultProxy>, and registry. However, .NET reads machine.config once per
+        # AppDomain — if the Phase 3 WmiPrvSE process reuses a cached AppDomain,
+        # DefaultWebProxy may still be empty. Read WinHTTP (guaranteed set by Phase 2)
+        # and stamp DefaultWebProxy in this AppDomain so all download resources
+        # (InstallVCRedist, InstallOleDb, InstallADK, etc.) inherit the proxy.
         Script EnsureProcessProxy {
             DependsOn  = $addUserDependency
             GetScript  = { @{ Result = "$([System.Net.WebRequest]::DefaultWebProxy)" } }
@@ -122,17 +118,15 @@ configuration Phase3
                 try {
                     $output = & netsh winhttp show proxy 2>$null
                     if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
-                        $proxyAddr = $Matches[1].Trim()
                         $current = [System.Net.WebRequest]::DefaultWebProxy
                         if ($current) {
-                            $testUri = [System.Uri]"https://aka.ms"
-                            $resolved = $current.GetProxy($testUri)
+                            $resolved = $current.GetProxy([System.Uri]"https://aka.ms")
                             if ($resolved -and $resolved.Host -ne 'aka.ms') { return $true }
                         }
                         return $false
                     }
                 } catch {}
-                return $true   # No WinHTTP proxy configured; nothing to do
+                return $true   # No WinHTTP proxy configured; not a proxy client
             }
             SetScript  = {
                 $output = & netsh winhttp show proxy 2>$null

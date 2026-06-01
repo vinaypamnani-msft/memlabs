@@ -155,13 +155,60 @@
             Role      = $firewallRoles
         }
 
+        # Disable UAC remote restrictions so PSDirect sessions from the host
+        # get a full (elevated) admin token. Without this, post-DSC host-to-VM
+        # commands (Set-WindowsClientProxy, etc.) fail with "Requested registry
+        # access is not allowed" on Windows client SKUs (Win10/Win11) because
+        # UAC filters remote admin tokens.
+        Registry DisableUACRemoteRestrictions {
+            DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+            Ensure    = "Present"
+            Key       = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            ValueName = "LocalAccountTokenFilterPolicy"
+            ValueType = "Dword"
+            ValueData = "1"
+        }
+
+        # Configure system proxy if this VM is a proxy client. Runs as SYSTEM
+        # so there are no UAC/PSDirect elevation issues. Sets WinHTTP, machine
+        # env vars, HKLM/HKU\.DEFAULT registry, and machine.config <defaultProxy>
+        # with retry logic. By the time Phase 3 DSC starts, all proxy layers are
+        # in place and downloads go through Squid.
+        $proxyDepend = '[Registry]DisableUACRemoteRestrictions'
+        if ($ThisVM.useProxy -eq $true) {
+            $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
+            if ($proxyVm) {
+                $proxyFqdn = "$($proxyVm.vmName).$DomainName"
+                $proxyServer = "${proxyFqdn}:3128"
+                $bypassEntries = @('<local>', "*.$DomainName", $proxyFqdn)
+                $network = $deployConfig.vmOptions.network
+                if ($network) {
+                    $base = ($network -replace '\.0$', '')
+                    if ($base -match '^\d+\.\d+\.\d+$') { $bypassEntries += "$base.*" }
+                }
+                $proxyBypass = ($bypassEntries | Select-Object -Unique) -join ';'
+
+                WriteStatus ConfigureProxy {
+                    DependsOn = '[Registry]DisableUACRemoteRestrictions'
+                    Status    = "Configuring system proxy: $proxyServer"
+                }
+
+                SetWindowsProxy ConfigureProxy {
+                    DependsOn   = '[WriteStatus]ConfigureProxy'
+                    ProxyServer = $proxyServer
+                    BypassList  = $proxyBypass
+                }
+                $proxyDepend = '[SetWindowsProxy]ConfigureProxy'
+            }
+        }
+
         # Pre-seed TPM protector for BitLocker VMs
         # Windows 11 24H2 on Hyper-V 512e disks cannot add a NumericalPassword as the first protector.
         # The ConfigMgr BLM handler calls ProtectKeyWithNumericalPassword first, which fails with 0x8007001f.
         # Pre-adding a TPM protector works around this by ensuring the volume already has a protector.
         if ($ThisVM.BitLocker -eq $true) {
             WriteStatus SeedTPM {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = $proxyDepend
                 Status    = "Adding TPM protector for BitLocker"
             }
 
@@ -283,7 +330,7 @@
         }
         else {
             WriteStatus Complete {
-                DependsOn = "[OpenFirewallPortForSCCM]OpenFirewall"
+                DependsOn = $proxyDepend
                 Status    = "Complete!"
             }
         }

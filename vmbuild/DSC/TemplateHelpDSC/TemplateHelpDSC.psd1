@@ -52,7 +52,8 @@ DscResourcesToExport = @(
     'RunPkiSync',
     'GpUpdate',
     'SetDNSAddress',
-    'DisableClusterNicDnsRegistration'
+    'DisableClusterNicDnsRegistration',
+    'SetWindowsProxy'
 
 
 )

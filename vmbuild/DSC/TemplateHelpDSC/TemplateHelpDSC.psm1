@@ -5487,3 +5487,153 @@ class DisableClusterNicDnsRegistration {
         return $this
     }
 }
+
+[DscResource()]
+class SetWindowsProxy {
+    [DscProperty(Key)]
+    [string] $ProxyServer      # e.g. "ZZ-SQUID.wacky.sandwich.lab:3128"
+
+    [DscProperty(Mandatory)]
+    [string] $BypassList       # e.g. "<local>;*.wacky.sandwich.lab;172.19.77.*"
+
+    [void] Set() {
+        $_proxy  = $this.ProxyServer
+        $_bypass = $this.BypassList
+        $maxRetries = 3
+
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            try {
+                Write-Status "SetWindowsProxy: configuring proxy $_proxy (attempt $attempt/$maxRetries)"
+
+                # 1. WinHTTP (used by BITS, Windows Update, .NET fallback)
+                $result = & netsh winhttp set proxy proxy-server="$_proxy" bypass-list="$_bypass" 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "netsh winhttp set proxy failed (exit $LASTEXITCODE): $result" }
+
+                # 2. Machine-level environment variables
+                [Environment]::SetEnvironmentVariable('HTTP_PROXY',  "http://$_proxy", 'Machine')
+                [Environment]::SetEnvironmentVariable('HTTPS_PROXY', "http://$_proxy", 'Machine')
+                [Environment]::SetEnvironmentVariable('NO_PROXY',    $_bypass,         'Machine')
+
+                # 3. HKLM Internet Settings (WinINet machine-wide default)
+                $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+                New-ItemProperty -Path $ieKey -Name 'ProxyEnable'   -PropertyType DWord  -Value 1       -Force | Out-Null
+                New-ItemProperty -Path $ieKey -Name 'ProxyServer'   -PropertyType String -Value $_proxy  -Force | Out-Null
+                New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $_bypass -Force | Out-Null
+
+                # 4. HKU\.DEFAULT (SYSTEM-context .NET / WinINet reads)
+                $defaultUserKey = 'Registry::HKEY_USERS\.DEFAULT\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+                if (-not (Test-Path $defaultUserKey)) { New-Item -Path $defaultUserKey -Force | Out-Null }
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyEnable'   -PropertyType DWord  -Value 1       -Force | Out-Null
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyServer'   -PropertyType String -Value $_proxy  -Force | Out-Null
+                New-ItemProperty -Path $defaultUserKey -Name 'ProxyOverride' -PropertyType String -Value $_bypass -Force | Out-Null
+
+                # 5. .NET Framework machine.config <defaultProxy>
+                $bypassRegexes = @()
+                foreach ($e in ($_bypass -split ';')) {
+                    $e = $e.Trim()
+                    if (-not $e -or $e -eq '<local>') { continue }
+                    $rx = '^' + ([Regex]::Escape($e) -replace '\\\*', '.*') + '$'
+                    $bypassRegexes += $rx
+                }
+                $machineConfigPaths = @(
+                    "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config",
+                    "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\Config\machine.config"
+                )
+                foreach ($mcPath in $machineConfigPaths) {
+                    if (-not (Test-Path $mcPath)) { continue }
+                    $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                    $configNode = $xml.DocumentElement
+                    $sysNet = $configNode.SelectSingleNode('system.net')
+                    if (-not $sysNet) {
+                        $sysNet = $xml.CreateElement('system.net')
+                        [void]$configNode.AppendChild($sysNet)
+                    }
+                    $existing = $sysNet.SelectSingleNode('defaultProxy')
+                    if ($existing) { [void]$sysNet.RemoveChild($existing) }
+                    $defProxy = $xml.CreateElement('defaultProxy')
+                    $defProxy.SetAttribute('enabled', 'true')
+                    $defProxy.SetAttribute('useDefaultCredentials', 'true')
+                    $proxyEl = $xml.CreateElement('proxy')
+                    $proxyEl.SetAttribute('proxyaddress', "http://$_proxy")
+                    $proxyEl.SetAttribute('bypassonlocal', 'true')
+                    $proxyEl.SetAttribute('autoDetect', 'false')
+                    $proxyEl.SetAttribute('usesystemdefault', 'false')
+                    [void]$defProxy.AppendChild($proxyEl)
+                    if ($bypassRegexes.Count -gt 0) {
+                        $bypassEl = $xml.CreateElement('bypasslist')
+                        foreach ($rx in $bypassRegexes) {
+                            $addEl = $xml.CreateElement('add')
+                            $addEl.SetAttribute('address', $rx)
+                            [void]$bypassEl.AppendChild($addEl)
+                        }
+                        [void]$defProxy.AppendChild($bypassEl)
+                    }
+                    [void]$sysNet.AppendChild($defProxy)
+                    $xml.Save($mcPath)
+
+                    # Verify the write persisted
+                    $verifyXml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                    $verifyProxy = $verifyXml.DocumentElement.SelectSingleNode('system.net/defaultProxy/proxy')
+                    if (-not $verifyProxy) {
+                        throw "machine.config verification failed: <defaultProxy/proxy> not found in $mcPath"
+                    }
+                    if ($verifyProxy.GetAttribute('proxyaddress') -ne "http://$_proxy") {
+                        throw "machine.config proxyaddress mismatch in $mcPath (got '$($verifyProxy.GetAttribute('proxyaddress'))')"
+                    }
+                }
+
+                Write-Status "SetWindowsProxy: proxy $_proxy configured successfully"
+                return   # success
+            }
+            catch {
+                Write-Status "SetWindowsProxy: attempt $attempt failed: $_"
+                if ($attempt -ge $maxRetries) { throw }
+                Start-Sleep -Seconds 5
+            }
+        }
+    }
+
+    [bool] Test() {
+        $_proxy = $this.ProxyServer
+
+        # Check WinHTTP
+        try {
+            $output = & netsh winhttp show proxy 2>$null
+            if ($output -notmatch 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy not set"
+                return $false
+            }
+            if ($Matches[1].Trim() -ne $_proxy) {
+                Write-Verbose "SetWindowsProxy Test: WinHTTP proxy is '$($Matches[1].Trim())', expected '$_proxy'"
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "SetWindowsProxy Test: WinHTTP check failed: $_"
+            return $false
+        }
+
+        # Check machine.config
+        $mcPath = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\Config\machine.config"
+        if (Test-Path $mcPath) {
+            try {
+                $xml = [xml](Get-Content -LiteralPath $mcPath -Raw)
+                $p = $xml.DocumentElement.SelectSingleNode('system.net/defaultProxy/proxy')
+                if (-not $p -or $p.GetAttribute('proxyaddress') -ne "http://$_proxy") {
+                    Write-Verbose "SetWindowsProxy Test: machine.config <defaultProxy> not set for $_proxy"
+                    return $false
+                }
+            }
+            catch {
+                Write-Verbose "SetWindowsProxy Test: machine.config check failed: $_"
+                return $false
+            }
+        }
+
+        return $true
+    }
+
+    [SetWindowsProxy] Get() {
+        return $this
+    }
+}
