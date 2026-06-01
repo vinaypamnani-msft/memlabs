@@ -2661,7 +2661,6 @@ function Get-List {
                     $vmIndex = 0
                     foreach ($vm in $virtualMachines) {
                         $vmIndex++
-                        Write-Log "Get-List: [$vmIndex/$($virtualMachines.Count)] Processing $($vm.Name)..." -LogOnly
                         $vmObject = Get-VMFromHyperV -vm $vm
                         if ($vmObject) {
                             $return += $vmObject
