@@ -463,9 +463,14 @@ $Install_Secondary = {
         }
     }
     $sleepSeconds = 30
-    if ($installed -and -not $alreadyExisted) {
+    if ($installed) {
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
-        Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryName
+        if (-not $alreadyExisted) {
+            Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryName
+        }
+        else {
+            Write-DscStatus "Secondary site already installed. Verifying replication link is 'Active'" -MachineName $SecondaryName
+        }
 
         # ReplicationLinkStatus enum: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
         $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
@@ -525,10 +530,7 @@ $Install_Secondary = {
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         }
 
-        Write-DscStatus "Secondary installation complete. Replication link is 'Active'." -MachineName $SecondaryName
-    }
-    elseif ($alreadyExisted) {
-        Write-DscStatus "Secondary site was already installed. Skipping replication wait." -MachineName $SecondaryName
+        Write-DscStatus "Secondary site replication link is 'Active'." -MachineName $SecondaryName
     }
 
 }
