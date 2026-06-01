@@ -1320,6 +1320,66 @@ function Test-CMSiteFunctionality {
         if (-not $sitePassed) { $passed = $false }
     }
 
+    # DRS replication link check: verify links to child sites are Active (not Failed/Error/Degraded)
+    # ReplicationLinkStatus enum: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
+    $childSites = @($DeployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $siteCode })
+    if ($passed -and $childSites.Count -gt 0) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying DRS replication links"
+        Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Checking DRS replication links to $($childSites.Count) child site(s)" -LogOnly
+
+        $childSiteCodes = @($childSites | ForEach-Object { $_.siteCode } | Select-Object -Unique)
+
+        $drsScriptBlock = {
+            param($parentSC, $childCodes)
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+            # StatusName lookup for readable output
+            $statusName = @{ 0='Deleted'; 1='Tombstoned'; 2='Active'; 3='Active_InterOp'; 4='Initializing'; 5='NotStarted'; 6='Error'; 7='Unknown'; 8='Degraded'; 9='Failed' }
+            $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
+
+            foreach ($childSC in $childCodes) {
+                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_ReplicationLinkSummary -Filter `"Site2 = '$childSC'`"")
+                try {
+                    $link = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_ReplicationLinkSummary `
+                        -Filter "Site2 = '$childSC'" -ErrorAction Stop
+                    if (-not $link) {
+                        $results.Details.Add("WARN: No DRS replication link found for $parentSC -> $childSC")
+                    }
+                    else {
+                        $ls = [int]$link.LinkStatus
+                        $s1s2 = [int]$link.Site1ToSite2GlobalState
+                        $s2s1 = [int]$link.Site2ToSite1GlobalState
+                        $lsName = if ($statusName.ContainsKey($ls)) { $statusName[$ls] } else { "Unknown($ls)" }
+                        $s1Name = if ($statusName.ContainsKey($s1s2)) { $statusName[$s1s2] } else { "Unknown($s1s2)" }
+                        $s2Name = if ($statusName.ContainsKey($s2s1)) { $statusName[$s2s1] } else { "Unknown($s2s1)" }
+
+                        if ($ls -eq 2 -and $s1s2 -eq 2 -and $s2s1 -eq 2) {
+                            $results.Details.Add("OK: DRS link $parentSC -> $childSC is Active")
+                        }
+                        elseif ($ls -in $failedStates -or $s1s2 -in $failedStates -or $s2s1 -in $failedStates) {
+                            $results.Details.Add("WARN: DRS link $parentSC -> $childSC has failures: Link=$lsName, S1->S2=$s1Name, S2->S1=$s2Name")
+                        }
+                        else {
+                            $results.Details.Add("WARN: DRS link $parentSC -> $childSC is not yet Active: Link=$lsName, S1->S2=$s1Name, S2->S1=$s2Name")
+                        }
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not query DRS link $parentSC -> $childSC`: $($_.Exception.Message)")
+                }
+            }
+
+            return $results
+        }
+
+        $drsResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $drsScriptBlock -ArgumentList $siteCode, $childSiteCodes `
+            -DisplayName "Phase11-DRS-Test" -SuppressLog
+
+        $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "DRS-$siteCode" -Result $drsResult
+        if (-not $drsPassed) { $passed = $false }
+    }
+
     return $passed
 }
 
