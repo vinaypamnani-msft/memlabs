@@ -88,6 +88,28 @@ foreach ($result in $results) {
     }
 }
 
+# --- Also discover local SQL instances (SQL Express instances like CONFIGMGRSEC won't have AD SPNs) ---
+Write-Log "Checking for local SQL instances..."
+$localSqlServices = Get-Service -Name 'MSSQL$*' -ErrorAction SilentlyContinue
+foreach ($svc in $localSqlServices) {
+    if ($svc.Name -match '^MSSQL\$(.+)$') {
+        $instName = $Matches[1]
+        $localEntry = "$env:COMPUTERNAME\$instName"
+        if (-not $sqlServers.ContainsKey($localEntry)) {
+            $sqlServers[$localEntry] = "$env:COMPUTERNAME\$instName"
+            Write-Log "  Added local instance: $localEntry"
+        }
+    }
+}
+# Also check for default instance
+$defaultSql = Get-Service -Name 'MSSQLSERVER' -ErrorAction SilentlyContinue
+if ($defaultSql) {
+    if (-not $sqlServers.ContainsKey($env:COMPUTERNAME)) {
+        $sqlServers[$env:COMPUTERNAME] = $env:COMPUTERNAME
+        Write-Log "  Added local default instance: $env:COMPUTERNAME"
+    }
+}
+
 Write-Log "Total unique SQL servers discovered: $($sqlServers.Count)"
 if ($sqlServers.Count -eq 0) {
     Write-Log "No SQL servers found. Exiting."

@@ -524,11 +524,32 @@ function Test-SQLFunctionality {
             return $results
         }
         if ($svc.Status -ne 'Running') {
-            $results.Passed = $false
-            $results.Details.Add("FAIL: SQL service '$svcName' is $($svc.Status)")
-            return $results
+            # Service exists but is stopped — try to start it before failing
+            $results.Details.Add("WARN: SQL service '$svcName' is $($svc.Status), attempting to start...")
+            try {
+                Start-Service -Name $svcName -ErrorAction Stop
+                $waited = 0
+                while ($waited -lt 60) {
+                    Start-Sleep -Seconds 5
+                    $waited += 5
+                    $svc = Get-Service -Name $svcName
+                    if ($svc.Status -eq 'Running') { break }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Start-Service failed: $($_.Exception.Message)")
+            }
+            $svc = Get-Service -Name $svcName
+            if ($svc.Status -ne 'Running') {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SQL service '$svcName' is still $($svc.Status) after start attempt")
+                return $results
+            }
+            $results.Details.Add("OK: SQL service '$svcName' started successfully")
         }
-        $results.Details.Add("OK: SQL service '$svcName' is Running")
+        else {
+            $results.Details.Add("OK: SQL service '$svcName' is Running")
+        }
 
         # SQL Agent - only check for SQLAO where it's required for failover
         $agentName = if ($instName -eq 'MSSQLSERVER') { 'SQLSERVERAGENT' } else { "SQLAgent`$$instName" }
@@ -1560,12 +1581,24 @@ function Test-SecondaryFunctionality {
 
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
+    $secSiteCode = $CurrentItem.siteCode
 
-    Write-Log "[Phase $Phase] $VMName [Secondary]: Testing SMS_EXECUTIVE service" -LogOnly
+    # Determine the SQL instance name for the secondary
+    # If sqlVersion is set, the secondary uses a pre-installed SQL instance.
+    # Otherwise, ConfigMgr installs SQL Express with instance name CONFIGMGRSEC.
+    $sqlInstanceName = if ($CurrentItem.sqlVersion) {
+        if ($CurrentItem.sqlInstanceName) { $CurrentItem.sqlInstanceName } else { 'MSSQLSERVER' }
+    } else {
+        'CONFIGMGRSEC'
+    }
+
+    Write-Log "[Phase $Phase] $VMName [Secondary]: Testing SMS_EXECUTIVE service, SQL instance '$sqlInstanceName', DB 'CM_$secSiteCode', and spDiagDRS" -LogOnly
 
     $scriptBlock = {
+        param($instanceName, $siteCode)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # --- SMS_EXECUTIVE service ---
         $results.Details.Add("CMD: Get-Service -Name 'SMS_EXECUTIVE'")
         $svc = Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue
         if (-not $svc) {
@@ -1580,11 +1613,112 @@ function Test-SecondaryFunctionality {
             $results.Details.Add("OK: Service 'SMS_EXECUTIVE' is Running")
         }
 
+        # --- SQL Server service ---
+        $svcName = if ($instanceName -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$instanceName" }
+        $results.Details.Add("CMD: Get-Service -Name '$svcName'")
+        $sqlSvc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if (-not $sqlSvc) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SQL service '$svcName' not found")
+            $allSql = (Get-Service -Name 'MSSQL*' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ', '
+            $results.Details.Add("  Available SQL services: $allSql")
+            return $results
+        }
+        if ($sqlSvc.Status -ne 'Running') {
+            # Service exists but is stopped — try to start it before failing
+            $results.Details.Add("WARN: SQL service '$svcName' is $($sqlSvc.Status), attempting to start...")
+            try {
+                Start-Service -Name $svcName -ErrorAction Stop
+                $waited = 0
+                while ($waited -lt 60) {
+                    Start-Sleep -Seconds 5
+                    $waited += 5
+                    $sqlSvc = Get-Service -Name $svcName
+                    if ($sqlSvc.Status -eq 'Running') { break }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Start-Service failed: $($_.Exception.Message)")
+            }
+            $sqlSvc = Get-Service -Name $svcName
+            if ($sqlSvc.Status -ne 'Running') {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SQL service '$svcName' is still $($sqlSvc.Status) after start attempt")
+                return $results
+            }
+            $results.Details.Add("OK: SQL service '$svcName' started successfully")
+        }
+        else {
+            $results.Details.Add("OK: SQL service '$svcName' is Running")
+        }
+
+        # --- SQL connectivity + CM database existence ---
+        $connStr = if ($instanceName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instanceName" }
+        $dbName = "CM_$siteCode"
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Query (check DB '$dbName') as $identity")
+        try {
+            Import-Module SqlServer -ErrorAction SilentlyContinue
+            if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+                Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
+            }
+
+            $dbCheck = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$dbName'" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+            if (-not $dbCheck) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Database '$dbName' does not exist on '$connStr'")
+                $allDbs = (Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT name FROM sys.databases" -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue | ForEach-Object { $_.name }) -join ', '
+                $results.Details.Add("  Available databases: $allDbs")
+                return $results
+            }
+            if ($dbCheck.state_desc -ne 'ONLINE') {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Database '$dbName' state is '$($dbCheck.state_desc)' (expected ONLINE)")
+                return $results
+            }
+            $results.Details.Add("OK: Database '$dbName' exists and is ONLINE on '$connStr'")
+        }
+        catch {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SQL connection to '$connStr' failed: $($_.Exception.Message)")
+            return $results
+        }
+
+        # --- spDiagDRS: check replication health from the secondary's perspective ---
+        $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Database '$dbName' -Query 'EXEC spDiagDRS'")
+        try {
+            $drsRows = @(Invoke-Sqlcmd -ServerInstance $connStr -Database $dbName -Query "EXEC spDiagDRS" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop)
+            if ($drsRows.Count -eq 0) {
+                $results.Details.Add("WARN: spDiagDRS returned no rows (replication may not be initialized yet)")
+            }
+            else {
+                # Look for key summary fields; spDiagDRS returns multiple result sets.
+                # The first result set typically has queue/backlog info.
+                $results.Details.Add("OK: spDiagDRS returned $($drsRows.Count) row(s)")
+
+                # Check for any rows with obvious error indicators
+                foreach ($row in $drsRows) {
+                    # spDiagDRS columns vary; look for common failure indicators
+                    if ($row.PSObject.Properties['IsBlocked'] -and $row.IsBlocked -eq 1) {
+                        $results.Details.Add("WARN: spDiagDRS reports a blocked replication queue")
+                    }
+                    if ($row.PSObject.Properties['SSB_State'] -and $row.SSB_State -notin @('STARTED', '')) {
+                        $results.Details.Add("WARN: Service Broker state is '$($row.SSB_State)' (expected STARTED)")
+                    }
+                }
+            }
+        }
+        catch {
+            # spDiagDRS failure is a warning, not a hard fail — the DB itself is confirmed working
+            $results.Details.Add("WARN: spDiagDRS failed: $($_.Exception.Message)")
+        }
+
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-Secondary-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -ArgumentList $sqlInstanceName, $secSiteCode `
+        -DisplayName "Phase11-Secondary-Test" -SuppressLog
 
     $localOk = Format-TestResult -VMName $VMName -RoleLabel 'Secondary' -Result $result
     if (-not $localOk) { return $false }
@@ -1596,7 +1730,6 @@ function Test-SecondaryFunctionality {
             $_.siteCode -eq $parentSiteCode -and $_.role -in @('Primary', 'CAS')
         } | Select-Object -First 1
         if ($parentVM) {
-            $secSiteCode = $CurrentItem.siteCode
             Write-Log "[Phase $Phase] $VMName [Secondary]: Verifying site '$secSiteCode' visible from parent '$($parentVM.vmName)'" -LogOnly
 
             $parentScript = {

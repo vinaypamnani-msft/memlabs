@@ -122,8 +122,106 @@ $Install_Secondary = {
         $exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server" -AllSite
         if ($exists) {
             Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName)." -MachineName $SecondaryName
-            $installed = $true
-            $alreadyExisted = $true
+
+            # Verify the SQL instance and CM database actually exist on the secondary.
+            # If a previous install timed out mid-setup, the site record may exist in the
+            # parent's DB but the SQL Express instance was never created on the secondary.
+            $sqlInstance = if ($SecondaryVM.sqlVersion) {
+                if ($SecondaryVM.sqlInstanceName) { $SecondaryVM.sqlInstanceName } else { 'MSSQLSERVER' }
+            } else { 'CONFIGMGRSEC' }
+            $sqlSvcName = if ($sqlInstance -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$sqlInstance" }
+            $dbName = "CM_$secondarySiteCode"
+
+            Write-DscStatus "Verifying SQL instance '$sqlInstance' and database '$dbName' exist on $SecondaryName..." -MachineName $SecondaryName
+            $dbExists = $false
+            try {
+                $dbCheck = Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock {
+                    param($svcName, $instName, $db)
+                    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+                    if (-not $svc) {
+                        return @{ ServiceOk = $false; ServiceStatus = 'NotFound'; DbOk = $false }
+                    }
+                    if ($svc.Status -ne 'Running') {
+                        # Service exists but is stopped — try to start it before giving up
+                        try {
+                            Start-Service -Name $svcName -ErrorAction Stop
+                            # Wait up to 60s for it to reach Running
+                            $waited = 0
+                            while ($waited -lt 60) {
+                                Start-Sleep -Seconds 5
+                                $waited += 5
+                                $svc = Get-Service -Name $svcName
+                                if ($svc.Status -eq 'Running') { break }
+                            }
+                        }
+                        catch { }
+                        $svc = Get-Service -Name $svcName
+                        if ($svc.Status -ne 'Running') {
+                            return @{ ServiceOk = $false; ServiceStatus = $svc.Status; ServiceStartAttempted = $true; DbOk = $false }
+                        }
+                    }
+                    # SQL service is running — check the database
+                    try {
+                        Import-Module SqlServer -ErrorAction SilentlyContinue
+                        if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
+                            Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
+                        }
+                        $connStr = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
+                        $result = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$db'" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        return @{ ServiceOk = $true; ServiceStatus = 'Running'; DbOk = ($null -ne $result -and $result.state_desc -eq 'ONLINE'); DbState = $result.state_desc }
+                    }
+                    catch {
+                        return @{ ServiceOk = $true; ServiceStatus = 'Running'; DbOk = $false; Error = $_.Exception.Message }
+                    }
+                } -ArgumentList $sqlSvcName, $sqlInstance, $dbName -ErrorAction Stop
+
+                if ($dbCheck.ServiceOk -and $dbCheck.DbOk) {
+                    Write-DscStatus "Verified: SQL service '$sqlSvcName' is Running and database '$dbName' is ONLINE on $SecondaryName." -MachineName $SecondaryName
+                    $dbExists = $true
+                }
+                elseif (-not $dbCheck.ServiceOk) {
+                    $startNote = if ($dbCheck.ServiceStartAttempted) { ' (attempted start)' } else { '' }
+                    Write-DscStatus "SQL service '$sqlSvcName' is $($dbCheck.ServiceStatus)$startNote on $SecondaryName. The secondary site installation did not complete." -MachineName $SecondaryName
+                }
+                else {
+                    $errMsg = if ($dbCheck.Error) { " Error: $($dbCheck.Error)" } else { "" }
+                    Write-DscStatus "Database '$dbName' not found or not ONLINE on $SecondaryName (State: $($dbCheck.DbState)).$errMsg" -MachineName $SecondaryName
+                }
+            }
+            catch {
+                Write-DscStatus "Could not verify SQL on $SecondaryName`: $($_.Exception.Message)" -MachineName $SecondaryName
+            }
+
+            if ($dbExists) {
+                $installed = $true
+                $alreadyExisted = $true
+            }
+            else {
+                # The site record exists but the secondary isn't actually functional.
+                # Remove the broken secondary and let it re-install from scratch.
+                Write-DscStatus "Secondary site record exists but SQL/$dbName is missing. Removing broken secondary site '$secondarySiteCode' for re-installation..." -MachineName $SecondaryName
+                try {
+                    Remove-CMSecondarySite -SiteCode $secondarySiteCode -Action Delete -Force *>&1 | Write-StatusLogEntry
+                    # Wait for the removal to process
+                    $removeWait = 0
+                    while ($removeWait -lt 120) {
+                        Start-Sleep -Seconds 15
+                        $removeWait += 15
+                        $stillExists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server" -AllSite
+                        if (-not $stillExists) {
+                            Write-DscStatus "Broken secondary site '$secondarySiteCode' removed successfully after $($removeWait)s." -MachineName $SecondaryName
+                            break
+                        }
+                    }
+                    if ($stillExists) {
+                        Write-DscStatus "Secondary site '$secondarySiteCode' removal still in progress after $($removeWait)s. Proceeding with re-install attempt." -MachineName $SecondaryName
+                    }
+                }
+                catch {
+                    Write-DscStatus "Failed to remove broken secondary site '$secondarySiteCode': $_. Will attempt re-install anyway." -MachineName $SecondaryName
+                }
+                # $installed stays $false so the install block runs
+            }
         }
 
         $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
