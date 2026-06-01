@@ -678,11 +678,36 @@ function Wait-Phase {
 
         $global:JobProgressHistory = @()
 
+        # Track how many output objects we've already displayed per job so
+        # warnings/errors from running jobs appear in real-time instead of
+        # being deferred until the job completes.
+        $outputDisplayed = @{}
+
         $FailRetry = 0
         do {
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
+
+                # Surface warning/error output objects from running jobs immediately.
+                $streamSource = Get-JobStreamSource -Job $job
+                if ($streamSource -and $streamSource.Output) {
+                    $shown = if ($outputDisplayed.ContainsKey($job.Id)) { $outputDisplayed[$job.Id] } else { 0 }
+                    $total = $streamSource.Output.Count
+                    for ($oi = $shown; $oi -lt $total; $oi++) {
+                        $obj = $streamSource.Output[$oi]
+                        if ($obj -and $obj.LogLevel -ge 2 -and $obj.Text) {
+                            $line = $obj.Text.ToString().Trim()
+                            if ($obj.LogLevel -eq 3) {
+                                Write-RedX $line -ForegroundColor $obj.ForegroundColor
+                            }
+                            else {
+                                Write-OrangePoint $line -ForegroundColor $obj.ForegroundColor
+                            }
+                        }
+                    }
+                    $outputDisplayed[$job.Id] = $total
+                }
             }
 
             $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
@@ -803,15 +828,33 @@ function Wait-Phase {
                 }
                 #$logLevel = 1    # 0 = Verbose, 1 = Info, 2 = Warning, 3 = Error
                 $worstLogLevel = 0
+                # Items with LogLevel >= 2 that were already surfaced while the
+                # job was running should not be printed again.
+                $alreadyShown = if ($outputDisplayed.ContainsKey($job.Id)) { $outputDisplayed[$job.Id] } else { 0 }
+                $outputIndex = 0
                 foreach ($OutputObject in $jobOutput) {
+                    $outputIndex++
                     $line = $OutputObject.text
                     if (-not $line) {
                         continue
                     }
                     $line = $line.ToString().Trim()
+                    if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
+
+                    # Skip warning/error items already displayed while the job was running
+                    if ($outputIndex -le $alreadyShown -and $OutputObject.LogLevel -ge 2) {
+                        # DC failure still needs to stop the phase even if already displayed
+                        if ($OutputObject.LogLevel -eq 3 -and $phase -ge 2 -and $jobName.Contains("[DC]")) {
+                            Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
+                            try { $jobs | Stop-Job } catch {}
+                            $return.Failed++
+                            return $return
+                        }
+                        continue
+                    }
+
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                         if ($phase -ge 2 -and $jobName.Contains("[DC]")) {
                             Write-RedX "DC failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
@@ -824,7 +867,6 @@ function Wait-Phase {
                     }
                     elseif ($OutputObject.LogLevel -eq 2) {
                         Write-OrangePoint $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($OutputObject.LogLevel -gt $worstLogLevel) { $worstLogLevel = $OutputObject.LogLevel }
                     }
                     else {
                         Write-GreenCheck $line -ForegroundColor $OutputObject.ForegroundColor
