@@ -3017,7 +3017,7 @@ $global:Linux_Configure = {
         $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
 
         Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Applying Linux role configuration" -force
-        Write-Log "[Phase $Phase]: $($currentItem.vmName): Applying Linux role configuration" -OutputStream
+        Write-Log "[Phase $Phase]: $($currentItem.vmName): Applying Linux role configuration"
 
         $ok = Invoke-LinuxRoleConfiguration -Vm $currentItem -DeployConfig $deployConfig
         if (-not $ok) {
