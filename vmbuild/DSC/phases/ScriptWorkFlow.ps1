@@ -362,17 +362,11 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
 
     if ($containsSecondary) {
-        $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-        if ($Configuration.InstallSecondary.Status -ne "Completed") {
-            # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
-            Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
-            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
-            Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
-        }
-        else {
-            Write-DscStatus "$scenario Skipping InstallSecondarySiteServer.ps1 (already completed)"
-        }
+        # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
+        Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
+        $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
+        Set-Location $LogPath
+        . $ScriptFile $ConfigFilePath $LogPath
     }
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
@@ -455,17 +449,11 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
                
         if ($containsSecondary) {
-            $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-            if ($Configuration.InstallSecondary.Status -ne "Completed") {
-                # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
-                Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
-                $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
-                Set-Location $LogPath
-                . $ScriptFile $ConfigFilePath $LogPath
-            }
-            else {
-                Write-DscStatus "$scenario Skipping InstallSecondarySiteServer.ps1 (already completed)"
-            }
+            # Install Secondary Site Server. Run before InstallBoundaryGroups.ps1, so it can create proper BGs
+            Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
+            $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
+            Set-Location $LogPath
+            . $ScriptFile $ConfigFilePath $LogPath
         }
 
         Write-DscStatus "$scenario Running InstallRoles.ps1"

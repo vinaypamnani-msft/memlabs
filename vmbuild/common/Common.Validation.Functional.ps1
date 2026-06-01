@@ -57,6 +57,15 @@ function Test-VmFunctionality {
     # Determine which test function(s) to call based on role and installed features.
     $testsPassed = $true
 
+    # Ensure all SQL services on this VM are running before role-specific tests.
+    # If any Automatic-start SQL engine service is stopped, try to start it.
+    $hasLocalSql = ($CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) -or
+                   $role -in @('Secondary', 'SQLAO')
+    if ($hasLocalSql) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Ensuring SQL services are running"
+        $testsPassed = Repair-StoppedSQLServices -VMName $VMName -Domain $domain
+    }
+
     switch ($role) {
         'DC' {
             Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying AD DS / DNS / Netlogon"
@@ -490,6 +499,84 @@ function Test-DCFunctionality {
         -DisplayName "Phase11-$label-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
+}
+
+function Repair-StoppedSQLServices {
+    <#
+    .SYNOPSIS
+        Scans for all SQL Server engine services on a VM and starts any that are stopped.
+    .DESCRIPTION
+        Runs before role-specific tests to ensure SQL services are up. If a service
+        has Automatic start type but is Stopped, tries Start-Service with a 60s wait.
+        Disabled services are skipped. Returns $false only if a service cannot be started.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName`: Scanning for stopped SQL services" -LogOnly
+
+    $scriptBlock = {
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        # Find all SQL engine services (MSSQLSERVER for default, MSSQL$<instance> for named)
+        $sqlServices = @(Get-Service -Name 'MSSQL*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'MSSQLSERVER' -or $_.Name -match '^MSSQL\$' })
+
+        if ($sqlServices.Count -eq 0) {
+            $results.Details.Add("OK: No SQL Server engine services found on this VM")
+            return $results
+        }
+
+        foreach ($svc in $sqlServices) {
+            $results.Details.Add("CMD: Get-Service -Name '$($svc.Name)' (StartType=$($svc.StartType), Status=$($svc.Status))")
+
+            if ($svc.Status -eq 'Running') {
+                $results.Details.Add("OK: $($svc.Name) is Running")
+                continue
+            }
+
+            if ($svc.StartType -eq 'Disabled') {
+                $results.Details.Add("OK: $($svc.Name) is Disabled (skipping)")
+                continue
+            }
+
+            # Service is stopped but has Automatic/Manual start type — try to start it
+            $results.Details.Add("WARN: $($svc.Name) is $($svc.Status) (StartType=$($svc.StartType)), attempting Start-Service...")
+            try {
+                Start-Service -Name $svc.Name -ErrorAction Stop
+                $waited = 0
+                while ($waited -lt 60) {
+                    Start-Sleep -Seconds 5
+                    $waited += 5
+                    $refreshed = Get-Service -Name $svc.Name
+                    if ($refreshed.Status -eq 'Running') { break }
+                }
+                $refreshed = Get-Service -Name $svc.Name
+                if ($refreshed.Status -eq 'Running') {
+                    $results.Details.Add("OK: $($svc.Name) started successfully (took ~$($waited)s)")
+                }
+                else {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: $($svc.Name) is still $($refreshed.Status) after $($waited)s start attempt")
+                }
+            }
+            catch {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: Start-Service '$($svc.Name)' failed: $($_.Exception.Message)")
+            }
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-SQL-Service-Sweep" -SuppressLog
+
+    return (Format-TestResult -VMName $VMName -RoleLabel 'SQL-Services' -Result $result)
 }
 
 function Test-SQLFunctionality {
