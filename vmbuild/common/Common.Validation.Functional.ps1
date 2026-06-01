@@ -670,7 +670,12 @@ function Test-SQLFunctionality {
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
-            $qr = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+            # -TrustServerCertificate not available on older SQLPS (SQL Express)
+            $sqlParams = @{}
+            if ((Get-Command Invoke-Sqlcmd).Parameters.ContainsKey('TrustServerCertificate')) {
+                $sqlParams['TrustServerCertificate'] = $true
+            }
+            $qr = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 @sqlParams -ErrorAction Stop
             if ($qr.TestResult -eq 1) {
                 $results.Details.Add("OK: SQL query 'SELECT 1' succeeded on '$connStr'")
             }
@@ -1749,12 +1754,17 @@ function Test-SecondaryFunctionality {
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                 Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
             }
+            # -TrustServerCertificate not available on older SQLPS (SQL Express)
+            $sqlParams = @{}
+            if ((Get-Command Invoke-Sqlcmd).Parameters.ContainsKey('TrustServerCertificate')) {
+                $sqlParams['TrustServerCertificate'] = $true
+            }
 
-            $dbCheck = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$dbName'" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+            $dbCheck = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$dbName'" -QueryTimeout 30 @sqlParams -ErrorAction Stop
             if (-not $dbCheck) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Database '$dbName' does not exist on '$connStr'")
-                $allDbs = (Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT name FROM sys.databases" -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue | ForEach-Object { $_.name }) -join ', '
+                $allDbs = (Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT name FROM sys.databases" -QueryTimeout 30 @sqlParams -ErrorAction SilentlyContinue | ForEach-Object { $_.name }) -join ', '
                 $results.Details.Add("  Available databases: $allDbs")
                 return $results
             }
@@ -1774,7 +1784,7 @@ function Test-SecondaryFunctionality {
         # --- spDiagDRS: check replication health from the secondary's perspective ---
         $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$connStr' -Database '$dbName' -Query 'EXEC spDiagDRS'")
         try {
-            $drsRows = @(Invoke-Sqlcmd -ServerInstance $connStr -Database $dbName -Query "EXEC spDiagDRS" -QueryTimeout 60 -TrustServerCertificate -ErrorAction Stop)
+            $drsRows = @(Invoke-Sqlcmd -ServerInstance $connStr -Database $dbName -Query "EXEC spDiagDRS" -QueryTimeout 60 @sqlParams -ErrorAction Stop)
             if ($drsRows.Count -eq 0) {
                 $results.Details.Add("WARN: spDiagDRS returned no rows (replication may not be initialized yet)")
             }

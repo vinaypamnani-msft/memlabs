@@ -167,8 +167,13 @@ $Install_Secondary = {
                         if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
                             Import-Module SQLPS -DisableNameChecking -ErrorAction SilentlyContinue
                         }
+                        # -TrustServerCertificate not available on older SQLPS (SQL Express)
+                        $sqlParams = @{}
+                        if ((Get-Command Invoke-Sqlcmd).Parameters.ContainsKey('TrustServerCertificate')) {
+                            $sqlParams['TrustServerCertificate'] = $true
+                        }
                         $connStr = if ($instName -eq 'MSSQLSERVER') { 'localhost' } else { "localhost\$instName" }
-                        $result = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$db'" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $result = Invoke-Sqlcmd -ServerInstance $connStr -Query "SELECT state_desc FROM sys.databases WHERE name = '$db'" -QueryTimeout 30 @sqlParams -ErrorAction Stop
                         return @{ ServiceOk = $true; ServiceStatus = 'Running'; DbOk = ($null -ne $result -and $result.state_desc -eq 'ONLINE'); DbState = $result.state_desc }
                     }
                     catch {
