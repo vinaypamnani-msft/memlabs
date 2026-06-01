@@ -369,6 +369,12 @@ $Install_Secondary = {
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryName
 
+        # ReplicationLinkStatus enum: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
+        $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
+        $failedSinceTime = $null
+        $reinitAttempted = $false
+        $reinitCooldownMin = 10
+
         $drsStartTime = Get-Date
         $drsTimeoutSec = 90 * 60  # 90 minutes
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
@@ -377,6 +383,45 @@ $Install_Secondary = {
                 Write-DscStatus "DRS replication wait timed out after $([int]($drsElapsed/60))m. LinkStatus=$($replicationStatus.LinkStatus), S1->S2=$($replicationStatus.Site1ToSite2GlobalState), S2->S1=$($replicationStatus.Site2ToSite1GlobalState). Proceeding anyway." -MachineName $SecondaryName
                 break
             }
+
+            # Detect failed/error/degraded link and attempt reinit after 10 minutes
+            $linkInFailedState = $replicationStatus.LinkStatus -in $failedStates -or $replicationStatus.Site1ToSite2GlobalState -in $failedStates -or $replicationStatus.Site2ToSite1GlobalState -in $failedStates
+            if ($linkInFailedState) {
+                if (-not $failedSinceTime) {
+                    $failedSinceTime = Get-Date
+                    Write-DscStatus "DRS link is in a failed state (Link=$($replicationStatus.LinkStatus), S1->S2=$($replicationStatus.Site1ToSite2GlobalState), S2->S1=$($replicationStatus.Site2ToSite1GlobalState)). Will attempt reinit after $reinitCooldownMin minutes." -MachineName $SecondaryName
+                }
+                $failedMin = [int]((Get-Date) - $failedSinceTime).TotalMinutes
+                if ($failedMin -ge $reinitCooldownMin -and -not $reinitAttempted) {
+                    $reinitAttempted = $true
+                    Write-DscStatus "DRS link has been failed for $failedMin minutes. Attempting reinitialization via SMS_ReplicationGroup.InitializeData..." -MachineName $SecondaryName
+                    try {
+                        $failedGroups = Get-WmiObject -Namespace "root\sms\site_$SiteCode" -Class SMS_ReplicationGroup -Filter "SiteCode1 = '$SiteCode' AND SiteCode2 = '$secondarySiteCode' AND Status != 2"
+                        if ($failedGroups) {
+                            foreach ($group in $failedGroups) {
+                                Write-DscStatus "Reinitializing replication group '$($group.ReplicationGroup)' (ID=$($group.ID))..." -MachineName $SecondaryName
+                                $result = ([wmiclass]"\\.\root\sms\site_$($SiteCode):SMS_ReplicationGroup").InitializeData($group.ID, $SiteCode, $secondarySiteCode)
+                                Write-DscStatus "InitializeData result for group '$($group.ReplicationGroup)': ReturnValue=$($result.ReturnValue)" -MachineName $SecondaryName
+                            }
+                        }
+                        else {
+                            Write-DscStatus "No failed replication groups found via WMI. Link may recover on its own." -MachineName $SecondaryName
+                        }
+                    }
+                    catch {
+                        Write-DscStatus "Failed to reinitialize DRS link: $_. Will continue waiting." -MachineName $SecondaryName
+                    }
+                }
+            }
+            else {
+                # Link is no longer in a failed state (e.g. moved to Initializing); reset tracking
+                if ($failedSinceTime) {
+                    Write-DscStatus "DRS link is no longer in a failed state (Link=$($replicationStatus.LinkStatus)). Continuing to wait for Active." -MachineName $SecondaryName
+                    $failedSinceTime = $null
+                    $reinitAttempted = $false
+                }
+            }
+
             Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)% (Link=$($replicationStatus.LinkStatus), S1->S2=$($replicationStatus.Site1ToSite2GlobalState), S2->S1=$($replicationStatus.Site2ToSite1GlobalState))" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
             Start-Sleep -Seconds $sleepSeconds
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
