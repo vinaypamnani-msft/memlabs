@@ -1159,6 +1159,22 @@ $global:VM_Config = {
         # Verify again that VM is connectable, in case DSC caused a reboot
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest:$alreadyCopiedDSC
         if (-not $connected) {
+            # AADClient: if the VM is running but unreachable, it was already
+            # sysprepped on a prior run and is sitting at OOBE with no local
+            # accounts. PSDirect can't connect.  Mark complete so subsequent
+            # re-runs skip it via the oobeComplete check above.
+            if ($currentItem.role -eq "AADClient") {
+                $vmState = (Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue).State
+                if ($vmState -eq "Running") {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient running but not connectable (likely at OOBE from a prior sysprep). Marking complete." -OutputStream -Success
+                    $note = Get-VMNote -VMName $currentItem.vmName
+                    if ($note) {
+                        $note | Add-Member -MemberType NoteProperty -Name "oobeComplete" -Value $true -Force
+                        Set-VMNote -VMName $currentItem.vmName -vmNote $note
+                    }
+                    return
+                }
+            }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return
         }

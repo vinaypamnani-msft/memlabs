@@ -312,8 +312,8 @@ function Convert-RGBtoAnsi {
     }
 }
 
-# OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal
-$script:_hyperlinkSupport = $null -ne $env:WT_SESSION
+# OSC 8 hyperlink support — makes URLs and file paths ctrl+clickable in Windows Terminal / VS Code
+$script:_hyperlinkSupport = ($null -ne $env:WT_SESSION) -or ($env:TERM_PROGRAM -eq 'vscode')
 $script:_hyperlinkEsc = [char]0x1B
 $script:_hyperlinkPattern = '(https?://[^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]]|[A-Za-z]:\\[^\s<>"\x1B]{2,}[^\s<>"\x1B.,;:!?\)\]]|\\\\[A-Za-z][^\s<>"\x1B]+[^\s<>"\x1B.,;:!?\)\]])'
 
