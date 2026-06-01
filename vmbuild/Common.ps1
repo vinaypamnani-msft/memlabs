@@ -3840,6 +3840,12 @@ function Invoke-VmCommand {
                     finally {
                         $ProgressPreference = $savedProgressPref
                     }
+                    # Overwrite any leaked Invoke-Command progress with the clean DisplayName.
+                    # $ProgressPreference suppression doesn't reliably prevent PS Direct
+                    # sessions from adding raw-scriptblock progress records to the job stream.
+                    if (-not $SuppressLog) {
+                        Write-Progress2 "$VmName`: $DisplayName" -Status "Done" -force
+                    }
                 }
             }
             catch {

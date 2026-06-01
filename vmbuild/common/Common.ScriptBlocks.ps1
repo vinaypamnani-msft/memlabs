@@ -896,11 +896,11 @@ $global:VM_Create = {
                 Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
                 # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force; New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create SQL directories" -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force; New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
 
                 # Copy files from DVD
                 Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL files from CD-ROM" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
@@ -954,11 +954,11 @@ $global:VM_Create = {
 
                     }
                     # Create CM Dir inside VM
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create CM directory" -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
 
                     # Copy files from DVD
                     Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Copying from DVD" -force
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM Files" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM files from CD-ROM" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
