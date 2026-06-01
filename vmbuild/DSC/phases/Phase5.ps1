@@ -250,25 +250,6 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
-        $dcNode1 = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-        WriteStatus DisableClusterNicDns {
-            DependsOn = $nextDepend
-            Status    = "Disabling DNS registration on cluster NIC and removing stale A records"
-        }
-
-        DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet        = '10.250.250.'
-            DomainName           = $DomainName
-            DCName               = $dcNode1
-            ClusterName          = $thisVM.ClusterName
-            ClusterIPAddress     = $thisVM.thisParams.SQLAO.ClusterIPAddress
-            ListenerName         = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
-            ListenerIPAddress    = $thisVM.thisParams.SQLAO.AGIPAddress
-            DependsOn            = $nextDepend
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
-
         WriteStatus CreateCluster {
             DependsOn = $nextDepend
             Status    = "Creating Cluster $($thisVM.ClusterName) on $($thisVM.thisParams.SQLAO.ClusterIPAddress)"
@@ -709,26 +690,7 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
-
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-
-        WriteStatus DisableClusterNicDns {
-            DependsOn = $nextDepend
-            Status    = "Disabling DNS registration on cluster NIC and removing stale A records"
-        }
-
-        DisableClusterNicDnsRegistration DisableClusterNicDns {
-            ClusterSubnet        = '10.250.250.'
-            DomainName           = $DomainName
-            DCName               = $DC
-            ClusterName          = $Node1VM.ClusterName
-            ClusterIPAddress     = $Node1VM.thisParams.SQLAO.ClusterIPAddress
-            ListenerName         = $Node1VM.thisParams.SQLAO.AlwaysOnListenerName
-            ListenerIPAddress    = $Node1VM.thisParams.SQLAO.AGIPAddress
-            DependsOn            = $nextDepend
-            PsDscRunAsCredential = $Admincreds
-        }
-        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterNicDns'
 
         WriteStatus WaitForDC {
             Status    = "Waiting for $DC to Complete [ADGroup]SQLAOGroup$node1"
