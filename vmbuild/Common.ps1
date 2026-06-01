@@ -337,6 +337,10 @@ function Get-LogBufferEntry {
 
 function Invoke-LogRotateIfNeeded {
     param([string]$Path)
+    # Only rotate the base VMBuild.log (menu log). Domain-specific deploy
+    # logs (VMBuild.<domain>.log) get a fresh file per deployment via the
+    # timestamp-rename in New-Lab.ps1 and should never be split mid-build.
+    if ($Path -notmatch '[/\\]VMBuild\.log$') { return }
     try {
         $entry = $global:LogBuffers[$Path]
         if ($entry) {
