@@ -2746,6 +2746,7 @@ $global:VM_Config = {
                                 # Read the last few lines and skip telemetry noise
                                 $tailLines = @(Get-Content $logDirs[0].FullName -Tail 5 -ErrorAction SilentlyContinue)
                                 for ($i = $tailLines.Count - 1; $i -ge 0; $i--) {
+                                    if ([string]::IsNullOrWhiteSpace($tailLines[$i])) { continue }
                                     if ($tailLines[$i] -notmatch 'telemetry|usage and performance data') {
                                         $last = $tailLines[$i]; break
                                     }
