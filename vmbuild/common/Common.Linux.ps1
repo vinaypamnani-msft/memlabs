@@ -137,16 +137,27 @@ public class MemlabsIsoFile {
 '@
     }
 
-    $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+    # IMAPI2FS COM object is not thread-safe; parallel Linux VM creation
+    # (runspaces) can collide on New-Object, producing 0xC0AAB138. Use a
+    # named mutex so only one thread builds an ISO at a time.
+    $mutex = [System.Threading.Mutex]::new($false, 'Global\MemlabsImapi2fsLock')
     try {
-        $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
-        $fsi.VolumeName = $VolumeLabel
-        $fsi.Root.AddTree($SourceDir, $false)
-        $result = $fsi.CreateResultImage()
-        [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+        $null = $mutex.WaitOne()
+        $fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+        try {
+            $fsi.FileSystemsToCreate = 3   # ISO9660 (1) | Joliet (2)
+            $fsi.VolumeName = $VolumeLabel
+            $fsi.Root.AddTree($SourceDir, $false)
+            $result = $fsi.CreateResultImage()
+            [MemlabsIsoFile]::Create($OutputIsoPath, $result.ImageStream, $result.BlockSize, $result.TotalBlocks)
+        }
+        finally {
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
+        }
     }
     finally {
-        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($fsi) | Out-Null
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
     }
 }
 
