@@ -204,29 +204,67 @@ $Install_Secondary = {
             }
             else {
                 # The site record exists but the secondary isn't actually functional.
-                # Remove the broken secondary and let it re-install from scratch.
-                Write-DscStatus "Secondary site record exists but SQL/$dbName is missing. Removing broken secondary site '$secondarySiteCode' for re-installation..." -MachineName $SecondaryName
+                # Never remove+reinstall — use CM's "Recover Secondary Site" which
+                # reinstalls CM, reinstalls/repairs SQL Express, and syncs a new DB
+                # from the parent primary.  This avoids:
+                #   - "site system role already installed" errors on reinstall
+                #   - AD prereq failures (System Management container permissions)
+                #
+                # The console triggers recovery by updating SMS_SCI_SiteDefinition:
+                #   "Requested Status" Value1=2 (Pending), Value2=1011 (recover from primary)
+                #   "PreReq Check" Value=1 (run prereq)
+                Write-DscStatus "Secondary site record exists but SQL/$dbName is missing. Triggering recovery for '$secondarySiteCode' on $SecondaryName..." -MachineName $SecondaryName
                 try {
-                    Remove-CMSecondarySite -SiteCode $secondarySiteCode -Action Delete -Force *>&1 | Write-StatusLogEntry
-                    # Wait for the removal to process
-                    $removeWait = 0
-                    while ($removeWait -lt 120) {
-                        Start-Sleep -Seconds 15
-                        $removeWait += 15
-                        $stillExists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server" -AllSite
-                        if (-not $stillExists) {
-                            Write-DscStatus "Broken secondary site '$secondarySiteCode' removed successfully after $($removeWait)s." -MachineName $SecondaryName
-                            break
+                    $siteDefPath = "SMS_SCI_SiteDefinition.FileType=2,ItemName=`"Site Definition`",ItemType=`"Site Definition`",SiteCode=`"$secondarySiteCode`""
+                    $siteDef = Get-WmiObject -Namespace $smsProvider.NamespacePath -ComputerName $smsProvider.FQDN -Query "SELECT * FROM SMS_SCI_SiteDefinition WHERE FileType=2 AND SiteCode='$secondarySiteCode'" -ErrorAction Stop
+                    if (-not $siteDef) {
+                        Write-DscStatus "Could not find SMS_SCI_SiteDefinition for site '$secondarySiteCode'. Cannot trigger recovery." -Failure -MachineName $SecondaryName
+                        continue
+                    }
+
+                    # Decode embedded properties
+                    $props = $siteDef.Props
+                    $foundRequestedStatus = $false
+                    $foundPreReqCheck = $false
+                    for ($p = 0; $p -lt $props.Count; $p++) {
+                        if ($props[$p].PropertyName -eq 'Requested Status') {
+                            $props[$p].Value1 = '2'     # Pending
+                            $props[$p].Value2 = '1011'  # Recover from primary
+                            $foundRequestedStatus = $true
+                        }
+                        if ($props[$p].PropertyName -eq 'PreReq Check') {
+                            $props[$p].Value = 1        # Need to run prereq
+                            $props[$p].Value1 = ''
+                            $props[$p].Value2 = ''
+                            $foundPreReqCheck = $true
                         }
                     }
-                    if ($stillExists) {
-                        Write-DscStatus "Secondary site '$secondarySiteCode' removal still in progress after $($removeWait)s. Proceeding with re-install attempt." -MachineName $SecondaryName
+
+                    if (-not $foundRequestedStatus) {
+                        $newProp = ([wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_EmbeddedProperty").CreateInstance()
+                        $newProp.PropertyName = 'Requested Status'
+                        $newProp.Value1 = '2'     # Pending
+                        $newProp.Value2 = '1011'  # Recover from primary
+                        $props += $newProp
                     }
+                    if (-not $foundPreReqCheck) {
+                        $newProp = ([wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_EmbeddedProperty").CreateInstance()
+                        $newProp.PropertyName = 'PreReq Check'
+                        $newProp.Value = 1        # Need to run prereq
+                        $newProp.Value1 = ''
+                        $newProp.Value2 = ''
+                        $props += $newProp
+                    }
+
+                    $siteDef.Props = $props
+                    $siteDef.Put() | Out-Null
+                    Write-DscStatus "Recovery initiated for secondary site '$secondarySiteCode'. CM will reinstall the site, SQL, and sync a new DB from parent." -MachineName $SecondaryName
+                    $installed = $true   # let the monitoring loop track progress
                 }
                 catch {
-                    Write-DscStatus "Failed to remove broken secondary site '$secondarySiteCode': $_. Will attempt re-install anyway." -MachineName $SecondaryName
+                    Write-DscStatus "Failed to trigger recovery for secondary site '$secondarySiteCode': $_" -Failure -MachineName $SecondaryName
+                    continue
                 }
-                # $installed stays $false so the install block runs
             }
         }
 
