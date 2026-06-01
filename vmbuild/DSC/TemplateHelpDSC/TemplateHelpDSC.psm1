@@ -5464,89 +5464,14 @@ class DisableClusterNicDnsRegistration {
             Write-Verbose "Could not clean stale hostname DNS records: $_"
         }
 
-        # 3. Ensure cluster name DNS A record exists.
-        #    Use config properties directly — this resource runs before xCluster
-        #    creates the cluster, so cluster cmdlets are not available. On re-runs
-        #    the cluster exists but cmdlets can be flaky under DSC/LCM context.
-        #    Pre-creating the A record is harmless; the cluster will adopt it.
-        $cName = $this.ClusterName
-        $cIP   = $this.ClusterIPAddress
-        if ($cIP -and $cIP -match '/') { $cIP = $cIP.Split('/')[0] }
-
-        if ($cName -and $cIP) {
-            $this.EnsureDnsRecord($_domain, $_dc, $cName, $cIP, 'cluster')
-        }
-
-        # 4. Ensure listener DNS A record exists (same approach).
-        $lName = $this.ListenerName
-        $lIP   = $this.ListenerIPAddress
-        if ($lIP -and $lIP -match '/') { $lIP = $lIP.Split('/')[0] }
-
-        if ($lName -and $lIP) {
-            $this.EnsureDnsRecord($_domain, $_dc, $lName, $lIP, 'listener')
-        }
-
-        # 5. Flush DNS cache and verify cluster name reachability.
+        # 3. Flush DNS cache so stale records don't interfere.
+        #    Do NOT pre-create cluster or listener DNS A records here.
+        #    The Cluster Name resource and AG listener manage their own DNS
+        #    registration on whichever network has DNS registration enabled
+        #    (the domain adapter). Pre-creating records on the cluster-subnet
+        #    IP caused OpenCluster() failures because the Cluster Name resource
+        #    serves on the domain-network IP, not the cluster-subnet IP.
         Clear-DnsClientCache -ErrorAction SilentlyContinue
-
-        if ($cName -and $cIP) {
-            try {
-                $rpc = Test-NetConnection -ComputerName $cName -Port 135 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
-                if ($rpc.TcpTestSucceeded) {
-                    Write-Status "Verified: RPC port 135 reachable on $cName ($($rpc.RemoteAddress))"
-                }
-                else {
-                    Write-Status "INFO: RPC port 135 not yet reachable on $cName (cluster may not exist yet)"
-                }
-            }
-            catch { }
-        }
-    }
-
-    # Helper: ensure a DNS A record exists with the correct IP, verify after
-    # add, and retry up to 3 times if verification fails.
-    [void] EnsureDnsRecord([string]$zone, [string]$dc, [string]$name, [string]$ip, [string]$label) {
-        $maxRetries = 3
-        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
-            try {
-                $existing = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-
-                # Remove any A records that don't match the desired IP.
-                foreach ($rec in $existing) {
-                    $recIP = $rec.RecordData.IPv4Address.ToString()
-                    if ($recIP -ne $ip) {
-                        Write-Status "Removing stale $label DNS A record $name -> $recIP (expected $ip)"
-                        Remove-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -RecordData $recIP -ComputerName $dc -Force -ErrorAction Stop
-                    }
-                }
-
-                # Add the record only if it doesn't already exist.
-                $correct = $existing | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $ip }
-                if (-not $correct) {
-                    Write-Status "Adding $label DNS A record $name -> $ip (attempt $attempt/$maxRetries)"
-                    Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ComputerName $dc -ErrorAction Stop
-                }
-
-                # Verify the record exists.
-                Start-Sleep -Milliseconds 500
-                $verify = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                $match = $verify | Where-Object { $_.RecordData.IPv4Address.ToString() -eq $ip }
-                if ($match) {
-                    Write-Status "Verified $label DNS A record $name -> $ip"
-                    return
-                }
-
-                Write-Status "WARNING: $label DNS verification failed for $name -> $ip (attempt $attempt/$maxRetries)"
-            }
-            catch {
-                Write-Status "WARNING: $label DNS error for $name -> $ip (attempt $attempt/$maxRetries): $_"
-            }
-
-            if ($attempt -lt $maxRetries) {
-                Start-Sleep -Seconds 2
-            }
-        }
-        Write-Status "ERROR: Failed to ensure $label DNS A record $name -> $ip after $maxRetries attempts"
     }
 
     [bool] Test() {
