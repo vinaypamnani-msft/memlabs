@@ -883,7 +883,7 @@ function Wait-Phase {
             }
 
             # Sleep
-            Start-Sleep -Milliseconds 250
+            Start-Sleep -Milliseconds 500
 
         } until (($runningJobs.Count -eq 0) -and ($failedJobs.Count -eq 0))
 
