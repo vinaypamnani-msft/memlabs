@@ -2479,33 +2479,39 @@ exit 1
     return $true
 }
 
-function Get-LinuxXrdpBashScript {
+function Get-LinuxXrdpPackagesBashScript {
     <#
     .SYNOPSIS
-        Bash body that installs xrdp + xfce4 + Firefox (Mozilla deb) and wires
-        the default session. Idempotent: re-running after success is fast.
-
-    .DESCRIPTION
-        This used to live in the cloud-init seed ISO as a fragile sequence of
-        YAML runcmd strings (each had to survive PS / YAML / bash quoting and
-        a `Package: *` line tripped PyYAML's alias parser). Moved out of
-        cloud-init into a Phase 3 SSH-driven step (Invoke-LinuxRoleConfiguration)
-        so we can ship the whole thing as one base64-encoded bash file and stop
-        fighting four nested quoting layers.
-
-        Returns: [string] bash source. Assumes it will be run as root.
+        Bash body that installs xrdp + xfce4 desktop packages.
     #>
     [CmdletBinding()]
     param ()
 
     return @'
-echo "[memlabs-rdp] start: $(date -Is)"
+echo "[memlabs-rdp-packages] start: $(date -Is)"
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
 apt-get install -y \
     xrdp xorgxrdp xfce4 xfce4-goodies dbus-x11 xorg \
     apt-transport-https ca-certificates gnupg wget
+
+echo "[memlabs-rdp-packages] done: $(date -Is)"
+'@
+}
+
+function Get-LinuxXrdpConfigBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that configures xrdp sessions, xfce4 panel defaults,
+        disables screen lock/screensaver, and enables xrdp + firewall.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    return @'
+echo "[memlabs-rdp-config] start: $(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
 
 # xrdp drops privs to 'xrdp'; it needs to read the snakeoil key to TLS the handshake.
 adduser xrdp ssl-cert || true
@@ -2570,6 +2576,23 @@ ufw allow 3389/tcp || true
 systemctl enable --now xrdp || true
 systemctl enable --now xrdp-sesman || true
 
+echo "[memlabs-rdp-config] done: $(date -Is)"
+'@
+}
+
+function Get-LinuxFirefoxBashScript {
+    <#
+    .SYNOPSIS
+        Bash body that installs Firefox from Mozilla's deb repo (not the
+        Ubuntu snap shim) and wires it as the system default browser.
+    #>
+    [CmdletBinding()]
+    param ()
+
+    return @'
+echo "[memlabs-firefox] start: $(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
+
 # Firefox: the Ubuntu 'firefox' package is a snap shim that takes 30s+ to
 # first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
 # it over the transitional snap stub.
@@ -2599,7 +2622,7 @@ x-scheme-handler/https=firefox.desktop
 text/html=firefox.desktop
 MIMEEOF
 
-echo "[memlabs-rdp] done: $(date -Is)"
+echo "[memlabs-firefox] done: $(date -Is)"
 '@
 }
 
@@ -2769,7 +2792,7 @@ function Invoke-LinuxRoleConfiguration {
 
     .DESCRIPTION
         Decides which bash modules apply based on VM flags:
-          - enableRDP=true       -> Get-LinuxXrdpBashScript
+          - enableRDP=true       -> xrdp packages, xrdp config, Firefox
           - role='LinuxClient'   -> Get-LinuxClientBashScript
           - joinDomain=true      -> Get-LinuxRealmJoinBashScript
         Concatenates the modules into a single bash script, base64-encodes it,
@@ -2796,11 +2819,25 @@ function Invoke-LinuxRoleConfiguration {
 
     if ($Vm.PSObject.Properties.Name -contains 'enableRDP' -and [bool]$Vm.enableRDP) {
         $ops.Add([pscustomobject]@{
-            Name       = 'enableRDP'
-            Label      = 'Installing XRDP + xfce4 + Firefox'
-            Script     = (Get-LinuxXrdpBashScript)
+            Name       = 'xrdpPackages'
+            Label      = 'Installing XRDP + xfce4 packages'
+            Script     = (Get-LinuxXrdpPackagesBashScript)
             TimeoutSec = 1800
-            Tag        = 'memlabs-xrdp'
+            Tag        = 'memlabs-xrdp-packages'
+        })
+        $ops.Add([pscustomobject]@{
+            Name       = 'xrdpConfig'
+            Label      = 'Configuring XRDP + xfce4 desktop'
+            Script     = (Get-LinuxXrdpConfigBashScript)
+            TimeoutSec = 300
+            Tag        = 'memlabs-xrdp-config'
+        })
+        $ops.Add([pscustomobject]@{
+            Name       = 'firefox'
+            Label      = 'Installing Firefox (Mozilla deb)'
+            Script     = (Get-LinuxFirefoxBashScript)
+            TimeoutSec = 600
+            Tag        = 'memlabs-firefox'
         })
     }
 
