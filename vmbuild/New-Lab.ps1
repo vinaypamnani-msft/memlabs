@@ -622,6 +622,24 @@ try {
         Write-Log -verbose "Could not rename existing $($Common.LogPath)"
     }
 
+    # Banner: stamp the fresh log with session details and a copy of the config
+    # so the deployment is self-contained even if the JSON on disk is removed.
+    Write-Log "========================================" -LogOnly
+    Write-Log "Deployment log started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -LogOnly
+    Write-Log "Configuration: $Configuration" -LogOnly
+    Write-Log "ConfigFile: $($Global:configfile)" -LogOnly
+    Write-Log "Domain: $domainName" -LogOnly
+    Write-Log "MemLabs Version: $($Common.MemLabsVersion)" -LogOnly
+    Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
+    Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
+    Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
+    Write-Log "----------------------------------------" -LogOnly
+    Write-Log "Deploy config JSON:" -LogOnly
+    foreach ($line in ($deployConfig | ConvertTo-Json -Depth 10) -split "`n") {
+        Write-Log $line.TrimEnd() -LogOnly
+    }
+    Write-Log "========================================" -LogOnly
+    try { Flush-LogBuffer -Path $Common.LogPath } catch { }
 
     if ($Restore) {
         Write-Log "### RESTORE SNAPSHOT (Configuration '$Configuration') [MemLabs Version $($Common.MemLabsVersion)]" -Activity
