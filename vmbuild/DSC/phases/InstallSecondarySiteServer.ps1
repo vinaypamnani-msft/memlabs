@@ -116,15 +116,14 @@ $Install_Secondary = {
         $secondarySiteCode = $SecondaryVM.siteCode
         $parentSiteCode = $SecondaryVM.parentSiteCode
         $installed = $false
+        $alreadyExisted = $false
 
         # Check if site already exists
         $exists = Get-CMSiteRole -SiteSystemServerName $secondaryFQDN -RoleName "SMS Site Server" -AllSite
         if ($exists) {
             Write-DscStatus "Secondary Site is already installed on $($SecondaryVM.vmName)." -MachineName $SecondaryName
-            #sleep will occur in DRS Monitoring phase
-            #Start-Sleep -Seconds 10 # Force sleep for status to update on host.
             $installed = $true
-            #continue
+            $alreadyExisted = $true
         }
 
         $SMSInstallDir = "C:\Program Files\Microsoft Configuration Manager"
@@ -366,17 +365,27 @@ $Install_Secondary = {
         }
     }
     $sleepSeconds = 30
-    if ($installed) {
+    if ($installed -and -not $alreadyExisted) {
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryName
 
+        $drsStartTime = Get-Date
+        $drsTimeoutSec = 90 * 60  # 90 minutes
         while ($replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 ) {
-            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
+            $drsElapsed = [int]((Get-Date) - $drsStartTime).TotalSeconds
+            if ($drsElapsed -ge $drsTimeoutSec) {
+                Write-DscStatus "DRS replication wait timed out after $([int]($drsElapsed/60))m. LinkStatus=$($replicationStatus.LinkStatus), S1->S2=$($replicationStatus.Site1ToSite2GlobalState), S2->S1=$($replicationStatus.Site2ToSite1GlobalState). Proceeding anyway." -MachineName $SecondaryName
+                break
+            }
+            Write-DscStatus "Waiting for Data Replication. $SiteCode -> $secondarySiteCode global data init percentage: $($replicationStatus.GlobalInitPercentage)% (Link=$($replicationStatus.LinkStatus), S1->S2=$($replicationStatus.Site1ToSite2GlobalState), S2->S1=$($replicationStatus.Site2ToSite1GlobalState))" -RetrySeconds $sleepSeconds -MachineName $SecondaryName
             Start-Sleep -Seconds $sleepSeconds
             $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         }
 
         Write-DscStatus "Secondary installation complete. Replication link is 'Active'." -MachineName $SecondaryName
+    }
+    elseif ($alreadyExisted) {
+        Write-DscStatus "Secondary site was already installed. Skipping replication wait." -MachineName $SecondaryName
     }
 
 }
