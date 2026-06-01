@@ -3284,8 +3284,8 @@ function Test-InternetClientFunctionality {
             }
             else {
                 # InternetClient is a workgroup machine — AD auto-enrollment GPO doesn't
-                # apply, so the cert is expected to be missing until manual provisioning.
-                $results.Details.Add("WARN: No valid client-auth cert in LocalMachine\My (PKI is enabled; workgroup machines cannot auto-enroll)")
+                # apply, so no cert is expected unless manually provisioned.
+                $results.Details.Add("OK: No client-auth cert in LocalMachine\My (expected for workgroup machines)")
             }
         }
 
