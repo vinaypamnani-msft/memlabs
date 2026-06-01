@@ -1206,28 +1206,40 @@ function Get-LinuxVmWaitTimeout {
         Return the SSH-ready timeout (in seconds) for a Linux VM.
 
     .DESCRIPTION
-        Returns a flat 900s (15 min). SSH-ready means sshd is listening
-        and the IP is published via KVP (or matches the expected static
-        IP for the role). sshd starts in cloud-init's `config` stage,
-        which is long before `final`/runcmd runs the slow add-on installs
-        (xfce4 + xrdp + Firefox for enableRDP, realmd stack for
-        joinDomain). So those add-ons should NOT push past the base
-        budget for the SSH-ready check itself.
+        Base timeout is 900s (15 min). On large deploys (>10 VMs), disk
+        I/O contention from concurrent Windows VM boots / DSC / sysprep
+        can delay the Linux VM's cloud-init reboot significantly. Each
+        VM above 10 adds 60s to the budget, capped at 2700s (45 min).
 
-        Historical context: a 900s timeout was observed on ADA-PROXY1.
-        Root cause was the Hyper-V KVP daemon failing to publish a guest
-        IP, not a slow apt install. Wait-LinuxVmReady now falls back to
-        the role's expected static IP (see Get-LinuxVmExpectedStaticIP)
-        when KVP is silent, so that failure mode no longer needs a
-        budget bump.
+        SSH-ready means sshd is listening and the IP is published via
+        KVP (or matches the expected static IP for the role). sshd
+        starts in cloud-init's `config` stage, which is long before
+        `final`/runcmd runs the slow add-on installs (xfce4 + xrdp +
+        Firefox for enableRDP, realmd stack for joinDomain). So those
+        add-ons should NOT push past the base budget for the SSH-ready
+        check itself.
+
+        The scaling addresses the observed failure where a 37-VM deploy
+        caused the Proxy VM's post-cloud-init reboot to take >15 min
+        under I/O pressure, and the mid-wait power-cycle at 8 min reset
+        boot progress, exhausting the remaining 7 min.
     #>
     [CmdletBinding()]
     param (
         [Parameter(Mandatory = $true)]
-        [psobject]$VmObject
+        [psobject]$VmObject,
+
+        # Total VM count in the deploy. When >10, the timeout scales
+        # to accommodate host I/O contention from concurrent VM boots.
+        [Parameter(Mandatory = $false)]
+        [int]$VmCount = 0
     )
 
-    return 900
+    $base = 900
+    if ($VmCount -gt 10) {
+        $base = [Math]::Min($base + ($VmCount - 10) * 60, 2700)
+    }
+    return $base
 }
 
 function Get-LinuxVmIPAddress {
@@ -1317,7 +1329,7 @@ function Wait-LinuxVmReady {
     $lastSshErrLogSec = -9999
     $sshErrLogIntervalSec = 30
     $restartAttempted = $false
-    $restartAfterSec = 480  # 8 minutes; leaves ~7 min for post-restart SSH
+    $restartAfterSec = [int]($TimeoutSeconds * 0.53)  # ~53% of total; 900s→477s, 1800s→954s
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -2128,7 +2140,8 @@ function Install-LinuxProxyServer {
 
     # Make sure the VM is up and SSH-reachable before doing anything.
     $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM
+    $vmCount = @($deployConfig.virtualMachines).Count
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $ProxyVM -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[Proxy] $vmName`: VM not reachable over SSH; cannot install Squid" -Failure
@@ -2840,7 +2853,8 @@ function Invoke-LinuxRoleConfiguration {
     # Wait for SSH first; the VM may have rebooted between phases.
     Write-Progress2 -Activity $activity -Status "Waiting for SSH" -force
     $expectedIp  = Get-LinuxVmExpectedStaticIP -VmObject $Vm -DeployConfig $DeployConfig
-    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm
+    $vmCount = @($DeployConfig.virtualMachines).Count
+    $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $Vm -VmCount $vmCount
     $ip = Wait-LinuxVmReady -VmName $vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
     if (-not $ip) {
         Write-Log "[LinuxConfig] $vmName`: VM not SSH-reachable; cannot apply config." -Failure
