@@ -11,11 +11,11 @@ $deployConfig = Get-Content $ConfigFilePath | ConvertFrom-Json
 $DomainFullName = $deployConfig.parameters.domainName
 
 # Read Actions file
-# $ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
-# $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-# $Configuration.InstallSecondary.Status = 'Running'
-# $Configuration.InstallSecondary.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-# $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+$ConfigurationFile = Join-Path -Path $LogPath -ChildPath "ScriptWorkflow.json"
+$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration.InstallSecondary.Status = 'Running'
+$Configuration.InstallSecondary.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
 # Get info for Secondary Site Servers
 $ThisMachineName = $deployConfig.parameters.ThisMachineName
@@ -394,6 +394,7 @@ foreach ($SecondaryVM in $SecondaryVMs) {
 Get-Job | Wait-Job
 
 # Update actions file
-# $Configuration.InstallSecondary.Status = 'Completed'
-# $Configuration.InstallSecondary.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-# $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+$Configuration.InstallSecondary.Status = 'Completed'
+$Configuration.InstallSecondary.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
