@@ -105,8 +105,57 @@ configuration Phase3
             $addUserDependency += "[AddUserToLocalAdminGroup]$DscNodeName"
         }
 
+        # Proxy clients: Set-WindowsClientProxy (Phase 2) writes the proxy to
+        # machine.config <defaultProxy>, WinHTTP, and HKU\.DEFAULT, but on some
+        # Windows builds the fresh WmiPrvSE AppDomain that hosts this DSC run
+        # does not pick up the machine.config change for [System.Net.WebRequest]::
+        # DefaultWebProxy. Net effect: WebClient/BITS/IWR bypass the proxy,
+        # Hyper-V ACLs deny the direct connection, and every download resource
+        # fails with "Unable to connect to the remote server".
+        # Explicitly read WinHTTP and stamp DefaultWebProxy in-process so all
+        # subsequent download resources (InstallVCRedist, InstallOleDb, etc.)
+        # inherit the proxy within this AppDomain.
+        Script EnsureProcessProxy {
+            DependsOn  = $addUserDependency
+            GetScript  = { @{ Result = "$([System.Net.WebRequest]::DefaultWebProxy)" } }
+            TestScript = {
+                try {
+                    $output = & netsh winhttp show proxy 2>$null
+                    if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                        $proxyAddr = $Matches[1].Trim()
+                        $current = [System.Net.WebRequest]::DefaultWebProxy
+                        if ($current) {
+                            $testUri = [System.Uri]"https://aka.ms"
+                            $resolved = $current.GetProxy($testUri)
+                            if ($resolved -and $resolved.Host -ne 'aka.ms') { return $true }
+                        }
+                        return $false
+                    }
+                } catch {}
+                return $true   # No WinHTTP proxy configured; nothing to do
+            }
+            SetScript  = {
+                $output = & netsh winhttp show proxy 2>$null
+                if ($output -match 'Proxy Server\(s\)\s*:\s*(\S+)') {
+                    $proxyAddr = $Matches[1].Trim()
+                    $bypass = ''
+                    if ($output -match 'Bypass List\s*:\s*(.+)') { $bypass = $Matches[1].Trim() }
+                    $wp = New-Object System.Net.WebProxy("http://$proxyAddr", $true)
+                    if ($bypass -and $bypass -ne '(none)') {
+                        $wp.BypassList = @($bypass -split ';' | ForEach-Object {
+                            $e = $_.Trim()
+                            if ($e -and $e -ne '<local>') { '^' + ([Regex]::Escape($e) -replace '\\\*','.*') + '$' }
+                        } | Where-Object { $_ })
+                        $wp.BypassProxyOnLocal = $true
+                    }
+                    [System.Net.WebRequest]::DefaultWebProxy = $wp
+                    Write-Verbose "EnsureProcessProxy: set DefaultWebProxy to http://$proxyAddr"
+                }
+            }
+        }
+
         WriteStatus InstallFeature {
-            DependsOn = $addUserDependency
+            DependsOn = '[Script]EnsureProcessProxy'
             Status    = "Installing required windows features for role $featureRoles"
         }
 
