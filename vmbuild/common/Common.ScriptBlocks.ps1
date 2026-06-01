@@ -2928,6 +2928,26 @@ $global:VM_Config = {
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
         }
 
+        # If the phase succeeded, check for a pending reboot and clear it now
+        # while other VMs are still finishing their phase. Getting the reboot
+        # out of the way early means the next phase doesn't have to wait for
+        # Stop/Start + Wait-ForVM before it can begin DSC.
+        if ($complete) {
+            try {
+                $reboot = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Post-phase reboot check" -SuppressLog
+                if ($reboot.ScriptBlockOutput -eq $true) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion. Rebooting now."
+                    Stop-VM2 -Name $currentItem.vmName
+                    Start-Sleep -Seconds 5
+                    Start-VM2 -Name $currentItem.vmName
+                    $null = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest
+                }
+            }
+            catch {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Post-phase reboot check failed: $_" -Warning
+            }
+        }
+
         if (-not $complete) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName)  [$($currentItem.role)] : Failed after $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
