@@ -92,6 +92,7 @@ $Install_Secondary = {
     $SecondaryVM = $using:SecondaryVM
     $DomainFullName = $using:DomainFullName
     $usePKI = $using:UsePKI
+    $ParentVM = $using:ThisVM
 
     $mtx = $null
     try {
@@ -464,6 +465,91 @@ $Install_Secondary = {
     }
     $sleepSeconds = 30
     if ($installed) {
+        # --- Verify SQL is running on both parent and secondary before DRS check ---
+        # If a service was stopped, start it, wait 60s, and confirm it stays running
+        # (crash-loop detection). DRS cannot establish without SQL on both endpoints.
+        $verifySqlService = {
+            param($svcName)
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if (-not $svc) {
+                return @{ Status = 'NotFound'; Started = $false }
+            }
+            if ($svc.Status -eq 'Running') {
+                return @{ Status = 'Running'; Started = $false }
+            }
+            # Service exists but is not running — attempt to start it
+            try {
+                Start-Service -Name $svcName -ErrorAction Stop
+                $waited = 0
+                while ($waited -lt 30) {
+                    Start-Sleep -Seconds 5
+                    $waited += 5
+                    $svc = Get-Service -Name $svcName
+                    if ($svc.Status -eq 'Running') { break }
+                }
+            }
+            catch {
+                return @{ Status = (Get-Service -Name $svcName -EA SilentlyContinue).Status; Started = $false; Failed = $true; Error = $_.Exception.Message }
+            }
+            $svc = Get-Service -Name $svcName
+            if ($svc.Status -ne 'Running') {
+                return @{ Status = $svc.Status; Started = $false; Failed = $true }
+            }
+            # Service started — wait 60s and verify it hasn't crashed again
+            Start-Sleep -Seconds 60
+            $svc = Get-Service -Name $svcName
+            if ($svc.Status -ne 'Running') {
+                return @{ Status = $svc.Status; Started = $true; CrashLoop = $true }
+            }
+            return @{ Status = 'Running'; Started = $true }
+        }
+
+        # Secondary SQL instance
+        $secSqlInstance = if ($SecondaryVM.sqlVersion) {
+            if ($SecondaryVM.sqlInstanceName) { $SecondaryVM.sqlInstanceName } else { 'MSSQLSERVER' }
+        } else { 'CONFIGMGRSEC' }
+        $secSqlSvcName = if ($secSqlInstance -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$secSqlInstance" }
+
+        Write-DscStatus "Verifying SQL service '$secSqlSvcName' on $SecondaryName before DRS check..." -MachineName $SecondaryName
+        $secResult = Invoke-Command -ComputerName $secondaryFQDN -ScriptBlock $verifySqlService -ArgumentList $secSqlSvcName -ErrorAction SilentlyContinue
+        if ($secResult.CrashLoop) {
+            Write-DscStatus "SQL service '$secSqlSvcName' on $SecondaryName is crash-looping (started then stopped within 60s). Cannot verify DRS." -Failure -MachineName $SecondaryName
+            return
+        }
+        elseif ($secResult.Failed) {
+            Write-DscStatus "SQL service '$secSqlSvcName' on $SecondaryName could not be started (Status=$($secResult.Status)). Cannot verify DRS." -Failure -MachineName $SecondaryName
+            return
+        }
+        elseif ($secResult.Started) {
+            Write-DscStatus "SQL service '$secSqlSvcName' on $SecondaryName was stopped. Started successfully and stable after 60s." -MachineName $SecondaryName
+        }
+
+        # Parent SQL instance (local or remote)
+        $parentSqlInstance = if ($ParentVM.sqlInstanceName) { $ParentVM.sqlInstanceName } else { 'MSSQLSERVER' }
+        $parentSqlSvcName = if ($parentSqlInstance -eq 'MSSQLSERVER') { 'MSSQLSERVER' } else { "MSSQL`$$parentSqlInstance" }
+        $parentSqlHost = if ($ParentVM.remoteSQLVM) { "$($ParentVM.remoteSQLVM).$DomainFullName" } else { $null }
+        $parentSqlLabel = if ($parentSqlHost) { $parentSqlHost } else { $env:COMPUTERNAME }
+
+        Write-DscStatus "Verifying SQL service '$parentSqlSvcName' on $parentSqlLabel before DRS check..." -MachineName $SecondaryName
+        if ($parentSqlHost) {
+            $parentResult = Invoke-Command -ComputerName $parentSqlHost -ScriptBlock $verifySqlService -ArgumentList $parentSqlSvcName -ErrorAction SilentlyContinue
+        }
+        else {
+            $parentResult = Invoke-Command -ScriptBlock $verifySqlService -ArgumentList $parentSqlSvcName
+        }
+        if ($parentResult.CrashLoop) {
+            Write-DscStatus "SQL service '$parentSqlSvcName' on $parentSqlLabel is crash-looping (started then stopped within 60s). Cannot verify DRS." -Failure -MachineName $SecondaryName
+            return
+        }
+        elseif ($parentResult.Failed) {
+            Write-DscStatus "SQL service '$parentSqlSvcName' on $parentSqlLabel could not be started (Status=$($parentResult.Status)). Cannot verify DRS." -Failure -MachineName $SecondaryName
+            return
+        }
+        elseif ($parentResult.Started) {
+            Write-DscStatus "SQL service '$parentSqlSvcName' on $parentSqlLabel was stopped. Started successfully and stable after 60s." -MachineName $SecondaryName
+        }
+
+        # --- DRS replication link verification ---
         $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $secondarySiteCode
         if (-not $alreadyExisted) {
             Write-DscStatus "Secondary installation complete. Waiting for replication link to be 'Active'" -MachineName $SecondaryName
