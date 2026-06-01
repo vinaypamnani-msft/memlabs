@@ -212,31 +212,25 @@ $Install_Secondary = {
                 #
                 # The console triggers recovery by updating SMS_SCI_SiteDefinition:
                 #   "Requested Status" Value1=2 (Pending), Value2=1011 (recover from primary)
-                #   "PreReq Check" Value=1 (run prereq)
+                # Note: the console also sets "PreReq Check" Value=1, but we skip that
+                # because the AD prereq check fails in lab environments (System Management
+                # container permissions) and would block the recovery.
                 Write-DscStatus "Secondary site record exists but SQL/$dbName is missing. Triggering recovery for '$secondarySiteCode' on $SecondaryName..." -MachineName $SecondaryName
                 try {
-                    $siteDefPath = "SMS_SCI_SiteDefinition.FileType=2,ItemName=`"Site Definition`",ItemType=`"Site Definition`",SiteCode=`"$secondarySiteCode`""
                     $siteDef = Get-WmiObject -Namespace $smsProvider.NamespacePath -ComputerName $smsProvider.FQDN -Query "SELECT * FROM SMS_SCI_SiteDefinition WHERE FileType=2 AND SiteCode='$secondarySiteCode'" -ErrorAction Stop
                     if (-not $siteDef) {
                         Write-DscStatus "Could not find SMS_SCI_SiteDefinition for site '$secondarySiteCode'. Cannot trigger recovery." -Failure -MachineName $SecondaryName
                         continue
                     }
 
-                    # Decode embedded properties
+                    # Update embedded properties — only set Requested Status
                     $props = $siteDef.Props
                     $foundRequestedStatus = $false
-                    $foundPreReqCheck = $false
                     for ($p = 0; $p -lt $props.Count; $p++) {
                         if ($props[$p].PropertyName -eq 'Requested Status') {
                             $props[$p].Value1 = '2'     # Pending
                             $props[$p].Value2 = '1011'  # Recover from primary
                             $foundRequestedStatus = $true
-                        }
-                        if ($props[$p].PropertyName -eq 'PreReq Check') {
-                            $props[$p].Value = 1        # Need to run prereq
-                            $props[$p].Value1 = ''
-                            $props[$p].Value2 = ''
-                            $foundPreReqCheck = $true
                         }
                     }
 
@@ -245,14 +239,6 @@ $Install_Secondary = {
                         $newProp.PropertyName = 'Requested Status'
                         $newProp.Value1 = '2'     # Pending
                         $newProp.Value2 = '1011'  # Recover from primary
-                        $props += $newProp
-                    }
-                    if (-not $foundPreReqCheck) {
-                        $newProp = ([wmiclass]"\\$($smsProvider.FQDN)\$($smsProvider.NamespacePath):SMS_EmbeddedProperty").CreateInstance()
-                        $newProp.PropertyName = 'PreReq Check'
-                        $newProp.Value = 1        # Need to run prereq
-                        $newProp.Value1 = ''
-                        $newProp.Value2 = ''
                         $props += $newProp
                     }
 
