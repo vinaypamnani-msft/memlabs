@@ -162,27 +162,38 @@ if ($blmCollection) {
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
 if ($blmEnabled) {
-    # Resolve SQL server instance (may be remote SQL or SQLAO listener)
-    $sqlInstance = $env:COMPUTERNAME
+    # Resolve SQL server instance (may be remote SQL or SQLAO listener).
+    # Follows the same pattern as InstallAndUpdateSCCM.ps1 for consistency.
+    $sqlServerName = $env:COMPUTERNAME
+    $sqlInstanceName = $ThisVM.sqlInstanceName
+    $sqlPort = if ($ThisVM.sqlPort) { $ThisVM.sqlPort } else { 1433 }
+
     if ($ThisVM.remoteSQLVM) {
         $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisVM.remoteSQLVM }
+        $sqlServerName = $ThisVM.remoteSQLVM
+        $sqlInstanceName = $SQLVM.sqlInstanceName
+        $sqlPort = if ($SQLVM.sqlPort) { $SQLVM.sqlPort } else { 1433 }
         if ($SQLVM.AlwaysOnListenerName) {
-            $sqlInstance = $SQLVM.AlwaysOnListenerName
-        } else {
-            $sqlInstance = $ThisVM.remoteSQLVM
+            $sqlServerName = $SQLVM.AlwaysOnListenerName
+            $sqlPort = $SQLVM.thisParams.SQLAO.SQLAOPort
         }
-        if ($SQLVM.sqlInstanceName -and $SQLVM.sqlInstanceName -ne 'MSSQLSERVER') {
-            $sqlInstance = "$sqlInstance\$($SQLVM.sqlInstanceName)"
-        }
-    } elseif ($ThisVM.sqlInstanceName -and $ThisVM.sqlInstanceName -ne 'MSSQLSERVER') {
-        $sqlInstance = "$sqlInstance\$($ThisVM.sqlInstanceName)"
     }
-    $sqlInstanceFqdn = if ($sqlInstance -match '\\') {
-        "$($sqlInstance.Split('\')[0]).$DomainFullName\$($sqlInstance.Split('\')[1])"
-    } else {
-        "$sqlInstance.$DomainFullName"
+
+    # Invoke-Sqlcmd -ServerInstance format: "server\instance,port" or "server,port"
+    $sqlConnStr = $sqlServerName
+    if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+        $sqlConnStr = "$sqlServerName\$sqlInstanceName"
     }
-    Write-DscStatus "$Tag SQL instance resolved to: $sqlInstance (FQDN: $sqlInstanceFqdn)"
+    if ($sqlPort -and $sqlPort -ne 1433) {
+        $sqlConnStr = "$sqlConnStr,$sqlPort"
+    }
+    # FQDN version for the Helpdesk installer (-SqlServerName must be FQDN)
+    $sqlServerFqdnBase = "$($sqlServerName.Split('\')[0]).$DomainFullName"
+    $sqlInstanceFqdn = $sqlServerFqdnBase
+    if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+        $sqlInstanceFqdn = "$sqlServerFqdnBase\$sqlInstanceName"
+    }
+    Write-DscStatus "$Tag SQL resolved: ConnStr=$sqlConnStr FQDN=$sqlInstanceFqdn Port=$sqlPort"
 
     # Ensure SQL encryption certificate exists (required for BLM recovery key escrow)
     # Reference: https://learn.microsoft.com/en-us/mem/configmgr/protect/deploy-use/bitlocker/encrypt-recovery-data
@@ -228,8 +239,8 @@ BEGIN
     GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite;
 END
 "@
-        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance $sqlInstance -TrustServerCertificate -ErrorAction Stop
-        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName on $sqlInstance"
+        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance $sqlConnStr -TrustServerCertificate -ErrorAction Stop
+        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName on $sqlConnStr"
     }
     catch {
         Write-DscStatus "$Tag WARNING: SQL cert creation failed: $($_.Exception.Message)"
@@ -359,10 +370,10 @@ if ($blmEnabled) {
     $blmGroup       = 'BLM Helpdesk Users'
     $netbios        = ($DomainFullName -split '\.')[0]
     $qualifiedGroup = "$netbios\$blmGroup"
-    $sqlServerFqdn  = $sqlInstanceFqdn
+    $localServerFqdn = "$env:COMPUTERNAME.$DomainFullName"
     $cmDbName       = "CM_$SiteCode"
 
-    Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$sqlServerFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
+    Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$localServerFqdn SqlServer=$sqlInstanceFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
 
     # ---- Pre-flight: is it already installed and healthy? -----------------
     try {
@@ -529,7 +540,7 @@ if ($blmEnabled) {
                 $installerArgs = @(
                     '-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned'
                     '-File',"`"$installer`""
-                    '-SqlServerName',$sqlServerFqdn        # MUST be FQDN -- installer hardcodes
+                    '-SqlServerName',$sqlInstanceFqdn       # MUST be FQDN -- installer hardcodes
                     '-SqlDatabaseName',$cmDbName            # Encrypt=True;TrustServerCertificate=False,
                     '-SiteInstall','HelpDesk'               # so NetBIOS triggers SPN mismatch
                     '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
@@ -579,12 +590,12 @@ if ($blmEnabled) {
 
                         # Smoke-test the URL (401/403 are also fine -- means IIS is serving)
                         try {
-                            $req = [System.Net.HttpWebRequest]::Create("https://$sqlServerFqdn/HelpDesk/")
+                            $req = [System.Net.HttpWebRequest]::Create("https://$localServerFqdn/HelpDesk/")
                             $req.Timeout = 15000
                             $req.AllowAutoRedirect = $false
                             $req.UseDefaultCredentials = $true
                             $resp = $req.GetResponse()
-                            Write-DscStatus "$Tag Smoke test: HTTP $([int]$resp.StatusCode) from https://$sqlServerFqdn/HelpDesk/"
+                            Write-DscStatus "$Tag Smoke test: HTTP $([int]$resp.StatusCode) from https://$localServerFqdn/HelpDesk/"
                             $resp.Close()
                         } catch [System.Net.WebException] {
                             $code = $null
@@ -598,7 +609,7 @@ if ($blmEnabled) {
                             Write-DscStatus "$Tag WARNING: Smoke test exception: $($_.Exception.Message)"
                         }
 
-                        Write-DscStatus "$Tag SUCCESS: BLM Helpdesk Portal ready at https://$sqlServerFqdn/HelpDesk (sign in as member of $qualifiedGroup)"
+                        Write-DscStatus "$Tag SUCCESS: BLM Helpdesk Portal ready at https://$localServerFqdn/HelpDesk (sign in as member of $qualifiedGroup)"
                     }
                     else {
                         Write-DscStatus "$Tag WARNING: Installer ran but post-install health check FAILED. See $logFile and $errFile for details."
