@@ -2746,13 +2746,15 @@ class RegisterTaskScheduler {
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 
-        # Register with retry — domain trust failures are transient (AD replication lag)
+        # Register with retry — domain trust failures are transient (AD replication lag
+        # can cause "trust relationship failed" for 10-20 min in large deployments)
         $registered = $false
-        for ($regAttempt = 1; $regAttempt -le 5; $regAttempt++) {
+        $maxRegAttempts = 40  # 40 × 30s = 20 min max wait
+        for ($regAttempt = 1; $regAttempt -le $maxRegAttempts; $regAttempt++) {
             try {
                 $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force -ErrorAction Stop | Out-Null
             } catch {
-                Write-Status "Register-ScheduledTask attempt $regAttempt failed: $($_.Exception.Message)"
+                Write-Status "Register-ScheduledTask attempt $regAttempt/$maxRegAttempts failed: $($_.Exception.Message)"
             }
             # Verify the task actually exists
             $verify = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
@@ -2761,7 +2763,7 @@ class RegisterTaskScheduler {
                 Write-Status "Task $($this.TaskName) registered successfully (attempt $regAttempt)"
                 break
             }
-            Write-Status "Task $($this.TaskName) not found after registration attempt $regAttempt. Retrying in 30s..."
+            Write-Status "Task $($this.TaskName) not found after attempt $regAttempt/$maxRegAttempts. Retrying in 30s..."
             Start-Sleep -Seconds 30
         }
 
