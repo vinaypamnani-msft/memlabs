@@ -80,27 +80,27 @@ function Write-JobProgress {
                         }
                     }
                     $CurrentActivity = "$jobName2`: $latestActivity"
-                    $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus
+                    $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus + $latestPercentComplete
                     if ($global:JobProgressHistory -notcontains $HistoryLine) {
                         $global:JobProgressHistory += $HistoryLine
                         if ($secondsRemaining -gt 0) {
                             $latestStatus += " (Remaining: $($secondsRemaining)s)"
                         }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
-                        write-host -NoNewline "$hideCursor"                        
-                    }
+                        write-host -NoNewline "$hideCursor"
 
-                    # Dismiss any orphan progress bar that PS7 may auto-render from
-                    # the child job's original progress record. Child jobs write with
-                    # the default ActivityId (0), but the managed bar above uses
-                    # $Job.Id. If PS7 surfaces the child's record at its original Id,
-                    # an extra bar appears without the VM name prefix.
-                    $childActivityId = $lastProgress.ActivityId
-                    if ($childActivityId -ne $Job.Id) {
-                        $savedPref = $Global:ProgressPreference
-                        $Global:ProgressPreference = 'Continue'
-                        Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
-                        $Global:ProgressPreference = $savedPref
+                        # Dismiss any orphan progress bar that PS7 may auto-render from
+                        # the child job's original progress record. Child jobs write with
+                        # the default ActivityId (0), but the managed bar above uses
+                        # $Job.Id. If PS7 surfaces the child's record at its original Id,
+                        # an extra bar appears without the VM name prefix.
+                        $childActivityId = $lastProgress.ActivityId
+                        if ($childActivityId -ne $Job.Id) {
+                            $savedPref = $Global:ProgressPreference
+                            $Global:ProgressPreference = 'Continue'
+                            Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
+                            $Global:ProgressPreference = $savedPref
+                        }
                     }
                 }
                 catch {
@@ -685,6 +685,10 @@ function Wait-Phase {
 
         $FailRetry = 0
         do {
+            # Begin synchronized output so Windows Terminal buffers all progress
+            # bar redraws and paints them as a single frame (eliminates flicker).
+            [Console]::Write("$esc[?2026h")
+
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
@@ -881,6 +885,9 @@ function Wait-Phase {
                 #Write-Progress2 -Id $job.Id -Activity $job.Name -Completed
                 $jobs.Remove($job)
             }
+
+            # End synchronized output — terminal renders all progress updates as one frame.
+            [Console]::Write("$esc[?2026l")
 
             # Sleep
             Start-Sleep -Milliseconds 500
