@@ -1315,6 +1315,7 @@ function Show-Menu {
         $HelpPosition = $null
         $script:_bgBannerInfo = $null
         $script:_lastBgUpdate = $null
+        $script:_lastBgRefresh = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1848,9 +1849,10 @@ function Set-MouseHoverHighlight {
 # Live background-operation banner update
 # ---------------------------------------------------------------------------
 # Called from Get-KeyStroke's idle polling loop every ~50-75ms. Throttles to
-# once per second so the cursor save/restore doesn't flicker. Returns
-# 'completed' when the background operation finishes (caller triggers redraw),
-# $null otherwise.
+# once per second so the cursor save/restore doesn't flicker. Returns:
+#   'completed' - operation finished; caller should invalidate cache & redraw
+#   'refresh'   - periodic full-screen refresh so the VM status table updates
+#   $null       - no action needed
 function Update-BgBannerInPlace {
     $info = $script:_bgBannerInfo
     if (-not $info) { return $null }
@@ -1867,6 +1869,17 @@ function Update-BgBannerInPlace {
         return $null
     }
     $script:_lastBgUpdate = $now
+
+    # Periodic full-screen refresh (every 5s) so the VM status table in the
+    # summary pane picks up state transitions (Running → Stopping → Off).
+    # Skip the in-place banner update — the full redraw will handle it.
+    if (-not $op.Completed) {
+        if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
+        if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
+            $script:_lastBgRefresh = $now
+            return 'refresh'
+        }
+    }
 
     $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
 
@@ -2058,7 +2071,10 @@ function Get-KeyStroke {
 
             # Live-update the background operation banner (elapsed time counter)
             $bgResult = Update-BgBannerInPlace
-            if ($bgResult -eq 'completed') { return $null }
+            if ($bgResult -in @('completed', 'refresh')) {
+                $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
+                return $null
+            }
 
             # Fallback Shift detection: if the console's mark mode (text
             # selection) swallowed the Shift key-up event, we'd stay in
@@ -2095,7 +2111,10 @@ function Get-KeyStroke {
 
         # Live-update the background operation banner (elapsed time counter)
         $bgResult = Update-BgBannerInPlace
-        if ($bgResult -eq 'completed') { return $null }
+        if ($bgResult -in @('completed', 'refresh')) {
+            $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
+            return $null
+        }
 
         Start-Sleep -Milliseconds 75
     }
