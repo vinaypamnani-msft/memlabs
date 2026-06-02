@@ -532,6 +532,35 @@ if ($blmEnabled) {
 
             # ---- Run the installer --------------------------------------------
             if ($installerOk) {
+                # Pre-flight: the MBAM installer calls [System.Net.Dns]::GetHostByName($env:computerName)
+                # at line 139 to resolve the local FQDN. If DNS suffix search list is missing or
+                # the VM's A record isn't registered yet, this fails with "No such host is known"
+                # and cascades into "Failure acquiring SQL identity certificate". Fix by ensuring
+                # the primary DNS suffix is set and the hostname resolves.
+                try {
+                    $null = [System.Net.Dns]::GetHostByName($env:COMPUTERNAME)
+                    Write-DscStatus "$Tag Pre-flight: DNS hostname resolution OK ($env:COMPUTERNAME)"
+                }
+                catch {
+                    Write-DscStatus "$Tag Pre-flight: DNS hostname resolution FAILED for '$env:COMPUTERNAME': $($_.Exception.Message)"
+                    # Ensure DNS suffix search list includes our domain
+                    try {
+                        $currentSuffix = (Get-DnsClient | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' } | Select-Object -First 1).ConnectionSpecificSuffix
+                        if (-not $currentSuffix) {
+                            Write-DscStatus "$Tag Pre-flight: No DNS suffix on primary adapter. Setting to '$DomainFullName'..."
+                            Get-DnsClient | Where-Object { $_.InterfaceAlias -notmatch 'Loopback' } | Set-DnsClient -ConnectionSpecificSuffix $DomainFullName -ErrorAction Stop
+                            Register-DnsClient -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 5
+                        }
+                        # Retry resolution
+                        $resolved = [System.Net.Dns]::GetHostByName($env:COMPUTERNAME)
+                        Write-DscStatus "$Tag Pre-flight: DNS resolved after suffix fix -> $($resolved.HostName)"
+                    }
+                    catch {
+                        Write-DscStatus "$Tag Pre-flight: DNS still failing after suffix fix: $($_.Exception.Message). MBAM installer will likely fail."
+                    }
+                }
+
                 $stamp     = Get-Date -Format yyyyMMdd_HHmmss
                 $logDir    = if (Test-Path 'C:\staging\DSC') { 'C:\staging\DSC' } else { $env:TEMP }
                 $logFile   = Join-Path $logDir "MBAMWebSiteInstaller_$stamp.log"
