@@ -496,6 +496,61 @@ function New-MRemoteNGXmlDocument {
     return $doc
 }
 
+function Get-MRemoteNGGroupForVM {
+    <#
+    .SYNOPSIS
+        Returns the role-based group name for a VM (Clients, DomainServers, MECMServers, Servers).
+    #>
+    param($Vm, $VmListFull)
+
+    switch ($Vm.Role) {
+        "DC"               { return "DomainServers" }
+        "BDC"              { return "DomainServers" }
+        "FileServer"       { return "DomainServers" }
+        "StandaloneRootCA" { return "DomainServers" }
+        "CAS"              { return "MECMServers" }
+        "Primary"          { return "MECMServers" }
+        "Secondary"        { return "MECMServers" }
+        "SiteSystem"       { return "MECMServers" }
+        "PassiveSite"      { return "MECMServers" }
+        "OSDClient"        { return "Clients" }
+        "AADClient"        { return "Clients" }
+        "InternetClient"   { return "Clients" }
+        "SQLAO" {
+            # SQLAO hosting a site DB → MECMServers, otherwise Servers
+            $primaryNode = $Vm
+            if (-not $Vm.OtherNode) {
+                $primaryNode = $VmListFull | Where-Object { $_.OtherNode -eq $Vm.vmName } | Select-Object -First 1
+                if (-not $primaryNode) { $primaryNode = $Vm }
+            }
+            $siteServer = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName -and $_.Role -in "Primary", "CAS" }
+            if ($siteServer) { return "MECMServers" }
+            return "Servers"
+        }
+        "WSUS" {
+            if ($Vm.installSUP -or $Vm.InstallSUP) { return "MECMServers" }
+            return "Servers"
+        }
+        "DomainMember" {
+            if ($Vm.InstallCA) { return "DomainServers" }
+            # SQL hosting a site DB → MECMServers
+            if ($Vm.SqlVersion) {
+                $siteServer = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $Vm.vmName -and $_.Role -in "Primary", "CAS" }
+                if ($siteServer) { return "MECMServers" }
+            }
+            $isServer = $Vm.deployedOS -match "Server"
+            if ($isServer) { return "Servers" }
+            return "Clients"
+        }
+        "WorkgroupMember" {
+            $isServer = $Vm.deployedOS -match "Server"
+            if ($isServer) { return "Servers" }
+            return "Clients"
+        }
+        default { return "Servers" }
+    }
+}
+
 function New-MRemoteNGContainerNode {
     param(
         [xml]$Doc,
@@ -979,19 +1034,52 @@ function New-MRemoteNGFileFromHyperV {
             $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
         }
 
-        # Find or create Linux (SSH) sub-container
+        # --- Role-based group containers ---
+        # Compute which groups are needed, create/find sub-containers.
+        # Order defines display order in the tree.
+        $groupOrder = @("MECMServers", "DomainServers", "Clients", "Servers", "Linux")
+        $neededGroups = @{}
+        foreach ($vm in $vmListFull) {
+            if (Test-VmIsLinux -Vm $vm) {
+                $neededGroups["Linux"] = $true
+            }
+            else {
+                $grp = Get-MRemoteNGGroupForVM -Vm $vm -VmListFull $vmListFull
+                $neededGroups[$grp] = $true
+            }
+        }
+
+        $groupContainers = @{}
+        foreach ($grpName in $groupOrder) {
+            if (-not $neededGroups[$grpName]) { continue }
+            $existing = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $grpName } | Select-Object -First 1
+            if ($existing) {
+                $groupContainers[$grpName] = $existing
+            }
+            else {
+                $expanded = $grpName -in @("MECMServers", "DomainServers")
+                $grpNode = New-MRemoteNGContainerNode -Doc $doc -Name $grpName `
+                    -Username $username -Domain $domain -Password $encryptedPass -Expanded $expanded
+                [void]$container.AppendChild($grpNode)
+                $groupContainers[$grpName] = $grpNode
+                $shouldSave = $true
+            }
+        }
+
+        # Find or create Linux (SSH) sub-container inside the Linux group
         $linuxContainer = $null
+        $linuxGroup = $groupContainers["Linux"]
 
         foreach ($vm in $vmListFull) {
             # --- Linux VMs: SSH entry for all, optional RDP entry ---
             if (Test-VmIsLinux -Vm $vm) {
                 # Always create SSH entry (no enableRDP gate)
-                if (-not $linuxContainer) {
-                    $linuxContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Linux (SSH)" } | Select-Object -First 1
+                if (-not $linuxContainer -and $linuxGroup) {
+                    $linuxContainer = $linuxGroup.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "SSH" } | Select-Object -First 1
                     if (-not $linuxContainer) {
-                        $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Linux (SSH)" `
-                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22"
-                        [void]$container.AppendChild($linuxContainer)
+                        $linuxContainer = New-MRemoteNGContainerNode -Doc $doc -Name "SSH" `
+                            -Username "vmbuildadmin" -Domain "" -Password $encryptedPass -Protocol "SSH2" -Port "22" -Expanded $false
+                        [void]$linuxGroup.AppendChild($linuxContainer)
                     }
                 }
 
@@ -1030,14 +1118,15 @@ function New-MRemoteNGFileFromHyperV {
                     }
                 }
 
-                # If enableRDP, also add an RDP entry in the main container
+                # If enableRDP, also add an RDP entry in the Linux group container
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 if ($rdpOn -or $isLinuxClient) {
                     $rdpDisplayName = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
                     if ($vm.SiteCode) { $rdpDisplayName += " ($($vm.SiteCode))" }
 
-                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
+                    $linuxRdpTarget = if ($linuxGroup) { $linuxGroup } else { $container }
+                    if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $linuxRdpTarget `
                             -Name $vm.VmName -DisplayName $rdpDisplayName -Hostname $sshHost `
                             -Protocol "RDP" -Port "3389" -Description $sshComment `
                             -Username "vmbuildadmin" -Domain "" -Password $encryptedPass `
@@ -1051,6 +1140,11 @@ function New-MRemoteNGFileFromHyperV {
 
             # --- Windows VMs ---
             Write-Verbose "mRemoteNG: Adding VM $($vm.VmName)"
+
+            # Determine role-based group container
+            $vmGroup = Get-MRemoteNGGroupForVM -Vm $vm -VmListFull $vmListFull
+            $targetContainer = $groupContainers[$vmGroup]
+            if (-not $targetContainer) { $targetContainer = $container }
 
             $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
@@ -1160,7 +1254,7 @@ function New-MRemoteNGFileFromHyperV {
                 $connPassword = $encryptedPass
             }
 
-            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $container `
+            if (Add-MRemoteNGConnectionToContainer -Doc $doc -Container $targetContainer `
                     -Name $name -DisplayName $displayName -Hostname $name `
                     -Protocol "RDP" -Port "3389" -Description $comment `
                     -Username $connUsername -Domain $connDomain -Password $connPassword `
@@ -1179,7 +1273,7 @@ function New-MRemoteNGFileFromHyperV {
         $hvContainer = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq "Hyper-V Console" } | Select-Object -First 1
         if (-not $hvContainer) {
             $hvContainer = New-MRemoteNGContainerNode -Doc $doc -Name "Hyper-V Console" `
-                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179"
+                -Username $env:USERNAME -Domain "" -Password "" -Protocol "RDP" -Port "2179" -Expanded $false
             [void]$container.AppendChild($hvContainer)
             $shouldSave = $true
         }
