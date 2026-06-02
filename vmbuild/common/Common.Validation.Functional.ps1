@@ -208,9 +208,11 @@ function Test-VmFunctionality {
         $testsPassed = Test-BitLockerProtection -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
 
-    # BitLocker Management: validate policy exists and is deployed (top-level site only)
-    $hasBLMVMs = @($DeployConfig.virtualMachines | Where-Object { $_.BitLocker -eq $true }).Count -gt 0
-    if ($testsPassed -and ($DeployConfig.cmOptions.EnableBLM -or $hasBLMVMs) -and $role -eq 'Primary') {
+    # BitLocker Management: validate policy exists and is deployed (top-level site only).
+    # Only check when cmOptions.EnableBLM is set — EnableBLM.ps1 skips policy creation
+    # when only VMs have BitLocker=true (TPM-only, no ConfigMgr BLM policy management).
+    $cmo = if ($CurrentItem.cmOptions) { $CurrentItem.cmOptions } else { $DeployConfig.cmOptions }
+    if ($testsPassed -and $cmo.EnableBLM -and $role -eq 'Primary') {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying BitLocker Management"
         $testsPassed = Test-BLMFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
     }
