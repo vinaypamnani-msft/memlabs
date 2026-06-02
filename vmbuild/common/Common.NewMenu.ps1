@@ -1316,6 +1316,7 @@ function Show-Menu {
         $script:_bgBannerInfo = $null
         $script:_lastBgUpdate = $null
         $script:_lastBgRefresh = $null
+        $script:_lastSeenStillActive = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1851,7 +1852,7 @@ function Set-MouseHoverHighlight {
 # Called from Get-KeyStroke's idle polling loop every ~50-75ms. Throttles to
 # once per second so the cursor save/restore doesn't flicker. Returns:
 #   'completed' - operation finished; caller should invalidate cache & redraw
-#   'refresh'   - periodic full-screen refresh so the VM status table updates
+#   'refresh'   - a VM changed state; caller should invalidate cache & redraw
 #   $null       - no action needed
 function Update-BgBannerInPlace {
     $info = $script:_bgBannerInfo
@@ -1870,18 +1871,22 @@ function Update-BgBannerInPlace {
     }
     $script:_lastBgUpdate = $now
 
-    # Periodic full-screen refresh (every 5s) so the VM status table in the
-    # summary pane picks up state transitions (Running → Stopping → Off).
-    # Skip the in-place banner update — the full redraw will handle it.
+    # Trigger a full-screen refresh only when a VM actually changed state.
+    # The ThreadJob updates $op.StillActive on its poll cycle; compare against
+    # the last value we saw to detect transitions.
     if (-not $op.Completed) {
-        if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
-        if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
-            $script:_lastBgRefresh = $now
+        $currentActive = $op.StillActive
+        if ($null -eq $script:_lastSeenStillActive) {
+            $script:_lastSeenStillActive = $currentActive
+        }
+        elseif ($currentActive -ne $script:_lastSeenStillActive) {
+            $script:_lastSeenStillActive = $currentActive
             return 'refresh'
         }
     }
 
     $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
+    $remaining = $op.StillActive
 
     if ($op.Completed) {
         if ($op.Failures -eq 0) {
@@ -1894,7 +1899,8 @@ function Update-BgBannerInPlace {
         }
     }
     else {
-        $newText = "Background $($op.Type): $($op.VMCount) VM(s) in progress ($($elapsedSec)s)"
+        $doneCount = $op.VMCount - $remaining
+        $newText = "Background $($op.Type): $doneCount/$($op.VMCount) VM(s) done ($($elapsedSec)s)"
         # Skip redraw if text hasn't changed
         if ($info.MenuItem.Text -eq $newText) { return $null }
         $info.MenuItem.Text = $newText

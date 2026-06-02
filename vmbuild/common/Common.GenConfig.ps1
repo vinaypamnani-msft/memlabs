@@ -832,15 +832,16 @@ function Invoke-StopVMsBackground {
 
     $jobName = "MemLabs-StopVMs-$(Get-Date -Format 'HHmmss')"
     $global:PendingVMOperation = @{
-        Type      = "Stop"
-        Domain    = $domain
-        VMNames   = $targetNames
-        VMCount   = $targetNames.Count
-        StartTime = Get-Date
-        Completed = $false
-        Failures  = 0
-        Elapsed   = $null
-        JobName   = $jobName
+        Type        = "Stop"
+        Domain      = $domain
+        VMNames     = $targetNames
+        VMCount     = $targetNames.Count
+        StillActive = $targetNames.Count
+        StartTime   = Get-Date
+        Completed   = $false
+        Failures    = 0
+        Elapsed     = $null
+        JobName     = $jobName
     }
 
     # Capture the hashtable reference so the ThreadJob can modify it.
@@ -871,6 +872,7 @@ function Invoke-StopVMsBackground {
                         $stillActive++
                     }
                 }
+                $op.StillActive = $stillActive
                 if ($stillActive -eq 0) { break }
             }
 
@@ -934,15 +936,16 @@ function Invoke-SmartStartVMsBackground {
 
     $jobName = "MemLabs-StartVMs-$(Get-Date -Format 'HHmmss')"
     $global:PendingVMOperation = @{
-        Type      = "Start"
-        Domain    = $domain
-        VMNames   = $allNames
-        VMCount   = $allNames.Count
-        StartTime = Get-Date
-        Completed = $false
-        Failures  = 0
-        Elapsed   = $null
-        JobName   = $jobName
+        Type        = "Start"
+        Domain      = $domain
+        VMNames     = $allNames
+        VMCount     = $allNames.Count
+        StillActive = $allNames.Count
+        StartTime   = Get-Date
+        Completed   = $false
+        Failures    = 0
+        Elapsed     = $null
+        JobName     = $jobName
     }
 
     # Capture references for the ThreadJob via $using:.
@@ -979,6 +982,7 @@ function Invoke-SmartStartVMsBackground {
                         try {
                             Start-VM -Name $vm.vmName -ErrorAction Stop
                             $startedAny = $true
+                            $op.StillActive = [Math]::Max(0, $op.StillActive - 1)
                         }
                         catch {
                             $failures++
