@@ -2752,6 +2752,8 @@ $global:VM_Config = {
                             $logDirs = @(Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\*\Detail.txt' -ErrorAction SilentlyContinue |
                                 Sort-Object LastWriteTime -Descending)
                             if ($logDirs.Count -gt 0) {
+                                # Skip stale logs from previous runs (older than 5 min)
+                                if ($logDirs[0].LastWriteTime -lt (Get-Date).AddMinutes(-5)) { return $null }
                                 # Read the last few lines and skip telemetry noise
                                 $tailLines = @(Get-Content $logDirs[0].FullName -Tail 5 -ErrorAction SilentlyContinue)
                                 for ($i = $tailLines.Count - 1; $i -ge 0; $i--) {
@@ -2765,10 +2767,10 @@ $global:VM_Config = {
                                 if ($last -match ':\s*([^:]+)$') { return "SQL Setup: $($Matches[1].Trim())" }
                                 return "SQL Setup: $last"
                             }
-                            # Fallback: Summary.txt
+                            # Fallback: Summary.txt (also check staleness)
                             $summaryFiles = @(Get-ChildItem 'C:\Program Files\Microsoft SQL Server\*\Setup Bootstrap\Log\Summary.txt' -ErrorAction SilentlyContinue |
                                 Sort-Object LastWriteTime -Descending)
-                            if ($summaryFiles.Count -gt 0) {
+                            if ($summaryFiles.Count -gt 0 -and $summaryFiles[0].LastWriteTime -ge (Get-Date).AddMinutes(-5)) {
                                 return "SQL Setup: " + (Get-Content $summaryFiles[0].FullName -Tail 1 -ErrorAction SilentlyContinue)
                             }
                         } -SuppressLog
