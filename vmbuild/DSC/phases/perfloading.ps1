@@ -626,36 +626,72 @@ else {
 
             if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
                 $i++
-                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products. (attempt $i of 30)"
 
-                # Log diagnostics so we can tell WHY the sync isn't starting
-                if ($i -eq 1 -or $i % 5 -eq 0) {
-                    try {
-                        $diag = @()
-                        $diag += "LastSyncState=$($syncState.LastSyncState) LastSyncErrorCode=$($syncState.LastSyncErrorCode) LastSyncStateTime=$($syncState.LastSyncStateTime)"
-                        # Check if WSUS service (W3SVC / WsusService) is running
-                        $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
-                        $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
-                        $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
-                        # Check wsyncmgr.log for recent errors
-                        $wsyncLog = Join-Path $CMInstallDir "Logs\wsyncmgr.log"
-                        if (Test-Path $wsyncLog) {
-                            $recent = Get-Content $wsyncLog -Tail 5 -ErrorAction SilentlyContinue
-                            foreach ($line in $recent) {
-                                if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "wsyncmgr: $($Matches[1])" }
+                # Check if WCM is still configuring WSUS. Syncs will fail until
+                # WCM reaches state 2 (WSUS_CONFIG_SUCCESS), so wait instead of
+                # spamming Sync-CMSoftwareUpdate with guaranteed-to-fail requests.
+                $wcmBusy = $false
+                try {
+                    $wcmLog = Join-Path $CMInstallDir "Logs\WCM.log"
+                    if (Test-Path $wcmLog) {
+                        $wcmTail = Get-Content $wcmLog -Tail 10 -ErrorAction SilentlyContinue
+                        $wcmState = $wcmTail | Where-Object { $_ -match 'Setting new configuration state to (\d+)' } | Select-Object -Last 1
+                        if ($wcmState -and $wcmState -match 'state to (\d+)') {
+                            $stateNum = [int]$Matches[1]
+                            # 1=WSUS_CONFIG_STARTING, 3=WSUS_CONFIG_PENDING, 4=WSUS_CONFIG_SUBSCRIPTION_PENDING
+                            if ($stateNum -ne 2 -and $stateNum -ne 0) {
+                                $wcmBusy = $true
+                                $wcmStateNames = @{ 1='STARTING'; 3='PENDING'; 4='SUBSCRIPTION_PENDING'; 5='FAILED' }
+                                $wcmStateName = if ($wcmStateNames.ContainsKey($stateNum)) { $wcmStateNames[$stateNum] } else { "state $stateNum" }
+                                Write-DscStatus "$Tag SUM Sync: WCM is still configuring WSUS ($wcmStateName). Waiting 60s... (attempt $i of 30)"
                             }
                         }
-                        Write-DscStatus "$Tag SUM Sync diag: $($diag -join ' | ')"
-                    } catch {}
-                }
+                    }
+                } catch {}
 
-                Sync-CMSoftwareUpdate
-                if ($i -ge 30) {
-                    $syncTimeout = $true
-                    Write-DscStatus "$Tag SUM Sync: gave up after $i attempts. Skipping Set-CMSoftwareUpdatePointComponent"
-                    return $false
+                if ($wcmBusy) {
+                    # WCM is still working — don't call Sync-CMSoftwareUpdate, just wait
+                    if ($i -ge 30) {
+                        $syncTimeout = $true
+                        Write-DscStatus "$Tag SUM Sync: gave up after $i attempts waiting for WCM. Skipping."
+                        return $false
+                    }
+                    Start-Sleep -Seconds 60
                 }
-                Start-Sleep -Seconds 60
+                else {
+                    # WCM is done (or we can't tell) — attempt a sync
+                    Write-DscStatus "$Tag SUM Sync not running on $($syncState.WSUSServerName). Triggering sync. (attempt $i of 30)"
+
+                    # Log diagnostics on first attempt and every 5th retry
+                    if ($i -eq 1 -or $i % 5 -eq 0) {
+                        try {
+                            $diag = @()
+                            $diag += "LastSyncState=$($syncState.LastSyncState) LastSyncErrorCode=$($syncState.LastSyncErrorCode) LastSyncStateTime=$($syncState.LastSyncStateTime)"
+                            $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+                            $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+                            $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
+                            $wsyncLog = Join-Path $CMInstallDir "Logs\wsyncmgr.log"
+                            if (Test-Path $wsyncLog) {
+                                $recent = Get-Content $wsyncLog -Tail 5 -ErrorAction SilentlyContinue
+                                foreach ($line in $recent) {
+                                    if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "wsyncmgr: $($Matches[1])" }
+                                }
+                            }
+                            Write-DscStatus "$Tag SUM Sync diag: $($diag -join ' | ')"
+                        } catch {}
+                    }
+
+                    Sync-CMSoftwareUpdate
+                    if ($i -ge 30) {
+                        $syncTimeout = $true
+                        Write-DscStatus "$Tag SUM Sync: gave up after $i attempts. Skipping."
+                        return $false
+                    }
+                    # Wait 5 min between sync attempts when WCM is done but sync keeps failing
+                    $sleepSec = if ($i -le 3) { 60 } else { 300 }
+                    Write-DscStatus "$Tag SUM Sync: waiting ${sleepSec}s before next attempt..."
+                    Start-Sleep -Seconds $sleepSec
+                }
             } 
             else {
                 $syncStateString = "Unknown"
