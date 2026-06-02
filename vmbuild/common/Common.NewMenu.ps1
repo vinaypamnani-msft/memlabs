@@ -1959,8 +1959,18 @@ function Update-BgBannerInPlace {
         }
     }
 
-    # Build combined banner text from all active ops
+    # Build combined banner text from all ops (active + completed)
     $parts = @()
+    # Show completed ops with checkmark
+    foreach ($d in @($global:PendingVMOperations.Keys)) {
+        $cop = $global:PendingVMOperations[$d]
+        if ($cop.Completed) {
+            $shortDomain = $cop.Domain.Split('.')[0]
+            $marker = if ($cop.Failures -eq 0) { [char]0x2713 } else { '!' }
+            $parts += "$marker $shortDomain`: $($cop.VMCount)/$($cop.VMCount)"
+        }
+    }
+    # Show active ops with progress
     foreach ($aop in $activeOps) {
         $doneCount = $aop.VMCount - $aop.StillActive
         $shortDomain = $aop.Domain.Split('.')[0]

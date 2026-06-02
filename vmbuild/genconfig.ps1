@@ -311,21 +311,26 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{ "*BT" = "" }
 
     # Background operation status banner (visible from main menu too)
-    $activeOps = @()
+    $allOps = @()
     if ($global:PendingVMOperations) {
         foreach ($d in @($global:PendingVMOperations.Keys)) {
             $o = $global:PendingVMOperations[$d]
-            if ($o -and -not $o.Completed) { $activeOps += $o }
+            if ($o) { $allOps += $o }
         }
     }
-    if ($activeOps.Count -gt 0) {
+    if ($allOps.Count -gt 0) {
         $parts = @()
-        foreach ($aop in $activeOps) {
-            $doneCount = $aop.VMCount - $aop.StillActive
+        foreach ($aop in $allOps) {
             $shortDomain = $aop.Domain.Split('.')[0]
-            $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            if ($aop.Completed) {
+                $marker = if ($aop.Failures -eq 0) { [char]0x2713 } else { '!' }
+                $parts += "$marker $shortDomain`: $($aop.VMCount)/$($aop.VMCount)"
+            } else {
+                $doneCount = $aop.VMCount - $aop.StillActive
+                $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            }
         }
-        $oldest = $activeOps | Sort-Object StartTime | Select-Object -First 1
+        $oldest = $allOps | Sort-Object StartTime | Select-Object -First 1
         $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
         $bannerText = ($parts -join ' | ') + " ($($elapsedSec)s)"
         $customOptions += [ordered]@{
@@ -570,21 +575,26 @@ function Build-DomainSubMenuOptions {
 
     # Background operation status banner
     $bgBanner = [ordered]@{}
-    $activeOps = @()
+    $allOps = @()
     if ($global:PendingVMOperations) {
         foreach ($d in @($global:PendingVMOperations.Keys)) {
             $o = $global:PendingVMOperations[$d]
-            if ($o -and -not $o.Completed) { $activeOps += $o }
+            if ($o) { $allOps += $o }
         }
     }
-    if ($activeOps.Count -gt 0) {
+    if ($allOps.Count -gt 0) {
         $parts = @()
-        foreach ($aop in $activeOps) {
-            $doneCount = $aop.VMCount - $aop.StillActive
+        foreach ($aop in $allOps) {
             $shortDomain = $aop.Domain.Split('.')[0]
-            $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            if ($aop.Completed) {
+                $marker = if ($aop.Failures -eq 0) { [char]0x2713 } else { '!' }
+                $parts += "$marker $shortDomain`: $($aop.VMCount)/$($aop.VMCount)"
+            } else {
+                $doneCount = $aop.VMCount - $aop.StillActive
+                $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
+            }
         }
-        $oldest = $activeOps | Sort-Object StartTime | Select-Object -First 1
+        $oldest = $allOps | Sort-Object StartTime | Select-Object -First 1
         $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
         $bannerText = ($parts -join ' | ') + " ($($elapsedSec)s)"
         $bgBanner = [ordered]@{

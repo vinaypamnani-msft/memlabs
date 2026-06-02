@@ -753,28 +753,41 @@ function Complete-PendingVMOperation {
     <#
     .SYNOPSIS
         Checks whether any background Stop/Start VM operations have finished
-        and displays the results. Call this from the menu loop so the user
-        sees the outcome on the next render cycle.
+        and displays the results. Only consumes (removes) completed ops when
+        ALL ops are done, so completed domains stay visible in the banner
+        while other ops are still running.
     .OUTPUTS
         $true if any completed operations were consumed, $false otherwise.
     #>
     if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) { return $false }
 
-    $consumed = $false
-    $completedDomains = @()
-
+    # Check if any ops are still active
+    $hasActive = $false
     foreach ($domainKey in @($global:PendingVMOperations.Keys)) {
         $op = $global:PendingVMOperations[$domainKey]
-
-        # If the job vanished (e.g. user closed the session), clean up.
-        $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
-        if (-not $job -and -not $op.Completed) {
-            Write-Log "Background $($op.Type) operation for '$domainKey': job disappeared unexpectedly." -Warning
-            $completedDomains += $domainKey
-            $consumed = $true
-            continue
+        if (-not $op.Completed) {
+            # Check for vanished jobs
+            $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
+            if (-not $job) {
+                Write-Log "Background $($op.Type) operation for '$domainKey': job disappeared unexpectedly." -Warning
+                $op.Completed = $true
+                $op.Failures = $op.VMCount
+                $op.Elapsed = (Get-Date) - $op.StartTime
+            }
+            else {
+                $hasActive = $true
+            }
         }
+    }
 
+    # Don't consume yet if some ops are still running — keep completed
+    # ops in the hashtable so the banner can show them with a checkmark.
+    if ($hasActive) { return $false }
+
+    # All ops are done — consume and display results for each
+    $consumed = $false
+    foreach ($domainKey in @($global:PendingVMOperations.Keys)) {
+        $op = $global:PendingVMOperations[$domainKey]
         if ($op.Completed) {
             Write-Host
             if ($op.Failures -eq 0) {
@@ -784,19 +797,17 @@ function Complete-PendingVMOperation {
                 Write-RedX "Background $($op.Type): $($op.Failures) of $($op.VMCount) VM(s) in '$($op.Domain)' had issues. ($([math]::Round($op.Elapsed.TotalSeconds))s)" -ForegroundColor Red
             }
             # Clean up the job
+            $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
             if ($job) {
                 try { Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
                 try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
             }
-            $completedDomains += $domainKey
             $consumed = $true
         }
     }
 
-    foreach ($domainKey in $completedDomains) {
-        $global:PendingVMOperations.Remove($domainKey)
-    }
     if ($consumed) {
+        $global:PendingVMOperations = @{}
         $global:vm_List_Dirty = $true
     }
     return $consumed
