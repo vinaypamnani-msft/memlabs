@@ -437,7 +437,7 @@ function Select-StartDomain {
                 Invoke-SmartStartVMsBackground -CritList $crit -CriticalOnly:$CriticalOnly -domain $domain
                 Write-GreenCheck "Starting $($ReturnVal.Count) VM(s) in '$domain' in the background..."
             }
-            $ReturnVal = $null
+            return
         }
     }
     get-list -type VM -SmartUpdate | out-null
