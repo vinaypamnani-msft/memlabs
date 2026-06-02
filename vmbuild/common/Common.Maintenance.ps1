@@ -268,7 +268,7 @@ function Start-VMMaintenance {
         }
         try {
             if ($ApplyNewOnly.IsPresent) {
-                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers
+                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers -DisplayName "Logoff users" -SuppressLog
             }
         }
         catch {}

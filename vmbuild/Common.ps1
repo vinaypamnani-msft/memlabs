@@ -3740,7 +3740,8 @@ function Invoke-VmCommand {
     try {
         # Set display name for logging
         if (-not $DisplayName) {
-            $DisplayName = $ScriptBlock
+            $DisplayName = ($ScriptBlock.ToString() -replace '\s+', ' ').Trim()
+            if ($DisplayName.Length -gt 80) { $DisplayName = $DisplayName.Substring(0, 77) + '...' }
         }
 
         # WhatIf
