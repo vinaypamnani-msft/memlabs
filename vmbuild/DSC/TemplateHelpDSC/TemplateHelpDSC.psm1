@@ -2609,6 +2609,9 @@ class RegisterTaskScheduler {
         $waitTime = 30
 
         $success = $this.RegisterTask()
+        if (-not $success) {
+            throw "Failed to register task $_TaskName after multiple attempts. Check domain trust and AD replication."
+        }
         $lastRunTime = $this.GetLastRunTime()
         $failCount = 0
         Write-Status "Starting task $_Taskname from $_ScriptPath $_ScriptName $_ScriptArgument"
@@ -2618,21 +2621,25 @@ class RegisterTaskScheduler {
             Write-Verbose "lastRunTime(UTC): $lastRunTime   RegisterTime(UTC): $RegisterTime"
 
             if ($failCount -gt 2) {
-                Write-Verbose "Manually starting the task"
-                Start-ScheduledTask -TaskName $_TaskName
-                start-sleep $waitTime
+                # Verify task still exists before trying to start it
+                $taskExists = Get-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+                if (-not $taskExists) {
+                    Write-Status "$_TaskName disappeared. Re-registering..."
+                    $success = $this.RegisterTask()
+                    if (-not $success) {
+                        throw "Failed to re-register task $_TaskName."
+                    }
+                }
+                else {
+                    Write-Verbose "Manually starting the task"
+                    Start-ScheduledTask -TaskName $_TaskName -ErrorAction SilentlyContinue
+                }
+                Start-Sleep $waitTime
                 $lastRunTime = $this.GetLastRunTime()
             }
 
-            if ($failCount -eq 5) {
-                Write-Status "$_TaskName has not ran yet after 5 Cycles. Re-Registering Task"
-                #Unregister existing task
-                $success = $this.RegisterTask()
-
-            }
-
             if ($failCount -eq 8) {
-                Write-Status "$_TaskName failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
+                Write-Status "$_TaskName failed to run after 8 retries. Exiting. Please check Task Scheduler for Task: $_TaskName"
                 throw "Task failed to run after 8 retries, and reregistration. Exiting. Please check Task Scheduler for Task: $_TaskName"
             }
 
@@ -2739,9 +2746,31 @@ class RegisterTaskScheduler {
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 
-        $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force | out-Null
+        # Register with retry — domain trust failures are transient (AD replication lag)
+        $registered = $false
+        for ($regAttempt = 1; $regAttempt -le 5; $regAttempt++) {
+            try {
+                $Task | Register-ScheduledTask -TaskName $($this.TaskName) -User $($this.AdminCreds.UserName) -Password $Password -Force -ErrorAction Stop | Out-Null
+            } catch {
+                Write-Status "Register-ScheduledTask attempt $regAttempt failed: $($_.Exception.Message)"
+            }
+            # Verify the task actually exists
+            $verify = Get-ScheduledTask -TaskName $($this.TaskName) -ErrorAction SilentlyContinue
+            if ($verify) {
+                $registered = $true
+                Write-Status "Task $($this.TaskName) registered successfully (attempt $regAttempt)"
+                break
+            }
+            Write-Status "Task $($this.TaskName) not found after registration attempt $regAttempt. Retrying in 30s..."
+            Start-Sleep -Seconds 30
+        }
 
-        start-sleep -Seconds $waitTime
+        if (-not $registered) {
+            Write-Status "ERROR: Task $($this.TaskName) could not be registered after 5 attempts."
+            return $false
+        }
+
+        Start-Sleep -Seconds $waitTime
 
         Write-Status "Time is now: $([datetime]::Now) Task Scheduled $($this.TaskName) is starting"
         Start-ScheduledTask -TaskName $($this.TaskName)
