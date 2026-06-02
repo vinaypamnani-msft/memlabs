@@ -894,8 +894,9 @@ function Invoke-StopVMsBackground {
                 if ($stillActive -eq 0) { break }
             }
 
-            # Clean up any lingering Stop-VM child jobs in this runspace
-            try { Get-Job | Where-Object { $_.Name -ne $op.JobName } | Remove-Job -Force -ErrorAction SilentlyContinue } catch {}
+            # Don't Remove-Job on Hyper-V WMI jobs — disposing them can crash
+            # the process (PSObjectDisposedException on a threadpool callback).
+            # They'll be cleaned up when the ThreadJob's runspace is torn down.
 
             # Count failures
             $failures = 0
