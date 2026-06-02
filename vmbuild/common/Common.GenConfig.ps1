@@ -752,42 +752,54 @@ function Invoke-StopVMs {
 function Complete-PendingVMOperation {
     <#
     .SYNOPSIS
-        Checks whether a background Stop/Start VM operation has finished
-        and displays the result. Call this from the menu loop so the user
+        Checks whether any background Stop/Start VM operations have finished
+        and displays the results. Call this from the menu loop so the user
         sees the outcome on the next render cycle.
     .OUTPUTS
-        $true if a completed operation was consumed, $false otherwise.
+        $true if any completed operations were consumed, $false otherwise.
     #>
-    if (-not $global:PendingVMOperation) { return $false }
+    if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) { return $false }
 
-    # If the job vanished (e.g. user closed the session), clean up.
-    $job = Get-Job -Name $global:PendingVMOperation.JobName -ErrorAction SilentlyContinue
-    if (-not $job -and -not $global:PendingVMOperation.Completed) {
-        Write-Log "Background $($global:PendingVMOperation.Type) operation: job disappeared unexpectedly." -Warning
-        $global:PendingVMOperation = $null
-        return $true
+    $consumed = $false
+    $completedDomains = @()
+
+    foreach ($domainKey in @($global:PendingVMOperations.Keys)) {
+        $op = $global:PendingVMOperations[$domainKey]
+
+        # If the job vanished (e.g. user closed the session), clean up.
+        $job = Get-Job -Name $op.JobName -ErrorAction SilentlyContinue
+        if (-not $job -and -not $op.Completed) {
+            Write-Log "Background $($op.Type) operation for '$domainKey': job disappeared unexpectedly." -Warning
+            $completedDomains += $domainKey
+            $consumed = $true
+            continue
+        }
+
+        if ($op.Completed) {
+            Write-Host
+            if ($op.Failures -eq 0) {
+                Write-GreenCheck "Background $($op.Type): All $($op.VMCount) VM(s) in '$($op.Domain)' completed successfully. ($([math]::Round($op.Elapsed.TotalSeconds))s)"
+            }
+            else {
+                Write-RedX "Background $($op.Type): $($op.Failures) of $($op.VMCount) VM(s) in '$($op.Domain)' had issues. ($([math]::Round($op.Elapsed.TotalSeconds))s)" -ForegroundColor Red
+            }
+            # Clean up the job
+            if ($job) {
+                try { Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            $completedDomains += $domainKey
+            $consumed = $true
+        }
     }
 
-    if ($global:PendingVMOperation.Completed) {
-        $op = $global:PendingVMOperation
-        Write-Host
-        if ($op.Failures -eq 0) {
-            Write-GreenCheck "Background $($op.Type): All $($op.VMCount) VM(s) in '$($op.Domain)' completed successfully. ($([math]::Round($op.Elapsed.TotalSeconds))s)"
-        }
-        else {
-            Write-RedX "Background $($op.Type): $($op.Failures) of $($op.VMCount) VM(s) in '$($op.Domain)' had issues. ($([math]::Round($op.Elapsed.TotalSeconds))s)" -ForegroundColor Red
-        }
-        # Clean up the job
-        if ($job) {
-            try { Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null } catch {}
-            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
-        }
-        $global:PendingVMOperation = $null
-        $global:vm_List_LastUpdate = $null
-        return $true
+    foreach ($domainKey in $completedDomains) {
+        $global:PendingVMOperations.Remove($domainKey)
     }
-
-    return $false
+    if ($consumed) {
+        $global:vm_List_Dirty = $true
+    }
+    return $consumed
 }
 
 function Invoke-StopVMsBackground {
@@ -807,9 +819,11 @@ function Invoke-StopVMsBackground {
         [Parameter(Mandatory = $false)] [object[]] $vmList = $null
     )
 
-    # Guard: only one background operation at a time
-    if ($global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
-        Write-OrangePoint "A background VM operation is already in progress ($($global:PendingVMOperation.Type) in '$($global:PendingVMOperation.Domain)')."
+    # Guard: only one background operation per domain
+    if (-not $global:PendingVMOperations) { $global:PendingVMOperations = @{} }
+    $existingOp = $global:PendingVMOperations[$domain]
+    if ($existingOp -and -not $existingOp.Completed) {
+        Write-OrangePoint "A background $($existingOp.Type) operation is already in progress for '$domain'."
         return
     }
 
@@ -831,7 +845,7 @@ function Invoke-StopVMsBackground {
     if ($targetNames.Count -eq 0) { return }
 
     $jobName = "MemLabs-StopVMs-$(Get-Date -Format 'HHmmss')"
-    $global:PendingVMOperation = @{
+    $global:PendingVMOperations[$domain] = @{
         Type         = "Stop"
         Domain       = $domain
         VMNames      = $targetNames
@@ -849,7 +863,7 @@ function Invoke-StopVMsBackground {
     # ThreadJobs run in a separate runspace — $global: variables and
     # custom functions (Get-VM2, Write-Log, etc.) are NOT available.
     # Only built-in / module cmdlets (Get-VM, Stop-VM) work.
-    $opRef = $global:PendingVMOperation
+    $opRef = $global:PendingVMOperations[$domain]
 
     $null = Start-ThreadJob -Name $jobName -ScriptBlock {
         $op = $using:opRef
@@ -917,9 +931,11 @@ function Invoke-SmartStartVMsBackground {
         [Parameter(Mandatory = $true)]  [string] $domain
     )
 
-    # Guard: only one background operation at a time
-    if ($global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
-        Write-OrangePoint "A background VM operation is already in progress ($($global:PendingVMOperation.Type) in '$($global:PendingVMOperation.Domain)')."
+    # Guard: only one background operation per domain
+    if (-not $global:PendingVMOperations) { $global:PendingVMOperations = @{} }
+    $existingOp = $global:PendingVMOperations[$domain]
+    if ($existingOp -and -not $existingOp.Completed) {
+        Write-OrangePoint "A background $($existingOp.Type) operation is already in progress for '$domain'."
         return
     }
 
@@ -939,7 +955,7 @@ function Invoke-SmartStartVMsBackground {
     if ($allNames.Count -eq 0) { return }
 
     $jobName = "MemLabs-StartVMs-$(Get-Date -Format 'HHmmss')"
-    $global:PendingVMOperation = @{
+    $global:PendingVMOperations[$domain] = @{
         Type         = "Start"
         Domain       = $domain
         VMNames      = $allNames
@@ -957,7 +973,7 @@ function Invoke-SmartStartVMsBackground {
     # ThreadJobs run in a separate runspace — $global: variables and
     # custom functions (Start-VM2, Invoke-SmartStartVMs, Write-Log, etc.)
     # are NOT available. Only built-in / module cmdlets work.
-    $opRef = $global:PendingVMOperation
+    $opRef = $global:PendingVMOperations[$domain]
     $critListCopy = $CritList
     $critOnlyCopy = [bool]$CriticalOnly
 

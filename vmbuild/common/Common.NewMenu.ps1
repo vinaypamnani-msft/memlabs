@@ -1122,7 +1122,7 @@ function Write-MenuItem {
             # return and the Show-Menu redraw. The _bgCompletionHandled flag
             # in Update-BgBannerInPlace prevents the infinite redraw loop.
             if ([string]$MenuItem.itemName -eq '*BG') {
-                if ($global:PendingVMOperation) {
+                if ($global:PendingVMOperations -and $global:PendingVMOperations.Count -gt 0) {
                     $bgPos = Get-CursorPosition
                     $script:_bgBannerInfo = @{
                         Y                = $bgPos.Y
@@ -1315,7 +1315,6 @@ function Show-Menu {
         $script:_bgBannerInfo = $null
         $script:_lastBgUpdate = $null
         $script:_lastBgRefresh = $null
-        $script:_lastSeenStillActive = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1857,17 +1856,64 @@ function Update-BgBannerInPlace {
     $info = $script:_bgBannerInfo
     if (-not $info) { return $null }
 
-    $op = $global:PendingVMOperation
-    if (-not $op) {
+    if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) {
         $script:_bgBannerInfo = $null
         $script:_bgCompletionHandled = $false
         return $null
     }
 
-    # Already showed the completion banner — don't re-trigger
-    if ($op.Completed -and $script:_bgCompletionHandled) {
+    # Gather active (not-completed) ops
+    $activeOps = @()
+    $allCompleted = $true
+    foreach ($d in @($global:PendingVMOperations.Keys)) {
+        $o = $global:PendingVMOperations[$d]
+        if ($o -and -not $o.Completed) {
+            $activeOps += $o
+            $allCompleted = $false
+        }
+    }
+
+    # All ops completed — handle settle delay then signal rebuild
+    if ($allCompleted) {
+        if ($script:_bgCompletionHandled) { return $null }
+        $now = [DateTime]::UtcNow
+        if (-not $script:_bgCompletionDetectedAt) {
+            $script:_bgCompletionDetectedAt = $now
+            # Update banner to green "complete" immediately
+            $totalVMs = ($global:PendingVMOperations.Values | Measure-Object -Property VMCount -Sum).Sum
+            $totalFail = ($global:PendingVMOperations.Values | Measure-Object -Property Failures -Sum).Sum
+            $oldest = $global:PendingVMOperations.Values | Sort-Object StartTime | Select-Object -First 1
+            $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+            if ($totalFail -eq 0) {
+                $info.MenuItem.Text = "All $totalVMs VM(s) complete ($($elapsedSec)s)"
+                $info.MenuItem.Color1 = "Chartreuse"
+            } else {
+                $info.MenuItem.Text = "$totalFail/$totalVMs VM(s) had issues ($($elapsedSec)s)"
+                $info.MenuItem.Color1 = "Red"
+            }
+            # Redraw the completion banner in-place
+            $savedPos = Get-CursorPosition
+            [System.Console]::CursorVisible = $false
+            try {
+                Set-CursorPosition -X 0 -Y $info.Y
+                Write-Host "`e[2K" -NoNewline
+                Set-CursorPosition -X 0 -Y $info.Y
+                Write-MenuHeader -MenuItem $info.MenuItem -LongestBreakLine $info.LongestBreakLine
+                Set-CursorPosition -X $savedPos.X -Y $savedPos.Y
+            } catch {}
+            finally { [System.Console]::CursorVisible = $false }
+            return $null
+        }
+        if (($now - $script:_bgCompletionDetectedAt).TotalSeconds -ge 5) {
+            $script:_bgCompletionHandled = $true
+            $script:_bgCompletionDetectedAt = $null
+            return 'completed'
+        }
         return $null
     }
+
+    # Reset completion tracking when ops are still active
+    $script:_bgCompletionDetectedAt = $null
 
     # Throttle to once per second
     $now = [DateTime]::UtcNow
@@ -1876,62 +1922,37 @@ function Update-BgBannerInPlace {
     }
     $script:_lastBgUpdate = $now
 
-    # Trigger a full-screen refresh only when a VM actually changed state,
-    # but no more often than every 5 seconds so rapid transitions don't
-    # cause a flurry of redraws.
-    if (-not $op.Completed) {
-        $currentActive = $op.StillActive
-        if ($null -eq $script:_lastSeenStillActive) {
-            $script:_lastSeenStillActive = $currentActive
+    # Trigger a full-screen refresh when any op's state changed,
+    # but no more often than every 5 seconds.
+    $anyChanged = $false
+    foreach ($aop in $activeOps) {
+        if ($aop.StateChanged) {
+            $aop.StateChanged = $false
+            $anyChanged = $true
         }
-        elseif ($currentActive -ne $script:_lastSeenStillActive) {
-            $script:_lastSeenStillActive = $currentActive
-            if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
-            if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
-                $script:_lastBgRefresh = $now
-                return 'refresh'
-            }
+    }
+    if ($anyChanged) {
+        if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
+        if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
+            $script:_lastBgRefresh = $now
+            return 'refresh'
         }
     }
 
-    if ($op.Completed) {
-        # Delay the 'completed' signal by 5 seconds so VMs have time to
-        # fully transition to their final state (e.g. Starting → Running)
-        # before the rebuild queries Get-VM for fresh data.
-        if (-not $script:_bgCompletionDetectedAt) {
-            $script:_bgCompletionDetectedAt = $now
-            # Fall through to update banner text to green immediately
-        }
-        elseif (($now - $script:_bgCompletionDetectedAt).TotalSeconds -ge 5) {
-            $script:_bgCompletionHandled = $true
-            $script:_bgCompletionDetectedAt = $null
-            return 'completed'
-        }
-        else {
-            return $null   # Still waiting for settle delay
-        }
+    # Build combined banner text from all active ops
+    $parts = @()
+    foreach ($aop in $activeOps) {
+        $doneCount = $aop.VMCount - $aop.StillActive
+        $shortDomain = $aop.Domain.Split('.')[0]
+        $parts += "$($aop.Type) $shortDomain`: $doneCount/$($aop.VMCount)"
     }
+    $oldest = $activeOps | Sort-Object StartTime | Select-Object -First 1
+    $elapsedSec = [math]::Round(((Get-Date) - $oldest.StartTime).TotalSeconds)
+    $newText = ($parts -join ' | ') + " ($($elapsedSec)s)"
 
-    $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
-    $remaining = $op.StillActive
-
-    if ($op.Completed) {
-        if ($op.Failures -eq 0) {
-            $info.MenuItem.Text = "Background $($op.Type): $($op.VMCount) VM(s) complete ($($elapsedSec)s)"
-            $info.MenuItem.Color1 = "Chartreuse"
-        }
-        else {
-            $info.MenuItem.Text = "Background $($op.Type): $($op.Failures)/$($op.VMCount) VM(s) had issues ($($elapsedSec)s)"
-            $info.MenuItem.Color1 = "Red"
-        }
-    }
-    else {
-        $doneCount = $op.VMCount - $remaining
-        $newText = "Background $($op.Type): $doneCount/$($op.VMCount) VM(s) done ($($elapsedSec)s)"
-        # Skip redraw if text hasn't changed
-        if ($info.MenuItem.Text -eq $newText) { return $null }
-        $info.MenuItem.Text = $newText
-    }
+    # Skip redraw if text hasn't changed
+    if ($info.MenuItem.Text -eq $newText) { return $null }
+    $info.MenuItem.Text = $newText
 
     # Save cursor, redraw the banner line in-place, restore cursor
     $savedPos = Get-CursorPosition
@@ -1939,14 +1960,12 @@ function Update-BgBannerInPlace {
     [System.Console]::CursorVisible = $false
     try {
         Set-CursorPosition -X 0 -Y $info.Y
-        Write-Host "`e[2K" -NoNewline           # clear entire line
+        Write-Host "`e[2K" -NoNewline
         Set-CursorPosition -X 0 -Y $info.Y
         Write-MenuHeader -MenuItem $info.MenuItem -LongestBreakLine $info.LongestBreakLine
         Set-CursorPosition -X $savedPos.X -Y $savedPos.Y
     }
-    catch {
-        # Best effort — don't break the input loop
-    }
+    catch {}
     finally {
         [System.Console]::CursorVisible = $savedVisible
     }

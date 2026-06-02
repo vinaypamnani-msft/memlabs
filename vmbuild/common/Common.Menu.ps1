@@ -354,10 +354,10 @@ function Select-StartDomain {
         [switch] $Sync
     )
 
-    # If a background VM operation is already running, warn and return
-    if (-not $Sync -and $global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+    # If a background VM operation is already running for this domain, warn and return
+    if (-not $Sync -and $global:PendingVMOperations[$domain] -and -not $global:PendingVMOperations[$domain].Completed) {
         Write-Host
-        Write-OrangePoint "A background $($global:PendingVMOperation.Type) operation is already in progress in '$($global:PendingVMOperation.Domain)'."
+        Write-OrangePoint "A background $($global:PendingVMOperations[$domain].Type) operation is already in progress for '$domain'."
         return
     }
 
@@ -455,10 +455,10 @@ function Select-StopDomain {
         [switch] $Sync
     )
 
-    # If a background VM operation is already running, warn and return
-    if (-not $Sync -and $global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+    # If a background VM operation is already running for this domain, warn and return
+    if (-not $Sync -and $global:PendingVMOperations[$domain] -and -not $global:PendingVMOperations[$domain].Completed) {
         Write-Host
-        Write-OrangePoint "A background $($global:PendingVMOperation.Type) operation is already in progress in '$($global:PendingVMOperation.Domain)'."
+        Write-OrangePoint "A background $($global:PendingVMOperations[$domain].Type) operation is already in progress for '$domain'."
         return
     }
 
