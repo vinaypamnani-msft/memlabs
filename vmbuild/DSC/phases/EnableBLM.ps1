@@ -319,7 +319,7 @@ if ($blmEnabled) {
 
     function Test-BlmPortalHealth {
         # Returns hashtable: @{ Installed=$bool; AppOk=$bool; PoolOk=$bool; Reg=$bool; ConnStr=$str; Details=$str }
-        $result = @{ Installed=$false; AppOk=$false; PoolOk=$false; Reg=$false; ConnStr=$null; Details=@() }
+        $result = @{ Installed=$false; AppOk=$false; SspOk=$false; PoolOk=$false; Reg=$false; ConnStr=$null; Details=@() }
         try {
             Import-Module WebAdministration -ErrorAction Stop
         } catch {
@@ -332,7 +332,7 @@ if ($blmEnabled) {
                 $result.AppOk = $true
                 $result.Details += "IIS app /HelpDesk -> $($app.PhysicalPath)"
                 if ($app.PhysicalPath -and -not (Test-Path $app.PhysicalPath)) {
-                    $result.Details += "WARN: physical path missing on disk"
+                    $result.Details += "WARN: HelpDesk physical path missing on disk"
                     $result.AppOk = $false
                 }
                 $poolName = $app.applicationPool
@@ -347,6 +347,13 @@ if ($blmEnabled) {
                 }
             } else {
                 $result.Details += "IIS app /HelpDesk not present"
+            }
+            $ssp = Get-WebApplication -Site 'Default Web Site' -Name 'SelfService' -ErrorAction SilentlyContinue
+            if ($ssp) {
+                $result.SspOk = $true
+                $result.Details += "IIS app /SelfService -> $($ssp.PhysicalPath)"
+            } else {
+                $result.Details += "IIS app /SelfService not present"
             }
         } catch {
             $result.Details += "IIS probe failed: $($_.Exception.Message)"
@@ -363,7 +370,7 @@ if ($blmEnabled) {
         } catch {
             $result.Details += "Registry probe failed: $($_.Exception.Message)"
         }
-        $result.Installed = ($result.AppOk -and $result.Reg)
+        $result.Installed = ($result.AppOk -and $result.SspOk -and $result.Reg)
         return $result
     }
 
@@ -571,14 +578,32 @@ if ($blmEnabled) {
                     '-File',"`"$installer`""
                     '-SqlServerName',$sqlServerFqdnBase     # FQDN of the SQL host only (no instance)
                     '-SqlDatabaseName',$cmDbName
-                    '-SiteInstall','HelpDesk'
+                    '-SiteInstall','Both'
                     '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
                     '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
                     '-DomainName',$DomainFullName
                 )
-                # Named instance: pass -SqlInstanceName separately
+                # Named instance: pass -SqlInstanceName separately and ensure
+                # SQL Browser is running on the SQL host (required for instance
+                # discovery when the MBAM installer connects without a port number)
                 if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
                     $installerArgs += '-SqlInstanceName'; $installerArgs += $sqlInstanceName
+                    $sqlHostName = $sqlServerName.Split('\')[0]
+                    try {
+                        $browserStatus = Invoke-Command -ComputerName "$sqlHostName.$DomainFullName" -ScriptBlock {
+                            $svc = Get-Service -Name SQLBrowser -ErrorAction SilentlyContinue
+                            if (-not $svc) { return 'NotFound' }
+                            if ($svc.Status -ne 'Running') {
+                                Set-Service -Name SQLBrowser -StartupType Automatic -ErrorAction SilentlyContinue
+                                Start-Service -Name SQLBrowser -ErrorAction Stop
+                                return 'Started'
+                            }
+                            return 'Running'
+                        } -ErrorAction Stop
+                        Write-DscStatus "$Tag SQL Browser on $sqlHostName: $browserStatus"
+                    } catch {
+                        Write-DscStatus "$Tag WARNING: Could not verify SQL Browser on $sqlHostName: $($_.Exception.Message)"
+                    }
                 }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
                 Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
@@ -642,7 +667,7 @@ if ($blmEnabled) {
                             Write-DscStatus "$Tag WARNING: Smoke test exception: $($_.Exception.Message)"
                         }
 
-                        Write-DscStatus "$Tag SUCCESS: BLM Helpdesk Portal ready at https://$localServerFqdn/HelpDesk (sign in as member of $qualifiedGroup)"
+                        Write-DscStatus "$Tag SUCCESS: BLM portals ready at https://$localServerFqdn/HelpDesk and https://$localServerFqdn/SelfService (sign in as member of $qualifiedGroup)"
                     }
                     else {
                         Write-DscStatus "$Tag WARNING: Installer ran but post-install health check FAILED. See $logFile and $errFile for details."
