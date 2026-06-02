@@ -1116,6 +1116,15 @@ function Write-MenuItem {
         }
         'Header' {
             if ($MaxShrink -or $Shrink.Header) { return $result }
+            # Track the *BG banner position for live elapsed-time updates
+            if ([string]$MenuItem.itemName -eq '*BG') {
+                $bgPos = Get-CursorPosition
+                $script:_bgBannerInfo = @{
+                    Y                = $bgPos.Y
+                    LongestBreakLine = $LongestBreakLine
+                    MenuItem         = $MenuItem
+                }
+            }
             Write-MenuHeader -MenuItem $MenuItem -LongestBreakLine $LongestBreakLine
             $result.Drawn = $true
         }
@@ -1297,6 +1306,8 @@ function Show-Menu {
         # it was drawn previously, and a stale position would cause Update-Prompt
         # to paint the help box over wherever that old coordinate points.
         $HelpPosition = $null
+        $script:_bgBannerInfo = $null
+        $script:_lastBgUpdate = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1826,6 +1837,74 @@ function Set-MouseHoverHighlight {
     $script:_lastHoveredIndex = $hoveredIndex
 }
 
+# ---------------------------------------------------------------------------
+# Live background-operation banner update
+# ---------------------------------------------------------------------------
+# Called from Get-KeyStroke's idle polling loop every ~50-75ms. Throttles to
+# once per second so the cursor save/restore doesn't flicker. Returns
+# 'completed' when the background operation finishes (caller triggers redraw),
+# $null otherwise.
+function Update-BgBannerInPlace {
+    $info = $script:_bgBannerInfo
+    if (-not $info) { return $null }
+
+    $op = $global:PendingVMOperation
+    if (-not $op) {
+        $script:_bgBannerInfo = $null
+        return $null
+    }
+
+    # Throttle to once per second
+    $now = [DateTime]::UtcNow
+    if ($script:_lastBgUpdate -and ($now - $script:_lastBgUpdate).TotalMilliseconds -lt 1000) {
+        return $null
+    }
+    $script:_lastBgUpdate = $now
+
+    $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
+
+    if ($op.Completed) {
+        if ($op.Failures -eq 0) {
+            $info.MenuItem.Text = "Background $($op.Type): $($op.VMCount) VM(s) complete ($($elapsedSec)s)"
+            $info.MenuItem.Color1 = "Chartreuse"
+        }
+        else {
+            $info.MenuItem.Text = "Background $($op.Type): $($op.Failures)/$($op.VMCount) VM(s) had issues ($($elapsedSec)s)"
+            $info.MenuItem.Color1 = "Red"
+        }
+    }
+    else {
+        $newText = "Background $($op.Type): $($op.VMCount) VM(s) in progress ($($elapsedSec)s)"
+        # Skip redraw if text hasn't changed
+        if ($info.MenuItem.Text -eq $newText) { return $null }
+        $info.MenuItem.Text = $newText
+    }
+
+    # Save cursor, redraw the banner line in-place, restore cursor
+    $savedPos = Get-CursorPosition
+    $savedVisible = [System.Console]::CursorVisible
+    [System.Console]::CursorVisible = $false
+    try {
+        Set-CursorPosition -X 0 -Y $info.Y
+        Write-Host "`e[2K" -NoNewline           # clear entire line
+        Set-CursorPosition -X 0 -Y $info.Y
+        Write-MenuHeader -MenuItem $info.MenuItem -LongestBreakLine $info.LongestBreakLine
+        Set-CursorPosition -X $savedPos.X -Y $savedPos.Y
+    }
+    catch {
+        # Best effort — don't break the input loop
+    }
+    finally {
+        [System.Console]::CursorVisible = $savedVisible
+    }
+
+    if ($op.Completed) {
+        $script:_bgBannerInfo = $null
+        return 'completed'
+    }
+    return $null
+}
+
 # Get the key stroke from the user. If $WatchSize is supplied, polls every
 # ~100ms and returns $null if the window size changes before a key is pressed.
 # Otherwise blocks until a key is pressed (original behavior).
@@ -1970,6 +2049,10 @@ function Get-KeyStroke {
                 }
             }
 
+            # Live-update the background operation banner (elapsed time counter)
+            $bgResult = Update-BgBannerInPlace
+            if ($bgResult -eq 'completed') { return $null }
+
             # Fallback Shift detection: if the console's mark mode (text
             # selection) swallowed the Shift key-up event, we'd stay in
             # suspended mode forever. Poll the physical key state to catch
@@ -2002,6 +2085,11 @@ function Get-KeyStroke {
         if ($live -and ($live.Width -ne $WatchSize.Width -or $live.Height -ne $WatchSize.Height)) {
             return $null
         }
+
+        # Live-update the background operation banner (elapsed time counter)
+        $bgResult = Update-BgBannerInPlace
+        if ($bgResult -eq 'completed') { return $null }
+
         Start-Sleep -Milliseconds 75
     }
 }
