@@ -547,6 +547,17 @@ if ($blmEnabled) {
                     '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
                     '-DomainName',$DomainFullName
                 )
+                # Named instances / custom ports need -IncludePortInSPN for Kerberos SPN
+                # resolution. Without it the installer fails with "Failure acquiring SQL
+                # identity certificate" because the SPN doesn't match.
+                if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
+                    $installerArgs += '-IncludePortInSPN'
+                    if ($sqlPort) { $installerArgs += '-Port'; $installerArgs += $sqlPort.ToString() }
+                }
+                elseif ($sqlPort -and $sqlPort -ne 1433) {
+                    $installerArgs += '-IncludePortInSPN'
+                    $installerArgs += '-Port'; $installerArgs += $sqlPort.ToString()
+                }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
                 Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
 
