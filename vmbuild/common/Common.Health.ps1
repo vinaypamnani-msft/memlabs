@@ -57,7 +57,7 @@ function Get-HealthStats {
     $uptimeHours = $null
     try { $uptimeHours = [math]::Round((Get-Uptime).TotalHours, 1) } catch {}
 
-    $vmList = Get-List -Type VM
+    $vmList = Get-List -Type VM -SmartUpdate
     $pendingCount = (Get-PendingVMs | Measure-Object).Count
 
     $Global:HealthStatsCache = [PSCustomObject]@{

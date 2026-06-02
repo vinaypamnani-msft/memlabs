@@ -307,6 +307,17 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{ "*F0" = "Check-OverallHealth" }
     $customOptions += [ordered]@{ "*HELP" = "Update-HelpText" }
     $customOptions += [ordered]@{ "*BT" = "" }
+
+    # Background operation status banner (visible from main menu too)
+    if ($global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
+        $op = $global:PendingVMOperation
+        $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
+        $doneCount = $op.VMCount - $op.StillActive
+        $customOptions += [ordered]@{
+            "*BG" = "Background $($op.Type): $doneCount/$($op.VMCount) VM(s) done ($($elapsedSec)s) [$($op.Domain)]%DarkGoldenrod"
+        }
+    }
+
     $customOptions += [ordered]@{ "*B0" = "Create or Modify domain configs%$($Global:Common.Colors.GenConfigHeader)" }
     $customOptions += [ordered]@{ "C" = "Create New Domain%$($Global:Common.Colors.GenConfigNewVM)%$($Global:Common.Colors.GenConfigNewVM)" }
     $customOptions += [ordered]@{ "HC" = "Use this option to create a new domain!" }

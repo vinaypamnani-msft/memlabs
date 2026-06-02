@@ -17,7 +17,7 @@ Function Get-DomainStatsLine {
 
     $stats = ""
     try {
-        $ListCache = Get-List -Type VM -Domain $DomainName
+        $ListCache = Get-List -Type VM -Domain $DomainName -SmartUpdate
         $ExistingCasCount = ($ListCache | Where-Object { $_.Role -eq "CAS" } | Measure-Object).Count
         $ExistingPriCount = ($ListCache | Where-Object { $_.Role -eq "Primary" } | Measure-Object).Count
         $ExistingSecCount = ($ListCache | Where-Object { $_.Role -eq "Secondary" } | Measure-Object).Count

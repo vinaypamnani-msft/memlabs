@@ -2088,6 +2088,7 @@ function Get-KeyStroke {
             $bgResult = Update-BgBannerInPlace
             if ($bgResult -in @('completed', 'refresh')) {
                 $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
+                $global:HealthStatsCache = $null     # invalidate Quick Stats cache
                 return $null
             }
 
@@ -2128,6 +2129,7 @@ function Get-KeyStroke {
         $bgResult = Update-BgBannerInPlace
         if ($bgResult -in @('completed', 'refresh')) {
             $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
+            $global:HealthStatsCache = $null     # invalidate Quick Stats cache
             return $null
         }
 
