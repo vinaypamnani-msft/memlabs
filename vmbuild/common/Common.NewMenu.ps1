@@ -1876,9 +1876,9 @@ function Update-BgBannerInPlace {
     }
     $script:_lastBgUpdate = $now
 
-    # Trigger a full-screen refresh only when a VM actually changed state.
-    # The ThreadJob updates $op.StillActive on its poll cycle; compare against
-    # the last value we saw to detect transitions.
+    # Trigger a full-screen refresh only when a VM actually changed state,
+    # but no more often than every 5 seconds so rapid transitions don't
+    # cause a flurry of redraws.
     if (-not $op.Completed) {
         $currentActive = $op.StillActive
         if ($null -eq $script:_lastSeenStillActive) {
@@ -1886,7 +1886,11 @@ function Update-BgBannerInPlace {
         }
         elseif ($currentActive -ne $script:_lastSeenStillActive) {
             $script:_lastSeenStillActive = $currentActive
-            return 'refresh'
+            if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
+            if (($now - $script:_lastBgRefresh).TotalSeconds -ge 5) {
+                $script:_lastBgRefresh = $now
+                return 'refresh'
+            }
         }
     }
 
