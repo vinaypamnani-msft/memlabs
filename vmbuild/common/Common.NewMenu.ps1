@@ -1894,6 +1894,24 @@ function Update-BgBannerInPlace {
         }
     }
 
+    if ($op.Completed) {
+        # Delay the 'completed' signal by 5 seconds so VMs have time to
+        # fully transition to their final state (e.g. Starting → Running)
+        # before the rebuild queries Get-VM for fresh data.
+        if (-not $script:_bgCompletionDetectedAt) {
+            $script:_bgCompletionDetectedAt = $now
+            # Fall through to update banner text to green immediately
+        }
+        elseif (($now - $script:_bgCompletionDetectedAt).TotalSeconds -ge 5) {
+            $script:_bgCompletionHandled = $true
+            $script:_bgCompletionDetectedAt = $null
+            return 'completed'
+        }
+        else {
+            return $null   # Still waiting for settle delay
+        }
+    }
+
     $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
     $remaining = $op.StillActive
 
@@ -1933,10 +1951,6 @@ function Update-BgBannerInPlace {
         [System.Console]::CursorVisible = $savedVisible
     }
 
-    if ($op.Completed) {
-        $script:_bgCompletionHandled = $true
-        return 'completed'
-    }
     return $null
 }
 
