@@ -1117,13 +1117,12 @@ function Write-MenuItem {
         'Header' {
             if ($MaxShrink -or $Shrink.Header) { return $result }
             # Track the *BG banner position for live elapsed-time updates.
-            # Only track if the operation is still in progress — once completed,
-            # the banner text was already updated in-place and re-tracking would
-            # cause an infinite redraw loop (completed → null → redraw → re-track
-            # → completed → …).
+            # Always track regardless of completion state so the completion
+            # signal isn't lost if the ThreadJob finishes between a 'refresh'
+            # return and the Show-Menu redraw. The _bgCompletionHandled flag
+            # in Update-BgBannerInPlace prevents the infinite redraw loop.
             if ([string]$MenuItem.itemName -eq '*BG') {
-                $op = $global:PendingVMOperation
-                if ($op -and -not $op.Completed) {
+                if ($global:PendingVMOperation) {
                     $bgPos = Get-CursorPosition
                     $script:_bgBannerInfo = @{
                         Y                = $bgPos.Y
@@ -1861,6 +1860,12 @@ function Update-BgBannerInPlace {
     $op = $global:PendingVMOperation
     if (-not $op) {
         $script:_bgBannerInfo = $null
+        $script:_bgCompletionHandled = $false
+        return $null
+    }
+
+    # Already showed the completion banner — don't re-trigger
+    if ($op.Completed -and $script:_bgCompletionHandled) {
         return $null
     }
 
@@ -1925,7 +1930,7 @@ function Update-BgBannerInPlace {
     }
 
     if ($op.Completed) {
-        $script:_bgBannerInfo = $null
+        $script:_bgCompletionHandled = $true
         return 'completed'
     }
     return $null
