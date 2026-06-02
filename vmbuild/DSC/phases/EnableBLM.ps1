@@ -569,23 +569,21 @@ if ($blmEnabled) {
                 $installerArgs = @(
                     '-NoProfile','-NonInteractive','-ExecutionPolicy','RemoteSigned'
                     '-File',"`"$installer`""
-                    '-SqlServerName',$sqlInstanceFqdn       # MUST be FQDN -- installer hardcodes
-                    '-SqlDatabaseName',$cmDbName            # Encrypt=True;TrustServerCertificate=False,
-                    '-SiteInstall','HelpDesk'               # so NetBIOS triggers SPN mismatch
+                    '-SqlServerName',$sqlServerFqdnBase     # FQDN of the SQL host only (no instance)
+                    '-SqlDatabaseName',$cmDbName
+                    '-SiteInstall','HelpDesk'
                     '-HelpdeskUsersGroupName',"`"$qualifiedGroup`""
                     '-HelpdeskAdminsGroupName',"`"$qualifiedGroup`""
                     '-DomainName',$DomainFullName
                 )
-                # Named instances / custom ports need -IncludePortInSPN for Kerberos SPN
-                # resolution. Without it the installer fails with "Failure acquiring SQL
-                # identity certificate" because the SPN doesn't match.
+                # Named instance: pass -SqlInstanceName separately
                 if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
-                    $installerArgs += '-IncludePortInSPN'
-                    if ($sqlPort) { $installerArgs += '-Port'; $installerArgs += $sqlPort.ToString() }
+                    $installerArgs += '-SqlInstanceName'; $installerArgs += $sqlInstanceName
                 }
-                elseif ($sqlPort -and $sqlPort -ne 1433) {
-                    $installerArgs += '-IncludePortInSPN'
+                # Custom port: pass -Port and -IncludePortInSPN for Kerberos SPN
+                if ($sqlPort -and $sqlPort -ne 1433) {
                     $installerArgs += '-Port'; $installerArgs += $sqlPort.ToString()
+                    $installerArgs += '-IncludePortInSPN'
                 }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
                 Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
