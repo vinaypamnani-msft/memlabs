@@ -162,6 +162,28 @@ if ($blmCollection) {
 
 # Build BitLocker policy objects for drive encryption (only when cmOptions.EnableBLM is set)
 if ($blmEnabled) {
+    # Resolve SQL server instance (may be remote SQL or SQLAO listener)
+    $sqlInstance = $env:COMPUTERNAME
+    if ($ThisVM.remoteSQLVM) {
+        $SQLVM = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ThisVM.remoteSQLVM }
+        if ($SQLVM.AlwaysOnListenerName) {
+            $sqlInstance = $SQLVM.AlwaysOnListenerName
+        } else {
+            $sqlInstance = $ThisVM.remoteSQLVM
+        }
+        if ($SQLVM.sqlInstanceName -and $SQLVM.sqlInstanceName -ne 'MSSQLSERVER') {
+            $sqlInstance = "$sqlInstance\$($SQLVM.sqlInstanceName)"
+        }
+    } elseif ($ThisVM.sqlInstanceName -and $ThisVM.sqlInstanceName -ne 'MSSQLSERVER') {
+        $sqlInstance = "$sqlInstance\$($ThisVM.sqlInstanceName)"
+    }
+    $sqlInstanceFqdn = if ($sqlInstance -match '\\') {
+        "$($sqlInstance.Split('\')[0]).$DomainFullName\$($sqlInstance.Split('\')[1])"
+    } else {
+        "$sqlInstance.$DomainFullName"
+    }
+    Write-DscStatus "$Tag SQL instance resolved to: $sqlInstance (FQDN: $sqlInstanceFqdn)"
+
     # Ensure SQL encryption certificate exists (required for BLM recovery key escrow)
     # Reference: https://learn.microsoft.com/en-us/mem/configmgr/protect/deploy-use/bitlocker/encrypt-recovery-data
     $cmDbName = "CM_$SiteCode"
@@ -206,8 +228,8 @@ BEGIN
     GRANT CONTROL ON CERTIFICATE ::BitLockerManagement_CERT TO RecoveryAndHardwareWrite;
 END
 "@
-        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance "." -TrustServerCertificate -ErrorAction Stop
-        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName"
+        Invoke-Sqlcmd -Query $sqlCertQuery -ServerInstance $sqlInstance -TrustServerCertificate -ErrorAction Stop
+        Write-DscStatus "$Tag SQL encryption certificate ensured for $cmDbName on $sqlInstance"
     }
     catch {
         Write-DscStatus "$Tag WARNING: SQL cert creation failed: $($_.Exception.Message)"
@@ -337,7 +359,7 @@ if ($blmEnabled) {
     $blmGroup       = 'BLM Helpdesk Users'
     $netbios        = ($DomainFullName -split '\.')[0]
     $qualifiedGroup = "$netbios\$blmGroup"
-    $sqlServerFqdn  = "$env:COMPUTERNAME.$DomainFullName"
+    $sqlServerFqdn  = $sqlInstanceFqdn
     $cmDbName       = "CM_$SiteCode"
 
     Write-DscStatus "$Tag === Helpdesk Portal: starting (Server=$sqlServerFqdn Db=$cmDbName Group=$qualifiedGroup Domain=$DomainFullName) ==="
