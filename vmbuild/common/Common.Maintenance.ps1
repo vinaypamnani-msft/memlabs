@@ -270,9 +270,12 @@ function Start-VMMaintenance {
             $started = @()
             foreach ($task in $logonTasks) {
                 try {
+                    $actions = $task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }
                     Start-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
-                    $started += $task.TaskName
-                } catch {}
+                    $started += "$($task.TaskName) [$($actions -join '; ')]"
+                } catch {
+                    $started += "$($task.TaskName) [FAILED: $($_.Exception.Message)]"
+                }
             }
             return $started
         }
