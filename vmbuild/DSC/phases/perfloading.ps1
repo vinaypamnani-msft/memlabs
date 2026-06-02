@@ -627,6 +627,28 @@ else {
             if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
                 $i++
                 Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products. (attempt $i of 30)"
+
+                # Log diagnostics so we can tell WHY the sync isn't starting
+                if ($i -eq 1 -or $i % 5 -eq 0) {
+                    try {
+                        $diag = @()
+                        $diag += "LastSyncState=$($syncState.LastSyncState) LastSyncErrorCode=$($syncState.LastSyncErrorCode) LastSyncStateTime=$($syncState.LastSyncStateTime)"
+                        # Check if WSUS service (W3SVC / WsusService) is running
+                        $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+                        $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+                        $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
+                        # Check wsyncmgr.log for recent errors
+                        $wsyncLog = Join-Path $CMInstallDir "Logs\wsyncmgr.log"
+                        if (Test-Path $wsyncLog) {
+                            $recent = Get-Content $wsyncLog -Tail 5 -ErrorAction SilentlyContinue
+                            foreach ($line in $recent) {
+                                if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "wsyncmgr: $($Matches[1])" }
+                            }
+                        }
+                        Write-DscStatus "$Tag SUM Sync diag: $($diag -join ' | ')"
+                    } catch {}
+                }
+
                 Sync-CMSoftwareUpdate
                 if ($i -ge 30) {
                     $syncTimeout = $true
