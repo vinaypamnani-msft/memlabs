@@ -2069,7 +2069,8 @@ function Get-VMNetworkCached {
 
 
     if ($vmCacheEntry) {
-        if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 24) {
+        # Switch names rarely change — use a long TTL (30 days)
+        if (Test-CacheValid -EntryTime $vmCacheEntry.EntryAdded -MaxHours 720) {
             return $vmCacheEntry
         }
     }
