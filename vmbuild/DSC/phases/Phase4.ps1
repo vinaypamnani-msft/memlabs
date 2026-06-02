@@ -216,6 +216,25 @@ configuration Phase4
 
         $nextDepend = '[ChangeSqlInstancePort]SqlInstancePort'
 
+        # Enable SQL Browser for named instances so remote clients can resolve
+        # the instance name to a port (e.g. MBAM installer uses -SqlInstanceName
+        # without a port number and relies on Browser for discovery).
+        if ($SQLInstanceName -ne 'MSSQLSERVER') {
+            Script EnableSqlBrowser {
+                DependsOn  = '[ChangeSqlInstancePort]SqlInstancePort'
+                GetScript  = { @{ Result = (Get-Service SQLBrowser -ErrorAction SilentlyContinue).Status } }
+                TestScript = {
+                    $svc = Get-Service SQLBrowser -ErrorAction SilentlyContinue
+                    return ($svc -and $svc.Status -eq 'Running' -and $svc.StartType -eq 'Automatic')
+                }
+                SetScript  = {
+                    Set-Service -Name SQLBrowser -StartupType Automatic -ErrorAction SilentlyContinue
+                    Start-Service -Name SQLBrowser -ErrorAction SilentlyContinue
+                }
+            }
+            $nextDepend = '[Script]EnableSqlBrowser'
+        }
+
         if (-not ($thisVM.Hidden)) {
             if ($ThisVM.SqlServiceAccount -and ($ThisVM.SqlServiceAccount -ne "LocalSystem")) {
                 $SPNs = @()
