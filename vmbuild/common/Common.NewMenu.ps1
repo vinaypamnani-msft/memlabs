@@ -1315,6 +1315,7 @@ function Show-Menu {
         $script:_bgBannerInfo = $null
         $script:_lastBgUpdate = $null
         $script:_lastBgRefresh = $null
+        $script:_lastActiveOpsCount = $null
 
         # Restore the full menu, then drop droppable items if they won't fit.
         # Runs every iteration so resize events (which return us to this loop
@@ -1931,14 +1932,24 @@ function Update-BgBannerInPlace {
     }
     $script:_lastBgUpdate = $now
 
-    # Trigger a full-screen refresh when any op's state changed,
-    # but no more often than every 5 seconds.
+    # Detect state changes: either a VM transitioned within an active op
+    # (StateChanged flag) or an op itself completed since last check
+    # (active count decreased). Both should trigger a refresh.
     $anyChanged = $false
     foreach ($aop in $activeOps) {
         if ($aop.StateChanged) {
             $aop.StateChanged = $false
             $anyChanged = $true
         }
+    }
+    $currentActiveCount = $activeOps.Count
+    if ($null -eq $script:_lastActiveOpsCount) {
+        $script:_lastActiveOpsCount = $currentActiveCount
+    }
+    elseif ($currentActiveCount -ne $script:_lastActiveOpsCount) {
+        # An op completed (or a new one started) — treat as state change
+        $script:_lastActiveOpsCount = $currentActiveCount
+        $anyChanged = $true
     }
     if ($anyChanged) {
         if (-not $script:_lastBgRefresh) { $script:_lastBgRefresh = $now }
