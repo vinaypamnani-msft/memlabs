@@ -2588,6 +2588,12 @@ function Get-List {
                     # Skip refresh, use cached data as-is.
                 }
                 else {
+                # When dirty, update ALL VMs regardless of DomainName filter.
+                # The domain filter is an optimization for normal refreshes but
+                # breaks cross-domain updates: the first Get-DomainStatsLine
+                # call refreshes only its domain's VMs, leaving other domains
+                # stale in the cache for the 3-second throttle window.
+                $filterByDomain = $DomainName -and -not $global:vm_List_Dirty
                 try {
                     try {
                         $virtualMachines = Get-VM
@@ -2597,7 +2603,7 @@ function Get-List {
                         $virtualMachines = Get-VM
                     }
                     foreach ( $oldListVM in $global:vm_List) {
-                        if ($DomainName) {
+                        if ($filterByDomain) {
                             if ($oldListVM.domain -ne $DomainName) {
                                 continue
                             }
@@ -2620,7 +2626,7 @@ function Get-List {
                             }
                         }
                         else {
-                            if ($DomainName) {
+                            if ($filterByDomain) {
                                 if ($vmFromGlobal.domain -ne $DomainName) {
                                     continue
                                 }
