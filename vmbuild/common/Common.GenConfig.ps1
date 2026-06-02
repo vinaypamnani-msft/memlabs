@@ -1004,8 +1004,6 @@ function Invoke-SmartStartVMsBackground {
                         try {
                             Start-VM -Name $vm.vmName -ErrorAction Stop
                             $startedAny = $true
-                            $op.StillActive = [Math]::Max(0, $op.StillActive - 1)
-                            $op.StateChanged = $true
                         }
                         catch {
                             $failures++
@@ -1016,6 +1014,31 @@ function Invoke-SmartStartVMsBackground {
                 if ($startedAny -and $waitSecs -gt 0) {
                     Start-Sleep -Seconds $waitSecs
                 }
+            }
+
+            # Poll until all target VMs reach Running or hard timeout.
+            # Start-VM returns immediately; VMs transition Off → Starting → Running.
+            $previousActive = $op.VMCount
+            while ($sw.Elapsed.TotalMinutes -lt 10) {
+                Start-Sleep -Seconds 2
+                $stillActive = 0
+                foreach ($name in $op.VMNames) {
+                    $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                    if ($vm -and $vm.State -ne "Running") {
+                        $stillActive++
+                    }
+                }
+                $op.StillActive = $stillActive
+                if ($stillActive -ne $previousActive) { $op.StateChanged = $true }
+                $previousActive = $stillActive
+                if ($stillActive -eq 0) { break }
+            }
+
+            # Count failures (VMs that never reached Running)
+            $failures = 0
+            foreach ($name in $op.VMNames) {
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                if ($vm -and $vm.State -ne "Running") { $failures++ }
             }
             $op.Failures = $failures
         }
