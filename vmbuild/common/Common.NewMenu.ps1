@@ -2087,8 +2087,8 @@ function Get-KeyStroke {
             # Live-update the background operation banner (elapsed time counter)
             $bgResult = Update-BgBannerInPlace
             if ($bgResult -in @('completed', 'refresh')) {
-                $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
-                $global:HealthStatsCache = $null     # invalidate Quick Stats cache
+                $global:vm_List_Dirty = $true        # signal Get-List to call Get-VM on next SmartUpdate
+                $global:HealthStatsCache = $null      # invalidate Quick Stats cache
                 return $null
             }
 
@@ -2128,8 +2128,8 @@ function Get-KeyStroke {
         # Live-update the background operation banner (elapsed time counter)
         $bgResult = Update-BgBannerInPlace
         if ($bgResult -in @('completed', 'refresh')) {
-            $global:vm_List_LastUpdate = $null   # invalidate VM cache so redraw gets fresh states
-            $global:HealthStatsCache = $null     # invalidate Quick Stats cache
+            $global:vm_List_Dirty = $true        # signal Get-List to call Get-VM on next SmartUpdate
+            $global:HealthStatsCache = $null      # invalidate Quick Stats cache
             return $null
         }
 

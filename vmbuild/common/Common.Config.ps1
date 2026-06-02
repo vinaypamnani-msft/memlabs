@@ -2584,7 +2584,7 @@ function Get-List {
                 # was refreshed less than 3 seconds ago. Rapid-fire menu
                 # navigation calls get-list -SmartUpdate multiple times in
                 # the same user action; the VM state won't change that fast.
-                if ($global:vm_List_LastUpdate -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
+                if ($global:vm_List_LastUpdate -and -not $global:vm_List_Dirty -and ((Get-Date) - $global:vm_List_LastUpdate).TotalSeconds -lt 3) {
                     # Skip refresh, use cached data as-is.
                 }
                 else {
@@ -2633,6 +2633,7 @@ function Get-List {
                 finally {
                 }
                 $global:vm_List_LastUpdate = Get-Date
+                $global:vm_List_Dirty = $false
                 } # else (throttle)
             }
         }

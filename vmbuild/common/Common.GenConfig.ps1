@@ -832,16 +832,17 @@ function Invoke-StopVMsBackground {
 
     $jobName = "MemLabs-StopVMs-$(Get-Date -Format 'HHmmss')"
     $global:PendingVMOperation = @{
-        Type        = "Stop"
-        Domain      = $domain
-        VMNames     = $targetNames
-        VMCount     = $targetNames.Count
-        StillActive = $targetNames.Count
-        StartTime   = Get-Date
-        Completed   = $false
-        Failures    = 0
-        Elapsed     = $null
-        JobName     = $jobName
+        Type         = "Stop"
+        Domain       = $domain
+        VMNames      = $targetNames
+        VMCount      = $targetNames.Count
+        StillActive  = $targetNames.Count
+        StateChanged = $false
+        StartTime    = Get-Date
+        Completed    = $false
+        Failures     = 0
+        Elapsed      = $null
+        JobName      = $jobName
     }
 
     # Capture the hashtable reference so the ThreadJob can modify it.
@@ -863,6 +864,7 @@ function Invoke-StopVMsBackground {
             }
 
             # Poll until all target VMs reach Off/Saved or hard timeout
+            $previousActive = $op.VMCount
             while ($sw.Elapsed.TotalMinutes -lt 10) {
                 Start-Sleep -Seconds 2
                 $stillActive = 0
@@ -873,6 +875,8 @@ function Invoke-StopVMsBackground {
                     }
                 }
                 $op.StillActive = $stillActive
+                if ($stillActive -ne $previousActive) { $op.StateChanged = $true }
+                $previousActive = $stillActive
                 if ($stillActive -eq 0) { break }
             }
 
@@ -936,16 +940,17 @@ function Invoke-SmartStartVMsBackground {
 
     $jobName = "MemLabs-StartVMs-$(Get-Date -Format 'HHmmss')"
     $global:PendingVMOperation = @{
-        Type        = "Start"
-        Domain      = $domain
-        VMNames     = $allNames
-        VMCount     = $allNames.Count
-        StillActive = $allNames.Count
-        StartTime   = Get-Date
-        Completed   = $false
-        Failures    = 0
-        Elapsed     = $null
-        JobName     = $jobName
+        Type         = "Start"
+        Domain       = $domain
+        VMNames      = $allNames
+        VMCount      = $allNames.Count
+        StillActive  = $allNames.Count
+        StateChanged = $false
+        StartTime    = Get-Date
+        Completed    = $false
+        Failures     = 0
+        Elapsed      = $null
+        JobName      = $jobName
     }
 
     # Capture references for the ThreadJob via $using:.
@@ -983,6 +988,7 @@ function Invoke-SmartStartVMsBackground {
                             Start-VM -Name $vm.vmName -ErrorAction Stop
                             $startedAny = $true
                             $op.StillActive = [Math]::Max(0, $op.StillActive - 1)
+                            $op.StateChanged = $true
                         }
                         catch {
                             $failures++
