@@ -600,9 +600,9 @@ if ($blmEnabled) {
                             }
                             return 'Running'
                         } -ErrorAction Stop
-                        Write-DscStatus "$Tag SQL Browser on $sqlHostName: $browserStatus"
+                        Write-DscStatus "$Tag SQL Browser on ${sqlHostName}: $browserStatus"
                     } catch {
-                        Write-DscStatus "$Tag WARNING: Could not verify SQL Browser on $sqlHostName: $($_.Exception.Message)"
+                        Write-DscStatus "$Tag WARNING: Could not verify SQL Browser on ${sqlHostName}: $($_.Exception.Message)"
                     }
                 }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
