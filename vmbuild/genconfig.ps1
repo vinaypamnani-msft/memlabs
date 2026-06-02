@@ -151,6 +151,8 @@ function Select-ConfigMenu {
     try { Get-HealthStats -Force | Out-Null } catch {}
     while ($true) {
 
+        Complete-PendingVMOperation | Out-Null
+
         $built = Build-ConfigMenuOptions
         $customOptions = $built.Options
         $domainMap = $built.DomainMap

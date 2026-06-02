@@ -2360,6 +2360,13 @@ function Start-Navigation {
         # falsiness skips the action-dispatch branch and re-enters the render path.
         $key = Get-KeyStroke -WatchSize $startSize
         if ($null -eq $key) {
+            # If a background op just completed, return a signal that
+            # propagates through Show-Menu → Get-Menu2 to the outer
+            # menu loop, forcing it to rebuild all menu items (including
+            # static text like domain stats) with fresh data.
+            if ($script:_bgCompletionHandled) {
+                return "BGCOMPLETE"
+            }
             return
         }
         write-log -Verbose -HostOnly "key: $key"
