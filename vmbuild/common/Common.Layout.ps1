@@ -7,7 +7,7 @@ Function Get-LabVMs {
         [string] $DomainName
     )
 
-    $vms = Get-List -Type VM -domain $DomainName
+    $vms = Get-List -Type VM -domain $DomainName -SmartUpdate
 
     # Reserve lines for menu options below the VM panel so key items (Modify,
     # Start, Stop) are visible on the first page without pressing PgDn.
