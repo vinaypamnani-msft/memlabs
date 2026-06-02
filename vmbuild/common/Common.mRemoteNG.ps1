@@ -1289,6 +1289,20 @@ function New-MRemoteNGFileFromHyperV {
             $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -WindowStyle Minimized -ErrorAction SilentlyContinue
             if ($mRNGProc) {
                 Write-GreenCheck "Updated $MRemoteNGFile. Restarted mRemoteNG (PID $($mRNGProc.Id))" -ForegroundColor ForestGreen
+                # mRemoteNG ignores -WindowStyle Minimized and restores to its previous position.
+                # Wait for it to finish initializing, then force-minimize and restore terminal focus.
+                try {
+                    $mRNGProc.WaitForInputIdle(8000) | Out-Null
+                    Start-Sleep -Milliseconds 500
+                    $mRNGProc.Refresh()
+                    $hWnd = $mRNGProc.MainWindowHandle
+                    if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                        $swApi = Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -Name "SwApi" -Namespace Win32mRNG -PassThru -ErrorAction SilentlyContinue
+                        $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                    }
+                }
+                catch {}
+                Restore-TerminalFocus
             }
             else {
                 Write-GreenCheck "Updated $MRemoteNGFile. mRemoteNG was stopped but failed to restart" -ForegroundColor ForestGreen
