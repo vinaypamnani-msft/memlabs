@@ -2129,22 +2129,19 @@ function Start-VMIPRefreshJob {
         return
     }
 
-    $global:VMIPRefreshJob = Start-ThreadJob -Name "MemLabs-IPRefresh" -ScriptBlock {
-        # ThreadJob shares the process; $global:common, $global:vm_List, and
-        # all dot-sourced functions (Write-Log, Set-VMNote, etc.) are accessible.
-        try {
-            # Wait briefly for the foreground to finish populating vm_List on
-            # its first Get-List call before we start touching VMs.
-            $waitCount = 0
-            while (-not $global:vm_List -and $waitCount -lt 30) {
-                Start-Sleep -Milliseconds 500
-                $waitCount++
-            }
-            if (-not $global:vm_List) { return }
+    # ThreadJobs run in a separate runspace — $global: variables and custom
+    # functions (Write-Log, Set-VMNote, Get-VM2, etc.) are NOT available.
+    # Only built-in / module cmdlets (Get-VM, Get-VMNetworkAdapter) work.
+    # Pass the cache path via $using: so the job can write .network.json files.
+    $cachePath = $global:Common.CachePath
 
-            Write-Log "IPRefreshJob: Starting background IP refresh for running VMs." -LogOnly
+    $global:VMIPRefreshJob = Start-ThreadJob -Name "MemLabs-IPRefresh" -ScriptBlock {
+        $cPath = $using:cachePath
+        try {
+            # Brief delay to let the host settle after init
+            Start-Sleep -Seconds 5
+
             $virtualMachines = Get-VM | Where-Object { $_.State -eq 'Running' }
-            $updated = 0
 
             foreach ($vm in $virtualMachines) {
                 try {
@@ -2163,7 +2160,7 @@ function Start-VMIPRefreshJob {
 
                     # Update .network.json cache file with IP
                     $jsonFile = $vm.vmID.ToString() + ".network.json"
-                    $cacheFile = Join-Path $global:common.CachePath $jsonFile
+                    $cacheFile = Join-Path $cPath $jsonFile
                     $cacheEntry = [PSCustomObject]@{
                         vmId       = $vm.vmID
                         SwitchName = $netAdapter.SwitchName
@@ -2172,13 +2169,7 @@ function Start-VMIPRefreshJob {
                     }
                     ConvertTo-Json $cacheEntry | Out-File $cacheFile -Force
 
-                    # Update in-memory vm_List entry
-                    $listEntry = $global:vm_List | Where-Object { $_.vmId -eq $vm.vmID }
-                    if ($listEntry) {
-                        $listEntry | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
-                    }
-
-                    # Persist to VM Notes if changed
+                    # Persist to VM Notes if IP changed
                     if ($ipAddress -ne $vmNoteObject.LastKnownIP) {
                         if ($null -eq $vmNoteObject.LastKnownIP) {
                             $vmNoteObject | Add-Member -MemberType NoteProperty -Name "LastKnownIP" -Value $ipAddress -Force
@@ -2186,18 +2177,18 @@ function Start-VMIPRefreshJob {
                         else {
                             $vmNoteObject.LastKnownIP = $ipAddress
                         }
-                        Set-VMNote -vmName $vm.Name -vmNote $vmNoteObject
-                        $updated++
+                        $vmNoteObject | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -Format "MM/dd/yyyy HH:mm") -Force
+                        $noteJson = ($vmNoteObject | ConvertTo-Json) -replace "`r`n", "" -replace "    ", " " -replace "  ", " "
+                        $vm | Set-VM -Notes $noteJson -ErrorAction SilentlyContinue
                     }
                 }
                 catch {
-                    Write-Log "IPRefreshJob: Error updating $($vm.Name): $_" -LogOnly
+                    # Best-effort per VM; continue with next
                 }
             }
-            Write-Log "IPRefreshJob: Completed. Updated $updated VM(s)." -LogOnly
         }
         catch {
-            Write-Log "IPRefreshJob: Fatal error: $_" -LogOnly
+            # Fatal error; job ends quietly
         }
     }
     Write-Log "Start-VMIPRefreshJob: Background IP refresh job started." -LogOnly

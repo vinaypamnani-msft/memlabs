@@ -843,62 +843,52 @@ function Invoke-StopVMsBackground {
         JobName   = $jobName
     }
 
+    # Capture the hashtable reference so the ThreadJob can modify it.
+    # ThreadJobs run in a separate runspace — $global: variables and
+    # custom functions (Get-VM2, Write-Log, etc.) are NOT available.
+    # Only built-in / module cmdlets (Get-VM, Stop-VM) work.
+    $opRef = $global:PendingVMOperation
+
     $null = Start-ThreadJob -Name $jobName -ScriptBlock {
-        # ThreadJob shares the process; globals and dot-sourced functions
-        # (Get-VM2, Write-Log, Show-Notification, etc.) are accessible.
-        $op = $global:PendingVMOperation
+        $op = $using:opRef
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
-            Write-Log "Background Stop: starting for $($op.VMNames -join ', ') in '$($op.Domain)'" -LogOnly
-            $vmNames = @()
+            # Issue Stop-VM for each running target VM (in parallel via -AsJob)
             foreach ($name in $op.VMNames) {
-                $vm = Get-VM2 -Name $name -ErrorAction SilentlyContinue
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
                 if ($vm -and $vm.State -eq "Running") {
-                    $vmNames += $vm.Name
                     Stop-VM -VM $vm -Force -AsJob | Out-Null
                 }
             }
-            # Monitor jobs until all target VMs are off (mirrors Invoke-StopVMs)
-            $stallCheck = [System.Diagnostics.Stopwatch]::StartNew()
-            $lastRunning = 999
-            while ($true) {
-                $pendingJobs = @(Get-Job | Where-Object {
-                    $_.Name -ne $op.JobName -and
-                    $_.State -notin @("Completed", "Stopped", "Failed")
-                })
-                if ($pendingJobs.Count -eq 0) { break }
-                if ($pendingJobs.Count -lt $lastRunning) {
-                    $lastRunning = $pendingJobs.Count
-                    $stallCheck.Restart()
-                }
-                if ($stallCheck.Elapsed.TotalSeconds -ge 30 -and $vmNames.Count -gt 0) {
-                    $stillOn = @($vmNames | ForEach-Object { Get-VM2 -Name $_ -ErrorAction SilentlyContinue } | Where-Object { $_.State -eq "Running" })
-                    if ($stillOn.Count -eq 0) {
-                        $pendingJobs | Stop-Job -ErrorAction SilentlyContinue
-                        break
+
+            # Poll until all target VMs reach Off/Saved or hard timeout
+            while ($sw.Elapsed.TotalMinutes -lt 10) {
+                Start-Sleep -Seconds 2
+                $stillActive = 0
+                foreach ($name in $op.VMNames) {
+                    $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                    if ($vm -and $vm.State -notin @("Off", "Saved")) {
+                        $stillActive++
                     }
-                    $stallCheck.Restart()
                 }
-                Start-Sleep -Milliseconds 500
+                if ($stillActive -eq 0) { break }
             }
+
+            # Clean up any lingering Stop-VM child jobs in this runspace
             try { Get-Job | Where-Object { $_.Name -ne $op.JobName } | Remove-Job -Force -ErrorAction SilentlyContinue } catch {}
 
-            # Check final state
+            # Count failures
             $failures = 0
             foreach ($name in $op.VMNames) {
-                $vm = Get-VM2 -Name $name -ErrorAction SilentlyContinue
-                if ($vm -and $vm.State -ne "Off") { $failures++ }
+                $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                if ($vm -and $vm.State -notin @("Off", "Saved")) { $failures++ }
             }
             $op.Failures = $failures
-            Write-Log "Background Stop: completed for '$($op.Domain)'. Failures: $failures. Elapsed: $([math]::Round($sw.Elapsed.TotalSeconds))s" -LogOnly
-            Show-Notification -ToastText "Stopped $($op.VMCount) VM(s) in '$($op.Domain)'"
         }
         catch {
-            Write-Log "Background Stop: error: $_" -LogOnly
             $op.Failures = $op.VMCount
         }
         finally {
-            $global:vm_List_LastUpdate = $null
             $op.Elapsed = $sw.Elapsed
             $op.Completed = $true
         }
@@ -955,38 +945,57 @@ function Invoke-SmartStartVMsBackground {
         JobName   = $jobName
     }
 
-    # Capture values for the scriptblock (CritList is a PSCustomObject;
-    # ThreadJob shares globals but $CritList is a local — pass via $using:)
+    # Capture references for the ThreadJob via $using:.
+    # ThreadJobs run in a separate runspace — $global: variables and
+    # custom functions (Start-VM2, Invoke-SmartStartVMs, Write-Log, etc.)
+    # are NOT available. Only built-in / module cmdlets work.
+    $opRef = $global:PendingVMOperation
     $critListCopy = $CritList
     $critOnlyCopy = [bool]$CriticalOnly
 
     $null = Start-ThreadJob -Name $jobName -ScriptBlock {
-        $op = $global:PendingVMOperation
+        $op = $using:opRef
         $crit = $using:critListCopy
         $critOnly = $using:critOnlyCopy
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
-            Write-Log "Background Start: starting for '$($op.Domain)' ($($op.VMCount) VMs, CriticalOnly=$critOnly)" -LogOnly
-            # Reuse the existing synchronous function — it runs in this
-            # ThreadJob's runspace which shares the process global scope.
-            # Pass -quiet $true to suppress console output that would
-            # corrupt the interactive menu display.
-            $failures = Invoke-SmartStartVMs -CritList $crit -CriticalOnly:$critOnly -quiet $true
+            $failures = 0
+            $waitSecondsDC = 20
+            $waitSeconds = 10
+
+            # Start VMs in dependency order: DC > FS > SQL > CAS > PRI > NONCRIT
+            $buckets = @('DC', 'FS', 'SQL', 'CAS', 'PRI')
+            if (-not $critOnly) { $buckets += 'NONCRIT' }
+
+            foreach ($bucket in $buckets) {
+                $vms = @($crit.$bucket | Where-Object { $_ })
+                if ($vms.Count -eq 0) { continue }
+                $waitSecs = if ($bucket -eq 'DC') { $waitSecondsDC } elseif ($bucket -ne 'NONCRIT') { $waitSeconds } else { 0 }
+                $startedAny = $false
+
+                foreach ($vm in $vms) {
+                    $hvVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+                    if ($hvVm -and $hvVm.State -ne "Running") {
+                        try {
+                            Start-VM -Name $vm.vmName -ErrorAction Stop
+                            $startedAny = $true
+                        }
+                        catch {
+                            $failures++
+                        }
+                    }
+                }
+
+                if ($startedAny -and $waitSecs -gt 0) {
+                    Start-Sleep -Seconds $waitSecs
+                }
+            }
             $op.Failures = $failures
-            Write-Log "Background Start: completed for '$($op.Domain)'. Failures: $failures. Elapsed: $([math]::Round($sw.Elapsed.TotalSeconds))s" -LogOnly
-            if ($failures -eq 0) {
-                Show-Notification -ToastText "Started $($op.VMCount) VM(s) in '$($op.Domain)'"
-            }
-            else {
-                Show-Notification -ToastText "Started VMs in '$($op.Domain)' with $failures failure(s)"
-            }
         }
         catch {
-            Write-Log "Background Start: error: $_" -LogOnly
             $op.Failures = $op.VMCount
         }
         finally {
-            $global:vm_List_LastUpdate = $null
             $op.Elapsed = $sw.Elapsed
             $op.Completed = $true
         }
