@@ -258,17 +258,30 @@ function Start-VMMaintenance {
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
         Set-VMNote -vmName $VMName -vmVersion ([string]$latestFixVersion) -forceVersionUpdate
-        $logoffusers = {
-            try {
-                query user 2>&1 | Select-Object -skip 1 | ForEach-Object {
-                    logoff ($_ -split "\s+")[-6]
-                }
+
+        # If a user is logged in, start any AtLogOn scheduled tasks directly
+        # so they run immediately instead of waiting for the next logon cycle.
+        # This replaces the old approach of force-logging-off all users.
+        $startLogonTasks = {
+            $logonTasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+                $_.State -ne 'Disabled' -and
+                $_.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' }
             }
-            catch {}
+            $started = @()
+            foreach ($task in $logonTasks) {
+                try {
+                    Start-ScheduledTask -TaskName $task.TaskName -ErrorAction Stop
+                    $started += $task.TaskName
+                } catch {}
+            }
+            return $started
         }
         try {
             if ($ApplyNewOnly.IsPresent) {
-                Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $logoffusers -DisplayName "Logoff users" -SuppressLog
+                $result = Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $startLogonTasks -DisplayName "Start logon tasks" -SuppressLog
+                if ($result.ScriptBlockOutput) {
+                    Write-Log "$VMName`: Started logon tasks: $($result.ScriptBlockOutput -join ', ')" -Verbose
+                }
             }
         }
         catch {}
