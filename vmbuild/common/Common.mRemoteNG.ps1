@@ -860,6 +860,10 @@ function New-MRemoteNGFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
 
+    # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
+    # lookups during Get-VMFromHyperV are instant instead of ~3s each.
+    Invoke-VMNetworkBulkWarmup
+
     # Ensure target directory exists
     $targetDir = Split-Path $MRemoteNGFile
     if (-not (Test-Path $targetDir)) {

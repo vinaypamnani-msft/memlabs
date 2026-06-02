@@ -2074,6 +2074,15 @@ function Get-VMNetworkCached {
         }
     }
 
+    # Check the in-memory bulk cache (populated by Invoke-VMNetworkBulkWarmup)
+    if ($global:Common.NetCache -and $global:Common.NetCache.ContainsKey($vm.Id)) {
+        $vmCacheEntry = $global:Common.NetCache[$vm.Id]
+        if ($vmCacheEntry.SwitchName -and -not $Common.InJob) {
+            ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
+        }
+        return $vmCacheEntry
+    }
+
     # if we didn't return the cache entry, get new data, and add it to cache
     Write-Log "Get-VMNetworkCached: cache miss for $($vm.Name), calling Get-VMNetworkAdapter..." -LogOnly
     $vmNet = ($vm | Get-VMNetworkAdapter)
@@ -2089,6 +2098,34 @@ function Get-VMNetworkCached {
         ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     }
     return $vmCacheEntry
+}
+
+# Bulk-fetch all VM network adapters in a single WMI call and populate the
+# in-memory NetCache. Per-VM Get-VMNetworkCached calls then hit the cache
+# instead of making individual ~2-3s WMI round-trips. Called before operations
+# that iterate many VMs (RDCMan/mRemoteNG generation).
+function Invoke-VMNetworkBulkWarmup {
+    if ($global:Common.NetCache) { return }  # Already warm
+    Write-Log "Invoke-VMNetworkBulkWarmup: fetching all VM network adapters in one call..." -LogOnly
+    $global:Common.NetCache = @{}
+    try {
+        $allAdapters = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue
+        $now = Get-Date -Format "MM/dd/yyyy HH:mm"
+        foreach ($adapter in $allAdapters) {
+            if (-not $adapter.VMId) { continue }
+            $entry = [PSCustomObject]@{
+                vmId       = $adapter.VMId
+                SwitchName = $adapter.SwitchName
+                IPAddress  = ($adapter.IPAddresses | Where-Object { $_ -notlike "*:*" } | Select-Object -First 1)
+                EntryAdded = $now
+            }
+            $global:Common.NetCache[$adapter.VMId] = $entry
+        }
+        Write-Log "Invoke-VMNetworkBulkWarmup: cached $($global:Common.NetCache.Count) adapters." -LogOnly
+    }
+    catch {
+        Write-Log "Invoke-VMNetworkBulkWarmup: failed: $_" -LogOnly
+    }
 }
 
 function Test-CacheValid {
@@ -2653,6 +2690,8 @@ function Get-List {
                     $return = @()
                     Write-Log "Get-List: calling Get-VM to enumerate all virtual machines..." -LogOnly
                     Flush-LogBuffer -All
+                    # Bulk-fetch network adapters in one WMI call before iterating VMs
+                    Invoke-VMNetworkBulkWarmup
                     $virtualMachines = Get-VM
                     Write-Log "Get-List: Get-VM returned $($virtualMachines.Count) VMs. Building cache..." -LogOnly
                     Flush-LogBuffer -All

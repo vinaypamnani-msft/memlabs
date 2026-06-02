@@ -310,6 +310,10 @@ function New-RDCManFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating MEMLabs.RDG file on Desktop (RDCMan.exe is located in C:\tools)" -Activity:$Activity
 
+    # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
+    # lookups during Get-VMFromHyperV are instant instead of ~3s each.
+    Invoke-VMNetworkBulkWarmup
+
     if ($OverWrite) {
         if (test-path $rdcmanfile) {
             Write-Log "Stopping RDCMan.exe, deleting $rdcmanfile, and regenerating a new MEMLabs.RDG."
