@@ -1854,7 +1854,13 @@ function Set-MouseHoverHighlight {
 #   $null       - no action needed
 function Update-BgBannerInPlace {
     $info = $script:_bgBannerInfo
-    if (-not $info) { return $null }
+    if (-not $info) {
+        # Clear stale completion flag when there's no banner to track
+        if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) {
+            $script:_bgCompletionHandled = $false
+        }
+        return $null
+    }
 
     if (-not $global:PendingVMOperations -or $global:PendingVMOperations.Count -eq 0) {
         $script:_bgBannerInfo = $null
@@ -1879,6 +1885,9 @@ function Update-BgBannerInPlace {
         $now = [DateTime]::UtcNow
         if (-not $script:_bgCompletionDetectedAt) {
             $script:_bgCompletionDetectedAt = $now
+            # Set dirty flag immediately so the rebuild after settle gets fresh data
+            $global:vm_List_Dirty = $true
+            $global:HealthStatsCache = $null
             # Update banner to green "complete" immediately
             $totalVMs = ($global:PendingVMOperations.Values | Measure-Object -Property VMCount -Sum).Sum
             $totalFail = ($global:PendingVMOperations.Values | Measure-Object -Property Failures -Sum).Sum
@@ -2398,6 +2407,7 @@ function Start-Navigation {
             # outer menu loop so it rebuilds all menu items — including
             # static text like domain stats lines.
             if ($script:_bgCompletionHandled -or ($global:PendingVMOperations -and $global:PendingVMOperations.Count -gt 0)) {
+                $script:_bgCompletionHandled = $false  # one-shot: clear after consuming
                 return "BGCOMPLETE"
             }
             return
