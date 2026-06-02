@@ -547,9 +547,9 @@ function Build-DomainSubMenuOptions {
     if ($global:PendingVMOperation -and -not $global:PendingVMOperation.Completed) {
         $op = $global:PendingVMOperation
         $elapsedSec = [math]::Round(((Get-Date) - $op.StartTime).TotalSeconds)
-        $transitioning = if ($op.Type -eq 'Stop') { $stopping } else { $starting }
+        $doneCount = $op.VMCount - $op.StillActive
         $bgBanner = [ordered]@{
-            "*BG" = "Background $($op.Type): $($op.VMCount) VM(s) in progress ($($elapsedSec)s)$(if ($transitioning) { " [$transitioning $($op.Type.ToLower())ing]" })%DarkGoldenrod"
+            "*BG" = "Background $($op.Type): $doneCount/$($op.VMCount) VM(s) done ($($elapsedSec)s)%DarkGoldenrod"
         }
     }
 
