@@ -1116,13 +1116,20 @@ function Write-MenuItem {
         }
         'Header' {
             if ($MaxShrink -or $Shrink.Header) { return $result }
-            # Track the *BG banner position for live elapsed-time updates
+            # Track the *BG banner position for live elapsed-time updates.
+            # Only track if the operation is still in progress — once completed,
+            # the banner text was already updated in-place and re-tracking would
+            # cause an infinite redraw loop (completed → null → redraw → re-track
+            # → completed → …).
             if ([string]$MenuItem.itemName -eq '*BG') {
-                $bgPos = Get-CursorPosition
-                $script:_bgBannerInfo = @{
-                    Y                = $bgPos.Y
-                    LongestBreakLine = $LongestBreakLine
-                    MenuItem         = $MenuItem
+                $op = $global:PendingVMOperation
+                if ($op -and -not $op.Completed) {
+                    $bgPos = Get-CursorPosition
+                    $script:_bgBannerInfo = @{
+                        Y                = $bgPos.Y
+                        LongestBreakLine = $LongestBreakLine
+                        MenuItem         = $MenuItem
+                    }
                 }
             }
             Write-MenuHeader -MenuItem $MenuItem -LongestBreakLine $LongestBreakLine
