@@ -277,8 +277,12 @@ foreach ($SUP in $SUPs) {
     $exists = Get-CMAdministrativeUser -RoleName "Full Administrator" | Where-Object { $_.LogonName -like "*$domainUserName*" } -ErrorAction SilentlyContinue
 
     if (-not $exists) {
-        New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
-            -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction SilentlyContinue | out-null
+        try {
+            New-CMAdministrativeUser -Name $domainUserName -RoleName "Full Administrator" `
+                -SecurityScopeName "All", "All Systems", "All Users and User Groups" -ErrorAction Stop | out-null
+        } catch {
+            if ($_.Exception.Message -notmatch 'already assigned') { Write-DscStatus "WARNING: New-CMAdministrativeUser failed: $($_.Exception.Message)" }
+        }
     }
     Install-SUP -ServerFQDN $SUPFQDN -ServerSiteCode $SUP.ServerSiteCode -usePKI:$usePKI
 }

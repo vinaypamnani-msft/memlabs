@@ -459,7 +459,11 @@ function Install-SUP {
         $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         if (-not $SystemServer) {
             Write-DscStatus "Creating new CM Site System server on $ServerFQDN SiteCode: $ServerSiteCode"
-            New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode *>&1 | Write-StatusLogEntry
+            try {
+                New-CMSiteSystemServer -SiteSystemServerName $ServerFQDN -SiteCode $ServerSiteCode -ErrorAction Stop *>&1 | Write-StatusLogEntry
+            } catch {
+                if ($_.Exception.Message -notmatch 'already exists') { Write-DscStatus "WARNING: New-CMSiteSystemServer failed: $($_.Exception.Message)" }
+            }
             Start-Sleep -Seconds 15
             $SystemServer = Get-CMSiteSystemServer -SiteSystemServerName $ServerFQDN
         }

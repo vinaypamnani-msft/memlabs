@@ -580,11 +580,6 @@ if ($blmEnabled) {
                 if ($sqlInstanceName -and $sqlInstanceName -ne 'MSSQLSERVER') {
                     $installerArgs += '-SqlInstanceName'; $installerArgs += $sqlInstanceName
                 }
-                # Custom port: pass -Port and -IncludePortInSPN for Kerberos SPN
-                if ($sqlPort -and $sqlPort -ne 1433) {
-                    $installerArgs += '-Port'; $installerArgs += $sqlPort.ToString()
-                    $installerArgs += '-IncludePortInSPN'
-                }
                 Write-DscStatus "$Tag Launching installer; log=$logFile"
                 Write-DscStatus "$Tag   args: $($installerArgs -join ' ')"
 

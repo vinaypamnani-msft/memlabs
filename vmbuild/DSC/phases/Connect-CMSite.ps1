@@ -28,7 +28,9 @@ if ($null -eq (Get-Module ConfigurationManager)) {
 }
 
 # Connect to the site's drive if it is not already present
-New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+if (-not (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName @initParams
+}
 $psDriveFailcount = 0
 while ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     $psDriveFailcount++
