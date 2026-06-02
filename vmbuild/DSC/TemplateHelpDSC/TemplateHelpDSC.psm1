@@ -2605,7 +2605,7 @@ class RegisterTaskScheduler {
 
 
 
-        $RegisterTime = [datetime]::Now
+        $RegisterTime = [datetime]::UtcNow
         $waitTime = 30
 
         $success = $this.RegisterTask()
@@ -2615,7 +2615,7 @@ class RegisterTaskScheduler {
         Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
         while ($lastRunTime -lt $RegisterTime) {
             Write-Verbose "Checking to see if task has started Attempt $failCount"
-            Write-Verbose "lastRunTime: $lastRunTime   RegisterTime: $RegisterTime"
+            Write-Verbose "lastRunTime(UTC): $lastRunTime   RegisterTime(UTC): $RegisterTime"
 
             if ($failCount -gt 2) {
                 Write-Verbose "Manually starting the task"
@@ -2641,7 +2641,7 @@ class RegisterTaskScheduler {
                 break
             }
             else {
-                Write-Status "$_Taskname has not started. Last run time was: $lastRunTime"
+                Write-Status "$_Taskname has not started. Last run time was: $lastRunTime (UTC), registered at: $RegisterTime (UTC), attempt $failCount"
                 $failCount++
             }
             start-sleep -Seconds $waitTime
@@ -2767,8 +2767,9 @@ class RegisterTaskScheduler {
         $Lastevent = (Get-WinEvent  -FilterXml $filterXML -ErrorAction Stop) | Where-Object { $_.ID -eq 100 } | Select-Object -First 1
 
         if ($Lastevent) {
-            Write-Verbose "Last Run Time is $($Lastevent.TimeCreated)"
-            return $Lastevent.TimeCreated
+            $utcTime = $Lastevent.TimeCreated.ToUniversalTime()
+            Write-Verbose "Last Run Time is $utcTime (UTC) [local: $($Lastevent.TimeCreated)]"
+            return $utcTime
         }
         Write-Verbose "No Last Run Time found returning $([datetime]::MinValue)"
         return [datetime]::MinValue
