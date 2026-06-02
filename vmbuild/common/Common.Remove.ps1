@@ -171,6 +171,10 @@ function Remove-VirtualMachine {
             Remove-Item -Path $cacheFile -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue | Out-Null
         }
     }
+    # Also purge the in-memory network cache entry
+    if ($global:Common.NetCache -and $vmTest.vmID) {
+        $global:Common.NetCache.Remove($vmTest.vmID) | Out-Null
+    }
 
     # -- Detach hard drives to prevent checkpoint merge during Remove-VM --
     # When a VM has checkpoints, Remove-VM triggers an AVHDX merge ("Destroying..."
