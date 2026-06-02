@@ -991,6 +991,7 @@ function Invoke-SmartStartVMsBackground {
             # Start VMs in dependency order: DC > FS > SQL > CAS > PRI > NONCRIT
             $buckets = @('DC', 'FS', 'SQL', 'CAS', 'PRI')
             if (-not $critOnly) { $buckets += 'NONCRIT' }
+            $startedNames = @()  # Track VMs where Start-VM succeeded
 
             foreach ($bucket in $buckets) {
                 $vms = @($crit.$bucket | Where-Object { $_ })
@@ -1000,14 +1001,22 @@ function Invoke-SmartStartVMsBackground {
 
                 foreach ($vm in $vms) {
                     $hvVm = Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue
-                    if ($hvVm -and $hvVm.State -ne "Running") {
+                    if ($hvVm -and $hvVm.State -eq "Running") {
+                        # Already running — not a failure, just skip
+                        $startedNames += $vm.vmName
+                    }
+                    elseif ($hvVm) {
                         try {
                             Start-VM -Name $vm.vmName -ErrorAction Stop
                             $startedAny = $true
+                            $startedNames += $vm.vmName
                         }
                         catch {
                             $failures++
                         }
+                    }
+                    else {
+                        $failures++  # VM doesn't exist
                     }
                 }
 
@@ -1016,27 +1025,33 @@ function Invoke-SmartStartVMsBackground {
                 }
             }
 
-            # Poll until all target VMs reach Running or hard timeout.
-            # Start-VM returns immediately; VMs transition Off → Starting → Running.
-            $previousActive = $op.VMCount
-            while ($sw.Elapsed.TotalMinutes -lt 10) {
-                Start-Sleep -Seconds 2
-                $stillActive = 0
-                foreach ($name in $op.VMNames) {
-                    $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
-                    if ($vm -and $vm.State -ne "Running") {
-                        $stillActive++
+            # Poll only VMs where Start-VM succeeded until they reach Running.
+            # VMs that failed Start-VM are already counted as failures.
+            $pendingNames = @($startedNames | Where-Object {
+                $v = Get-VM -Name $_ -ErrorAction SilentlyContinue
+                $v -and $v.State -ne "Running"
+            })
+            $op.StillActive = $pendingNames.Count + $failures
+            $previousActive = $op.StillActive
+            if ($pendingNames.Count -gt 0) {
+                while ($sw.Elapsed.TotalMinutes -lt 10) {
+                    Start-Sleep -Seconds 2
+                    $stillActive = 0
+                    foreach ($name in $pendingNames) {
+                        $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
+                        if ($vm -and $vm.State -ne "Running") {
+                            $stillActive++
+                        }
                     }
+                    $op.StillActive = $stillActive + $failures
+                    if (($stillActive + $failures) -ne $previousActive) { $op.StateChanged = $true }
+                    $previousActive = $stillActive + $failures
+                    if ($stillActive -eq 0) { break }
                 }
-                $op.StillActive = $stillActive
-                if ($stillActive -ne $previousActive) { $op.StateChanged = $true }
-                $previousActive = $stillActive
-                if ($stillActive -eq 0) { break }
             }
 
-            # Count failures (VMs that never reached Running)
-            $failures = 0
-            foreach ($name in $op.VMNames) {
+            # Count final failures (VMs that never reached Running)
+            foreach ($name in $startedNames) {
                 $vm = Get-VM -Name $name -ErrorAction SilentlyContinue
                 if ($vm -and $vm.State -ne "Running") { $failures++ }
             }
