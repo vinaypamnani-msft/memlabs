@@ -322,9 +322,16 @@ if ($configureSUP) {
                     $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
 
                     if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                        Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                        $i++
+                        Write-DscStatus "SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products. (attempt $i of 30)"
                         Sync-CMSoftwareUpdate
-                        Start-Sleep -Seconds 120
+                        if ($i -ge 30) {
+                            $syncTimeout = $true
+                            Write-DscStatus "SUM Sync: gave up after $i attempts. Skipping Set-CMSoftwareUpdatePointComponent"
+                        }
+                        else {
+                            Start-Sleep -Seconds 120
+                        }
                     } 
                     else {
                         $syncStateString = "Unknown"

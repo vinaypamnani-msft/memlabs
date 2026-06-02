@@ -625,8 +625,14 @@ else {
             }
 
             if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products."
+                $i++
+                Write-DscStatus "$Tag SUM Sync not detected as running on $($syncState.WSUSServerName). Running Sync to refresh products. (attempt $i of 30)"
                 Sync-CMSoftwareUpdate
+                if ($i -ge 30) {
+                    $syncTimeout = $true
+                    Write-DscStatus "$Tag SUM Sync: gave up after $i attempts. Skipping Set-CMSoftwareUpdatePointComponent"
+                    return $false
+                }
                 Start-Sleep -Seconds 60
             } 
             else {
