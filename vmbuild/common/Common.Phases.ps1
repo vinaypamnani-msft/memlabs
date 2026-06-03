@@ -16,7 +16,7 @@ function Write-JobProgress {
 
     try {
         if (-not $global:JobProgressHistory) {
-            $global:JobProgressHistory = @()
+            $global:JobProgressHistory = @{}
         }
         $latestActivity = $null
         $latestStatus = $null
@@ -81,8 +81,13 @@ function Write-JobProgress {
                     }
                     $CurrentActivity = "$jobName2`: $latestActivity"
                     $HistoryLine = $Job.Id.ToString() + $CurrentActivity + $latestStatus + $latestPercentComplete
-                    if ($global:JobProgressHistory -notcontains $HistoryLine) {
-                        $global:JobProgressHistory += $HistoryLine
+                    $jobKey = $Job.Id
+                    $now = [DateTime]::UtcNow
+                    $lastEntry = $global:JobProgressHistory[$jobKey]
+                    $changed = (-not $lastEntry) -or ($lastEntry.Line -ne $HistoryLine)
+                    $stale = $lastEntry -and (($now - $lastEntry.Time).TotalSeconds -ge 10)
+                    if ($changed -or $stale) {
+                        $global:JobProgressHistory[$jobKey] = @{ Line = $HistoryLine; Time = $now }
                         if ($secondsRemaining -gt 0) {
                             $latestStatus += " (Remaining: $($secondsRemaining)s)"
                         }
@@ -676,7 +681,7 @@ function Wait-Phase {
             Elapsed = $null
         }
 
-        $global:JobProgressHistory = @()
+        $global:JobProgressHistory = @{}
 
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
