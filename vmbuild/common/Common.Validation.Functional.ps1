@@ -3064,10 +3064,14 @@ function Test-DomainMemberFunctionality {
     $Phase = 11
     $domain = $DeployConfig.vmOptions.domainName
 
+    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $pushExpected = ($CurrentItem.pushClient -ne $false)
+
     Write-Log "[Phase $Phase] $VMName [DomainMember]: Testing domain join and CCM client (if present)" -LogOnly
 
     $scriptBlock = {
-        param($expectedDomain)
+        param($expectedDomain, $checkPkiCert)
+        $checkPki = ($checkPkiCert -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # Domain membership
@@ -3122,6 +3126,31 @@ function Test-DomainMemberFunctionality {
         }
         catch {
             $results.Details.Add("WARN: w32tm /query /status failed: $($_.Exception.Message)")
+        }
+
+        # PKI client authentication certificate (when UsePKI + pushClient)
+        if ($checkPki) {
+            $clientCert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2' -and   # Client Authentication
+                    $_.Issuer -notmatch 'O=Microsoft' -and
+                    $_.Subject -ne $_.Issuer                                               # Not self-signed
+                } | Select-Object -First 1
+            if ($clientCert) {
+                $results.Details.Add("OK: PKI client auth certificate found (Subject='$($clientCert.Subject)', Issuer='$($clientCert.Issuer)', Expires=$($clientCert.NotAfter.ToString('yyyy-MM-dd')))")
+                if ($clientCert.NotAfter -lt (Get-Date)) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PKI client auth certificate is expired")
+                }
+                if (-not $clientCert.HasPrivateKey) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: PKI client auth certificate has no private key")
+                }
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: No PKI client authentication certificate in LocalMachine\My. ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT. Check auto-enrollment and the ConfigMgrClientCertificate template.")
+            }
         }
 
         # CCM client (only if installed; not all DomainMembers get the client)
@@ -3233,13 +3262,13 @@ function Test-DomainMemberFunctionality {
         return $results
     }
 
+    $checkPkiCert = ($usePKI -and $pushExpected)
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $domain `
+        -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert `
         -DisplayName "Phase11-DomainMember-Test" -SuppressLog
 
     # If the guest reported NeedsPushCheck, enrich with deploy config context.
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
-        $pushExpected = ($CurrentItem.pushClient -ne $false)
         if ($pushExpected) {
             $result.ScriptBlockOutput.Passed = $false
             $result.ScriptBlockOutput.Details.Add("  pushClient=$true in config but no ccmsetup evidence on VM — push may have failed on the site server side")
@@ -3839,6 +3868,38 @@ function Test-CMSiteWideFunctionality {
         }
         catch {
             $results.Details.Add("WARN: SMS_Site mode query failed: $($_.Exception.Message)")
+        }
+
+        # 3b. IISSSLState -- the definitive HTTPS flag on the site component.
+        # Expected: 63 when UsePKI=true (HTTPS-only + PKI cert), not 1024 (eHTTP).
+        if ($usePki) {
+            try {
+                $comp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
+                    -Filter "FileType=2 AND ItemName='SMS_SITE_COMPONENT_MANAGER|SMS Site Server' AND SiteCode='$sc'" `
+                    -ErrorAction Stop
+                if ($comp) {
+                    $sslProp = $comp.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } | Select-Object -First 1
+                    if ($sslProp) {
+                        $sslVal = $sslProp.Value
+                        if ($sslVal -eq 63) {
+                            $results.Details.Add("OK: IISSSLState = $sslVal (HTTPS-only + PKI)")
+                        }
+                        elseif ($sslVal -band 1024) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: IISSSLState = $sslVal (eHTTP bit is set; expected 63 for HTTPS-only). Client push will fail because ccmsetup cannot use PKI certs when eHTTP is active.")
+                        }
+                        else {
+                            $results.Details.Add("WARN: IISSSLState = $sslVal (expected 63 for HTTPS-only with PKI)")
+                        }
+                    }
+                    else {
+                        $results.Details.Add("WARN: IISSSLState property not found on SMS_SITE_COMPONENT_MANAGER")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: IISSSLState query failed: $($_.Exception.Message)")
+            }
         }
 
         # 4. Apps enabled via deployConfig.Tools[Appinstall=true] must be present
