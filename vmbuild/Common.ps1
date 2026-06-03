@@ -1147,7 +1147,15 @@ function Copy-ItemSafe {
 
     $pollIntervalSeconds = 30
     $stallTimeoutSeconds = 60    # No progress for 1 minute = stalled
-    $maxTotalSeconds = 600       # Hard cap: 10 minutes per attempt
+    $maxTotalSeconds = 1800      # Hard cap: 30 minutes per attempt
+    $guestHeartbeatIntervalSeconds = 120  # Check guest file size every 2 min when stuck
+
+    # Derive the guest-side check path for heartbeat size monitoring
+    $guestCheckPath = $Destination
+    if ($Recurse) {
+        # Recursive copy: source folder lands as a subfolder of Destination
+        $guestCheckPath = Join-Path $Destination (Split-Path $Path -Leaf)
+    }
 
     $retries = 3
     while ($retries -gt 0) {
@@ -1156,6 +1164,8 @@ function Copy-ItemSafe {
         $lastProgressFingerprint = ''
         $lastProgressTime = $attemptStart
         $timedOut = $false
+        $lastGuestHeartbeatTime = [datetime]::MinValue
+        $lastGuestSize = -1
 
         # On the last retry, skip stall detection and allow the full hard cap.
         # Earlier retries use stall detection to fail fast and retry sooner.
@@ -1202,30 +1212,68 @@ function Copy-ItemSafe {
                 $lastProgressFingerprint = $fingerprint
                 $lastProgressTime = Get-Date
             }
-            elseif (-not $isLastRetry) {
-                # PercentComplete = -1 means indeterminate: cmdlet is transferring data but
-                # can't report granular progress (common during large file copies inside a
-                # recursive Copy-Item -ToSession). Skip stall detection in this case and
-                # let the hard cap protect against genuine hangs.
+            else {
+                # No progress from the Progress stream. Check if we should do a guest heartbeat.
                 $latestPercent = if ($currentCount -gt 0) { $progressStream[$currentCount - 1].PercentComplete } else { 0 }
                 $isIndeterminate = $currentCount -gt 0 -and $latestPercent -eq -1
+                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
 
-                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
-                if (-not $isIndeterminate -and $stallSeconds -ge $stallTimeoutSeconds) {
-                    $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
-                    Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
-                    $timedOut = $true
-                    break
+                # Guest heartbeat: check actual file size on the VM to detect real progress
+                # that the Progress stream doesn't report.
+                $heartbeatAlive = $false
+                $secsSinceHeartbeat = [int]((Get-Date) - $lastGuestHeartbeatTime).TotalSeconds
+                if ($stallSeconds -ge $stallTimeoutSeconds -and $secsSinceHeartbeat -ge $guestHeartbeatIntervalSeconds) {
+                    $lastGuestHeartbeatTime = Get-Date
+                    try {
+                        $checkSession = Get-VmSession -VmName $VMName -VmDomainName $VMDomainName -MaxRetries 1
+                        if ($checkSession) {
+                            $currentGuestSize = Invoke-Command -Session $checkSession -ScriptBlock {
+                                param($p)
+                                if (Test-Path $p) {
+                                    $item = Get-Item $p -EA SilentlyContinue
+                                    if ($item.PSIsContainer) {
+                                        (Get-ChildItem $p -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum -EA SilentlyContinue).Sum
+                                    }
+                                    else { $item.Length }
+                                }
+                                else { 0 }
+                            } -ArgumentList $guestCheckPath -ErrorAction SilentlyContinue
+                            if ($null -eq $currentGuestSize) { $currentGuestSize = 0 }
+
+                            if ($currentGuestSize -gt $lastGuestSize -and $lastGuestSize -ge 0) {
+                                $deltaMB = [Math]::Round(($currentGuestSize - $lastGuestSize) / 1MB, 1)
+                                $totalMB = [Math]::Round($currentGuestSize / 1MB, 1)
+                                Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat: +${deltaMB} MB (${totalMB} MB total at $guestCheckPath, ${elapsedSeconds}s elapsed)" -LogOnly
+                                $lastProgressTime = Get-Date  # copy IS alive, reset stall timer
+                                $heartbeatAlive = $true
+                            }
+                            else {
+                                $totalMB = [Math]::Round([Math]::Max($currentGuestSize, 0) / 1MB, 1)
+                                Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat: no growth (${totalMB} MB at $guestCheckPath, ${elapsedSeconds}s elapsed)" -LogOnly
+                            }
+                            $lastGuestSize = $currentGuestSize
+                        }
+                    }
+                    catch {
+                        Write-Log "[Copy-ItemSafe] [$VMName] Guest heartbeat failed: $_" -LogOnly
+                    }
                 }
-                else {
-                    $indeterminateTag = if ($isIndeterminate) { " [indeterminate, skipping stall check]" } else { "" }
-                    Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (stall timeout: ${stallTimeoutSeconds}s, ${elapsedSeconds}s total elapsed)${indeterminateTag}" -LogOnly
+
+                if (-not $heartbeatAlive -and -not $isLastRetry) {
+                    if (-not $isIndeterminate -and $stallSeconds -ge $stallTimeoutSeconds) {
+                        $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
+                        Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
+                        $timedOut = $true
+                        break
+                    }
+                    else {
+                        $indeterminateTag = if ($isIndeterminate) { " [indeterminate]" } else { "" }
+                        Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (${elapsedSeconds}s total)${indeterminateTag}" -LogOnly
+                    }
                 }
-            }
-            else {
-                # Last retry: log stall but don't give up, let it run to the hard cap
-                $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
-                Write-Log "[Copy-ItemSafe] [$VMName] Last retry: no new progress for ${stallSeconds}s, waiting up to ${maxTotalSeconds}s (${elapsedSeconds}s elapsed)" -LogOnly
+                elseif (-not $heartbeatAlive -and $isLastRetry) {
+                    Write-Log "[Copy-ItemSafe] [$VMName] Last retry: no new progress for ${stallSeconds}s, waiting up to ${maxTotalSeconds}s (${elapsedSeconds}s elapsed)" -LogOnly
+                }
             }
         }
 
