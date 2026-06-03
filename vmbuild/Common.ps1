@@ -1221,7 +1221,7 @@ function Copy-ItemSafe {
                 # Guest heartbeat: check actual file size on the VM to detect real progress
                 # that the Progress stream doesn't report.
                 $heartbeatAlive = $false
-                $secsSinceHeartbeat = [int]((Get-Date) - $lastGuestHeartbeatTime).TotalSeconds
+                $secsSinceHeartbeat = ((Get-Date) - $lastGuestHeartbeatTime).TotalSeconds
                 if ($stallSeconds -ge $stallTimeoutSeconds -and $secsSinceHeartbeat -ge $guestHeartbeatIntervalSeconds) {
                     $lastGuestHeartbeatTime = Get-Date
                     try {
