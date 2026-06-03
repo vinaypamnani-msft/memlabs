@@ -1,4 +1,4 @@
-#enableHTTPS.ps1
+﻿#enableHTTPS.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath,
@@ -83,7 +83,7 @@ if (-not $FirstRun) {
 
 Write-DscStatus "Enabling HTTPS"
 $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-$enabled = ($prop.Value -band 1)  # CCM_SSL_ENABLED (bit 0x1) — don't require exactly 63, users may have eHTTP+HTTPS
+$enabled = ($prop.Value -band 1)  # CCM_SSL_ENABLED (bit 0x1) -- don't require exactly 63, users may have eHTTP+HTTPS
 if ($enabled) {
     # IISSSLState is good, but verify AD has caught up too.
     $adOk = $false
@@ -105,7 +105,7 @@ if ($enabled) {
     }
     else {
         Write-DscStatus "HTTPS Enabled (IISSSLState=$($prop.Value)) but AD SecurityModeMaskEx is stale. Will wait for site component manager to republish."
-        # Fall through to the wait loop below — don't re-run Set-CMSite, just wait for AD
+        # Fall through to the wait loop below -- don't re-run Set-CMSite, just wait for AD
         $enabled = $true
     }
 }
@@ -224,7 +224,7 @@ if ($enabled -or (Test-Path $flagFile)) {
         $adElapsed += $adPoll
     }
     if ($adReady) {
-        Write-DscStatus "AD OperationalXml verified — SecurityModeMaskEx has CCM_SSL_ENABLED."
+        Write-DscStatus "AD OperationalXml verified -- SecurityModeMaskEx has CCM_SSL_ENABLED."
     }
     else {
         Write-DscStatus "WARNING: AD SecurityModeMaskEx still stale after ${adWaitMax}s. PushClients has its own replication check as a safety net."

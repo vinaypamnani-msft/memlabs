@@ -1,4 +1,4 @@
-#PushClients.ps1
+﻿#PushClients.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -208,7 +208,7 @@ if ($usePKI -and $CurrentRole -ne "CAS") {
 
         if ($staleDCs.Count -eq 0) {
             $allGood = $true
-            Write-DscStatus "[ClientPush] AD OperationalXml verified on $($allDCs.Count) DC(s) — SecurityModeMaskEx has CCM_SSL_ENABLED."
+            Write-DscStatus "[ClientPush] AD OperationalXml verified on $($allDCs.Count) DC(s) -- SecurityModeMaskEx has CCM_SSL_ENABLED."
         }
         else {
             $elapsed = [math]::Round(((Get-Date) - $deadline.AddMinutes($maxWaitMinutes)).TotalSeconds)
