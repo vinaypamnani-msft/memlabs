@@ -3866,13 +3866,28 @@ class WaitForClusterAccess {
             return $false
         }
 
-        # DNS works, now try the actual cluster connection
+        # DNS works, now try the actual cluster connection by name
         try {
             $null = Get-Cluster -Name $name -ErrorAction Stop
             return $true
         }
         catch {
-            $this.LastError = "Get-Cluster: $($_.Exception.Message)"
+            $nameErr = $_.Exception.Message
+            # Try via IP — if this works, it's a name-based access issue
+            # (Cluster Name resource offline or CNO not accessible by name)
+            $_ClusterIP = $this.ClusterIPAddress
+            if ($_ClusterIP) {
+                try {
+                    $null = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED — Cluster Name resource likely offline"
+                    return $false
+                }
+                catch {
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr), by IP $_ClusterIP also FAILED ($($_.Exception.Message))"
+                    return $false
+                }
+            }
+            $this.LastError = "Get-Cluster: $nameErr"
             return $false
         }
     }
@@ -3880,21 +3895,66 @@ class WaitForClusterAccess {
     hidden [string] RepairClusterDns([string] $name) {
         $actions = [System.Collections.Generic.List[string]]::new()
 
-        # If we're on a cluster node, force the cluster to re-register its DNS immediately.
+        # If we're on a cluster node, check cluster health and force DNS re-registration.
         # Get-Cluster (no -Name) connects to the local cluster service, bypassing DNS.
         try {
             $localCluster = Get-Cluster -ErrorAction Stop
             if ($localCluster.Name -eq $name) {
                 $actions.Add("Local cluster found")
-                Write-Status "Local cluster detected. Forcing DNS re-registration via Update-ClusterNetworkNameResource."
-                $null = Get-ClusterResource -Name "Cluster Name" -ErrorAction Stop |
-                    Update-ClusterNetworkNameResource -ErrorAction Stop
-                $actions.Add("Forced DNS re-registration")
-                Start-Sleep -Seconds 5
+
+                # Check all resources in the Cluster Group — the "Cluster Name" and
+                # "Cluster IP Address" resources must be Online for remote access.
+                $clusterGroup = Get-ClusterGroup -Name "Cluster Group" -ErrorAction Stop
+                $groupState = $clusterGroup.State
+                $actions.Add("ClusterGroup:$groupState")
+
+                $clusterResources = Get-ClusterResource -ErrorAction Stop |
+                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                foreach ($res in $clusterResources) {
+                    $actions.Add("$($res.Name):$($res.State)")
+                    Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
+                }
+
+                # If Cluster Name or its IP is not Online, try to bring the group online
+                $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
+                $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
+
+                if ($nameRes -and $nameRes.State -ne 'Online') {
+                    Write-Status "Cluster Name resource is $($nameRes.State). Attempting to bring online..."
+                    # IP must be online before name can come online
+                    if ($ipRes -and $ipRes.State -ne 'Online') {
+                        foreach ($ip in $ipRes) {
+                            if ($ip.State -ne 'Online') {
+                                Write-Status "Starting Cluster IP resource '$($ip.Name)'..."
+                                $ip | Start-ClusterResource -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 3
+                            }
+                        }
+                    }
+                    $nameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    # Re-check state
+                    $nameRes = Get-ClusterResource -Name $nameRes.Name -ErrorAction Stop
+                    $actions.Add("NameAfterStart:$($nameRes.State)")
+                    Write-Status "Cluster Name resource now: $($nameRes.State)"
+                }
+
+                if ($nameRes -and $nameRes.State -eq 'Online') {
+                    Write-Status "Forcing DNS re-registration via Update-ClusterNetworkNameResource."
+                    try {
+                        $null = $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop
+                        $actions.Add("DNS re-registered")
+                    }
+                    catch {
+                        $actions.Add("UpdateDNS failed: $_")
+                    }
+                    Start-Sleep -Seconds 5
+                }
             }
         }
         catch {
             Write-Verbose "Not on a cluster node or local cluster not named '$name': $_"
+            $actions.Add("LocalCheck: $_")
         }
 
         # Discover domain and all DCs
