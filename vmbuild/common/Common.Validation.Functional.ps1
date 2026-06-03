@@ -3871,7 +3871,8 @@ function Test-CMSiteWideFunctionality {
         }
 
         # 3b. IISSSLState -- the definitive HTTPS flag on the site component.
-        # Expected: 63 when UsePKI=true (HTTPS-only + PKI cert), not 1024 (eHTTP).
+        # CCM_SSL_ENABLED (0x1) must be set for ccmsetup to use PKI certs.
+        # IISSSLState=63 (0x3F) has all the right bits including 0x1.
         if ($usePki) {
             try {
                 $comp = Get-WmiObject -Namespace $ns -Class SMS_SCI_Component `
@@ -3881,15 +3882,12 @@ function Test-CMSiteWideFunctionality {
                     $sslProp = $comp.Props | Where-Object { $_.PropertyName -eq 'IISSSLState' } | Select-Object -First 1
                     if ($sslProp) {
                         $sslVal = $sslProp.Value
-                        if ($sslVal -eq 63) {
-                            $results.Details.Add("OK: IISSSLState = $sslVal (HTTPS-only + PKI)")
-                        }
-                        elseif ($sslVal -band 1024) {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: IISSSLState = $sslVal (eHTTP bit is set; expected 63 for HTTPS-only). Client push will fail because ccmsetup cannot use PKI certs when eHTTP is active.")
+                        if ($sslVal -band 1) {
+                            $results.Details.Add("OK: IISSSLState = $sslVal (CCM_SSL_ENABLED bit is set)")
                         }
                         else {
-                            $results.Details.Add("WARN: IISSSLState = $sslVal (expected 63 for HTTPS-only with PKI)")
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: IISSSLState = $sslVal (CCM_SSL_ENABLED bit 0x1 is NOT set; ccmsetup cannot use PKI certs). Expected 63 for HTTPS-only.")
                         }
                     }
                     else {
@@ -3899,6 +3897,45 @@ function Test-CMSiteWideFunctionality {
             }
             catch {
                 $results.Details.Add("WARN: IISSSLState query failed: $($_.Exception.Message)")
+            }
+
+            # 3c. AD-published OperationalXml -- ccmsetup reads SecurityModeMaskEx
+            # from the MP's AD object during bootstrap. If the site component manager
+            # hasn't republished after EnableHTTPS set IISSSLState=63, the AD object
+            # still has the pre-HTTPS value and ccmsetup will fail with
+            # CCM_E_NO_CLIENT_PKI_CERT.
+            try {
+                $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+                $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$sc'" `
+                    -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+                if ($mpObj -and $mpObj.mSSMSCapabilities) {
+                    $xml = $mpObj.mSSMSCapabilities
+                    $maskMatch = [regex]::Match($xml, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+                    if ($maskMatch.Success) {
+                        $adMaskEx = [int]$maskMatch.Groups[1].Value
+                        if ($adMaskEx -band 1) {
+                            $results.Details.Add("OK: AD SecurityModeMaskEx = $adMaskEx (CCM_SSL_ENABLED bit set)")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: AD SecurityModeMaskEx = $adMaskEx (CCM_SSL_ENABLED bit 0x1 NOT set). Site component manager has not republished after HTTPS was enabled. ccmsetup bootstrap will fail with CCM_E_NO_CLIENT_PKI_CERT.")
+                        }
+                    }
+                    # Check CertificateIssuers is populated
+                    $issuersMatch = [regex]::Match($xml, '<CertificateIssuers>([^<]*)</CertificateIssuers>')
+                    if ($issuersMatch.Success -and $issuersMatch.Groups[1].Value) {
+                        $results.Details.Add("OK: AD CertificateIssuers = '$($issuersMatch.Groups[1].Value)'")
+                    }
+                    else {
+                        $results.Details.Add("WARN: AD CertificateIssuers is empty (ccmsetup cert search by issuer will be skipped after AD refresh)")
+                    }
+                }
+                else {
+                    $results.Details.Add("WARN: MP AD object for site '$sc' not found or has no mSSMSCapabilities")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: AD OperationalXml query failed: $($_.Exception.Message)")
             }
         }
 

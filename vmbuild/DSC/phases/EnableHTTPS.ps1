@@ -137,10 +137,7 @@ else {
             $component.Put()
             #End Hack 
         }
-        # Disable eHTTP (-UseSmsGeneratedCert $false) when switching to HTTPS-only.
-        # If eHTTP stays enabled, the site publishes SecurityModeMask=1024 to AD
-        # which causes ccmsetup bootstrap to ignore PKI certs (CCM_E_NO_CLIENT_PKI_CERT).
-        Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -UseSmsGeneratedCert $false -AddCertificateByPath $CertPath *>&1 | Write-StatusLogEntry
+        Set-CMSite -SiteCode $SiteCode -UsePkiClientCertificate $true -ClientComputerCommunicationType HttpsOnly -AddCertificateByPath $CertPath *>&1 | Write-StatusLogEntry
 
         Start-Sleep 10
 

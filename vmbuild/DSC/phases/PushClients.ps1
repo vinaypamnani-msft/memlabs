@@ -163,6 +163,63 @@ if ($CurrentRole -ne "CAS") {
 if ($usePKI -and $CurrentRole -ne "CAS") {
     Write-DscStatus "[ClientPush] PKI is enabled. Setting /UsePKICert installation property for client push."
     Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Write-StatusLogEntry
+
+    # After EnableHTTPS sets IISSSLState=63, the site component manager must
+    # republish the OperationalXml to AD. ccmsetup reads SecurityModeMaskEx
+    # from the MP's AD object during bootstrap and needs CCM_SSL_ENABLED (bit 0)
+    # to be set. If we push before AD is updated, ccmsetup fails with
+    # CCM_E_NO_CLIENT_PKI_CERT. Check ALL DCs to guard against replication lag.
+    Write-DscStatus "[ClientPush] Verifying AD has HTTPS-mode OperationalXml on all DCs before pushing..."
+    $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+    if ($allDCs.Count -eq 0) { $allDCs = @($env:LOGONSERVER -replace '\\\\','') }
+
+    $maxWaitMinutes = 10
+    $pollSeconds = 15
+    $deadline = (Get-Date).AddMinutes($maxWaitMinutes)
+    $allGood = $false
+
+    while (-not $allGood -and (Get-Date) -lt $deadline) {
+        $staleDCs = @()
+        foreach ($dc in $allDCs) {
+            try {
+                $mpObj = Get-ADObject -Server $dc -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+                    -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+                if ($mpObj -and $mpObj.mSSMSCapabilities) {
+                    $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+                    if ($maskMatch.Success) {
+                        $adMaskEx = [int]$maskMatch.Groups[1].Value
+                        if (-not ($adMaskEx -band 1)) {
+                            $staleDCs += "$dc (SecurityModeMaskEx=$adMaskEx, bit 0x1 missing)"
+                        }
+                    }
+                    else {
+                        $staleDCs += "$dc (SecurityModeMaskEx not found in OperationalXml)"
+                    }
+                }
+                else {
+                    $staleDCs += "$dc (MP AD object not found)"
+                }
+            }
+            catch {
+                $staleDCs += "$dc (query failed: $($_.Exception.Message))"
+            }
+        }
+
+        if ($staleDCs.Count -eq 0) {
+            $allGood = $true
+            Write-DscStatus "[ClientPush] AD OperationalXml verified on $($allDCs.Count) DC(s) — SecurityModeMaskEx has CCM_SSL_ENABLED."
+        }
+        else {
+            $elapsed = [math]::Round(((Get-Date) - $deadline.AddMinutes($maxWaitMinutes)).TotalSeconds)
+            Write-DscStatus "[ClientPush] Waiting for AD replication ($($staleDCs.Count)/$($allDCs.Count) DC(s) stale, ${elapsed}s elapsed): $($staleDCs -join '; ')" -RetrySeconds $pollSeconds
+            Start-Sleep -Seconds $pollSeconds
+        }
+    }
+
+    if (-not $allGood) {
+        Write-DscStatus "[ClientPush] WARNING: AD OperationalXml still stale on some DCs after ${maxWaitMinutes}m. Client push may fail with CCM_E_NO_CLIENT_PKI_CERT if clients query a stale DC."
+    }
 }
 
 Write-DscStatus "Client push candidates are '$ClientNames'"
