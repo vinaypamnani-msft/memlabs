@@ -3102,6 +3102,20 @@ function Test-DomainMemberFunctionality {
             catch { $scError = $_ }
             if ($i -lt 4) { Start-Sleep -Seconds (5 * $i) }
         }
+        if (-not $sc -and -not $scError) {
+            # Attempt repair: resets the machine account password in AD.
+            # Runs as SYSTEM which has the rights to reset its own password.
+            $results.Details.Add("WARN: Secure channel broken, attempting -Repair...")
+            try {
+                $sc = Test-ComputerSecureChannel -Repair -ErrorAction Stop
+                if ($sc) {
+                    $results.Details.Add("OK: Secure channel repaired successfully")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Repair failed: $($_.Exception.Message)")
+            }
+        }
         if ($sc) {
             $results.Details.Add("OK: Secure channel to domain is healthy")
         }
@@ -3110,7 +3124,7 @@ function Test-DomainMemberFunctionality {
         }
         else {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False after 4 attempts -- machine account password may be broken")
+            $results.Details.Add("FAIL: Test-ComputerSecureChannel returned False after repair attempt -- machine account may need to be reset in AD (Reset-ComputerMachinePassword)")
         }
 
         # Time sync
