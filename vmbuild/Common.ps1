@@ -1203,15 +1203,23 @@ function Copy-ItemSafe {
                 $lastProgressTime = Get-Date
             }
             elseif (-not $isLastRetry) {
+                # PercentComplete = -1 means indeterminate: cmdlet is transferring data but
+                # can't report granular progress (common during large file copies inside a
+                # recursive Copy-Item -ToSession). Skip stall detection in this case and
+                # let the hard cap protect against genuine hangs.
+                $latestPercent = if ($currentCount -gt 0) { $progressStream[$currentCount - 1].PercentComplete } else { 0 }
+                $isIndeterminate = $currentCount -gt 0 -and $latestPercent -eq -1
+
                 $stallSeconds = [int]((Get-Date) - $lastProgressTime).TotalSeconds
-                if ($stallSeconds -ge $stallTimeoutSeconds) {
+                if (-not $isIndeterminate -and $stallSeconds -ge $stallTimeoutSeconds) {
                     $stallDetail = if ($progressDetail) { " (last: $progressDetail)" } else { '' }
                     Write-Log "[Copy-ItemSafe] [$VMName] Copy stalled for ${stallSeconds}s with no progress${stallDetail} copying $Path. Retries left: $($retries - 1)" -Warning
                     $timedOut = $true
                     break
                 }
                 else {
-                    Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (stall timeout: ${stallTimeoutSeconds}s, ${elapsedSeconds}s total elapsed)" -LogOnly
+                    $indeterminateTag = if ($isIndeterminate) { " [indeterminate, skipping stall check]" } else { "" }
+                    Write-Log "[Copy-ItemSafe] [$VMName] No new progress for ${stallSeconds}s (stall timeout: ${stallTimeoutSeconds}s, ${elapsedSeconds}s total elapsed)${indeterminateTag}" -LogOnly
                 }
             }
             else {
