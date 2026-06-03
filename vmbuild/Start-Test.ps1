@@ -40,9 +40,22 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "CMVersion", ParameterSetName = 'TestName')]
     [ArgumentCompleter({
             param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
-            . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
-            $argument = @(Get-CMVersions)
-            return $argument | Where-Object { $_ -match $WordToComplete }
+            # Fast path: read CM versions from cache file instead of loading Common.ps1
+            $versions = @()
+            if ($global:Common.Supported.CMVersions) {
+                $versions = @($global:Common.Supported.CMVersions)
+            }
+            else {
+                $cacheFile = Join-Path $PSScriptRoot "cache\supported-options.json"
+                if (Test-Path $cacheFile) {
+                    try {
+                        $cached = Get-Content $cacheFile -ErrorAction SilentlyContinue | ConvertFrom-Json
+                        if ($cached.Supported.CMVersions) { $versions = @($cached.Supported.CMVersions) }
+                    } catch {}
+                }
+            }
+            $versions = $versions | Sort-Object -Descending
+            return $versions | Where-Object { $_ -like "$WordToComplete*" }
         })]        
     [string]$cmVersion,
 

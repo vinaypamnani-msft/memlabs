@@ -6,9 +6,18 @@ param (
     [Parameter(Mandatory = $false, ParameterSetName = "InProgress")]
     [ArgumentCompleter({
         param ($Command, $Parameter, $WordToComplete, $CommandAst, $FakeBoundParams)
-        . $PSScriptRoot\Common.ps1 -VerboseEnabled:$false -InJob:$true
-        $domainlist = @(Get-DomainList)
-        return $domainlist | Where-Object {$_ -match $WordToComplete}
+        # Fast path: if Common.ps1 is already loaded and the VM list is cached,
+        # use it directly. Otherwise, derive domain names from Hyper-V virtual
+        # switch names (single WMI call) instead of loading the full module.
+        if ($global:vm_List) {
+            $domainlist = @($global:vm_List | Where-Object { $_.Domain } | Select-Object -ExpandProperty Domain -Unique | Sort-Object)
+        }
+        else {
+            $domainlist = @(Get-VMSwitch -SwitchType Internal -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '^(Default Switch|intSwitch)$' } |
+                Select-Object -ExpandProperty Name | Sort-Object)
+        }
+        return $domainlist | Where-Object { $_ -like "$WordToComplete*" }
     })]
     [string] $DomainName,
     [Parameter(Mandatory = $true, ParameterSetName = "Orphaned")]
