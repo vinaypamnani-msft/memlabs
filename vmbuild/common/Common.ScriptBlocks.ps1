@@ -1600,9 +1600,20 @@ $global:VM_Config = {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create staging directory on the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
-            $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+
+            # Copy-ItemSafe has 3 internal retries (~12 min worst case).
+            # DSC copy is critical, so retry up to 2 more times at the caller level.
+            $copyResults = $false
+            for ($copyAttempt = 1; $copyAttempt -le 3; $copyAttempt++) {
+                if ($copyAttempt -gt 1) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Caller retry $($copyAttempt - 1)/2 after 30s delay..." -Warning
+                    Start-Sleep -Seconds 30
+                }
+                $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+                if ($copyResults -ne $false) { break }
+            }
             if ($copyResults -eq $false) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM (Copy-ItemSafe exhausted retries)." -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM after $copyAttempt attempts." -Failure -OutputStream
                 return
             }
         }
