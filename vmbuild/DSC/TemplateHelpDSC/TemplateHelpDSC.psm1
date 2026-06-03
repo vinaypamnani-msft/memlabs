@@ -3879,7 +3879,31 @@ class WaitForClusterAccess {
             if ($_ClusterIP) {
                 try {
                     $null = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
-                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED — Cluster Name resource likely offline"
+
+                    # Cluster is running and reachable by IP. Check if the
+                    # Cluster Name resource is actually Online. If it is,
+                    # the name-based failure is a client-side resolution issue
+                    # (e.g. local ClusSvc not running on this pre-join node)
+                    # and the cluster itself is fully functional.
+                    $nameResOnline = $false
+                    try {
+                        $nameRes = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
+                        if ($nameRes -and $nameRes.State -eq 'Online') {
+                            $nameResOnline = $true
+                        }
+                    }
+                    catch {
+                        Write-Verbose "Could not query Cluster Name resource state: $_"
+                    }
+
+                    if ($nameResOnline) {
+                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online — accepting as accessible"
+                        $this.LastError = $null
+                        return $true
+                    }
+
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED — Cluster Name resource not Online"
                     return $false
                 }
                 catch {
