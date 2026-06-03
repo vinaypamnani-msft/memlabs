@@ -56,28 +56,42 @@ $attempts = 0
 $maxAttempts = 5
 
 if (-not $FirstRun) {
-    # On re-runs, still verify AD has the right state. If the site component
-    # manager hadn't republished when the first run completed, AD is stale and
-    # ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT.
-    $adOk = $false
-    try {
-        $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
-        $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
-            -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
-        if ($mpObj -and $mpObj.mSSMSCapabilities) {
-            $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
-            if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
-                $adOk = $true
-            }
+    if ($isCas) {
+        # CAS has no Management Point, so there is no mSSMSManagementPoint AD object.
+        # Check IISSSLState directly instead.
+        $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
+        if ($prop.Value -band 1) {
+            Write-DscStatus "Not the first run. CAS IISSSLState=$($prop.Value) has CCM_SSL_ENABLED. Skipping."
+            return
+        }
+        else {
+            Write-DscStatus "Not the first run but CAS IISSSLState=$($prop.Value) missing CCM_SSL_ENABLED. Will re-enable."
         }
     }
-    catch { }
-    if ($adOk) {
-        Write-DscStatus "Not the first run. AD SecurityModeMaskEx has CCM_SSL_ENABLED. Skipping."
-        return
-    }
     else {
-        Write-DscStatus "Not the first run but AD SecurityModeMaskEx is stale (CCM_SSL_ENABLED bit missing). Will wait for republish."
+        # On re-runs, still verify AD has the right state. If the site component
+        # manager hadn't republished when the first run completed, AD is stale and
+        # ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT.
+        $adOk = $false
+        try {
+            $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+            $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+                -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+            if ($mpObj -and $mpObj.mSSMSCapabilities) {
+                $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+                if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
+                    $adOk = $true
+                }
+            }
+        }
+        catch { }
+        if ($adOk) {
+            Write-DscStatus "Not the first run. AD SecurityModeMaskEx has CCM_SSL_ENABLED. Skipping."
+            return
+        }
+        else {
+            Write-DscStatus "Not the first run but AD SecurityModeMaskEx is stale (CCM_SSL_ENABLED bit missing). Will wait for republish."
+        }
     }
 }
 
@@ -85,6 +99,11 @@ Write-DscStatus "Enabling HTTPS"
 $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
 $enabled = ($prop.Value -band 1)  # CCM_SSL_ENABLED (bit 0x1) -- don't require exactly 63, users may have eHTTP+HTTPS
 if ($enabled) {
+    if ($isCas) {
+        # CAS has no MP, so no AD object to check. IISSSLState is the definitive source.
+        Write-DscStatus "HTTPS Already Enabled on CAS (IISSSLState=$($prop.Value)). Done."
+        return
+    }
     # IISSSLState is good, but verify AD has caught up too.
     $adOk = $false
     try {
@@ -200,7 +219,12 @@ else {
 # ccmsetup reads SecurityModeMaskEx from the MP's AD object and needs
 # CCM_SSL_ENABLED (bit 0x1) set. Without this wait, PushClients may run
 # before AD is updated and ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT.
-if ($enabled -or (Test-Path $flagFile)) {
+# CAS has no Management Point, so there is no mSSMSManagementPoint AD
+# object to check. Skip the wait on CAS -- PushClients runs on the Primary.
+if ($isCas) {
+    Write-DscStatus "CAS has no MP -- skipping AD SecurityModeMaskEx wait."
+}
+elseif ($enabled -or (Test-Path $flagFile)) {
     $adWaitMax = 300  # 5 minutes
     $adPoll = 10
     $adElapsed = 0
