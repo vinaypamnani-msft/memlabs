@@ -1145,10 +1145,17 @@ function Copy-ItemSafe {
 
     write-log "[Copy-ItemSafe] location: $location enableVerbose: $enableVerbose VMName:$VMName Path:$Path Destination:$Destination WhatIF:$WhatIF Recurse:$Recurse Container:$Container  Force:$Force" -LogOnly
 
+    # Scale timeouts based on concurrent VM load. More VMs = more PSDirect
+    # contention = slower copies. Avoid adding heartbeat probe load too often.
+    $runningVmCount = @(Get-VM -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }).Count
+    $extraVms = [Math]::Max(0, $runningVmCount - 8)
+
     $pollIntervalSeconds = 30
-    $stallTimeoutSeconds = 60    # No progress for 1 minute = stalled
-    $maxTotalSeconds = 1800      # Hard cap: 30 minutes per attempt
-    $guestHeartbeatIntervalSeconds = 120  # Check guest file size every 2 min when stuck
+    $stallTimeoutSeconds = 30 + ($extraVms * 5)    # 30s base + 5s per VM over 8
+    $maxTotalSeconds = 1800                         # Hard cap: 30 minutes per attempt
+    $guestHeartbeatIntervalSeconds = 120 + ($extraVms * 5)  # 120s base + 5s per VM over 8
+
+    Write-Log "[Copy-ItemSafe] [$VMName] $runningVmCount running VMs: stallTimeout=${stallTimeoutSeconds}s, heartbeatInterval=${guestHeartbeatIntervalSeconds}s" -LogOnly
 
     # Derive the guest-side check path for heartbeat size monitoring
     $guestCheckPath = $Destination
