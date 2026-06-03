@@ -54,6 +54,7 @@ DscResourcesToExport = @(
     'SetDNSAddress',
     'DisableClusterNicDnsRegistration',
     'WaitForClusterAccess',
+    'JoinClusterByIP',
     'SetWindowsProxy'
 
 

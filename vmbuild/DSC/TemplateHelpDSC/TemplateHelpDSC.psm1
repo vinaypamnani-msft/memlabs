@@ -4146,6 +4146,7 @@ class WaitForClusterAccess {
     [void] Set() {
         # Pre-import modules silently to avoid verbose "Exporting function" spam
         Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
 
         $_ClusterName = $this.ClusterName
         $_RetryInterval = $this.RetryIntervalSec
@@ -4199,6 +4200,10 @@ class WaitForClusterAccess {
     }
 
     [bool] Test() {
+        # Pre-import modules silently to avoid verbose "Exporting function" spam
+        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+        Import-Module DnsClient -Verbose:$false -ErrorAction SilentlyContinue
+
         $_ClusterName = $this.ClusterName
         if ($this.TryClusterAccess($_ClusterName)) {
             Write-Verbose "Cluster '$_ClusterName' is accessible by name."
@@ -4209,6 +4214,69 @@ class WaitForClusterAccess {
     }
 
     [WaitForClusterAccess] Get() {
+        return $this
+    }
+}
+
+# JoinClusterByIP works around a Windows Failover Cluster API limitation:
+# OpenCluster("ClusterName") fails on non-member nodes where ClusSvc is not
+# running, even when DNS, SPNs, and the Cluster Name resource are all healthy.
+# The xCluster DSC resource uses name-based cluster access in Test-TargetResource,
+# which triggers a non-terminating error that causes the LCM to abort. This
+# resource uses IP-based access (Get-Cluster -Name $IP / Add-ClusterNode -Cluster $IP)
+# which bypasses the broken name resolution layer entirely.
+[DscResource()]
+class JoinClusterByIP {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty(Mandatory)]
+    [string] $ClusterIPAddress
+
+    [DscProperty()]
+    [PSCredential] $DomainAdministratorCredential
+
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
+    [void] Set() {
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+        $_NodeName = $env:COMPUTERNAME
+        Write-Status "Joining node '$_NodeName' to cluster '$($this.ClusterName)' via IP $_ClusterIP"
+        try {
+            Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
+            Write-Status "Successfully joined '$_NodeName' to cluster '$($this.ClusterName)'"
+        }
+        catch {
+            Write-Status "Add-ClusterNode failed: $_"
+            throw
+        }
+    }
+
+    [bool] Test() {
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+        $_NodeName = $env:COMPUTERNAME
+        try {
+            $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
+            if ($node -and $node.State -eq 'Up') {
+                Write-Verbose "Node '$_NodeName' is already a member of cluster '$($this.ClusterName)' (State: Up)"
+                return $true
+            }
+            elseif ($node) {
+                Write-Verbose "Node '$_NodeName' is a member but state is '$($node.State)'"
+                return $false
+            }
+        }
+        catch {
+            Write-Verbose "Could not query cluster membership via IP $_ClusterIP`: $_"
+        }
+        Write-Verbose "Node '$_NodeName' is not a member of cluster '$($this.ClusterName)'"
+        return $false
+    }
+
+    [JoinClusterByIP] Get() {
         return $this
     }
 }
