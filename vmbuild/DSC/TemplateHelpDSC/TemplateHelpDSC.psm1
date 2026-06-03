@@ -3749,6 +3749,155 @@ class ClusterSetOwnerNodes {
 }
 
 [DscResource()]
+class WaitForClusterAccess {
+    [DscProperty(Key)]
+    [string] $ClusterName
+
+    [DscProperty()]
+    [int] $RetryIntervalSec = 15
+
+    [DscProperty()]
+    [int] $RetryCount = 40
+
+    hidden [bool] TryClusterAccess([string] $name) {
+        Clear-DnsClientCache
+        try {
+            $null = Get-Cluster -Name $name -ErrorAction Stop
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+
+    hidden [void] RepairClusterDns([string] $name) {
+        # If we're on a cluster node, force the cluster to re-register its DNS immediately.
+        # Get-Cluster (no -Name) connects to the local cluster service, bypassing DNS.
+        try {
+            $localCluster = Get-Cluster -ErrorAction Stop
+            if ($localCluster.Name -eq $name) {
+                Write-Status "Local cluster detected. Forcing DNS re-registration via Update-ClusterNetworkNameResource."
+                $null = Get-ClusterResource -Name "Cluster Name" -ErrorAction Stop |
+                    Update-ClusterNetworkNameResource -ErrorAction Stop
+                Start-Sleep -Seconds 5
+            }
+        }
+        catch {
+            Write-Verbose "Not on a cluster node or local cluster not named '$name': $_"
+        }
+
+        # Discover domain and all DCs
+        $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+        $allDCs = @()
+        try {
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $allDCs = @(Get-ADDomainController -Filter * -ErrorAction Stop | Select-Object -ExpandProperty HostName)
+        }
+        catch {
+            Write-Verbose "Could not enumerate DCs via AD module: $_"
+        }
+        if ($allDCs.Count -eq 0) {
+            # Fallback: try NS records for the domain
+            try {
+                $ns = Resolve-DnsName -Name $domain -Type NS -ErrorAction Stop | Where-Object { $_.Type -eq 'NS' }
+                $allDCs = @($ns | ForEach-Object { $_.NameHost })
+            }
+            catch {
+                Write-Verbose "Could not enumerate DCs via NS records: $_"
+            }
+        }
+
+        $clusterFqdn = if ($name -like "*.*") { $name } else { "$name.$domain" }
+        Write-Status "Checking DNS for '$clusterFqdn' across $($allDCs.Count) DC(s): $($allDCs -join ', ')"
+
+        # Check which DCs have the A record and which don't
+        $dcsWithRecord = @()
+        $dcsMissing = @()
+        $knownIP = $null
+        foreach ($dc in $allDCs) {
+            try {
+                $rec = Resolve-DnsName -Name $clusterFqdn -Type A -Server $dc -DnsOnly -ErrorAction Stop |
+                    Where-Object { $_.Type -eq 'A' }
+                if ($rec) {
+                    $dcsWithRecord += $dc
+                    if (-not $knownIP) { $knownIP = $rec[0].IPAddress }
+                    Write-Verbose "DC $dc has A record: $($rec.IPAddress -join ',')"
+                }
+                else {
+                    $dcsMissing += $dc
+                    Write-Verbose "DC $dc returned empty A record for $clusterFqdn"
+                }
+            }
+            catch {
+                $dcsMissing += $dc
+                Write-Verbose "DC $dc cannot resolve $clusterFqdn : $_"
+            }
+        }
+
+        if ($dcsMissing.Count -gt 0 -and $dcsWithRecord.Count -gt 0) {
+            # Some DCs have it, some don't — force replication from a DC that has it
+            $sourceDC = $dcsWithRecord[0]
+            Write-Status "DNS record missing on $($dcsMissing.Count) DC(s). Forcing AD replication from $sourceDC"
+            try {
+                $domainDN = ($domain.Split('.') | ForEach-Object { "DC=$_" }) -join ','
+                foreach ($targetDC in $dcsMissing) {
+                    foreach ($nc in @($domainDN, "DC=DomainDnsZones,$domainDN")) {
+                        $null = repadmin /replicate $targetDC $sourceDC $nc /force 2>&1
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Replication attempt failed: $_"
+            }
+        }
+
+        # Flush local DNS cache after any repair
+        Clear-DnsClientCache
+        # Also re-register this machine's own DNS to make sure we pick up fresh records
+        $null = ipconfig /registerdns 2>&1
+    }
+
+    [void] Set() {
+        $_ClusterName = $this.ClusterName
+        $_RetryInterval = $this.RetryIntervalSec
+        $_RetryCount = $this.RetryCount
+
+        for ($i = 1; $i -le $_RetryCount; $i++) {
+            # On first attempt and every 4th attempt, run DNS diagnostics/repair
+            if ($i -eq 1 -or ($i % 4) -eq 0) {
+                try { $this.RepairClusterDns($_ClusterName) } catch { Write-Verbose "RepairClusterDns failed: $_" }
+            }
+            else {
+                Clear-DnsClientCache
+            }
+
+            if ($this.TryClusterAccess($_ClusterName)) {
+                Write-Status "Cluster '$_ClusterName' is now accessible by name."
+                return
+            }
+
+            Write-Status "Cluster '$_ClusterName' not yet accessible (attempt $i/$_RetryCount). Retrying in ${_RetryInterval}s..."
+            Start-Sleep -Seconds $_RetryInterval
+        }
+        throw "Cluster '$_ClusterName' did not become accessible by name after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) minutes)."
+    }
+
+    [bool] Test() {
+        $_ClusterName = $this.ClusterName
+        if ($this.TryClusterAccess($_ClusterName)) {
+            Write-Verbose "Cluster '$_ClusterName' is accessible by name."
+            return $true
+        }
+        Write-Verbose "Cluster '$_ClusterName' is not accessible by name — will attempt DNS repair."
+        return $false
+    }
+
+    [WaitForClusterAccess] Get() {
+        return $this
+    }
+}
+
+[DscResource()]
 class ClusterRemoveUnwantedIPs {
     [DscProperty(Key)]
     [string] $ClusterName

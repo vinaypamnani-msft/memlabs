@@ -53,6 +53,7 @@ DscResourcesToExport = @(
     'GpUpdate',
     'SetDNSAddress',
     'DisableClusterNicDnsRegistration',
+    'WaitForClusterAccess',
     'SetWindowsProxy'
 
 

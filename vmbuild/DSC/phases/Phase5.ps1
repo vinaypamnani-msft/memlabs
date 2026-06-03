@@ -264,6 +264,20 @@ Configuration Phase5
         }
         $nextDepend = '[xCluster]CreateCluster'
 
+        WriteStatus EnsureClusterDns {
+            DependsOn = $nextDepend
+            Status    = "Ensuring Cluster '$($thisVM.ClusterName)' DNS is registered and accessible"
+        }
+
+        WaitForClusterAccess EnsureClusterDns {
+            ClusterName          = $thisVM.ClusterName
+            RetryIntervalSec     = 15
+            RetryCount           = 40
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[WaitForClusterAccess]EnsureClusterDns'
+
         WriteStatus JoinCluster {
             DependsOn = $nextDepend
             Status    = "Waiting on $node2 To Join Cluster"
@@ -721,6 +735,20 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xWaitForCluster]WaitForCluster'
+
+        WriteStatus WaitClusterAccess {
+            Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to be accessible by name"
+            DependsOn = $nextDepend
+        }
+
+        WaitForClusterAccess WaitClusterAccess {
+            ClusterName          = $Node1VM.ClusterName
+            RetryIntervalSec     = 15
+            RetryCount           = 40
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[WaitForClusterAccess]WaitClusterAccess'
 
 
         WriteStatus JoinCluster {
