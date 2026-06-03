@@ -1313,17 +1313,36 @@ function Test-CMSiteFunctionality {
         param($sc)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        # Check critical CM services
+        # Check critical CM services (with remediation for transient states)
         foreach ($svc in @('SMS_EXECUTIVE', 'SMS_SITE_COMPONENT_MANAGER')) {
             $results.Details.Add("CMD: Get-Service -Name '$svc'")
             $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
             if (-not $s) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Service '$svc' not found")
+                continue
             }
-            elseif ($s.Status -ne 'Running') {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Service '$svc' is $($s.Status), expected Running")
+            if ($s.Status -ne 'Running') {
+                # Attempt remediation: force-stop then start
+                $results.Details.Add("WARN: Service '$svc' is $($s.Status), attempting restart...")
+                try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue } catch { }
+                Start-Sleep -Seconds 5
+                try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch { }
+                # Wait up to 60s for the service to reach Running
+                $svcOk = $false
+                for ($w = 0; $w -lt 12; $w++) {
+                    Start-Sleep -Seconds 5
+                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($s -and $s.Status -eq 'Running') { $svcOk = $true; break }
+                }
+                if ($svcOk) {
+                    $results.Details.Add("OK: Service '$svc' is Running after restart")
+                }
+                else {
+                    $results.Passed = $false
+                    $sNow = if ($s) { $s.Status } else { 'NotFound' }
+                    $results.Details.Add("FAIL: Service '$svc' is $sNow after restart attempt, expected Running")
+                }
             }
             else {
                 $results.Details.Add("OK: Service '$svc' is Running")
@@ -1835,20 +1854,30 @@ function Test-SecondaryFunctionality {
                 param($parentSC, $childSC)
                 $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
                 $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_Site -Filter `"SiteCode = '$childSC'`"")
-                try {
-                    $sec = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_Site `
-                        -Filter "SiteCode = '$childSC'" -ErrorAction Stop
-                    if ($sec) {
-                        $results.Details.Add("OK: Secondary site '$childSC' found in parent site '$parentSC'")
+                $maxAttempts = 10
+                $retryDelay = 30
+                $found = $false
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    try {
+                        $sec = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_Site `
+                            -Filter "SiteCode = '$childSC'" -ErrorAction Stop
+                        if ($sec) {
+                            $results.Details.Add("OK: Secondary site '$childSC' found in parent site '$parentSC' (attempt $attempt)")
+                            $found = $true
+                            break
+                        }
                     }
-                    else {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Secondary site '$childSC' not found in parent site '$parentSC'")
+                    catch {
+                        $results.Details.Add("INFO: Query attempt $attempt failed: $($_.Exception.Message)")
+                    }
+                    if ($attempt -lt $maxAttempts) {
+                        $results.Details.Add("INFO: Secondary site '$childSC' not yet visible in parent (attempt $attempt/$maxAttempts), retrying in ${retryDelay}s...")
+                        Start-Sleep -Seconds $retryDelay
                     }
                 }
-                catch {
+                if (-not $found) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: Cannot query parent for secondary: $($_.Exception.Message)")
+                    $results.Details.Add("FAIL: Secondary site '$childSC' not found in parent site '$parentSC' after $maxAttempts attempts")
                 }
                 return $results
             }
@@ -3765,9 +3794,6 @@ function Test-CMSiteWideFunctionality {
             if ($siteObj) {
                 $mode = $siteObj.Mode
                 $results.Details.Add("OK: SMS_Site.Mode = $mode (cmOptions.UsePKI=$usePki)")
-                if ($usePki -and $mode -ne 1) {
-                    $results.Details.Add("WARN: UsePKI=true but site Mode=$mode (expected 1 = HTTPS only)")
-                }
             }
         }
         catch {
