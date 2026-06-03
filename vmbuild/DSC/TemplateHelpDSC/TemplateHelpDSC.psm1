@@ -4244,10 +4244,26 @@ class JoinClusterByIP {
     [void] Set() {
         $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
         $_NodeName = $env:COMPUTERNAME
-        Write-Status "Joining node '$_NodeName' to cluster '$($this.ClusterName)' via IP $_ClusterIP"
+        $_ClusterName = $this.ClusterName
+
+        # Check for existing node in Down state — must remove before re-adding (matches xCluster behavior)
+        try {
+            $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
+            if ($existingNode -and $existingNode.State -eq 'Down') {
+                Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
+                Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
+                Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
+            }
+        }
+        catch {
+            Write-Status "Error checking/removing downed node: $_"
+            # Continue — Add-ClusterNode will fail with a clear error if the node still exists
+        }
+
+        Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
         try {
             Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
-            Write-Status "Successfully joined '$_NodeName' to cluster '$($this.ClusterName)'"
+            Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
         }
         catch {
             Write-Status "Add-ClusterNode failed: $_"
@@ -4258,21 +4274,23 @@ class JoinClusterByIP {
     [bool] Test() {
         $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
         $_NodeName = $env:COMPUTERNAME
+        $_ClusterName = $this.ClusterName
         try {
             $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
-            if ($node -and $node.State -eq 'Up') {
-                Write-Verbose "Node '$_NodeName' is already a member of cluster '$($this.ClusterName)' (State: Up)"
-                return $true
-            }
-            elseif ($node) {
-                Write-Verbose "Node '$_NodeName' is a member but state is '$($node.State)'"
+            if ($node) {
+                if ($node.State -eq 'Up' -or $node.State -eq 'Paused') {
+                    Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' (State: $($node.State))"
+                    return $true
+                }
+                # Down state — return $false so Set can remove and re-add
+                Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' but state is '$($node.State)' — will remove and re-add"
                 return $false
             }
         }
         catch {
             Write-Verbose "Could not query cluster membership via IP $_ClusterIP`: $_"
         }
-        Write-Verbose "Node '$_NodeName' is not a member of cluster '$($this.ClusterName)'"
+        Write-Verbose "Node '$_NodeName' is not a member of cluster '$_ClusterName'"
         return $false
     }
 
