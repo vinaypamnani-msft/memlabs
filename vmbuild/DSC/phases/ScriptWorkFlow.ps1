@@ -336,6 +336,20 @@ if ($scenario -eq "Standalone") {
     Set-Location $LogPath
     . $ScriptFile $ConfigFilePath $LogPath
 
+    # Enable HTTPS/eHTTP early so the site component manager has maximum
+    # time to republish the updated OperationalXml (SecurityModeMaskEx) to
+    # AD before PushClients runs. The flag file prevents double execution
+    # if this already ran inside InstallAndUpdateSCCM's update loop.
+    $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+    if (-not $cmoEarly.UsePKI) {
+        Write-DscStatus "$scenario Early EnableEHTTP.ps1"
+        . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+    }
+    else {
+        Write-DscStatus "$scenario Early EnableHTTPS.ps1"
+        . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
+    }
+
     #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
     if ($Configuration.InstallDP.Status -ne "Completed") {
         Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
@@ -401,6 +415,17 @@ if ($scenario -eq "Hierarchy") {
         Set-Location $LogPath
         . $ScriptFile $ConfigFilePath $LogPath
 
+        # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
+        $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        if (-not $cmoEarly.UsePKI) {
+            Write-DscStatus "$scenario CAS Early EnableEHTTP.ps1"
+            . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+        }
+        else {
+            Write-DscStatus "$scenario CAS Early EnableHTTPS.ps1"
+            . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
+        }
+
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
@@ -421,6 +446,17 @@ if ($scenario -eq "Hierarchy") {
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
             . $ScriptFile $ConfigFilePath $LogPath
+        }
+
+        # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
+        $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
+        if (-not $cmoEarly.UsePKI) {
+            Write-DscStatus "$scenario Primary Early EnableEHTTP.ps1"
+            . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+        }
+        else {
+            Write-DscStatus "$scenario Primary Early EnableHTTPS.ps1"
+            . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
         }
 
         #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
