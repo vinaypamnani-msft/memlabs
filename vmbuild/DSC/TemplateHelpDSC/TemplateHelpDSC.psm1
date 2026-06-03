@@ -3765,6 +3765,47 @@ class WaitForClusterAccess {
     hidden [string] $LastError = ''
     hidden [string] $DnsSummary = ''
     hidden [string] $NetSummary = ''
+    hidden [string] $FwSummary = ''
+
+    hidden [string] TestFirewallRules() {
+        $results = [System.Collections.Generic.List[string]]::new()
+
+        # Check Failover Cluster firewall rules (auto-created by the Windows Feature)
+        $clusterRules = Get-NetFirewallRule -DisplayGroup "Failover Clusters" -ErrorAction SilentlyContinue
+        if ($clusterRules) {
+            $enabled = @($clusterRules | Where-Object { $_.Enabled -eq 'True' }).Count
+            $total = @($clusterRules).Count
+            $results.Add("ClusterRules:$enabled/$total enabled")
+        }
+        else {
+            $results.Add("ClusterRules:MISSING")
+        }
+
+        # Check cluster network blanket rules
+        $clusterNetIn = Get-NetFirewallRule -DisplayName "Cluster Network Inbound" -ErrorAction SilentlyContinue
+        $clusterNetOut = Get-NetFirewallRule -DisplayName "Cluster Network Outbound" -ErrorAction SilentlyContinue
+        $inOk = $clusterNetIn -and $clusterNetIn.Enabled -eq 'True'
+        $outOk = $clusterNetOut -and $clusterNetOut.Enabled -eq 'True'
+        $results.Add("ClusterNet:In=$(if ($inOk) {'OK'} else {'MISS'}),Out=$(if ($outOk) {'OK'} else {'MISS'})")
+
+        # Check RPC 135 inbound
+        $rpc135 = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match 'RPC Endpoint Mapper|DCOM' } |
+            Select-Object -First 1
+        $results.Add("RPC135in:$(if ($rpc135) {'OK'} else {'MISS'})")
+
+        # Check firewall profiles
+        $profiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue
+        $activeProfiles = @($profiles | Where-Object { $_.Enabled -eq 'True' } | ForEach-Object { "$($_.Name):$($_.DefaultInboundAction)" })
+        if ($activeProfiles.Count -gt 0) {
+            $results.Add("Profiles:$($activeProfiles -join ',')")
+        }
+
+        $summary = $results -join ', '
+        Write-Status "Firewall: $summary"
+        $this.FwSummary = $summary
+        return $summary
+    }
 
     hidden [string] TestNetworkConnectivity([string] $ip) {
         if (-not $ip) { return "No IP to test" }
@@ -3982,6 +4023,10 @@ class WaitForClusterAccess {
                 if ($testIP) {
                     try { $this.TestNetworkConnectivity($testIP) } catch { Write-Status "Network test error: $_" }
                 }
+                # Firewall diagnostics on first attempt only
+                if ($i -eq 1) {
+                    try { $this.TestFirewallRules() } catch { Write-Status "Firewall check error: $_" }
+                }
             }
             else {
                 Clear-DnsClientCache
@@ -3995,10 +4040,11 @@ class WaitForClusterAccess {
             $detail = $this.LastError
             if ($this.DnsSummary) { $detail = "$detail | $($this.DnsSummary)" }
             if ($this.NetSummary) { $detail = "$detail | Net:$($this.NetSummary)" }
+            if ($this.FwSummary -and $i -le 2) { $detail = "$detail | FW:$($this.FwSummary)" }
             Write-Status "Cluster '$_ClusterName' attempt $i/$_RetryCount FAILED: $detail"
             Start-Sleep -Seconds $_RetryInterval
         }
-        throw "Cluster '$_ClusterName' did not become accessible after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) min). Last: $($this.LastError) | DNS: $($this.DnsSummary) | Net: $($this.NetSummary)"
+        throw "Cluster '$_ClusterName' did not become accessible after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) min). Last: $($this.LastError) | DNS: $($this.DnsSummary) | Net: $($this.NetSummary) | FW: $($this.FwSummary)"
     }
 
     [bool] Test() {
