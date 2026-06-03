@@ -3754,6 +3754,9 @@ class WaitForClusterAccess {
     [string] $ClusterName
 
     [DscProperty()]
+    [string] $ClusterIPAddress = ''
+
+    [DscProperty()]
     [int] $RetryIntervalSec = 15
 
     [DscProperty()]
@@ -3761,6 +3764,45 @@ class WaitForClusterAccess {
 
     hidden [string] $LastError = ''
     hidden [string] $DnsSummary = ''
+    hidden [string] $NetSummary = ''
+
+    hidden [string] TestNetworkConnectivity([string] $ip) {
+        if (-not $ip) { return "No IP to test" }
+
+        $results = [System.Collections.Generic.List[string]]::new()
+
+        # ICMP ping
+        try {
+            $ping = Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction Stop
+            $results.Add("Ping:$(if ($ping) { 'OK' } else { 'FAIL' })")
+        }
+        catch {
+            $results.Add("Ping:ERR($($_.Exception.Message))")
+        }
+
+        # TCP 135 (RPC endpoint mapper — used by Get-Cluster)
+        try {
+            $tcp135 = Test-NetConnection -ComputerName $ip -Port 135 -WarningAction SilentlyContinue -ErrorAction Stop
+            $results.Add("TCP135:$(if ($tcp135.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+        }
+        catch {
+            $results.Add("TCP135:ERR")
+        }
+
+        # TCP 445 (SMB — used for cluster admin shares)
+        try {
+            $tcp445 = Test-NetConnection -ComputerName $ip -Port 445 -WarningAction SilentlyContinue -ErrorAction Stop
+            $results.Add("TCP445:$(if ($tcp445.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
+        }
+        catch {
+            $results.Add("TCP445:ERR")
+        }
+
+        $summary = $results -join ', '
+        Write-Status "Network $ip : $summary"
+        $this.NetSummary = $summary
+        return $summary
+    }
 
     hidden [bool] TryClusterAccess([string] $name) {
         Clear-DnsClientCache
@@ -3919,11 +3961,27 @@ class WaitForClusterAccess {
         $_ClusterName = $this.ClusterName
         $_RetryInterval = $this.RetryIntervalSec
         $_RetryCount = $this.RetryCount
+        $_ClusterIP = $this.ClusterIPAddress
 
         for ($i = 1; $i -le $_RetryCount; $i++) {
-            # On first attempt and every 4th attempt, run DNS diagnostics/repair
+            # On first attempt and every 4th attempt, run full diagnostics
             if ($i -eq 1 -or ($i % 4) -eq 0) {
                 try { $this.RepairClusterDns($_ClusterName) } catch { Write-Status "RepairClusterDns error: $_" }
+                # Network connectivity test against known cluster IP
+                $testIP = $_ClusterIP
+                if (-not $testIP) {
+                    # Try to get IP from DNS summary or resolve
+                    $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+                    $fqdn = if ($_ClusterName -like "*.*") { $_ClusterName } else { "$_ClusterName.$domain" }
+                    try {
+                        $r = Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop | Where-Object { $_.Type -eq 'A' }
+                        if ($r) { $testIP = $r[0].IPAddress }
+                    }
+                    catch {}
+                }
+                if ($testIP) {
+                    try { $this.TestNetworkConnectivity($testIP) } catch { Write-Status "Network test error: $_" }
+                }
             }
             else {
                 Clear-DnsClientCache
@@ -3936,10 +3994,11 @@ class WaitForClusterAccess {
 
             $detail = $this.LastError
             if ($this.DnsSummary) { $detail = "$detail | $($this.DnsSummary)" }
+            if ($this.NetSummary) { $detail = "$detail | Net:$($this.NetSummary)" }
             Write-Status "Cluster '$_ClusterName' attempt $i/$_RetryCount FAILED: $detail"
             Start-Sleep -Seconds $_RetryInterval
         }
-        throw "Cluster '$_ClusterName' did not become accessible by name after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) minutes). Last: $($this.LastError) | DNS: $($this.DnsSummary)"
+        throw "Cluster '$_ClusterName' did not become accessible after $_RetryCount attempts ($(($_RetryCount * $_RetryInterval) / 60) min). Last: $($this.LastError) | DNS: $($this.DnsSummary) | Net: $($this.NetSummary)"
     }
 
     [bool] Test() {

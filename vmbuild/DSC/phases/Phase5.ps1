@@ -271,6 +271,7 @@ Configuration Phase5
 
         WaitForClusterAccess EnsureClusterDns {
             ClusterName          = $thisVM.ClusterName
+            ClusterIPAddress     = $thisVM.thisParams.SQLAO.ClusterIPAddress
             RetryIntervalSec     = 15
             RetryCount           = 40
             DependsOn            = $nextDepend
@@ -743,6 +744,7 @@ Configuration Phase5
 
         WaitForClusterAccess WaitClusterAccess {
             ClusterName          = $Node1VM.ClusterName
+            ClusterIPAddress     = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             RetryIntervalSec     = 15
             RetryCount           = 40
             DependsOn            = $nextDepend
