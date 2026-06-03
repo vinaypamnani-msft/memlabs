@@ -82,6 +82,43 @@ function Write-StatusLogEntry {
     }
 }
 
+function Invoke-DotSource {
+    # Wrapper for dot-sourcing scripts with error handling.
+    # Catches parse errors, execution policy blocks, and other failures
+    # that would otherwise be silently swallowed by the caller.
+    param(
+        [Parameter(Mandatory)]
+        [string]$Script,
+        [object[]]$Arguments
+    )
+
+    $scriptName = Split-Path $Script -Leaf
+
+    # Pre-flight: verify the file exists
+    if (-not (Test-Path $Script)) {
+        Write-DscStatus "FAILED to dot-source $scriptName -- file not found: $Script" -Failure
+        return
+    }
+
+    # Pre-flight: verify the file parses without errors
+    $tokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        $firstErr = $parseErrors[0]
+        Write-DscStatus "FAILED to dot-source $scriptName -- parse error at line $($firstErr.Extent.StartLineNumber): $($firstErr.Message)" -Failure
+        return
+    }
+
+    # Dot-source with error handling
+    try {
+        . $Script @Arguments
+    }
+    catch {
+        Write-DscStatus "FAILED to dot-source ${scriptName}: $_" -Failure
+    }
+}
+
 function Write-DscStatusSetup {
     $StatusPrefix = "Setting up ConfigMgr. See ConfigMgrSetup.log"
     $StatusPrefix | Out-File $global:StatusFile -Force

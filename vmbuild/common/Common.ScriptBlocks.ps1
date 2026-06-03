@@ -1618,6 +1618,41 @@ $global:VM_Config = {
 
 
         if (-not $alreadyCopiedDSC -or ($guestZipHash -ne $dscZipHash)) {
+
+            # PS5.1 parse-check all guest scripts once per build (not per VM).
+            # Guest VMs run PS 5.1 which reads non-BOM files as Windows-1252;
+            # non-ASCII in string literals silently breaks dot-sourced scripts.
+            if (-not $script:dscParseChecked) {
+                $script:dscParseChecked = $true
+                $dscPhasesDir = Join-Path $rootPath "DSC" "phases"
+                $dscModuleDir = Join-Path $rootPath "DSC" "TemplateHelpDSC"
+                $guestScripts = @()
+                if (Test-Path $dscPhasesDir) { $guestScripts += Get-ChildItem -Path $dscPhasesDir -Filter '*.ps1' -Recurse }
+                if (Test-Path $dscModuleDir) {
+                    $guestScripts += Get-ChildItem -Path $dscModuleDir -Filter '*.ps1' -Recurse
+                    $guestScripts += Get-ChildItem -Path $dscModuleDir -Filter '*.psm1' -Recurse
+                }
+                $parseFailures = @()
+                foreach ($gs in $guestScripts) {
+                    $bytes = [System.IO.File]::ReadAllBytes($gs.FullName)
+                    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+                    if (-not $hasBom) {
+                        # Check for non-ASCII bytes that PS5.1 would misinterpret
+                        for ($bi = 0; $bi -lt $bytes.Length; $bi++) {
+                            if ($bytes[$bi] -gt 127) {
+                                $parseFailures += "$($gs.Name): non-ASCII byte 0x$($bytes[$bi].ToString('X2')) at offset $bi (no UTF-8 BOM)"
+                                break
+                            }
+                        }
+                    }
+                }
+                if ($parseFailures.Count -gt 0) {
+                    foreach ($pf in $parseFailures) {
+                        Write-Log "[Phase $Phase]: DSC parse-check WARNING: $pf" -Warning
+                    }
+                }
+            }
+
             # Copy DSC files
             Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."

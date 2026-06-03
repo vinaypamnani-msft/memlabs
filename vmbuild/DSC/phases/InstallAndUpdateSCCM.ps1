@@ -1,4 +1,4 @@
-# InstallAndUpdateSCCM.ps1
+﻿# InstallAndUpdateSCCM.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
@@ -919,13 +919,13 @@ if ($UpdateRequired) {
             # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
             Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
             Write-DscStatus "EnableEHTTP.ps1 done"
         }
         else {
             Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
-            . $ScriptFile $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
             Write-DscStatus "EnableHTTPS.ps1 done"
         }
 

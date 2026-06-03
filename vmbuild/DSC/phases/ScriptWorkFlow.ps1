@@ -314,7 +314,7 @@ if ($scenario -eq "MultiDomain") {
     Write-DscStatus "$scenario Running InstallMultiDomainPKI.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallMultiDomainPKI.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
     $Configuration.ScriptWorkflow.Status = "Completed"
@@ -334,7 +334,7 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     # Enable HTTPS/eHTTP early so the site component manager has maximum
     # time to republish the updated OperationalXml (SecurityModeMaskEx) to
@@ -343,11 +343,11 @@ if ($scenario -eq "Standalone") {
     $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
     if (-not $cmoEarly.UsePKI) {
         Write-DscStatus "$scenario Early EnableEHTTP.ps1"
-        . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+        Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
     }
     else {
         Write-DscStatus "$scenario Early EnableHTTPS.ps1"
-        . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
+        Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
     }
 
     #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
@@ -355,7 +355,7 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     }
     else {
         Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -380,13 +380,13 @@ if ($scenario -eq "Standalone") {
         Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     }
 
     Write-DscStatus "$scenario Running InstallRoles.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     # ConfigureCMProxy is cheap and idempotent; always run it so latched
     # Completed state from a deploy that ran before the Proxy was hydrated
@@ -395,13 +395,13 @@ if ($scenario -eq "Standalone") {
     Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
     Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
 }
 
@@ -413,29 +413,29 @@ if ($scenario -eq "Hierarchy") {
         Write-DscStatus "$scenario Running InstallAndUpdateSCCM.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallAndUpdateSCCM.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
         # Enable HTTPS/eHTTP early on CAS too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
         if (-not $cmoEarly.UsePKI) {
             Write-DscStatus "$scenario CAS Early EnableEHTTP.ps1"
-            . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
         }
         else {
             Write-DscStatus "$scenario CAS Early EnableHTTPS.ps1"
-            . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
         }
 
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     }
     elseif ($CurrentRole -eq "Primary") {
@@ -445,18 +445,18 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallPSForHierarchy.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPSForHierarchy.ps1"
             Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
 
         # Enable HTTPS/eHTTP early on Primary too (same reasoning as Standalone).
         $cmoEarly = if ($ThisVM -and $ThisVM.cmOptions) { $ThisVM.cmOptions } else { $deployConfig.cmOptions }
         if (-not $cmoEarly.UsePKI) {
             Write-DscStatus "$scenario Primary Early EnableEHTTP.ps1"
-            . $PSScriptRoot\EnableEHTTP.ps1 $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script "$PSScriptRoot\EnableEHTTP.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
         }
         else {
             Write-DscStatus "$scenario Primary Early EnableHTTPS.ps1"
-            . $PSScriptRoot\EnableHTTPS.ps1 $ConfigFilePath $LogPath $firstRun
+            Invoke-DotSource -Script "$PSScriptRoot\EnableHTTPS.ps1" -Arguments $ConfigFilePath, $LogPath, $firstRun
         }
 
         #Install DP/MP/Client - Run before secondary so MP can be installed on sitesytems
@@ -464,7 +464,7 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallDPMPClient.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallDPMPClient.ps1"
             Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
         else {
             Write-DscStatus "$scenario Skipping InstallDPMPClient.ps1 (already completed)"
@@ -489,25 +489,25 @@ if ($scenario -eq "Hierarchy") {
             Write-DscStatus "$scenario Running InstallSecondarySiteServer.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallSecondarySiteServer.ps1"
             Set-Location $LogPath
-            . $ScriptFile $ConfigFilePath $LogPath
+            Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
         }
 
         Write-DscStatus "$scenario Running InstallRoles.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallRoles.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
         # ConfigureCMProxy is cheap and idempotent; always run.
         Write-DscStatus "$scenario Running ConfigureCMProxy.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "ConfigureCMProxy.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
          #Install BGs -- Must run after InstallRoles so DPs MPs and SUPs can be detected
         Write-DscStatus "$scenario Running InstallBoundaryGroups.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallBoundaryGroups.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
     }
 }
@@ -521,7 +521,7 @@ if ($containsPassive) {
         Write-DscStatus "ContainsPassive Running InstallPassiveSiteServer.ps1"
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
         Set-Location $LogPath
-        . $ScriptFile $ConfigFilePath $LogPath
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     }
     else {
         Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
@@ -546,19 +546,19 @@ if (-not $cmo.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
 }
 else {
     Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
-    . $ScriptFile $ConfigFilePath $LogPath $firstRun
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
 }
 
 if ($TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
 
 }
 
@@ -566,7 +566,7 @@ if ($TopLevelSiteServer) {
   Write-DscStatus "Running InstallProvider.ps1"
   $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
   Set-Location $LogPath
-  . $ScriptFile $ConfigFilePath $LogPath
+  Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
   
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -579,7 +579,7 @@ if ($ThisVM.role -ne "CAS") {
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     Write-DscStatus "Complete!"
 }
 
@@ -588,7 +588,7 @@ if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Running EnableBLM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
     Set-Location $LogPath
-    . $ScriptFile $ConfigFilePath $LogPath
+    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
     # MUST re-assert Complete! -- EnableBLM's final status ("BitLocker Management
     # configuration complete") overwrites the earlier Complete! marker written
     # after PushClients. The orchestrator in Common.ScriptBlocks.ps1 polls for
