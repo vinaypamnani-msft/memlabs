@@ -1174,6 +1174,32 @@ $global:VM_Config = {
                     }
                     return
                 }
+                if ($vmState -eq "Off") {
+                    # VM was sysprepped and shut down on a prior run but never
+                    # started back up. Start it and wait for OOBE.
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient is Off (post-sysprep from prior run). Starting and waiting for OOBE." -OutputStream -Warning
+                    $started = Start-VM2 -Name $currentItem.vmName -Passthru
+                    if ($started) {
+                        $oobeStartedRecovery = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                        if ($oobeStartedRecovery) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient recovered — OOBE started. Marking complete." -OutputStream -Success
+                        }
+                        else {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient started but OOBE did not appear within 15 minutes." -OutputStream -Failure
+                            return
+                        }
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to start AADClient VM." -OutputStream -Failure
+                        return
+                    }
+                    $note = Get-VMNote -VMName $currentItem.vmName
+                    if ($note) {
+                        $note | Add-Member -MemberType NoteProperty -Name "oobeComplete" -Value $true -Force
+                        Set-VMNote -VMName $currentItem.vmName -vmNote $note
+                    }
+                    return
+                }
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
             return

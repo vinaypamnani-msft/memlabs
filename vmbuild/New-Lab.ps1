@@ -799,6 +799,26 @@ try {
         $prepared = Start-Phase -Phase 0 -deployConfig $deployConfig -WhatIf:$WhatIf
     }
 
+    # AADClient idempotency: if an AADClient VM exists from a prior interrupted
+    # run but never reached oobeComplete, it is in an unrecoverable state
+    # (partial DSC, half-sysprepped, etc.). Delete it now so Phase 1 can
+    # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
+    # it so the AADClient gets rebuilt before Phase 2 runs.
+    $forcePhase1ForAAD = $false
+    foreach ($vm in $deployConfig.virtualMachines) {
+        if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
+        $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
+        if (-not $existingVm) { continue }
+        $note = Get-VMNote -VMName $vm.vmName
+        if ($note -and $note.oobeComplete) { continue }
+        Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
+        Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
+        $forcePhase1ForAAD = $true
+    }
+    if ($forcePhase1ForAAD) {
+        $runPhase1 = $true
+    }
+
     # Define phases
     $start = 1
     $maxPhase = 11
@@ -824,8 +844,14 @@ try {
             }
 
             if ($StartPhase -and $i -lt $StartPhase) {
-                Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
-                continue
+                # Don't skip Phase 1 if we deleted stuck AADClient VMs that need re-creation
+                if ($i -eq 1 -and $forcePhase1ForAAD) {
+                    Write-Log "[Phase 1] Forced by AADClient cleanup (overriding -StartPhase $StartPhase)." -Warning
+                }
+                else {
+                    Write-OrangePoint "Skipped Phase $i because -StartPhase is $StartPhase." -ForegroundColor Yellow -WriteLog
+                    continue
+                }
             }
 
             if ($StopPhase -and $i -gt $StopPhase) {
