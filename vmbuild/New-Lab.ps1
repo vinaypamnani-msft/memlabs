@@ -805,6 +805,7 @@ try {
     # re-create from a fresh VHDX. If -StartPhase would skip Phase 1, override
     # it so the AADClient gets rebuilt before Phase 2 runs.
     $forcePhase1ForAAD = $false
+    $global:ForcePhase1VmNames = @()
     foreach ($vm in $deployConfig.virtualMachines) {
         if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
         $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
@@ -813,10 +814,13 @@ try {
         if ($note -and $note.oobeComplete) { continue }
         Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
         Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
+        $global:ForcePhase1VmNames += $vm.vmName
         $forcePhase1ForAAD = $true
     }
     if ($forcePhase1ForAAD) {
         $runPhase1 = $true
+        # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+        Get-List -FlushCache
     }
 
     # Define phases
@@ -871,6 +875,7 @@ try {
                 if ($i -eq 1) {
                     # Phase 1 deployed new VMs; used by Phase 8 to decide whether to auto-snapshot
                     $global:Phase1DeployedNewVMs = $true
+                    $global:ForcePhase1VmNames = @()
 
                     # Clear out vm remove list
                     $global:vm_remove_list = @()

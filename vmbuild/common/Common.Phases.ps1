@@ -136,12 +136,19 @@ function Start-Phase {
 
     # Remove DNS records for VM's in this config, if existing DC
     if ($deployConfig.parameters.ExistingDCName -and $Phase -eq 1) {
-        Write-Log "[Phase $Phase] Attempting to remove existing DNS Records"
         $existingDC = $deployConfig.parameters.ExistingDCName
-        foreach ($item in $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) } ) {
-            if ($existingDC) {
-                Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
-            }
+        # When Phase 1 was forced only for AADClient cleanup, scope DNS
+        # removal to just the deleted VMs instead of nuking all records.
+        if ($global:ForcePhase1VmNames -and $global:ForcePhase1VmNames.Count -gt 0) {
+            $dnsTargets = $deployConfig.virtualMachines | Where-Object { $_.vmName -in $global:ForcePhase1VmNames }
+            Write-Log "[Phase $Phase] Removing DNS records for re-created VM(s): $($global:ForcePhase1VmNames -join ', ')"
+        }
+        else {
+            $dnsTargets = $deployConfig.virtualMachines | Where-Object { -not ($_.hidden) }
+            Write-Log "[Phase $Phase] Attempting to remove existing DNS Records"
+        }
+        foreach ($item in $dnsTargets) {
+            Remove-DnsRecord -DCName $existingDC -Domain $deployConfig.vmOptions.domainName -RecordToDelete $item.vmName
         }
     }
 
