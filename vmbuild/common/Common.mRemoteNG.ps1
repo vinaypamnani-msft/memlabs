@@ -1383,16 +1383,35 @@ function New-MRemoteNGFileFromHyperV {
             $mRNGProc = Start-Process $mRNGExe -ArgumentList "/cons:`"$MRemoteNGFile`"" -PassThru -WindowStyle Minimized -ErrorAction SilentlyContinue
             if ($mRNGProc) {
                 Write-GreenCheck "Updated $MRemoteNGFile. Restarted mRemoteNG (PID $($mRNGProc.Id))" -ForegroundColor ForestGreen
-                # mRemoteNG ignores -WindowStyle Minimized and restores to its previous position.
-                # Wait for it to finish initializing, then force-minimize and restore terminal focus.
+                # mRemoteNG ignores -WindowStyle Minimized and restores to its saved window state.
+                # Poll for its main window handle, then force-minimize repeatedly to win the race
+                # against mRemoteNG's late window activation during load.
                 try {
+                    $swApi = Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -Name "SwApi" -Namespace Win32mRNG -PassThru -ErrorAction SilentlyContinue
                     $mRNGProc.WaitForInputIdle(8000) | Out-Null
-                    Start-Sleep -Milliseconds 500
-                    $mRNGProc.Refresh()
-                    $hWnd = $mRNGProc.MainWindowHandle
+
+                    # Poll for MainWindowHandle (may not exist until UI fully renders)
+                    $hWnd = [IntPtr]::Zero
+                    for ($i = 0; $i -lt 20; $i++) {
+                        Start-Sleep -Milliseconds 250
+                        $mRNGProc.Refresh()
+                        $hWnd = $mRNGProc.MainWindowHandle
+                        if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                            $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                            break
+                        }
+                    }
+
+                    # Re-minimize after a delay: mRemoteNG often re-activates while loading connections
                     if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
-                        $swApi = Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' -Name "SwApi" -Namespace Win32mRNG -PassThru -ErrorAction SilentlyContinue
-                        $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                        for ($i = 0; $i -lt 4; $i++) {
+                            Start-Sleep -Milliseconds 500
+                            $mRNGProc.Refresh()
+                            $hWnd = $mRNGProc.MainWindowHandle
+                            if ($hWnd -and $hWnd -ne [IntPtr]::Zero) {
+                                $swApi::ShowWindow($hWnd, 6) | Out-Null  # SW_MINIMIZE
+                            }
+                        }
                     }
                 }
                 catch {}
