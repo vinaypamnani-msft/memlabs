@@ -806,21 +806,31 @@ try {
     # it so the AADClient gets rebuilt before Phase 2 runs.
     $forcePhase1ForAAD = $false
     $global:ForcePhase1VmNames = @()
+    $needCacheFlush = $false
     foreach ($vm in $deployConfig.virtualMachines) {
         if ($vm.role -ne "AADClient" -or $vm.hidden) { continue }
         $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
-        if (-not $existingVm) { continue }
+        if (-not $existingVm) {
+            # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
+            Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
+            $global:ForcePhase1VmNames += $vm.vmName
+            $forcePhase1ForAAD = $true
+            continue
+        }
         $note = Get-VMNote -VMName $vm.vmName
         if ($note -and $note.oobeComplete) { continue }
         Write-Log "[Phase 0] $($vm.vmName): AADClient exists but oobeComplete is not set (interrupted prior run). Deleting so Phase 1 can re-create." -Warning
         Remove-VirtualMachine -VmName $vm.vmName -Force -SkipProxyCleanup
         $global:ForcePhase1VmNames += $vm.vmName
         $forcePhase1ForAAD = $true
+        $needCacheFlush = $true
     }
     if ($forcePhase1ForAAD) {
         $runPhase1 = $true
-        # Flush the VM list cache so Phase 1 sees the deleted VM as missing
-        Get-List -FlushCache
+        if ($needCacheFlush) {
+            # Flush the VM list cache so Phase 1 sees the deleted VM as missing
+            Get-List -FlushCache
+        }
     }
 
     # Define phases
