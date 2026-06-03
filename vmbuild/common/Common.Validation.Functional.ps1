@@ -3125,6 +3125,45 @@ function Test-DomainMemberFunctionality {
         }
 
         # CCM client (only if installed; not all DomainMembers get the client)
+        # Helper: attempt to re-run ccmsetup, wait for completion, re-check CcmExec.
+        # Returns $true if CcmExec ends up Running after the retry.
+        $retryCcmSetup = {
+            param($results)
+            $ccmsetupExe = 'C:\Windows\ccmsetup\ccmsetup.exe'
+            if (-not (Test-Path $ccmsetupExe)) {
+                $results.Details.Add("INFO: $ccmsetupExe not found, cannot retry")
+                return $false
+            }
+            $results.Details.Add("INFO: Attempting ccmsetup retry...")
+            try { Start-Process -FilePath $ccmsetupExe -ErrorAction Stop } catch {
+                $results.Details.Add("INFO: Failed to launch ccmsetup: $($_.Exception.Message)")
+                return $false
+            }
+            Start-Sleep -Seconds 10
+            # Wait up to 5 minutes for ccmsetup to finish
+            for ($w = 0; $w -lt 30; $w++) {
+                Start-Sleep -Seconds 10
+                if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
+            }
+            Start-Sleep -Seconds 10
+            $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') {
+                $results.Details.Add("OK: CcmExec is Running after ccmsetup retry")
+                return $true
+            }
+            # Still not running — try Start-Service in case the service was just installed
+            if ($svc) {
+                try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {}
+                Start-Sleep -Seconds 10
+                $svc = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                if ($svc -and $svc.Status -eq 'Running') {
+                    $results.Details.Add("OK: CcmExec is Running after ccmsetup retry + manual start")
+                    return $true
+                }
+            }
+            return $false
+        }
+
         $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
         if ($ccm) {
             if ($ccm.Status -ne 'Running') {
@@ -3143,23 +3182,23 @@ function Test-DomainMemberFunctionality {
                     $results.Details.Add("WARN: CcmExec is $($ccm.Status) but ccmsetup.exe is still running (client install in progress)")
                 }
                 else {
-                    # ccmsetup finished — check ccmsetup.log for failure details.
+                    # ccmsetup finished but service not running — attempt remediation.
                     $logPath = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
+                    $failDetail = $null
                     if (Test-Path $logPath) {
                         $logTail = Get-Content $logPath -Tail 50 -ErrorAction SilentlyContinue
                         $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
-                        if ($failLine -and $failLine -match '0x[0-9A-Fa-f]+') {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: CcmExec is $($ccm.Status); ccmsetup failed: $($failLine.Trim())")
-                        }
-                        else {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: CcmExec is $($ccm.Status) (ccmsetup finished but service won't start)")
-                        }
+                        if ($failLine) { $failDetail = $failLine.Trim() }
+                    }
+                    if ($failDetail) {
+                        $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail")
                     }
                     else {
+                        $results.Details.Add("WARN: CcmExec is $($ccm.Status) (ccmsetup finished but service won't start)")
+                    }
+                    if (-not (& $retryCcmSetup $results)) {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: CcmExec is $($ccm.Status); no ccmsetup.log found at $logPath")
+                        $results.Details.Add("FAIL: CcmExec still not Running after ccmsetup retry")
                     }
                 }
             }
@@ -3174,12 +3213,14 @@ function Test-DomainMemberFunctionality {
                 $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
                 $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
                 if ($failLine) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: CcmExec not installed; ccmsetup failed: $($failLine.Trim())")
+                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($failLine.Trim())")
                 }
                 else {
+                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
+                }
+                if (-not (& $retryCcmSetup $results)) {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
+                    $results.Details.Add("FAIL: CcmExec still not installed after ccmsetup retry")
                 }
             }
             else {
