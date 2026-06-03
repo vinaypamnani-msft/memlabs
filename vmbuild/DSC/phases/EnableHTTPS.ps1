@@ -56,18 +56,58 @@ $attempts = 0
 $maxAttempts = 5
 
 if (-not $FirstRun) {
-    # Only try this once (in case it failed during initial PS setup when we're re-running DSC)
-    Write-DscStatus "Not the first run.. Skipping HTTPS setup."
-    return
-    $attempts = $maxAttempts
+    # On re-runs, still verify AD has the right state. If the site component
+    # manager hadn't republished when the first run completed, AD is stale and
+    # ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT.
+    $adOk = $false
+    try {
+        $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+        $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+            -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+        if ($mpObj -and $mpObj.mSSMSCapabilities) {
+            $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+            if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
+                $adOk = $true
+            }
+        }
+    }
+    catch { }
+    if ($adOk) {
+        Write-DscStatus "Not the first run. AD SecurityModeMaskEx has CCM_SSL_ENABLED. Skipping."
+        return
+    }
+    else {
+        Write-DscStatus "Not the first run but AD SecurityModeMaskEx is stale (CCM_SSL_ENABLED bit missing). Will wait for republish."
+    }
 }
 
 Write-DscStatus "Enabling HTTPS"
 $prop = Get-CMSiteComponent -SiteCode $SiteCode -ComponentName "SMS_SITE_COMPONENT_MANAGER" | Select-Object -ExpandProperty Props | Where-Object { $_.PropertyName -eq "IISSSLState" }
-$enabled = ($prop.Value -eq 63)
+$enabled = ($prop.Value -band 1)  # CCM_SSL_ENABLED (bit 0x1) — don't require exactly 63, users may have eHTTP+HTTPS
 if ($enabled) {
-    Write-DscStatus "HTTPS Already Enabled.. Done." 
-    return
+    # IISSSLState is good, but verify AD has caught up too.
+    $adOk = $false
+    try {
+        $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+        $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+            -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+        if ($mpObj -and $mpObj.mSSMSCapabilities) {
+            $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+            if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
+                $adOk = $true
+            }
+        }
+    }
+    catch { }
+    if ($adOk) {
+        Write-DscStatus "HTTPS Already Enabled (IISSSLState=$($prop.Value)) and AD is current. Done."
+        return
+    }
+    else {
+        Write-DscStatus "HTTPS Enabled (IISSSLState=$($prop.Value)) but AD SecurityModeMaskEx is stale. Will wait for site component manager to republish."
+        # Fall through to the wait loop below — don't re-run Set-CMSite, just wait for AD
+        $enabled = $true
+    }
 }
 $CAName = "$DomainShort-$CAVMName-CA"
 $CertPath = "c:\temp\rootca.cer"
@@ -152,5 +192,41 @@ else {
     else {
         Write-DscStatus "HTTPS was enabled."
         New-Item -ItemType File -Path $flagFile -Force | Out-Null
+    }
+}
+
+# After HTTPS is enabled (either just now or on a prior run), wait for the
+# site component manager to republish the updated OperationalXml to AD.
+# ccmsetup reads SecurityModeMaskEx from the MP's AD object and needs
+# CCM_SSL_ENABLED (bit 0x1) set. Without this wait, PushClients may run
+# before AD is updated and ccmsetup fails with CCM_E_NO_CLIENT_PKI_CERT.
+if ($enabled -or (Test-Path $flagFile)) {
+    $adWaitMax = 300  # 5 minutes
+    $adPoll = 10
+    $adElapsed = 0
+    $adReady = $false
+    while ($adElapsed -lt $adWaitMax) {
+        try {
+            $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
+            $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$SiteCode'" `
+                -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
+            if ($mpObj -and $mpObj.mSSMSCapabilities) {
+                $maskMatch = [regex]::Match($mpObj.mSSMSCapabilities, '<SecurityModeMaskEx>(\d+)</SecurityModeMaskEx>')
+                if ($maskMatch.Success -and ([int]$maskMatch.Groups[1].Value -band 1)) {
+                    $adReady = $true
+                    break
+                }
+            }
+        }
+        catch { }
+        Write-DscStatus "Waiting for AD to reflect HTTPS mode (SecurityModeMaskEx CCM_SSL_ENABLED bit, ${adElapsed}s elapsed)" -RetrySeconds $adPoll
+        Start-Sleep -Seconds $adPoll
+        $adElapsed += $adPoll
+    }
+    if ($adReady) {
+        Write-DscStatus "AD OperationalXml verified — SecurityModeMaskEx has CCM_SSL_ENABLED."
+    }
+    else {
+        Write-DscStatus "WARNING: AD SecurityModeMaskEx still stale after ${adWaitMax}s. PushClients has its own replication check as a safety net."
     }
 }
