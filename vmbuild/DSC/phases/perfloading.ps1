@@ -1,4 +1,4 @@
-#perfloading.ps1
+﻿#perfloading.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath
