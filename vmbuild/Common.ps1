@@ -11,7 +11,7 @@ param (
     [Parameter()]
     [switch]$GetLatestHotfixVersion,
     [Parameter()]
-    [ValidateSet("Default", "Fast", "Full")]
+    [ValidateSet("Default", "Fast", "Full", "RemoveOnly")]
     [string]$StartupProfile = "Default",
     [Parameter()]
     [switch]$FastInit,
@@ -5338,6 +5338,35 @@ Function Set-TitleBar {
 ### DOT SOURCING ###
 ####################
 
+# RemoveOnly profile: load only the files needed for Remove-VirtualMachine.
+# Saves ~2-3s per ThreadJob worker during domain removal (skips ~20 files).
+$removeOnlyProfile = ($StartupProfile -eq 'RemoveOnly')
+if ($removeOnlyProfile) {
+    . $PSScriptRoot\common\Common.StorageToken.ps1
+    . $PSScriptRoot\common\Common.Colors.ps1
+    . $PSScriptRoot\common\Common.Config.ps1
+    . $PSScriptRoot\common\Common.HyperV.ps1
+    . $PSScriptRoot\common\Common.Remove.ps1
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        . $PSScriptRoot\common\Common.Linux.ps1
+    }
+    else {
+        function Test-VmIsLinux {
+            param ([Parameter(Mandatory = $false, ValueFromPipeline = $true)] [object]$Vm)
+            if (-not $Vm) { return $false }
+            if ($Vm.PSObject.Properties.Name -contains 'osFamily' -and $Vm.osFamily -eq 'Linux') { return $true }
+            foreach ($prop in @('operatingSystem', 'deployedOS')) {
+                if ($Vm.PSObject.Properties.Name -contains $prop) {
+                    $val = $Vm.$prop
+                    if ($val -and ($val -like 'Ubuntu*' -or $val -like 'Debian*' -or $val -like 'Linux*')) { return $true }
+                }
+            }
+            return $false
+        }
+    }
+}
+else {
+
 . $PSScriptRoot\common\Common.StorageToken.ps1
 
 . $PSScriptRoot\common\Common.Colors.ps1
@@ -5399,6 +5428,8 @@ if ($PSVersionTable.PSVersion -ge [Version]'7.4') {
     . $PSScriptRoot\common\Common.NewMenu.ps1
     . $PSScriptRoot\common\Common.PS7.ps1
 }
+
+} # end else (non-RemoveOnly profile)
 
 ############################
 ### Common Object        ###
