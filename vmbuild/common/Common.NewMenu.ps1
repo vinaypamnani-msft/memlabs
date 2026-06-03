@@ -1380,6 +1380,10 @@ function Show-Menu {
             $NoClear = $false
         }
 
+        # Begin synchronized output so the terminal buffers the entire
+        # clear+redraw and paints it as a single frame (no flicker).
+        [Console]::Write("`e[?2026h")
+
         if (-not $NoClear) {
             Write-Host "`e[2J`e[H"
             # Clearing the screen wipes the help-box pixels too; invalidate the
@@ -1547,6 +1551,10 @@ function Show-Menu {
         }
         Write-Host2 -ForegroundColor $Global:Common.Colors.GenConfigPrompt $prompt -NoNewline
         $PromptPosition = Get-CursorPosition
+
+        # End synchronized output — terminal paints the entire menu as one frame.
+        [Console]::Write("`e[?2026l")
+
         # Re-check the window size. If it changed while we were drawing this
         # frame, the layout we just painted is stale (text truncated for the
         # old width, items positioned for the old height, etc). Restart the
