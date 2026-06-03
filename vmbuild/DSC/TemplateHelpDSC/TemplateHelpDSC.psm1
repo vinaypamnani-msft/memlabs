@@ -3875,7 +3875,7 @@ class WaitForClusterAccess {
             $nameErr = $_.Exception.Message
             # Try via IP — if this works, it's a name-based access issue
             # (Cluster Name resource offline or CNO not accessible by name)
-            $_ClusterIP = $this.ClusterIPAddress
+            $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
             if ($_ClusterIP) {
                 try {
                     $null = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
@@ -3961,7 +3961,7 @@ class WaitForClusterAccess {
         $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
         $allDCs = @()
         try {
-            Import-Module ActiveDirectory -ErrorAction Stop
+            Import-Module ActiveDirectory -ErrorAction Stop -Verbose:$false
             $allDCs = @(Get-ADDomainController -Filter * -ErrorAction Stop | Select-Object -ExpandProperty HostName)
         }
         catch {
@@ -4058,30 +4058,38 @@ class WaitForClusterAccess {
         return $summary
     }
 
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
     [void] Set() {
         $_ClusterName = $this.ClusterName
         $_RetryInterval = $this.RetryIntervalSec
         $_RetryCount = $this.RetryCount
-        $_ClusterIP = $this.ClusterIPAddress
+        $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
 
         for ($i = 1; $i -le $_RetryCount; $i++) {
             # On first attempt and every 4th attempt, run full diagnostics
             if ($i -eq 1 -or ($i % 4) -eq 0) {
                 try { $this.RepairClusterDns($_ClusterName) } catch { Write-Status "RepairClusterDns error: $_" }
-                # Network connectivity test against known cluster IP
-                $testIP = $_ClusterIP
-                if (-not $testIP) {
-                    # Try to get IP from DNS summary or resolve
-                    $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
-                    $fqdn = if ($_ClusterName -like "*.*") { $_ClusterName } else { "$_ClusterName.$domain" }
-                    try {
-                        $r = Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop | Where-Object { $_.Type -eq 'A' }
-                        if ($r) { $testIP = $r[0].IPAddress }
+                # Network connectivity test against cluster IP and DNS-resolved IP
+                $ipsToTest = [System.Collections.Generic.List[string]]::new()
+                if ($_ClusterIP) { $ipsToTest.Add($_ClusterIP) }
+                $domain = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+                $fqdn = if ($_ClusterName -like "*.*") { $_ClusterName } else { "$_ClusterName.$domain" }
+                try {
+                    $r = Resolve-DnsName -Name $fqdn -Type A -ErrorAction Stop | Where-Object { $_.Type -eq 'A' }
+                    if ($r) {
+                        $dnsIP = $r[0].IPAddress
+                        if ($dnsIP -and $dnsIP -ne $_ClusterIP -and -not $ipsToTest.Contains($dnsIP)) {
+                            $ipsToTest.Add($dnsIP)
+                        }
                     }
-                    catch {}
                 }
-                if ($testIP) {
-                    try { $this.TestNetworkConnectivity($testIP) } catch { Write-Status "Network test error: $_" }
+                catch {}
+                foreach ($testIP in $ipsToTest) {
+                    try { $this.TestNetworkConnectivity($testIP) } catch { Write-Status "Network test error for ${testIP}: $_" }
                 }
                 # Firewall diagnostics on first attempt only
                 if ($i -eq 1) {
