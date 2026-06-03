@@ -3955,6 +3955,62 @@ class WaitForClusterAccess {
         catch {
             Write-Verbose "Not on a cluster node or local cluster not named '$name': $_"
             $actions.Add("LocalCheck: $_")
+
+            # Not on a cluster node — try connecting remotely via IP to fix Cluster Name resource.
+            # This is the typical path for ClusterNode2 which hasn't joined the cluster yet.
+            $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+            if ($_ClusterIP) {
+                try {
+                    $remoteCluster = Get-Cluster -Name $_ClusterIP -ErrorAction Stop
+                    if ($remoteCluster.Name -eq $name) {
+                        $actions.Add("RemoteCluster via $($_ClusterIP) OK")
+
+                        $clusterResources = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
+                        foreach ($res in $clusterResources) {
+                            $actions.Add("$($res.Name):$($res.State)")
+                            Write-Status "Cluster resource '$($res.Name)' state: $($res.State)"
+                        }
+
+                        $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
+                        $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
+
+                        if ($nameRes -and $nameRes.State -ne 'Online') {
+                            Write-Status "Cluster Name resource is $($nameRes.State). Attempting remote fix via IP..."
+                            if ($ipRes -and $ipRes.State -ne 'Online') {
+                                foreach ($ip in $ipRes) {
+                                    if ($ip.State -ne 'Online') {
+                                        Write-Status "Starting Cluster IP resource '$($ip.Name)'..."
+                                        $ip | Start-ClusterResource -ErrorAction SilentlyContinue
+                                        Start-Sleep -Seconds 3
+                                    }
+                                }
+                            }
+                            $nameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 5
+                            $nameRes = Get-ClusterResource -Name $nameRes.Name -Cluster $_ClusterIP -ErrorAction Stop
+                            $actions.Add("NameAfterStart:$($nameRes.State)")
+                            Write-Status "Cluster Name resource now: $($nameRes.State)"
+                        }
+
+                        if ($nameRes -and $nameRes.State -eq 'Online') {
+                            Write-Status "Forcing DNS re-registration via Update-ClusterNetworkNameResource."
+                            try {
+                                $null = $nameRes | Update-ClusterNetworkNameResource -ErrorAction Stop
+                                $actions.Add("DNS re-registered")
+                            }
+                            catch {
+                                $actions.Add("UpdateDNS failed: $_")
+                            }
+                            Start-Sleep -Seconds 5
+                        }
+                    }
+                }
+                catch {
+                    Write-Verbose "Remote cluster via IP $_ClusterIP also failed: $_"
+                    $actions.Add("RemoteCheck: $_")
+                }
+            }
         }
 
         # Discover domain and all DCs
@@ -4064,6 +4120,9 @@ class WaitForClusterAccess {
     }
 
     [void] Set() {
+        # Pre-import modules silently to avoid verbose "Exporting function" spam
+        Import-Module FailoverClusters -Verbose:$false -ErrorAction SilentlyContinue
+
         $_ClusterName = $this.ClusterName
         $_RetryInterval = $this.RetryIntervalSec
         $_RetryCount = $this.RetryCount
