@@ -1601,6 +1601,10 @@ $global:VM_Config = {
                 return
             }
             $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
+            if ($copyResults -eq $false) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy DSC files to the VM (Copy-ItemSafe exhausted retries)." -Failure -OutputStream
+                return
+            }
         }
         else {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log

@@ -4520,7 +4520,10 @@ function Copy-ToolToVM {
             Copy-Item -ToSession $ps -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
         }
         else {
-            Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+            $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf
+            if ($copyResult -eq $false) {
+                throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+            }
         }
 
         # Expand inside the VM
