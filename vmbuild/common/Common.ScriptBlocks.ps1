@@ -782,43 +782,86 @@ $global:VM_Create = {
 
         }
 
-        if ($createVM) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Default user profile to fix a known sysprep issue."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_DefaultProfile -DisplayName "Fix Default Profile"
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to fix the default user profile." -Warning -OutputStream
-                $skipVersionUpdate = $true
+        # Combined scriptblock that runs Fix_DefaultProfile + Fix_LocalAccount +
+        # Set-TimeZone + TLS 1.2 keys + WorkgroupMember fix in one PSDirect call.
+        $Fix_NewVmSettings = {
+            param([String]$timezone, [String]$domainName, [bool]$isWorkgroup)
+            $warnings = @()
+
+            # Fix Default Profile (sysprep issue)
+            try {
+                $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
+                $path2 = "C:\Users\Default\AppData\Local\Microsoft\Windows\INetCache"
+                $path3 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCacheLock.dat"
+                if (Test-Path $path1) { Remove-Item -Path $path1 -Force -Recurse | Out-Null }
+                if (Test-Path $path2) { Remove-Item -Path $path2 -Force -Recurse | Out-Null }
+                if (Test-Path $path3) { Remove-Item -Path $path3 -Force | Out-Null }
+            } catch { $warnings += "Fix Default Profile: $_" }
+
+            # Fix Local Account Password Expiration
+            try {
+                Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
+            } catch { $warnings += "Fix Local Account: $_" }
+
+            # Set Timezone
+            try {
+                Set-TimeZone -Id $timezone
+            } catch { $warnings += "Set Timezone: $_" }
+
+            # TLS 1.2 Registry Keys
+            try {
+                $netRegKey = "HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319"
+                if (Test-Path $netRegKey) {
+                    New-ItemProperty -Path $netRegKey -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path $netRegKey -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path $netRegKey -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                $netRegKey32 = "HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319"
+                if (Test-Path $netRegKey32) {
+                    New-ItemProperty -Path $netRegKey32 -Name "SystemDefaultTlsVersions" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path $netRegKey32 -Name "SchUseStrongCrypto" -Value 1 -PropertyType DWORD -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path $netRegKey32 -Name "MemLabsComment" -Value "SystemDefaultTlsVersions and SchUseStrongCrypto set by MemLabs" -PropertyType STRING -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                try {
+                    if ($domainName -and ($domainName -ne "WORKGROUP")) {
+                        New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Force
+                        New-Item -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Force
+                        Set-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains" -Name "@" -Value "" -Force
+                        New-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\$domainName" -Name "*" -Value 1 -PropertyType DWORD -Force
+                    }
+                    New-Item -Path "HKLM:\Software\Policies\Microsoft\Edge" -Force
+                    New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "HideFirstRunExperience" -Value 1 -PropertyType DWORD -Force
+                    New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Edge" -Name "AutoImportAtFirstRun " -Value 4 -PropertyType DWORD -Force
+                } catch {}
+            } catch { $warnings += "TLS 1.2 Keys: $_" }
+
+            # WorkgroupMember fix
+            if ($isWorkgroup) {
+                try {
+                    New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "LocalAccountTokenFilterPolicy" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                } catch { $warnings += "Fix WorkGroup: $_" }
             }
 
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Updating Password Expiration for vmbuildadmin account."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_LocalAccount -DisplayName "Fix Local Account Password Expiration"
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to fix the password expiration policy for vmbuildadmin." -Warning -OutputStream
-                $skipVersionUpdate = $true
-            }
+            [PSCustomObject]@{ Warnings = $warnings }
+        }
+
+        if ($createVM) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuring new VM settings (profile, account, timezone, TLS, etc.)"
 
             $timeZone = $deployConfig.vmOptions.timeZone
             if (-not $timeZone) {
                 $timeZone = (Get-Timezone).id
             }
+            $isWorkgroup = $currentItem.role -in "WorkgroupMember", "InternetClient"
 
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting timezone to '$timeZone'."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { param ($timezone) Set-TimeZone -Id $timezone } -ArgumentList $timeZone -DisplayName "Setting timezone to '$timeZone'"
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings"
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set the timezone." -Warning -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to configure new VM settings." -Warning -OutputStream
+                $skipVersionUpdate = $true
             }
-
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting TLS 1.2 registry keys."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Set_TLS12Keys -DisplayName "Setting TLS 1.2 Registry Keys" -ArgumentList $domainNameForLogging
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set TLS 1.2 Registry Keys." -Warning -OutputStream
-            }
-
-            if ($currentItem.role -in "WorkgroupMember", "InternetClient") {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Fix_WorkGroupMachines"
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_WorkGroupMachines -DisplayName "Fix_WorkGroupMachines"
-                if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed Fix_WorkGroupMachines" -Warning -OutputStream
+            elseif ($result.ScriptBlockOutput.Warnings -and $result.ScriptBlockOutput.Warnings.Count -gt 0) {
+                foreach ($w in $result.ScriptBlockOutput.Warnings) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): $w" -Warning -OutputStream
                 }
             }
             # Set vm note
@@ -895,24 +938,20 @@ $global:VM_Create = {
                 # Add SQL ISO to guest
                 Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
 
-                # Create C:\temp\SQL & C:\temp\SQL_CU inside VM
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create SQL directories" -ScriptBlock { New-Item -Path "C:\temp\SQL" -ItemType Directory -Force; New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force }
-
-                # Copy files from DVD
+                # Create directories and copy files from DVD in one call
                 Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy SQL files from CD-ROM" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create SQL directories and copy from CD-ROM" -ScriptBlock {
+                    New-Item -Path "C:\temp\SQL" -ItemType Directory -Force | Out-Null
+                    New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force | Out-Null
+                    $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
+                    Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false
+                }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
 
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU" }
-                if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                    return
-                }
-
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL\setup.exe" }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU"; get-item "c:\temp\SQL\setup.exe" }
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
@@ -954,11 +993,13 @@ $global:VM_Create = {
 
                     }
                     # Create CM Dir inside VM
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create CM directory" -ScriptBlock { New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force }
-
-                    # Copy files from DVD
+                    # Create directory and copy files from DVD in one call
                     Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Copying from DVD" -force
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy CM files from CD-ROM" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create CM directory and copy from CD-ROM" -ScriptBlock {
+                        New-Item -Path "C:\CMCB\cd.retail.LN" -ItemType Directory -Force | Out-Null
+                        $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
+                        Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\CMCB\cd.retail.LN" -Recurse -Force -Confirm:$false
+                    }
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy CM installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
