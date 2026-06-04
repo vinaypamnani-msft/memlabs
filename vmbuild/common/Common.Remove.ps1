@@ -121,8 +121,10 @@ function Remove-VirtualMachine {
 
     # -- DHCP cleanup --
     if ($vmFromList.ClusterIPAddress) {
-        Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion..." -HostOnly
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
+        # Cluster IP is on the domain subnet (current) or cluster subnet (legacy).
+        $clusterScopeId = if ($vmFromList.network) { $vmFromList.network } else { '10.250.250.0' }
+        Write-Log "$VmName`: Removing $($vmFromList.ClusterIPAddress) Exclusion (scope $clusterScopeId)..." -HostOnly
+        Remove-DhcpServerv4ExclusionRange -ScopeId $clusterScopeId `
             -StartRange $vmFromList.ClusterIPAddress -EndRange $vmFromList.ClusterIPAddress `
             -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }

@@ -3351,13 +3351,12 @@ function New-VirtualMachine {
                 #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
                 #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
                 if ($currentItem.OtherNode) {
-                    # Cluster IP: allocate from the cluster/heartbeat subnet (10.250.250.x).
-                    $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-
-                    # AG listener IP: allocate from the domain/production subnet so SQL
-                    # clients can reach it. The cluster network is Role 1 (cluster-only),
-                    # so a listener there is unreachable from non-cluster nodes.
+                    # Both the cluster IP and AG listener IP are allocated from the domain
+                    # subnet so they're reachable by clients. The 10.250.250.0 network is
+                    # set to Role 1 (cluster-only) for heartbeat, so virtual IPs on that
+                    # subnet can't come online (WSFC refuses client access on Role 1 networks).
                     $domainScopeId = $DeployConfig.vmOptions.network
+                    $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
                     $AGIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
 
                     Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
@@ -3379,7 +3378,7 @@ function New-VirtualMachine {
                     $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
                     $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
 
-                    Add-DhcpServerv4ExclusionRange -ScopeId "10.250.250.0" -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
+                    Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
                     Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
                 }
             }
