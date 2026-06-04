@@ -1768,6 +1768,16 @@ function Invoke-LinuxVmCommand {
         $remoteShell
     )
 
+    # Retry loop: SSH exit code 255 = transport-level failure (connection
+    # refused, network unreachable, connection reset). These are transient
+    # during VM boot, service restarts, and VMBus hiccups. Retry up to 3
+    # times with increasing backoff. Non-255 exit codes (remote command
+    # failures) are never retried -- the remote script ran and failed.
+    $maxSshRetries = 3
+    $sshAttempt = 0
+
+    :sshRetry while ($true) {
+    $sshAttempt++
     try {
         # Build a quoted argument string. ProcessStartInfo.ArgumentList isn't
         # available in PS 5.1, so escape manually: any arg containing whitespace
@@ -1821,6 +1831,21 @@ function Invoke-LinuxVmCommand {
             $return.ScriptBlockOutput = $stdout
         }
         else {
+            # Exit code 255 = SSH transport failure (connection refused, reset,
+            # network unreachable). Retry if we haven't exhausted attempts.
+            if ($proc.ExitCode -eq 255 -and $sshAttempt -lt $maxSshRetries) {
+                $backoff = $sshAttempt * 10
+                if (-not $SuppressLog) {
+                    Write-Log "$VmName`: SSH connection failed (attempt $sshAttempt/$maxSshRetries), retrying in ${backoff}s..." -Warning
+                }
+                Start-Sleep -Seconds $backoff
+                # Reset return object for next attempt
+                $return.ScriptBlockFailed = $false
+                $return.ScriptBlockOutput = $null
+                $return.ExitCode = -1
+                continue sshRetry
+            }
+
             $return.ScriptBlockFailed = $true
             $combined = $stdout
             if ($stderr) {
@@ -1836,6 +1861,19 @@ function Invoke-LinuxVmCommand {
         }
     }
     catch {
+        # Retry on process-level exceptions (e.g. ssh.exe not responding) if
+        # we haven't exhausted attempts.
+        if ($sshAttempt -lt $maxSshRetries) {
+            $backoff = $sshAttempt * 10
+            if (-not $SuppressLog) {
+                Write-Log "$VmName`: SSH exception (attempt $sshAttempt/$maxSshRetries): $_ -- retrying in ${backoff}s..." -Warning
+            }
+            Start-Sleep -Seconds $backoff
+            $return.ScriptBlockFailed = $false
+            $return.ScriptBlockOutput = $null
+            $return.ExitCode = -1
+            continue sshRetry
+        }
         $return.ScriptBlockFailed = $true
         $return.ScriptBlockOutput = "$_"
         if (-not $SuppressLog) {
@@ -1843,6 +1881,8 @@ function Invoke-LinuxVmCommand {
             Write-Log "$($_.ScriptStackTrace)" -LogOnly
         }
     }
+    break sshRetry
+    } # end :sshRetry while loop
 
     return $return
 }
@@ -2103,6 +2143,62 @@ function Set-LinuxVmsDcDns {
 }
 
 
+function Restart-LinuxVmAndWait {
+    <#
+    .SYNOPSIS
+        Reboot a Linux VM and wait until it's SSH-reachable again.
+
+    .DESCRIPTION
+        Issues 'sudo reboot' over SSH (or Stop-VM/Start-VM as fallback),
+        sleeps briefly for the VM to begin shutting down, then calls
+        Wait-LinuxVmReady to wait for SSH. Returns the new IP on success
+        or $null on failure.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)][string]$VmName,
+        [Parameter(Mandatory = $false)][string]$IPAddress,
+        [Parameter(Mandatory = $false)][string]$ExpectedIPAddress,
+        [Parameter(Mandatory = $false)][int]$WaitTimeoutSeconds = 300
+    )
+
+    Write-Log "$VmName`: Rebooting VM for retry..."
+    # Try graceful SSH reboot first; if SSH is broken, fall back to Hyper-V.
+    if ($IPAddress) {
+        $null = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress `
+            -BashCommand 'nohup bash -c "sleep 2 && reboot" &>/dev/null &' `
+            -Sudo -TimeoutSeconds 10 -SuppressLog
+    }
+    Start-Sleep -Seconds 10
+    # If the VM is still running after the SSH reboot attempt, force via Hyper-V.
+    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if ($vm -and $vm.State -eq 'Running') {
+        try {
+            Stop-VM -Name $VmName -Force -ErrorAction Stop
+            Start-Sleep -Seconds 3
+            Start-VM -Name $VmName -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$VmName`: Hyper-V reboot failed: $_" -Warning
+        }
+    }
+    elseif ($vm -and $vm.State -eq 'Off') {
+        try { Start-VM -Name $VmName -ErrorAction Stop } catch {
+            Write-Log "$VmName`: Start-VM failed: $_" -Warning
+        }
+    }
+
+    $newIp = Wait-LinuxVmReady -VmName $VmName -TimeoutSeconds $WaitTimeoutSeconds -ExpectedIPAddress $ExpectedIPAddress
+    if ($newIp) {
+        Write-Log "$VmName`: VM back online at $newIp after reboot" -Success
+    }
+    else {
+        Write-Log "$VmName`: VM did not come back after reboot within ${WaitTimeoutSeconds}s" -Failure
+    }
+    return $newIp
+}
+
+
 function Install-LinuxProxyServer {
     <#
     .SYNOPSIS
@@ -2196,6 +2292,24 @@ coredump_dir /var/spool/squid
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
+# Retry wrapper for apt operations. Mirrors can be slow, dpkg locks can
+# linger from cloud-init, and transient network errors are common on VMs.
+apt_retry() {
+    local max=3 attempt=0 rc=0
+    while [ `$attempt -lt `$max ]; do
+        attempt=`$((attempt + 1))
+        if NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive "\`$@"; then
+            return 0
+        fi
+        rc=`$?
+        echo "[apt_retry] attempt `$attempt/`$max failed (rc=`$rc), waiting `$((attempt * 10))s..." >&2
+        sleep `$((attempt * 10))
+        # Recover interrupted dpkg between retries
+        dpkg --configure -a 2>/dev/null || true
+    done
+    return `$rc
+}
+
 # Fast-path: if squid is already installed, active, and listening on 3128,
 # we still rewrite the config (subnets may have changed) and reload, but
 # skip apt-get entirely. Saves ~30-60s on re-runs.
@@ -2220,8 +2334,8 @@ if [ "`$FAST_PATH" = "0" ]; then
     # No-op when dpkg is clean.
     dpkg --configure -a || true
 
-    apt-get update -y
-    apt-get install -y squid ufw python3-flask
+    apt_retry apt-get update -y
+    apt_retry apt-get install -y squid ufw python3-flask
 fi
 
 install -d -m 0755 /etc/squid
@@ -2255,6 +2369,21 @@ echo PROXY_READY
 "@
 
     $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
+
+    # Retry with reboot: if the first attempt failed, reboot the VM to clear
+    # stale dpkg locks, broken service state, or hung apt processes, then try
+    # once more before declaring failure.
+    if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0 -or $result.ScriptBlockOutput -notmatch 'PROXY_READY') {
+        Write-Log "[Proxy] $vmName`: First attempt failed (exit=$($result.ExitCode)); rebooting and retrying..." -Warning
+        $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
+        $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 300
+        if (-not $ip) {
+            Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
+            return $false
+        }
+        $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid (retry)"
+    }
+
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {
         Write-Log "[Proxy] $vmName`: Squid install failed (ExitCode=$($result.ExitCode))`n$($result.ScriptBlockOutput)" -Failure
         return $false
@@ -2608,7 +2737,7 @@ export DEBIAN_FRONTEND=noninteractive
 # first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
 # it over the transitional snap stub.
 install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
+wget --timeout=30 -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
     | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
 echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
     > /etc/apt/sources.list.d/mozilla.list
@@ -3020,9 +3149,12 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
     }
 
     # Run each module as its own SSH invocation so the Phase 3 row reflects
-    # exactly what's running. Fail-fast: a module failure aborts subsequent
-    # modules and returns $false (matches the old single-blob behavior).
+    # exactly what's running. If a module fails, reboot the VM and retry that
+    # module once before aborting. A fresh boot clears stale dpkg locks,
+    # hung apt processes, and broken service state that commonly cause
+    # transient failures.
     $i = 0
+    $rebooted = $false
     foreach ($op in $ops) {
         $i++
         $statusText = "[$i/$($ops.Count)] $($op.Label)"
@@ -3039,13 +3171,34 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
 
         $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName $op.Tag -TimeoutSeconds $op.TimeoutSec
         if (-not ($result -and $result.CommandResult)) {
-            $tail = $null
-            if ($result -and $result.ScriptBlockOutput) {
-                $lines = ($result.ScriptBlockOutput -split "`n")
-                $tail = ($lines | Select-Object -Last 20) -join "`n"
+            # If we haven't rebooted yet, try a reboot-and-retry for this module.
+            if (-not $rebooted) {
+                $tail = $null
+                if ($result -and $result.ScriptBlockOutput) {
+                    $lines = ($result.ScriptBlockOutput -split "`n")
+                    $tail = ($lines | Select-Object -Last 10) -join "`n"
+                }
+                Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' failed (exit=$($result.ExitCode)); rebooting for retry. Tail:`n$tail" -Warning
+                $rebooted = $true
+                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 300
+                if (-not $ip) {
+                    Write-Log "[LinuxConfig] $vmName`: VM not reachable after reboot; aborting." -Failure
+                    return $false
+                }
+                # Retry the same module after reboot.
+                Write-Progress2 -Activity $activity -Status "[$i/$($ops.Count)] $($op.Label) (retry after reboot)" -force
+                Write-Log "[Phase 3]: $vmName`: [$i/$($ops.Count)] $($op.Label) (retry after reboot)" -OutputStream
+                $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -DisplayName "$($op.Tag)-retry" -TimeoutSeconds $op.TimeoutSec
             }
+            if (-not ($result -and $result.CommandResult)) {
+                $tail = $null
+                if ($result -and $result.ScriptBlockOutput) {
+                    $lines = ($result.ScriptBlockOutput -split "`n")
+                    $tail = ($lines | Select-Object -Last 20) -join "`n"
+                }
             Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' FAILED (exit=$($result.ExitCode)). Tail:`n$tail" -Failure
             return $false
+            }
         }
         Write-Log "[Phase 3]: $vmName`: $($op.Label) complete." -Success
     }
@@ -4486,42 +4639,51 @@ $bakeWriteFilesYaml
         $ctx = @{ Step = 0 }
 
         function Invoke-BakeStep {
-            param([string]$Name, [string]$Script, [int]$Timeout = 180)
+            param([string]$Name, [string]$Script, [int]$Timeout = 180, [int]$Retries = 0)
             $ctx.Step++
             $label = "[$($ctx.Step)/$totalSteps]"
-            Write-Log "Bake $label $Name" -Activity
+            $maxAttempts = 1 + $Retries
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Log "Bake $label $Name$(if ($attempt -gt 1) { " (retry $($attempt-1)/$Retries)" })" -Activity
             $r = Invoke-LinuxVmCommand -VmName $vmName -BashCommand $Script `
                 -IPAddress $BakeIPAddress -UserName 'memlabs' -Sudo `
                 -TimeoutSeconds $Timeout -DisplayName "Bake: $Name"
-            if (-not $r.CommandResult) {
-                $out = $(if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' })
+            if ($r.CommandResult) {
+                $lines = $(if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 })
+                Write-Log "Bake $label $Name - OK ($lines lines)" -Success
+                return $r
+            }
+            if ($attempt -lt $maxAttempts) {
+                $backoff = $attempt * 15
+                Write-Log "Bake $label $Name failed (exit=$($r.ExitCode)), retrying in ${backoff}s..." -Warning
+                Start-Sleep -Seconds $backoff
+                continue
+            }
+            $out = $(if ($r.ScriptBlockOutput) { $r.ScriptBlockOutput.Trim() } else { '(no output)' })
                 if ($out.Length -gt 2000) { $out = '...' + $out.Substring($out.Length - 2000) }
                 Write-Log "Bake $label FAILED: $Name (exit=$($r.ExitCode))" -Failure
                 Write-Log $out -LogOnly
                 throw "Bake FAILED at step $label '$Name' (exit=$($r.ExitCode)).`n`nLast output:`n$out`n`nVM '$vmName' left running at $BakeIPAddress for debugging.`nSSH: ssh -i `"$($keyPair.PrivateKeyPath)`" memlabs@$BakeIPAddress"
             }
-            $lines = $(if ($r.ScriptBlockOutput) { ($r.ScriptBlockOutput -split "`n").Count } else { 0 })
-            Write-Log "Bake $label $Name - OK ($lines lines)" -Success
-            return $r
         }
 
         # ── Step 1: System updates ───────────────────────────────────────
         $updTimeout = $(if ($Variant -eq 'Desktop') { 1200 } else { 600 })
-        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Script @'
+        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Retries 2 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 echo "=== apt-get update ==="
 apt-get update
 echo "=== apt-get dist-upgrade ==="
-apt-get dist-upgrade -y
+NEEDRESTART_SUSPEND=1 apt-get dist-upgrade -y
 echo "=== System updates complete ==="
 '@
 
         # ── Step 2: Base packages ────────────────────────────────────────
-        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Script @'
+        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Retries 2 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get install -y linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server
+NEEDRESTART_SUSPEND=1 apt-get install -y linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server
 echo "=== Base packages installed ==="
 '@
 
@@ -4535,7 +4697,7 @@ systemctl enable hv-vss-daemon.service
 # Install kernel-exact HV tools if the meta-package version doesn't match
 # the running kernel (can happen if dist-upgrade bumped the kernel).
 dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
-  || apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
+  || NEEDRESTART_SUSPEND=1 apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
 echo "=== Base services enabled ==="
 '@
 
@@ -4630,10 +4792,10 @@ echo "=== DHCP watchdog service installed ==="
 
         if ($Variant -eq 'Desktop') {
             # ── Step 5: Desktop packages ─────────────────────────────────
-            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Script @'
+            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Retries 2 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get install -y \
+NEEDRESTART_SUSPEND=1 apt-get install -y \
   ubuntu-desktop-minimal gdm3 network-manager xrdp xorgxrdp \
   gnome-tweaks dconf-cli unzip \
   apt-transport-https ca-certificates gnupg wget
@@ -4653,18 +4815,18 @@ echo "=== Desktop services enabled ==="
 '@
 
             # ── Step 7: Microsoft repos + Edge + Intune ──────────────────
-            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Script @'
+            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Retries 2 -Script @'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 install -d -m 0755 /etc/apt/keyrings
-wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
+wget --timeout=30 -qO- https://packages.microsoft.com/keys/microsoft.asc \
   | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
 echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
   > /etc/apt/sources.list.d/microsoft-edge.list
 echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
   > /etc/apt/sources.list.d/microsoft-prod.list
 apt-get update
-apt-get install -y microsoft-edge-stable intune-portal
+NEEDRESTART_SUSPEND=1 apt-get install -y microsoft-edge-stable intune-portal
 echo "=== Microsoft Edge + Intune installed ==="
 '@
 
@@ -4801,14 +4963,14 @@ if [ -z "$SHELL_VER" ]; then
     exit 1
 fi
 echo "GNOME Shell version: $SHELL_VER"
-DL_URL=$(wget -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
+DL_URL=$(wget --timeout=30 -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
 if [ -z "$DL_URL" ]; then
     echo "ERROR: could not resolve dash-to-panel download URL for GNOME Shell ${SHELL_VER}" >&2
     exit 1
 fi
 echo "Downloading from: https://extensions.gnome.org${DL_URL}"
-wget -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
+wget --timeout=60 -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
 install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
 unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
 chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
