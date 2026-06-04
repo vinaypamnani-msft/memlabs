@@ -250,6 +250,23 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
+        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+
+        WriteStatus PreClusterNicConfig {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC (pre-cluster)"
+        }
+
+        DisableClusterNicDnsRegistration PreClusterNicConfig {
+            Stage                = 'PreCluster'
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $DC
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]PreClusterNicConfig'
+
         WriteStatus CreateCluster {
             DependsOn = $nextDepend
             Status    = "Creating Cluster $($thisVM.ClusterName) on $($thisVM.thisParams.SQLAO.ClusterIPAddress)"
@@ -353,21 +370,21 @@ Configuration Phase5
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
-        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-
-        WriteStatus DisableClusterDns {
+        WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
-            Status    = "Disabling DNS registration on cluster NIC (10.250.250.x)"
+            Status    = "Setting RegisterAllProvidersIP=0 on cluster '$($thisVM.ClusterName)'"
         }
 
-        DisableClusterNicDnsRegistration DisableClusterDns {
+        DisableClusterNicDnsRegistration PostClusterDnsConfig {
+            Stage                = 'PostCluster'
             ClusterSubnet        = '10.250.250.'
             DomainName           = $DomainName
             DCName               = $DC
+            ClusterName          = $thisVM.ClusterName
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterDns'
+        $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
 
         WriteStatus SvcAccount {
             DependsOn = $nextDepend
@@ -708,6 +725,21 @@ Configuration Phase5
 
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
 
+        WriteStatus PreClusterNicConfig {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC (pre-cluster)"
+        }
+
+        DisableClusterNicDnsRegistration PreClusterNicConfig {
+            Stage                = 'PreCluster'
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $DC
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]PreClusterNicConfig'
+
         WriteStatus WaitForDC {
             Status    = "Waiting for $DC to Complete [ADGroup]SQLAOGroup$node1"
             DependsOn = $nextDepend
@@ -767,19 +799,21 @@ Configuration Phase5
         }
         $nextDepend = '[xCluster]JoinSecondNodeToCluster'
 
-        WriteStatus DisableClusterDns {
+        WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
-            Status    = "Disabling DNS registration on cluster NIC (10.250.250.x)"
+            Status    = "Setting RegisterAllProvidersIP=0 on cluster '$($Node1VM.ClusterName)'"
         }
 
-        DisableClusterNicDnsRegistration DisableClusterDns {
+        DisableClusterNicDnsRegistration PostClusterDnsConfig {
+            Stage                = 'PostCluster'
             ClusterSubnet        = '10.250.250.'
             DomainName           = $DomainName
             DCName               = $DC
+            ClusterName          = $Node1VM.ClusterName
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterDns'
+        $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
 
         WriteStatus "ChangeNetwork-10" {
             Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"

@@ -5947,6 +5947,9 @@ class DisableClusterNicDnsRegistration {
     [DscProperty(Key)]
     [string] $ClusterSubnet = '10.250.250.'
 
+    [DscProperty(Key)]
+    [string] $Stage = 'Full'
+
     [DscProperty(Mandatory)]
     [string] $DomainName
 
