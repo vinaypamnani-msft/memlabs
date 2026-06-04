@@ -70,7 +70,44 @@ for i in $(seq 1 60); do
     fi
     sleep 1
 done
-echo "[install-squid] squid NOT listening on :3128 after 60s"
+
+# Not listening after 60s. Before failing, check if squid is still actively
+# starting up (cache.log growing, squid process alive). If so, give it
+# another 120s — on a very busy host the initial cache/swap build can be slow.
+echo "[install-squid] squid not listening after 60s; checking if still starting up..."
+SQUID_PID=$(pgrep -x squid 2>/dev/null || true)
+CACHE_LOG="/var/log/squid/cache.log"
+if [ -n "$SQUID_PID" ] && [ -f "$CACHE_LOG" ]; then
+    PREV_SIZE=$(stat -c%s "$CACHE_LOG" 2>/dev/null || echo 0)
+    echo "[install-squid] squid PID=$SQUID_PID, cache.log size=$PREV_SIZE; extending wait..."
+    for i in $(seq 1 120); do
+        if ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
+            echo "[install-squid] squid listening on :3128 after $((60 + i))s (extended wait)"
+            echo "PROXY_READY"
+            exit 0
+        fi
+        # Every 15s, check if the log is still growing or squid is still alive
+        if [ $((i % 15)) -eq 0 ]; then
+            CUR_SIZE=$(stat -c%s "$CACHE_LOG" 2>/dev/null || echo 0)
+            SQUID_PID=$(pgrep -x squid 2>/dev/null || true)
+            if [ -z "$SQUID_PID" ]; then
+                echo "[install-squid] squid process died during extended wait"
+                break
+            fi
+            if [ "$CUR_SIZE" = "$PREV_SIZE" ]; then
+                echo "[install-squid] cache.log stalled at ${CUR_SIZE} bytes (squid may be stuck)"
+                break
+            fi
+            echo "[install-squid] cache.log growing ($PREV_SIZE -> $CUR_SIZE bytes), squid PID=$SQUID_PID; still waiting..."
+            PREV_SIZE=$CUR_SIZE
+        fi
+        sleep 1
+    done
+else
+    echo "[install-squid] squid not running (PID='$SQUID_PID') or no cache.log; cannot extend wait"
+fi
+
+echo "[install-squid] squid NOT listening on :3128"
 echo "[install-squid] Squid error log (last 30 lines):"
 tail -30 /var/log/squid/cache.log 2>/dev/null || echo "(no cache.log found)"
 echo "[install-squid] journalctl squid (last 20 lines):"
