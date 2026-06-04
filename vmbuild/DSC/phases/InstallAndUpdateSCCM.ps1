@@ -910,19 +910,28 @@ if ($UpdateRequired) {
             $retrytimes++
             continue
         }
-        if ($updatepack.state -eq 199612 ) {
+        if ($updatepack.state -eq 196612) {
             $updateCompleted = $true
             break
         }
 
-        if (-not $cmo.UsePKI) {
+        # If the update is already installing (196609-196629), skip straight
+        # to the monitoring loop. Re-triggering EnableHTTPS, download, prereq,
+        # or Install-CMSiteUpdate would all throw "Cannot perform an update
+        # at this time" and waste retry attempts.
+        $installInProgress = ($updatepack.State -ge 196609 -and $updatepack.State -le 196629)
+        if ($installInProgress) {
+            Write-DscStatus "Update '$($updatepack.Name)' is already installing (state $($updatepack.State) = $($state[$updatepack.State])). Monitoring."
+        }
+
+        if (-not $installInProgress -and -not $cmo.UsePKI) {
             # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
             Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
             Write-DscStatus "EnableEHTTP.ps1 done"
         }
-        else {
+        elseif (-not $installInProgress) {
             Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
             $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
             Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
@@ -930,7 +939,7 @@ if ($UpdateRequired) {
         }
 
         # Invoke update download
-        while ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679) {
+        while (-not $installInProgress -and ($updatepack.State -eq 327682 -or $updatepack.State -eq 262145 -or $updatepack.State -eq 327679)) {
 
             # Package not downloaded
             if ($updatepack.State -eq 327682) {
@@ -1011,14 +1020,16 @@ if ($UpdateRequired) {
         }
 
         # trigger prerequisites check after the package downloaded
-        try {
-            Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
-        }
-        catch {
-            Write-DscStatus "WARNING: Invoke-CMSiteUpdatePrerequisiteCheck threw: $_"
+        if (-not $installInProgress) {
+            try {
+                Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+            }
+            catch {
+                Write-DscStatus "WARNING: Invoke-CMSiteUpdatePrerequisiteCheck threw: $_"
+            }
         }
         $count = 0
-        while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
+        while (-not $installInProgress -and $updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
             $count++
             if ($count -eq 12) {
@@ -1038,7 +1049,7 @@ if ($UpdateRequired) {
             
         }
 
-        if ($updatepack.State -eq 196607) {
+        if (-not $installInProgress -and $updatepack.State -eq 196607) {
             Write-DscStatus "Update State: PREREQ_FAILED"
             $retrytimes++
             Start-Sleep 100
@@ -1054,15 +1065,24 @@ if ($UpdateRequired) {
             catch {}
         }
         # trigger setup after the prerequisites check
-        Write-DscStatus "Calling Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force"
-        try {
-            Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
-        }
-        catch {
-            Write-DscStatus "WARNING: Install-CMSiteUpdate threw: $_"
-            $retrytimes++
-            Start-Sleep 60
-            continue
+        if (-not $installInProgress) {
+            Write-DscStatus "Calling Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force"
+            try {
+                Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+            }
+            catch {
+                # Check if the update started installing despite the error
+                $updatepack = Get-CMSiteUpdate -Fast -Name $updatepack.Name
+                if ($updatepack.State -ge 196609 -and $updatepack.State -le 196629) {
+                    Write-DscStatus "Install-CMSiteUpdate threw but update is now installing (state $($updatepack.State)). Monitoring."
+                }
+                else {
+                    Write-DscStatus "WARNING: Install-CMSiteUpdate threw: $_"
+                    $retrytimes++
+                    Start-Sleep 60
+                    continue
+                }
+            }
         }
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {   
             if ($updatepack.Flag -eq 1) {
