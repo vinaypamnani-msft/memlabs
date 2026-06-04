@@ -6004,6 +6004,15 @@ class DisableClusterNicDnsRegistration {
             Write-Status "Disabling DNS registration on adapter '$($adapter.Name)' ($_subnet*)"
             Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction Stop
 
+            # Set higher metric so the domain NIC is always preferred for outbound traffic.
+            Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 20 -ErrorAction SilentlyContinue
+
+            # Disable NetBIOS over TCP/IP on the cluster NIC (2 = Disable).
+            $wmiNic = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $($adapter.InterfaceIndex)" -ErrorAction SilentlyContinue
+            if ($wmiNic) {
+                $wmiNic.SetTcpipNetbios(2) | Out-Null
+            }
+
             # Rename to something descriptive if still using a generic Windows name.
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
                 try {
@@ -6016,8 +6025,10 @@ class DisableClusterNicDnsRegistration {
             }
         }
 
-        # Also rename the domain adapter for consistency.
+        # Also rename the domain adapter for consistency and ensure low metric.
         foreach ($adapter in $domainAdapters) {
+            Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
+
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
                 try {
                     Rename-NetAdapter -InputObject $adapter -NewName 'Domain' -ErrorAction Stop
