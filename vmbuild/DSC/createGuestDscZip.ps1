@@ -151,7 +151,12 @@ try {
     Write-Host "Creating a test config for $role in C:\Temp"
 
     if ($Common.LocalAdmin) { $adminCreds = $Common.LocalAdmin }
-    else { $adminCreds = Get-Credential }
+    else {
+        # Non-interactive: create a dummy credential for test compilation (never used for auth)
+        $ss = New-Object System.Security.SecureString
+        $ss.AppendChar('x')
+        $adminCreds = New-Object System.Management.Automation.PSCredential('admin', $ss)
+    }
 
     $dscFolder = "phases"
     . ".\$dscFolder\$($dscRole).ps1"

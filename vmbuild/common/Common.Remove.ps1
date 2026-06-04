@@ -597,6 +597,9 @@ function Remove-Domain {
         $result = Wait-Phase -Phase "DomainRemove" -Jobs $start.Jobs -AdditionalData $start.AdditionalData           
         
     }
+    else {
+        Write-Log "No virtual machines found for '$DomainName'." -Warning
+    }
 
 
     if ($DC) {
