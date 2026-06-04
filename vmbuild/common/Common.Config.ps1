@@ -1264,6 +1264,17 @@ function Get-SQLAOConfig {
         #throw "Primary SQLAO $($PrimaryAO.vmName) does not have a ClusterIP assigned."
     }
 
+    # Warn if ClusterIP or AGIP are on the legacy heartbeat subnet.
+    # These labs need a full re-deploy to get domain-subnet IPs.
+    $domainNetwork = $deployConfig.vmOptions.network
+    $domainPrefix = ($domainNetwork -replace '\.\d+$', '.')
+    if ($PrimaryAO.ClusterIPAddress -match '^10\.250\.250\.') {
+        write-log "$vmName`: WARNING: ClusterIPAddress $($PrimaryAO.ClusterIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). Cluster steps will be skipped." -Warning
+    }
+    if ($PrimaryAO.AGIPAddress -match '^10\.250\.250\.') {
+        write-log "$vmName`: WARNING: AGIPAddress $($PrimaryAO.AGIPAddress) is on the heartbeat subnet, not the domain subnet ($domainPrefix*). AG listener may not be reachable." -Warning
+    }
+
     $config = [PSCustomObject]@{
         GroupName                  = $ClusterName + "Group"
         GroupMembers               = @("$($PrimaryAO.vmName)$", "$($SecondAO)$", "$($ClusterName)$")

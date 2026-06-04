@@ -3375,6 +3375,16 @@ function New-VirtualMachine {
                         return $false
                     }
 
+                    # Validate both IPs are on the domain subnet, not the heartbeat subnet.
+                    # If they land on 10.250.250.x, the cluster can't come online (Role 1 network).
+                    $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
+                    foreach ($entry in @(@{Name='ClusterIP'; IP=$clusterIP}, @{Name='AGIP'; IP=$AGIP})) {
+                        if ($entry.IP -notmatch [regex]::Escape($domainPrefix)) {
+                            write-log -failure "$VmName`: $($entry.Name) $($entry.IP) is NOT on the domain subnet $domainScopeId. Expected $domainPrefix*"
+                            return $false
+                        }
+                    }
+
                     $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
                     $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
 
