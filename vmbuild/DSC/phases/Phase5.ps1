@@ -353,20 +353,21 @@ Configuration Phase5
         }
         $nextDepend = '[ClusterSetOwnerNodes]ClusterSetOwnerNodes'
 
-        #WriteStatus WaitForDC {
-        #    DependsOn = $nextDepend
-        #    Status    = "Waiting for DC $(($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName) to Complete"
-        #}
+        $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
 
-        #WaitForAny DCComplete {
-        #    ResourceName     = '[WriteStatus]Complete'
-        #    NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-        #    RetryIntervalSec = 5
-        #    RetryCount       = 450
-        #    DependsOn        = $nextDepend
-        #}
-        #$nextDepend = '[WaitForAny]DCComplete'
+        WriteStatus DisableClusterDns {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC (10.250.250.x)"
+        }
 
+        DisableClusterNicDnsRegistration DisableClusterDns {
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $DC
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterDns'
 
         WriteStatus SvcAccount {
             DependsOn = $nextDepend
@@ -767,18 +768,19 @@ Configuration Phase5
         }
         $nextDepend = '[JoinClusterByIP]JoinSecondNodeToCluster'
 
+        WriteStatus DisableClusterDns {
+            DependsOn = $nextDepend
+            Status    = "Disabling DNS registration on cluster NIC (10.250.250.x)"
+        }
 
-
-        #WaitForAny WaitForClusteringNetworking {
-        #    NodeName             = $node1
-        #    ResourceName         = '[xClusterNetwork]ChangeNetwork-10'
-        #    RetryIntervalSec     = 10
-        #    RetryCount           = 90
-        #    PsDscRunAsCredential = $Admincreds
-        #    DependsOn = $nextDepend
-        #}
-        #$nextDepend = '[WaitForAny]WaitForClusteringNetworking'
-
+        DisableClusterNicDnsRegistration DisableClusterDns {
+            ClusterSubnet        = '10.250.250.'
+            DomainName           = $DomainName
+            DCName               = $DC
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterDns'
 
         WriteStatus "ChangeNetwork-10" {
             Status    = "Setting Cluster Network 10.250.250.0 to Type 3"
