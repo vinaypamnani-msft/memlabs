@@ -5434,6 +5434,7 @@ if ($removeOnlyProfile) {
     . $PSScriptRoot\common\Common.Colors.ps1
     . $PSScriptRoot\common\Common.Config.ps1
     . $PSScriptRoot\common\Common.HyperV.ps1
+    . $PSScriptRoot\common\Common.Phases.ps1
     . $PSScriptRoot\common\Common.Remove.ps1
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         . $PSScriptRoot\common\Common.Linux.ps1
