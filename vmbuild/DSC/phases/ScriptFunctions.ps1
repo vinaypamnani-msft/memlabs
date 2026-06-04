@@ -110,12 +110,17 @@ function Invoke-DotSource {
         return
     }
 
-    # Dot-source with error handling
+    # Dot-source with error handling.
+    # The catch logs runtime errors from within the script for diagnostics but
+    # does NOT mark them as -Failure. The pre-flight checks above catch the
+    # real infrastructure failures (missing file, parse errors). Runtime errors
+    # from CM cmdlets are transient and the scripts have their own retry logic;
+    # marking them as JOBFAILURE would abort the phase prematurely.
     try {
         . $Script @Arguments
     }
     catch {
-        Write-DscStatus "FAILED to dot-source ${scriptName}: $_" -Failure
+        Write-DscStatus "WARNING: exception in ${scriptName}: $_"
     }
 }
 

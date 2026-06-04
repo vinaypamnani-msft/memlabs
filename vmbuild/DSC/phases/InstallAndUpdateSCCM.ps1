@@ -1011,13 +1011,23 @@ if ($UpdateRequired) {
         }
 
         # trigger prerequisites check after the package downloaded
-        Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+        try {
+            Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+        }
+        catch {
+            Write-DscStatus "WARNING: Invoke-CMSiteUpdatePrerequisiteCheck threw: $_"
+        }
         $count = 0
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 131074 -and $updatepack.State -ne 131075 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612 -and $updatepack.State -ne 196609) {
 
             $count++
             if ($count -eq 12) {
-                Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+                try {
+                    Invoke-CMSiteUpdatePrerequisiteCheck -Name $updatepack.Name
+                }
+                catch {
+                    Write-DscStatus "WARNING: Invoke-CMSiteUpdatePrerequisiteCheck retry threw: $_"
+                }
             }
             if ($count -ge 30) {
                 breaK
@@ -1045,12 +1055,24 @@ if ($UpdateRequired) {
         }
         # trigger setup after the prerequisites check
         Write-DscStatus "Calling Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force"
-        
-        Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+        try {
+            Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+        }
+        catch {
+            Write-DscStatus "WARNING: Install-CMSiteUpdate threw: $_"
+            $retrytimes++
+            Start-Sleep 60
+            continue
+        }
         while ($updatepack.State -ne 196607 -and $updatepack.State -ne 262143 -and $updatepack.State -ne 196612) {   
             if ($updatepack.Flag -eq 1) {
                 Write-DscStatus "Update State: PREREQ_ONLY"
-                Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+                try {
+                    Install-CMSiteUpdate -Name $updatepack.Name -SkipPrerequisiteCheck -Force
+                }
+                catch {
+                    Write-DscStatus "WARNING: Install-CMSiteUpdate (PREREQ_ONLY) threw: $_"
+                }
             }    
             #if ($updatepack.State -eq 131074 -and $updatepack.Flag -eq 1) {
             # PREREQ_SUCCESS and Flag = 1 means the update is in prereq only mode.
