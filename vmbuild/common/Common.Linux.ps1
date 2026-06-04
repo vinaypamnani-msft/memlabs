@@ -16,6 +16,87 @@
 # Higher-level orchestration (calling these from the create-VM scriptblock,
 # DNS registration, RDCMan exclusion, etc.) lives in Phase 1d-1g.
 
+# ── Script directory for external .sh / .py files ────────────────────────
+# All non-trivial bash scripts live as standalone files under
+# vmbuild/scripts/linux/.  Get-LinuxScript reads them, optionally prepends
+# variable assignments, and returns the content ready for
+# Invoke-LinuxVmCommand -BashCommand.
+$script:LinuxScriptDir = Join-Path (Split-Path $PSScriptRoot) 'scripts\linux'
+
+function Get-LinuxScript {
+    <#
+    .SYNOPSIS
+        Read an external bash script from scripts/linux/ and optionally
+        inject PowerShell variables as bash variable assignments.
+
+    .PARAMETER Name
+        Relative path under scripts/linux/ without the .sh extension.
+        E.g. "proxy/install-squid", "bake/01-system-updates",
+        "roles/realm-join".
+
+    .PARAMETER Variables
+        Hashtable of VARNAME = value pairs. Each is emitted as a
+        single-quoted bash assignment prepended to the script body:
+            VARNAME='value'
+        Values containing single quotes are escaped ('\'').
+
+    .PARAMETER IncludeAptRetry
+        When set, sources lib/apt-retry.sh at the top of the script
+        so the apt_retry function is available.
+
+    .OUTPUTS
+        [string] — the complete bash script body.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)][string]$Name,
+        [hashtable]$Variables,
+        [switch]$IncludeAptRetry
+    )
+
+    $scriptPath = Join-Path $script:LinuxScriptDir "$Name.sh"
+    if (-not (Test-Path $scriptPath)) {
+        throw "Get-LinuxScript: script not found: $scriptPath"
+    }
+    $body = Get-Content -Path $scriptPath -Raw
+
+    # Prepend variable assignments (single-quoted to avoid bash expansion).
+    $prefix = ''
+    if ($Variables -and $Variables.Count -gt 0) {
+        $lines = foreach ($key in $Variables.Keys) {
+            $val = $Variables[$key] -replace "'", "'\\''"
+            "${key}='${val}'"
+        }
+        $prefix = ($lines -join "`n") + "`n"
+    }
+
+    # Optionally prepend the shared apt_retry helper.
+    if ($IncludeAptRetry.IsPresent) {
+        $aptRetryPath = Join-Path $script:LinuxScriptDir 'lib\apt-retry.sh'
+        if (Test-Path $aptRetryPath) {
+            $aptRetryBody = Get-Content -Path $aptRetryPath -Raw
+            # Strip the shebang from the helper since we're inlining it.
+            $aptRetryBody = $aptRetryBody -replace '^#!/bin/bash\r?\n', ''
+            $prefix = $aptRetryBody + "`n" + $prefix
+        }
+    }
+
+    if ($prefix) {
+        # Insert prefix after the shebang line (if present) so bash sees
+        # the variables before the script body uses them.
+        if ($body -match '^(#!/[^\r\n]+\r?\n)') {
+            $shebang = $Matches[1]
+            $rest = $body.Substring($shebang.Length)
+            $body = $shebang + $prefix + $rest
+        }
+        else {
+            $body = $prefix + $body
+        }
+    }
+
+    return $body
+}
+
 function Get-LinuxAdminSshKeyPair {
     [CmdletBinding()]
     param (
@@ -844,49 +925,13 @@ function Get-LinuxDomainJoinSeedArgs {
     # Quoting hell avoidance: build the join script as bash source, then
     # base64-encode it and emit a single runcmd line:
     #   echo <b64> | base64 -d > /root/join.sh && bash /root/join.sh
-    # The script body is opaque to PowerShell here-string parsing, YAML, and
-    # bash -c " " word splitting, so no escaping of $/`/"/' is needed inside.
-    $joinScript = @"
-#!/bin/bash
-set -uo pipefail
-DOMAIN='$domainLower'
-DC_IP='$dcIp'
-ADMIN_USER='$adminUser'
-ADMIN_PWD='$pwBashSingle'
-# Point resolver at the DC so realm discover can find AD SRV records.
-/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
-# Wait up to 20 minutes for the DC's A record to resolve (DC DSC may
-# still be coming up when cloud-init runs).
-for i in {1..80}; do
-  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
-  echo "memlabs-realm-join: waiting for DNS on `$DOMAIN (attempt `$i/80)"
-  sleep 15
-done
-realm discover "`$DOMAIN" || true
-# Retry the join up to 5 times in case the DC accepts auth but hasn't
-# fully replicated.
-for i in {1..5}; do
-  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
-    JOINED=1
-    break
-  fi
-  echo "memlabs-realm-join: join attempt `$i failed, retrying in 30s"
-  sleep 30
-done
-if [ "`${JOINED:-0}" != "1" ]; then
-  echo "memlabs-realm-join: ERROR - all join attempts failed"
-  exit 1
-fi
-# Allow login as plain "user" (not "user@domain") and auto-create home dirs.
-realm permit --realm "`$DOMAIN" --all || true
-sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
-sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
-pam-auth-update --enable mkhomedir || true
-systemctl restart sssd || true
-# Domain Admins -> sudo NOPASSWD.
-echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
-chmod 0440 /etc/sudoers.d/memlabs-domain-admins
-"@
+    # Uses the same realm-join.sh file as Phase 3 — single source of truth.
+    $joinScript = Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+        DOMAIN     = $domainLower
+        DC_IP      = $dcIp
+        ADMIN_USER = $adminUser
+        ADMIN_PWD  = $pwBashSingle
+    }
 
     # Base64-encode the script (UTF-8 LF line endings) so it survives the
     # YAML/bash quoting layers untouched.
@@ -2170,8 +2215,21 @@ function Restart-LinuxVmAndWait {
             -Sudo -TimeoutSeconds 10 -SuppressLog
     }
     Start-Sleep -Seconds 10
-    # If the VM is still running after the SSH reboot attempt, force via Hyper-V.
+    # Wait for the VM to leave any transitional state (Stopping, Starting,
+    # etc.) before attempting Hyper-V operations. The SSH reboot may have
+    # started a shutdown that hasn't completed yet.
     $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+    if ($vm -and $vm.State -notin @('Running', 'Off')) {
+        Write-Log "$VmName`: VM in '$($vm.State)' state; waiting up to 60s for stable state" -LogOnly
+        $stableTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($stableTimer.Elapsed.TotalSeconds -lt 60) {
+            Start-Sleep -Seconds 3
+            $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+            if (-not $vm -or $vm.State -in @('Running', 'Off')) { break }
+        }
+        $stableTimer.Stop()
+    }
+    # If the VM is still running after the SSH reboot attempt, force via Hyper-V.
     if ($vm -and $vm.State -eq 'Running') {
         try {
             Stop-VM -Name $VmName -Force -ErrorAction Stop
@@ -2288,85 +2346,7 @@ coredump_dir /var/spool/squid
     $confBytes = [System.Text.Encoding]::UTF8.GetBytes($squidConf)
     $confB64 = [Convert]::ToBase64String($confBytes)
 
-    $bash = @"
-set -e
-export DEBIAN_FRONTEND=noninteractive
-
-# Retry wrapper for apt operations. Mirrors can be slow, dpkg locks can
-# linger from cloud-init, and transient network errors are common on VMs.
-apt_retry() {
-    local max=3 attempt=0 rc=0
-    while [ `$attempt -lt `$max ]; do
-        attempt=`$((attempt + 1))
-        if NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive "\`$@"; then
-            return 0
-        fi
-        rc=`$?
-        echo "[apt_retry] attempt `$attempt/`$max failed (rc=`$rc), waiting `$((attempt * 10))s..." >&2
-        sleep `$((attempt * 10))
-        # Recover interrupted dpkg between retries
-        dpkg --configure -a 2>/dev/null || true
-    done
-    return `$rc
-}
-
-# Fast-path: if squid is already installed, active, and listening on 3128,
-# we still rewrite the config (subnets may have changed) and reload, but
-# skip apt-get entirely. Saves ~30-60s on re-runs.
-FAST_PATH=0
-if command -v squid >/dev/null 2>&1 && systemctl is-active --quiet squid && \
-   ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
-    FAST_PATH=1
-fi
-
-if [ "`$FAST_PATH" = "0" ]; then
-    # Wait for any background apt/unattended-upgrades to finish (cloud-init
-    # may still be running at this point on a freshly-provisioned VM).
-    for i in `$(seq 1 60); do
-        if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && \
-           ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-            break
-        fi
-        sleep 5
-    done
-
-    # Recover from a prior hard cancel that left dpkg half-configured.
-    # No-op when dpkg is clean.
-    dpkg --configure -a || true
-
-    apt_retry apt-get update -y
-    apt_retry apt-get install -y squid ufw python3-flask
-fi
-
-install -d -m 0755 /etc/squid
-
-# Create empty blocklist if it doesn't exist so Squid doesn't fail on start.
-[ -f /etc/squid/blocklist.txt ] || touch /etc/squid/blocklist.txt
-chmod 0644 /etc/squid/blocklist.txt
-NEW_CONF=`$(mktemp)
-echo '$confB64' | base64 -d > "`$NEW_CONF"
-if [ -f /etc/squid/squid.conf ] && cmp -s "`$NEW_CONF" /etc/squid/squid.conf; then
-    rm -f "`$NEW_CONF"
-    CONF_CHANGED=0
-else
-    mv "`$NEW_CONF" /etc/squid/squid.conf
-    chmod 0644 /etc/squid/squid.conf
-    CONF_CHANGED=1
-fi
-
-systemctl enable squid >/dev/null 2>&1 || true
-if [ "`$FAST_PATH" = "0" ] || [ "`$CONF_CHANGED" = "1" ]; then
-    systemctl restart squid
-fi
-
-# Open 3128 in ufw if installed; otherwise just stage the rule.
-command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
-
-# Quick self-test
-ss -ltn 'sport = :3128' | grep -q ':3128' || { echo 'squid not listening on 3128'; exit 1; }
-
-echo PROXY_READY
-"@
+    $bash = Get-LinuxScript -Name 'proxy/install-squid' -Variables @{ CONF_B64 = $confB64 } -IncludeAptRetry
 
     $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
 
@@ -2398,202 +2378,14 @@ echo PROXY_READY
     # ---- Proxy Admin web UI ----
     # A lightweight Flask app that manages /etc/squid/blocklist.txt and
     # reloads Squid on changes. Runs as a systemd service on port 8443.
-    $proxyAdminApp = @'
-#!/usr/bin/env python3
-"""memlabs Proxy Admin - Squid blocklist manager."""
-import os, re, subprocess
-from flask import Flask, request, redirect, url_for
-from markupsafe import escape as _escape
-
-app = Flask(__name__)
-BLOCKLIST = "/etc/squid/blocklist.txt"
-
-# Matches: domain names (.example.com, example.com), IPv4, IPv4/CIDR
-_VALID_ENTRY = re.compile(
-    r'^(?:'
-    r'\.?[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)*'
-    r'|'
-    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?'
-    r')$'
-)
-
-def _read_blocklist():
-    if not os.path.isfile(BLOCKLIST):
-        return []
-    with open(BLOCKLIST, "r") as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
-def _write_blocklist(entries):
-    with open(BLOCKLIST, "w") as f:
-        for e in sorted(set(entries)):
-            f.write(e + "\n")
-    subprocess.run(["squid", "-k", "reconfigure"], capture_output=True, timeout=10)
-
-def _render(entries, error=None, success=None):
-    rows = ""
-    for e in entries:
-        rows += (
-            '<tr><td>{entry}</td><td>'
-            '<form method="post" action="/delete" style="margin:0">'
-            '<input type="hidden" name="entry" value="{entry}">'
-            '<button type="submit" class="btn btn-sm btn-del">Remove</button>'
-            '</form></td></tr>'
-        ).format(entry=_escape(e))
-    if not entries:
-        rows = '<tr><td colspan="2" class="empty">No entries — all traffic is allowed through Squid.</td></tr>'
-    alert = ""
-    if error:
-        alert = '<div class="alert alert-error">{}</div>'.format(_escape(error))
-    if success:
-        alert = '<div class="alert alert-ok">{}</div>'.format(_escape(success))
-    return '''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Proxy Admin</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;background:#1e1e2e;color:#cdd6f4;min-height:100vh;padding:2rem}
-h1{font-size:1.5rem;margin-bottom:.25rem;color:#89b4fa}
-.subtitle{color:#6c7086;margin-bottom:1.5rem;font-size:.9rem}
-.card{background:#313244;border-radius:8px;padding:1.25rem;margin-bottom:1.25rem;border:1px solid #45475a}
-table{width:100%%;border-collapse:collapse}
-th{text-align:left;padding:.5rem;border-bottom:2px solid #45475a;color:#89b4fa;font-size:.85rem;text-transform:uppercase;letter-spacing:.05em}
-td{padding:.5rem;border-bottom:1px solid #45475a;font-family:"Cascadia Code",Consolas,monospace;font-size:.9rem}
-.empty{color:#6c7086;font-style:italic;text-align:center;padding:1.5rem;font-family:inherit}
-.add-form{display:flex;gap:.5rem}
-.add-form input[type=text]{flex:1;padding:.5rem .75rem;border:1px solid #45475a;border-radius:6px;background:#1e1e2e;color:#cdd6f4;font-size:.9rem;font-family:"Cascadia Code",Consolas,monospace}
-.add-form input[type=text]:focus{outline:none;border-color:#89b4fa}
-.btn{padding:.4rem .75rem;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:500;transition:background .15s}
-.btn-add{background:#a6e3a1;color:#1e1e2e}.btn-add:hover{background:#94e2d5}
-.btn-del{background:#f38ba8;color:#1e1e2e}.btn-del:hover{background:#eba0ac}
-.btn-sm{padding:.25rem .5rem;font-size:.8rem}
-.alert{padding:.75rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:.9rem}
-.alert-error{background:#45475a;border:1px solid #f38ba8;color:#f38ba8}
-.alert-ok{background:#45475a;border:1px solid #a6e3a1;color:#a6e3a1}
-.help{color:#6c7086;font-size:.8rem;margin-top:.75rem}
-</style></head><body>
-<h1>Proxy Admin</h1>
-<p class="subtitle">Squid blocklist manager &mdash; blocked domains and IPs are denied through the proxy.</p>
-''' + alert + '''
-<div class="card">
-<form method="post" action="/add" class="add-form">
-<input type="text" name="entry" placeholder=".example.com or 1.2.3.4 or 10.0.0.0/8" required autofocus>
-<button type="submit" class="btn btn-add">Block</button>
-</form>
-<p class="help">Prefix with a dot to block all subdomains (e.g. <code>.windowsupdate.com</code> blocks <code>www.windowsupdate.com</code>). Plain domains block exact matches. IPv4 addresses and CIDR ranges also accepted.</p>
-</div>
-<div class="card">
-<table><thead><tr><th>Blocked Entry</th><th style="width:100px">Action</th></tr></thead>
-<tbody>''' + rows + '''</tbody></table>
-</div>
-</body></html>'''
-
-@app.route("/")
-def index():
-    return _render(_read_blocklist(), success=request.args.get("ok"))
-
-@app.route("/add", methods=["POST"])
-def add():
-    entry = (request.form.get("entry") or "").strip().lower()
-    if not entry:
-        return _render(_read_blocklist(), error="Entry cannot be empty.")
-    if not _VALID_ENTRY.match(entry):
-        return _render(_read_blocklist(), error="Invalid entry. Use a domain (.example.com), IP (1.2.3.4), or CIDR (10.0.0.0/8).")
-    if len(entry) > 253:
-        return _render(_read_blocklist(), error="Entry too long (max 253 characters).")
-    entries = _read_blocklist()
-    if entry in entries:
-        return _render(entries, error="'{}' is already blocked.".format(entry))
-    entries.append(entry)
-    _write_blocklist(entries)
-    return redirect(url_for("index", ok="Added '{}'.".format(entry)))
-
-@app.route("/delete", methods=["POST"])
-def delete():
-    entry = (request.form.get("entry") or "").strip()
-    entries = _read_blocklist()
-    entries = [e for e in entries if e != entry]
-    _write_blocklist(entries)
-    return redirect(url_for("index", ok="Removed '{}'.".format(entry)))
-
-@app.route("/health")
-def health():
-    return "ok", 200
-
-if __name__ == "__main__":
-    os.makedirs(os.path.dirname(BLOCKLIST), exist_ok=True)
-    if not os.path.isfile(BLOCKLIST):
-        open(BLOCKLIST, "a").close()
-    app.run(host="0.0.0.0", port=8443)
-'@
-
-    $proxyAdminService = @'
-[Unit]
-Description=memlabs Proxy Admin Web UI
-After=network.target squid.service
-Wants=squid.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/memlabs/proxy-admin/app.py
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-'@
+    # The .py and .service files live under scripts/linux/proxy/.
+    $proxyAdminApp = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.py') -Raw
+    $proxyAdminService = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\proxy-admin.service') -Raw
 
     $appB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminApp))
     $svcB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($proxyAdminService))
 
-    $webUiBash = @"
-set -e
-
-install -d -m 0755 /opt/memlabs/proxy-admin
-
-NEW_APP=`$(mktemp)
-echo '$appB64' | base64 -d > "`$NEW_APP"
-
-APP_CHANGED=0
-if [ -f /opt/memlabs/proxy-admin/app.py ] && cmp -s "`$NEW_APP" /opt/memlabs/proxy-admin/app.py; then
-    rm -f "`$NEW_APP"
-else
-    mv "`$NEW_APP" /opt/memlabs/proxy-admin/app.py
-    chmod 0755 /opt/memlabs/proxy-admin/app.py
-    APP_CHANGED=1
-fi
-
-NEW_SVC=`$(mktemp)
-echo '$svcB64' | base64 -d > "`$NEW_SVC"
-
-SVC_CHANGED=0
-if [ -f /etc/systemd/system/memlabs-proxy-admin.service ] && cmp -s "`$NEW_SVC" /etc/systemd/system/memlabs-proxy-admin.service; then
-    rm -f "`$NEW_SVC"
-else
-    mv "`$NEW_SVC" /etc/systemd/system/memlabs-proxy-admin.service
-    chmod 0644 /etc/systemd/system/memlabs-proxy-admin.service
-    systemctl daemon-reload
-    SVC_CHANGED=1
-fi
-
-systemctl enable memlabs-proxy-admin >/dev/null 2>&1 || true
-
-if [ "`$APP_CHANGED" = "1" ] || [ "`$SVC_CHANGED" = "1" ] || ! systemctl is-active --quiet memlabs-proxy-admin; then
-    systemctl restart memlabs-proxy-admin
-fi
-
-# Open 8443 in ufw
-command -v ufw >/dev/null 2>&1 && ufw allow 8443/tcp || true
-
-# Self-test: wait up to 10s for the web UI to start listening
-for i in `$(seq 1 10); do
-    if ss -ltn 'sport = :8443' 2>/dev/null | grep -q ':8443'; then
-        echo WEBUI_READY
-        exit 0
-    fi
-    sleep 1
-done
-echo 'proxy-admin not listening on 8443'
-exit 1
-"@
+    $webUiBash = Get-LinuxScript -Name 'proxy/deploy-webui' -Variables @{ APP_B64 = $appB64; SVC_B64 = $svcB64 }
 
     $result2 = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $webUiBash -Sudo -TimeoutSeconds 120 -DisplayName "Install Proxy Admin UI"
     if ($result2.ScriptBlockFailed -or $result2.ExitCode -ne 0) {
@@ -2627,17 +2419,7 @@ function Get-LinuxXrdpPackagesBashScript {
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-rdp-packages] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update
-apt-get install -y \
-    xrdp xorgxrdp xfce4 xfce4-goodies dbus-x11 xorg \
-    apt-transport-https ca-certificates gnupg wget
-
-echo "[memlabs-rdp-packages] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/xrdp-packages' -IncludeAptRetry)
 }
 
 function Get-LinuxXrdpConfigBashScript {
@@ -2649,75 +2431,7 @@ function Get-LinuxXrdpConfigBashScript {
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-rdp-config] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-# xrdp drops privs to 'xrdp'; it needs to read the snakeoil key to TLS the handshake.
-adduser xrdp ssl-cert || true
-
-# Default XDG session for vmbuildadmin and root.
-install -d -o vmbuildadmin -g vmbuildadmin -m 0755 /home/vmbuildadmin
-echo 'xfce4-session' > /home/vmbuildadmin/.xsession
-chown vmbuildadmin:vmbuildadmin /home/vmbuildadmin/.xsession
-chmod 0644 /home/vmbuildadmin/.xsession
-echo 'xfce4-session' > /root/.xsession
-chmod 0644 /root/.xsession
-
-# Pre-seed default xfce4 panel config so the "Welcome to the first start of
-# the panel" dialog never fires. Over xrdp it renders behind the desktop or
-# auto-dismisses with an empty panel, leaving a blank blue screen.
-if [ -d /etc/xdg/xfce4/panel ]; then
-    for UHOME in /home/vmbuildadmin /root; do
-        install -d -o "$(stat -c '%U' "$UHOME")" -g "$(stat -c '%G' "$UHOME")" -m 0700 "$UHOME/.config"
-        cp -rn /etc/xdg/xfce4 "$UHOME/.config/"
-        chown -R "$(stat -c '%U' "$UHOME"):$(stat -c '%G' "$UHOME")" "$UHOME/.config/xfce4"
-    done
-fi
-
-# Disable screen lock, screensaver, and idle blank (lab VM, not production).
-# xfce4-screensaver, light-locker, and xfce4-power-manager all race to lock.
-apt-get remove -y light-locker xfce4-screensaver 2>/dev/null || true
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME")
-    UGRP=$(stat -c '%G' "$UHOME")
-    XCONF="$UHOME/.config/xfce4/xfconf/xfce-perchannel-xml"
-    install -d -o "$UNAME" -g "$UGRP" -m 0700 "$XCONF"
-
-    # Power manager: never blank / sleep / suspend
-    cat > "$XCONF/xfce4-power-manager.xml" << 'XFCEPM'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-power-manager" version="1.0">
-  <property name="xfce4-power-manager" type="empty">
-    <property name="dpms-enabled" type="bool" value="false"/>
-    <property name="blank-on-ac" type="int" value="0"/>
-    <property name="dpms-on-ac-sleep" type="uint" value="0"/>
-    <property name="dpms-on-ac-off" type="uint" value="0"/>
-    <property name="lock-screen-suspend-hibernate" type="bool" value="false"/>
-    <property name="inactivity-on-ac" type="uint" value="0"/>
-  </property>
-</channel>
-XFCEPM
-    chown "$UNAME:$UGRP" "$XCONF/xfce4-power-manager.xml"
-
-    # Session: no auto-lock on idle
-    cat > "$XCONF/xfce4-session.xml" << 'XFCESESS'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfce4-session" version="1.0">
-  <property name="general" type="empty">
-    <property name="LockCommand" type="string" value=""/>
-  </property>
-</channel>
-XFCESESS
-    chown "$UNAME:$UGRP" "$XCONF/xfce4-session.xml"
-done
-
-ufw allow 3389/tcp || true
-systemctl enable --now xrdp || true
-systemctl enable --now xrdp-sesman || true
-
-echo "[memlabs-rdp-config] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/xrdp-config')
 }
 
 function Get-LinuxFirefoxBashScript {
@@ -2729,41 +2443,7 @@ function Get-LinuxFirefoxBashScript {
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-firefox] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-# Firefox: the Ubuntu 'firefox' package is a snap shim that takes 30s+ to
-# first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
-# it over the transitional snap stub.
-install -d -m 0755 /etc/apt/keyrings
-wget --timeout=30 -qO- https://packages.mozilla.org/apt/repo-signing-key.gpg \
-    | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null
-echo 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \
-    > /etc/apt/sources.list.d/mozilla.list
-printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
-    > /etc/apt/preferences.d/mozilla
-apt-get update
-apt-get install -y firefox
-
-# Wire firefox as the system-wide x-www-browser / gnome-www-browser so
-# xfce4-web-browser (which calls xdg-open -> x-www-browser) opens it.
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/firefox 200 || true
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/firefox 200 || true
-update-alternatives --set x-www-browser /usr/bin/firefox || true
-update-alternatives --set gnome-www-browser /usr/bin/firefox || true
-
-# Tell XDG that firefox handles http/https/text-html system-wide.
-install -d -m 0755 /etc/xdg
-cat > /etc/xdg/mimeapps.list <<'MIMEEOF'
-[Default Applications]
-x-scheme-handler/http=firefox.desktop
-x-scheme-handler/https=firefox.desktop
-text/html=firefox.desktop
-MIMEEOF
-
-echo "[memlabs-firefox] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/firefox' -IncludeAptRetry)
 }
 
 function Get-LinuxClientBashScript {
@@ -2789,66 +2469,7 @@ function Get-LinuxClientBashScript {
     [CmdletBinding()]
     param ()
 
-    return @'
-echo "[memlabs-gnome] start: $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-# --- .xsessionrc + .xsession: GNOME on X11 over xrdp ---------------------
-# .xsessionrc is sourced by /etc/X11/Xsession BEFORE the session command
-# runs, so env vars are available to gnome-session and all children.
-# .xsession (non-executable, 0644) is read by Xsession's
-# 50x11-common_determine-startup as the session command.
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME")
-    UGRP=$(stat -c '%G' "$UHOME")
-
-    cat > "$UHOME/.xsessionrc" << 'XSESSIONRC'
-# memlabs: env vars for GNOME over xrdp (no hardware GPU)
-export XDG_SESSION_TYPE=x11
-export GDK_BACKEND=x11
-export GNOME_SHELL_SESSION_MODE=ubuntu
-export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-# Mutter 46 refuses software renderers (llvmpipe) by default.
-# xrdp has no GPU, so we must allow fallback drivers.
-export MUTTER_ALLOW_FALLBACK_DRIVERS=1
-export LIBGL_ALWAYS_SOFTWARE=1
-XSESSIONRC
-    chown "$UNAME:$UGRP" "$UHOME/.xsessionrc"
-    chmod 0644 "$UHOME/.xsessionrc"
-
-    # Session command — bare line, not executable, so Xsession runs it
-    # via 'exec /bin/sh ~/.xsession' after all Xsession.d scripts.
-    echo 'gnome-session --session=ubuntu' > "$UHOME/.xsession"
-    chown "$UNAME:$UGRP" "$UHOME/.xsession"
-    chmod 0644 "$UHOME/.xsession"
-done
-
-# --- Per-user fixup: replace Firefox with Edge in taskbar favorites -------
-# System-wide dconf defaults (baked into the base image) only apply to keys
-# the user hasn't set yet. Once a user logs in, GNOME writes per-user
-# favorite-apps (including firefox.desktop from Ubuntu's default). Patch
-# every existing user's dconf database so Edge replaces Firefox in the
-# taskbar on next login.
-for UHOME in /home/vmbuildadmin /root; do
-    UNAME=$(stat -c '%U' "$UHOME" 2>/dev/null) || continue
-    if [ -d "$UHOME/.config/dconf" ]; then
-        su - "$UNAME" -c "
-            export DCONF_PROFILE=/etc/dconf/profile/user
-            CURRENT=\$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
-            if echo \"\$CURRENT\" | grep -q 'firefox.desktop'; then
-                NEW=\$(echo \"\$CURRENT\" | sed \"s/'firefox.desktop'/'microsoft-edge.desktop'/g\")
-                dconf write /org/gnome/shell/favorite-apps \"\$NEW\"
-                echo '[memlabs-gnome] replaced firefox with edge in favorite-apps for $UNAME'
-            elif [ -z \"\$CURRENT\" ] || [ \"\$CURRENT\" = \"@as []\" ]; then
-                dconf write /org/gnome/shell/favorite-apps \"['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']\"
-                echo '[memlabs-gnome] set favorite-apps with edge for $UNAME'
-            fi
-        " || true
-    fi
-done
-
-echo "[memlabs-gnome] done: $(date -Is)"
-'@
+    return (Get-LinuxScript -Name 'roles/client-config')
 }
 
 function Get-LinuxRealmJoinBashScript {
@@ -2857,10 +2478,9 @@ function Get-LinuxRealmJoinBashScript {
         Bash body that installs realmd + sssd stack and joins the lab AD.
 
     .DESCRIPTION
-        Extracted from Get-LinuxDomainJoinSeedArgs so the same script can run
-        from Phase 3 SSH dispatch instead of cloud-init. Caller supplies
-        $Domain (lowercase), $DcIp, $AdminUser, $AdminPassword. We
-        single-quote-escape the password into bash. Returns [string] bash.
+        Reads the shared realm-join.sh script and injects the domain,
+        DC IP, admin user, and password as bash variables. Used by both
+        Phase 3 SSH dispatch and cloud-init seed.
     #>
     [CmdletBinding()]
     param (
@@ -2873,55 +2493,12 @@ function Get-LinuxRealmJoinBashScript {
     $pwBashSingle = $AdminPassword -replace "'", "'\''"
     $domainLower = $Domain.ToLower()
 
-    return @"
-echo "[memlabs-realm-join] start: `$(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update
-apt-get install -y realmd sssd sssd-tools adcli krb5-user packagekit \
-    samba-common-bin oddjob oddjob-mkhomedir libnss-sss libpam-sss
-
-DOMAIN='$domainLower'
-DC_IP='$dcIp'
-ADMIN_USER='$AdminUser'
-ADMIN_PWD='$pwBashSingle'
-
-/usr/local/sbin/memlabs-set-dns "`$DC_IP" "`$DOMAIN" || true
-
-for i in {1..80}; do
-  if getent hosts "`$DOMAIN" >/dev/null 2>&1; then break; fi
-  echo "[memlabs-realm-join] waiting for DNS on `$DOMAIN (attempt `$i/80)"
-  sleep 15
-done
-
-realm discover "`$DOMAIN" || true
-
-JOINED=0
-for i in {1..5}; do
-  if echo "`$ADMIN_PWD" | realm join -U "`$ADMIN_USER" "`$DOMAIN" --install=/; then
-    JOINED=1
-    break
-  fi
-  echo "[memlabs-realm-join] attempt `$i failed, retry in 30s"
-  sleep 30
-done
-
-if [ "`$JOINED" != "1" ]; then
-  echo "[memlabs-realm-join] ERROR: all join attempts failed"
-  exit 1
-fi
-
-realm permit --realm "`$DOMAIN" --all || true
-sed -i 's/^use_fully_qualified_names = .*/use_fully_qualified_names = False/' /etc/sssd/sssd.conf || true
-sed -i 's|^fallback_homedir = .*|fallback_homedir = /home/%u|' /etc/sssd/sssd.conf || true
-pam-auth-update --enable mkhomedir || true
-systemctl restart sssd || true
-
-echo '%domain\ admins ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/memlabs-domain-admins
-chmod 0440 /etc/sudoers.d/memlabs-domain-admins
-
-echo "[memlabs-realm-join] done: `$(date -Is)"
-"@
+    return (Get-LinuxScript -Name 'roles/realm-join' -IncludeAptRetry -Variables @{
+        DOMAIN    = $domainLower
+        DC_IP     = $DcIp
+        ADMIN_USER = $AdminUser
+        ADMIN_PWD  = $pwBashSingle
+    })
 }
 
 function Invoke-LinuxRoleConfiguration {
@@ -4669,415 +4246,52 @@ $bakeWriteFilesYaml
 
         # ── Step 1: System updates ───────────────────────────────────────
         $updTimeout = $(if ($Variant -eq 'Desktop') { 1200 } else { 600 })
-        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Retries 2 -Script @'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-echo "=== apt-get update ==="
-apt-get update
-echo "=== apt-get dist-upgrade ==="
-NEEDRESTART_SUSPEND=1 apt-get dist-upgrade -y
-echo "=== System updates complete ==="
-'@
+        Invoke-BakeStep -Name "System updates (apt-get update + dist-upgrade)" -Timeout $updTimeout -Retries 2 `
+            -Script (Get-LinuxScript -Name 'bake/01-system-updates' -IncludeAptRetry)
 
         # ── Step 2: Base packages ────────────────────────────────────────
-        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Retries 2 -Script @'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-NEEDRESTART_SUSPEND=1 apt-get install -y linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server
-echo "=== Base packages installed ==="
-'@
+        Invoke-BakeStep -Name "Base packages (HVL, qemu-guest-agent)" -Timeout 300 -Retries 2 `
+            -Script (Get-LinuxScript -Name 'bake/02-base-packages' -IncludeAptRetry)
 
         # ── Step 3: Enable base services ─────────────────────────────────
-        Invoke-BakeStep -Name "Enable base services" -Timeout 120 -Script @'
-set -euo pipefail
-systemctl daemon-reload
-systemctl enable qemu-guest-agent.service
-systemctl enable hv-kvp-daemon.service
-systemctl enable hv-vss-daemon.service
-# Install kernel-exact HV tools if the meta-package version doesn't match
-# the running kernel (can happen if dist-upgrade bumped the kernel).
-dpkg -s "linux-cloud-tools-$(uname -r)" >/dev/null 2>&1 \
-  || NEEDRESTART_SUSPEND=1 apt-get install -y "linux-tools-$(uname -r)" "linux-cloud-tools-$(uname -r)"
-echo "=== Base services enabled ==="
-'@
+        Invoke-BakeStep -Name "Enable base services" -Timeout 120 `
+            -Script (Get-LinuxScript -Name 'bake/03-enable-base-services' -IncludeAptRetry)
 
         # ── Step 3b: Prevent maintenance-mode boot on fsck failure ───────
-        # Ubuntu cloud images can drop to a "Give root password for
-        # maintenance" prompt if the journal or filesystem has minor
-        # inconsistencies after a hard shutdown. This is fatal for
-        # headless VMs because sshd never starts. Configure GRUB to
-        # auto-repair and systemd to never drop to emergency mode.
-        Invoke-BakeStep -Name "Prevent maintenance-mode boot" -Timeout 60 -Script @'
-set -euo pipefail
-# Add fsck.mode=force fsck.repair=yes to kernel command line
-GRUB_FILE="/etc/default/grub"
-if ! grep -q 'fsck.repair=yes' "$GRUB_FILE"; then
-    sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
-    # Also add to GRUB_CMDLINE_LINUX if GRUB_CMDLINE_LINUX_DEFAULT doesn't exist
-    if ! grep -q 'GRUB_CMDLINE_LINUX_DEFAULT' "$GRUB_FILE"; then
-        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 fsck.mode=force fsck.repair=yes"/' "$GRUB_FILE"
-    fi
-    update-grub
-fi
-# Tell systemd to never drop to emergency/rescue on failure — just reboot
-mkdir -p /etc/systemd/system.conf.d
-cat > /etc/systemd/system.conf.d/no-emergency.conf << 'EOF'
-[Manager]
-DefaultTimeoutStartSec=180s
-DefaultTimeoutStopSec=90s
-EOF
-# Override emergency.service to just reboot instead of prompting
-mkdir -p /etc/systemd/system/emergency.service.d
-cat > /etc/systemd/system/emergency.service.d/override.conf << 'EOF'
-[Service]
-ExecStart=
-ExecStart=-/usr/bin/systemctl reboot
-EOF
-systemctl daemon-reload
-echo "=== Maintenance-mode prevention configured ==="
-'@
+        Invoke-BakeStep -Name "Prevent maintenance-mode boot" -Timeout 60 `
+            -Script (Get-LinuxScript -Name 'bake/03b-maintenance-prevention')
 
         # ── Step 4: DHCP watchdog service ────────────────────────────────
-        # systemd-networkd's default DHCP retry is not aggressive enough
-        # under heavy host load (25+ VMs booting). This oneshot service
-        # runs after networkd, checks for an IPv4 address, and restarts
-        # networkd with retries until DHCP succeeds. Runs on every boot.
-        Invoke-BakeStep -Name "DHCP watchdog service" -Timeout 60 -Script @'
-set -euo pipefail
-
-cat > /usr/local/bin/memlabs-dhcp-watchdog << 'WATCHDOG'
-#!/bin/bash
-# memlabs-dhcp-watchdog: retry systemd-networkd DHCP if no IPv4 address.
-MAX_RETRIES=10
-RETRY_INTERVAL=15
-INITIAL_WAIT=30
-
-# Wait for networkd to have a chance to acquire a lease on its own.
-sleep $INITIAL_WAIT
-
-for i in $(seq 1 $MAX_RETRIES); do
-    if ip -4 addr show scope global | grep -q 'inet '; then
-        logger -t memlabs-dhcp-watchdog "IPv4 address found on attempt $i"
-        exit 0
-    fi
-    logger -t memlabs-dhcp-watchdog "No IPv4 address (attempt $i/$MAX_RETRIES), restarting systemd-networkd"
-    systemctl restart systemd-networkd
-    sleep $RETRY_INTERVAL
-done
-logger -t memlabs-dhcp-watchdog "FAILED: no IPv4 address after $MAX_RETRIES retries"
-exit 1
-WATCHDOG
-chmod 0755 /usr/local/bin/memlabs-dhcp-watchdog
-
-cat > /etc/systemd/system/memlabs-dhcp-watchdog.service << 'SVCUNIT'
-[Unit]
-Description=MemLabs DHCP Watchdog (retry networkd DHCP)
-After=systemd-networkd.service cloud-init-local.service
-Wants=systemd-networkd.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/memlabs-dhcp-watchdog
-RemainAfterExit=yes
-TimeoutStartSec=300
-
-[Install]
-WantedBy=multi-user.target
-SVCUNIT
-
-systemctl daemon-reload
-systemctl enable memlabs-dhcp-watchdog.service
-echo "=== DHCP watchdog service installed ==="
-'@
+        Invoke-BakeStep -Name "DHCP watchdog service" -Timeout 60 `
+            -Script (Get-LinuxScript -Name 'bake/04-dhcp-watchdog')
 
         if ($Variant -eq 'Desktop') {
             # ── Step 5: Desktop packages ─────────────────────────────────
-            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Retries 2 -Script @'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-NEEDRESTART_SUSPEND=1 apt-get install -y \
-  ubuntu-desktop-minimal gdm3 network-manager xrdp xorgxrdp \
-  gnome-tweaks dconf-cli unzip \
-  apt-transport-https ca-certificates gnupg wget
-echo "=== Desktop packages installed ==="
-'@
+            Invoke-BakeStep -Name "Desktop packages (GNOME, xrdp, tools)" -Timeout 1800 -Retries 2 `
+                -Script (Get-LinuxScript -Name 'bake/05-desktop-packages' -IncludeAptRetry)
 
             # ── Step 6: Desktop services ─────────────────────────────────
-            Invoke-BakeStep -Name "Enable desktop services" -Timeout 120 -Script @'
-set -euo pipefail
-systemctl set-default graphical.target
-systemctl enable gdm3.service
-systemctl enable NetworkManager.service
-systemctl enable xrdp.service
-adduser xrdp ssl-cert || true
-ufw allow 3389/tcp || true
-echo "=== Desktop services enabled ==="
-'@
+            Invoke-BakeStep -Name "Enable desktop services" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/06-desktop-services')
 
             # ── Step 7: Microsoft repos + Edge + Intune ──────────────────
-            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Retries 2 -Script @'
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-install -d -m 0755 /etc/apt/keyrings
-wget --timeout=30 -qO- https://packages.microsoft.com/keys/microsoft.asc \
-  | gpg --dearmor | tee /etc/apt/keyrings/microsoft.gpg > /dev/null
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main' \
-  > /etc/apt/sources.list.d/microsoft-edge.list
-echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main' \
-  > /etc/apt/sources.list.d/microsoft-prod.list
-apt-get update
-NEEDRESTART_SUSPEND=1 apt-get install -y microsoft-edge-stable intune-portal
-echo "=== Microsoft Edge + Intune installed ==="
-'@
+            Invoke-BakeStep -Name "Microsoft Edge + Intune" -Timeout 600 -Retries 2 `
+                -Script (Get-LinuxScript -Name 'bake/07-edge-intune' -IncludeAptRetry)
 
             # ── Step 8: Desktop system configuration ─────────────────────
-            # Edge default browser, --password-store=basic, fixup scripts,
-            # PAM hooks for GNOME Keyring, polkit colord rule, dconf defaults
-            Invoke-BakeStep -Name "Desktop system configuration" -Timeout 120 -Script @'
-set -euo pipefail
-
-# --- Edge as default browser ---
-update-alternatives --install /usr/bin/x-www-browser x-www-browser /usr/bin/microsoft-edge-stable 200
-update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/bin/microsoft-edge-stable 200
-update-alternatives --set x-www-browser /usr/bin/microsoft-edge-stable
-update-alternatives --set gnome-www-browser /usr/bin/microsoft-edge-stable
-
-# --- Edge --password-store=basic (suppress GNOME Keyring prompt) ---
-if [ -f /usr/share/applications/microsoft-edge.desktop ]; then
-    sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        /usr/share/applications/microsoft-edge.desktop
-fi
-
-# --- Edge fixup login script ---
-cat > /etc/profile.d/memlabs-edge-fixup.sh << 'FIXUP'
-#!/bin/bash
-DESKTOP=/usr/share/applications/microsoft-edge.desktop
-if [ -f "$DESKTOP" ] && grep -q 'Exec=/usr/bin/microsoft-edge-stable ' "$DESKTOP" \
-   && ! grep -q '\-\-password-store=basic' "$DESKTOP"; then
-    sudo sed -i 's|Exec=/usr/bin/microsoft-edge-stable|Exec=/usr/bin/microsoft-edge-stable --password-store=basic|g' \
-        "$DESKTOP" 2>/dev/null
-fi
-if command -v dconf >/dev/null 2>&1; then
-    FAVS=$(dconf read /org/gnome/shell/favorite-apps 2>/dev/null)
-    if echo "$FAVS" | grep -q 'firefox.desktop'; then
-        NEW=$(echo "$FAVS" | sed "s/'firefox.desktop'/'microsoft-edge.desktop'/g")
-        dconf write /org/gnome/shell/favorite-apps "$NEW" 2>/dev/null
-    fi
-fi
-FIXUP
-chmod 0644 /etc/profile.d/memlabs-edge-fixup.sh
-
-# --- Sudoers for Edge fixup ---
-echo 'ALL ALL=(root) NOPASSWD: /usr/bin/sed -i s*Exec=/usr/bin/microsoft-edge-stable*Exec=/usr/bin/microsoft-edge-stable --password-store=basic* /usr/share/applications/microsoft-edge.desktop' \
-    > /etc/sudoers.d/memlabs-edge-fixup
-chmod 0440 /etc/sudoers.d/memlabs-edge-fixup
-
-# --- XDG mimeapps (Edge as default handler) ---
-install -d -m 0755 /etc/xdg
-cat > /etc/xdg/mimeapps.list << 'MIMEEOF'
-[Default Applications]
-x-scheme-handler/http=microsoft-edge.desktop
-x-scheme-handler/https=microsoft-edge.desktop
-text/html=microsoft-edge.desktop
-MIMEEOF
-
-# --- PAM: auto-unlock GNOME Keyring on xrdp login ---
-# microsoft-identity-broker (pulled in by intune-portal) stores Entra ID
-# auth tokens in GNOME Keyring via libsecret / Secret Service D-Bus API.
-# Without this, the keyring stays locked and enrollment fails.
-if [ -f /etc/pam.d/xrdp-sesman ]; then
-    if ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
-        sed -i '/^@include common-auth/a auth       optional     pam_gnome_keyring.so' \
-            /etc/pam.d/xrdp-sesman
-        sed -i '/^@include common-session/a session    optional     pam_gnome_keyring.so auto_start' \
-            /etc/pam.d/xrdp-sesman
-    fi
-fi
-
-# --- Polkit: allow colord without auth for xrdp ---
-install -d -m 0755 /etc/polkit-1/rules.d
-cat > /etc/polkit-1/rules.d/45-allow-colord.rules << 'RULES'
-polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.freedesktop.color-manager.") == 0) {
-        return polkit.Result.YES;
-    }
-});
-RULES
-
-# --- dconf: Windows-like GNOME defaults (system-wide) ---
-install -d -m 0755 /etc/dconf/profile
-printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
-
-install -d -m 0755 /etc/dconf/db/local.d
-cat > /etc/dconf/db/local.d/01-memlabs-windows-like << 'DCONF'
-[org/gnome/desktop/wm/preferences]
-button-layout='appmenu:minimize,maximize,close'
-
-[org/gnome/shell]
-enabled-extensions=['dash-to-panel@jderose9.github.com', 'ding@rastersoft.com']
-welcome-dialog-last-shown-version='99.0'
-favorite-apps=['microsoft-edge.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.TextEditor.desktop']
-
-[org/gnome/shell/extensions/dash-to-panel]
-panel-positions='{"0":"BOTTOM"}'
-panel-sizes='{"0":40}'
-panel-element-positions='{"0":[{"element":"showAppsButton","visible":true,"position":"stackedTL"},{"element":"activitiesButton","visible":false,"position":"stackedTL"},{"element":"leftBox","visible":true,"position":"stackedTL"},{"element":"taskbar","visible":true,"position":"centerMonitor"},{"element":"centerBox","visible":false,"position":"stackedBR"},{"element":"rightBox","visible":true,"position":"stackedBR"},{"element":"dateMenu","visible":true,"position":"stackedBR"},{"element":"systemMenu","visible":true,"position":"stackedBR"},{"element":"desktopButton","visible":true,"position":"stackedBR"}]}'
-appicon-margin=4
-appicon-padding=4
-animate-appicon-hover=false
-dot-style-focused='DASHES'
-dot-style-unfocused='DOTS'
-trans-use-custom-opacity=false
-hide-overview-on-startup=true
-show-apps-icon-file=''
-
-[org/gnome/desktop/interface]
-enable-hot-corners=false
-
-[org/gnome/shell/extensions/ding]
-show-home=true
-show-trash=true
-
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-
-[org/gnome/desktop/notifications]
-show-banners=true
-DCONF
-
-dconf update
-
-echo "=== Desktop system configuration complete ==="
-'@
+            Invoke-BakeStep -Name "Desktop system configuration" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/08-desktop-config')
 
             # ── Step 9: dash-to-panel extension ──────────────────────────
-            Invoke-BakeStep -Name "dash-to-panel extension" -Timeout 120 -Script @'
-set -euo pipefail
-EXT_UUID="dash-to-panel@jderose9.github.com"
-SHELL_VER=$(gnome-shell --version 2>/dev/null | grep -oP '[\d.]+' | cut -d. -f1)
-if [ -z "$SHELL_VER" ]; then
-    echo "ERROR: could not detect GNOME Shell version" >&2
-    exit 1
-fi
-echo "GNOME Shell version: $SHELL_VER"
-DL_URL=$(wget --timeout=30 -qO- "https://extensions.gnome.org/extension-info/?uuid=${EXT_UUID}&shell_version=${SHELL_VER}" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['download_url'])" 2>/dev/null)
-if [ -z "$DL_URL" ]; then
-    echo "ERROR: could not resolve dash-to-panel download URL for GNOME Shell ${SHELL_VER}" >&2
-    exit 1
-fi
-echo "Downloading from: https://extensions.gnome.org${DL_URL}"
-wget --timeout=60 -qO /tmp/dash-to-panel.zip "https://extensions.gnome.org${DL_URL}"
-install -d -m 0755 "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-unzip -o /tmp/dash-to-panel.zip -d "/usr/share/gnome-shell/extensions/${EXT_UUID}/"
-chmod -R a+rX "/usr/share/gnome-shell/extensions/${EXT_UUID}"
-rm -f /tmp/dash-to-panel.zip
-echo "=== dash-to-panel installed (GNOME Shell ${SHELL_VER}) ==="
-'@
+            Invoke-BakeStep -Name "dash-to-panel extension" -Timeout 120 `
+                -Script (Get-LinuxScript -Name 'bake/09-dash-to-panel' -IncludeAptRetry)
         } # end Desktop-only steps
 
         # ── Validation ───────────────────────────────────────────────────
-        # Check ALL expected artifacts in one pass. Collect every failure
-        # and report them all before aborting.
         $validationScript = $(if ($Variant -eq 'Desktop') {
-            @'
-set -euo pipefail
-FAIL=0
-ERRORS=""
-
-for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server \
-           ubuntu-desktop-minimal gdm3 network-manager xrdp xorgxrdp \
-           gnome-tweaks dconf-cli \
-           microsoft-edge-stable intune-portal; do
-    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-        ERRORS="${ERRORS}  MISSING package: $pkg\n"
-        FAIL=1
-    fi
-done
-
-for svc in hv-kvp-daemon gdm3 NetworkManager xrdp memlabs-dhcp-watchdog; do
-    if ! systemctl is-enabled "${svc}.service" >/dev/null 2>&1; then
-        ERRORS="${ERRORS}  NOT enabled: ${svc}.service\n"
-        FAIL=1
-    fi
-done
-
-if [ ! -d "/usr/share/gnome-shell/extensions/dash-to-panel@jderose9.github.com" ]; then
-    ERRORS="${ERRORS}  MISSING: dash-to-panel extension directory\n"
-    FAIL=1
-fi
-
-if [ ! -f /usr/local/bin/memlabs-dhcp-watchdog ]; then
-    ERRORS="${ERRORS}  MISSING: /usr/local/bin/memlabs-dhcp-watchdog\n"
-    FAIL=1
-fi
-
-if [ ! -f "/etc/dconf/db/local" ]; then
-    ERRORS="${ERRORS}  MISSING: compiled dconf database /etc/dconf/db/local\n"
-    FAIL=1
-fi
-
-if [ -f /etc/pam.d/xrdp-sesman ] && ! grep -q 'pam_gnome_keyring.so' /etc/pam.d/xrdp-sesman; then
-    ERRORS="${ERRORS}  MISSING: pam_gnome_keyring.so in xrdp-sesman PAM config\n"
-    FAIL=1
-fi
-
-if ! update-alternatives --query x-www-browser 2>/dev/null | grep -q 'microsoft-edge'; then
-    ERRORS="${ERRORS}  NOT default: Edge not set as x-www-browser\n"
-    FAIL=1
-fi
-
-if [ ! -f "/etc/polkit-1/rules.d/45-allow-colord.rules" ]; then
-    ERRORS="${ERRORS}  MISSING: polkit colord rule\n"
-    FAIL=1
-fi
-
-if [ $FAIL -ne 0 ]; then
-    echo "=== VALIDATION FAILED ==="
-    printf "$ERRORS"
-    exit 1
-fi
-echo "=== Validation passed: all packages, services, and configs verified ==="
-'@
-        }
-        else {
-            @'
-set -euo pipefail
-FAIL=0
-ERRORS=""
-
-for pkg in linux-tools-virtual linux-cloud-tools-virtual qemu-guest-agent openssh-server; do
-    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-        ERRORS="${ERRORS}  MISSING package: $pkg\n"
-        FAIL=1
-    fi
-done
-
-if ! systemctl is-enabled hv-kvp-daemon.service >/dev/null 2>&1; then
-    ERRORS="${ERRORS}  NOT enabled: hv-kvp-daemon.service\n"
-    FAIL=1
-fi
-
-if [ ! -f /usr/local/bin/memlabs-dhcp-watchdog ]; then
-    ERRORS="${ERRORS}  MISSING: /usr/local/bin/memlabs-dhcp-watchdog\n"
-    FAIL=1
-fi
-
-if ! systemctl is-enabled memlabs-dhcp-watchdog.service >/dev/null 2>&1; then
-    ERRORS="${ERRORS}  NOT enabled: memlabs-dhcp-watchdog.service\n"
-    FAIL=1
-fi
-
-if [ $FAIL -ne 0 ]; then
-    echo "=== VALIDATION FAILED ==="
-    printf "$ERRORS"
-    exit 1
-fi
-echo "=== Validation passed: all packages installed, services enabled ==="
-'@
+            Get-LinuxScript -Name 'bake/validate-desktop'
+        } else {
+            Get-LinuxScript -Name 'bake/validate-server'
         })
 
         Invoke-BakeStep -Name "Validation" -Timeout 60 -Script $validationScript
@@ -5088,21 +4302,7 @@ echo "=== Validation passed: all packages installed, services enabled ==="
         Write-Log "Bake: all steps passed. Running cleanup and shutdown..." -Activity
         $cleanupResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $BakeIPAddress `
             -UserName 'memlabs' -Sudo -TimeoutSeconds 120 `
-            -DisplayName "Bake: Cleanup + shutdown" -BashCommand @'
-set -euo pipefail
-# Delete bake user so the VHDX ships with no stale credentials
-userdel -r memlabs 2>/dev/null || true
-# Disable unattended upgrades (avoids dpkg lock races on deployed VMs)
-systemctl stop unattended-upgrades.service 2>/dev/null || true
-systemctl disable unattended-upgrades.service 2>/dev/null || true
-# Clean cloud-init state so next boot re-runs with the deploy seed
-cloud-init clean --logs --seed --machine-id || true
-truncate -s 0 /etc/machine-id
-rm -f /var/lib/dbus/machine-id
-rm -f /etc/netplan/50-cloud-init.yaml
-echo "=== Cleanup complete, shutting down ==="
-shutdown -h now
-'@
+            -DisplayName "Bake: Cleanup + shutdown" -BashCommand (Get-LinuxScript -Name 'bake/cleanup')
         # Cleanup+shutdown may report exit code 1 because the shutdown command
         # kills the SSH session before it can return. That's expected - check
         # for the success marker in output instead of exit code.
