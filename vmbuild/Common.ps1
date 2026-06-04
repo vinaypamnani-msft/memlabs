@@ -2463,9 +2463,10 @@ function Test-DHCPScope {
             try {
                 if (-not $DomainScope) {
                     if ($ScopeName -eq "cluster") {
+                        # Cluster/heartbeat NICs must not have a default gateway.
+                        # Only set ScopeId — no Router, no DNS.
                         $HashArguments = @{
                             ScopeId = $ScopeID
-                            Router  = $DHCPDefaultGateway
                         }
                     }
                     else {

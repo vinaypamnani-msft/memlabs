@@ -6019,6 +6019,14 @@ class DisableClusterNicDnsRegistration {
             # Disable IPv6 on the cluster NIC to prevent AAAA record registration.
             Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
 
+            # Remove default gateway from cluster NIC — heartbeat NICs should never
+            # route externally. DHCP may have handed one out before the scope was fixed.
+            $gateway = Get-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
+            if ($gateway) {
+                Remove-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Status "Removed default gateway from cluster adapter '$($adapter.Name)'"
+            }
+
             # Rename to something descriptive if still using a generic Windows name.
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
                 try {
