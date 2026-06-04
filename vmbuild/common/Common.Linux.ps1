@@ -2194,10 +2194,15 @@ function Restart-LinuxVmAndWait {
         Reboot a Linux VM and wait until it's SSH-reachable again.
 
     .DESCRIPTION
-        Issues 'sudo reboot' over SSH (or Stop-VM/Start-VM as fallback),
-        sleeps briefly for the VM to begin shutting down, then calls
-        Wait-LinuxVmReady to wait for SSH. Returns the new IP on success
-        or $null on failure.
+        Before rebooting, checks via SSH whether a reboot is actually
+        warranted (pending reboot flag, broken dpkg state). If SSH is
+        functional and no reboot is pending, skips the reboot and returns
+        the current IP so the caller can simply retry the command.
+
+        When a reboot IS needed, issues 'sudo reboot' over SSH (or
+        Stop-VM/Start-VM as fallback), sleeps briefly for the VM to begin
+        shutting down, then calls Wait-LinuxVmReady to wait for SSH.
+        Returns the new IP on success or $null on failure.
     #>
     [CmdletBinding()]
     param (
@@ -2206,6 +2211,70 @@ function Restart-LinuxVmAndWait {
         [Parameter(Mandatory = $false)][string]$ExpectedIPAddress,
         [Parameter(Mandatory = $false)][int]$WaitTimeoutSeconds = 900
     )
+
+    # ── Guard: if SSH is functional, check whether a reboot is actually needed.
+    # Transient failures (apt lock, slow service start) don't require a reboot,
+    # and on a busy host the reboot itself is risky (VM may not come back for
+    # minutes). Only reboot when the OS actually flags one as pending.
+    if ($IPAddress) {
+        $rebootCheckBash = @'
+NEEDS=0
+REASONS=""
+# Ubuntu/Debian: file created by apt/dpkg when a reboot is needed (kernel update, etc.)
+if [ -f /var/run/reboot-required ]; then
+    NEEDS=1
+    REASONS="${REASONS} reboot-required"
+    echo "reboot-required packages:"
+    cat /var/run/reboot-required.pkgs 2>/dev/null | head -10 || echo "(none listed)"
+fi
+# dpkg in broken state (interrupted install, half-configured, etc.)
+if dpkg --audit 2>/dev/null | grep -q .; then
+    NEEDS=1
+    REASONS="${REASONS} dpkg-broken"
+    echo "dpkg audit:"
+    dpkg --audit 2>/dev/null | head -10
+fi
+# cloud-init still running — rebooting would interrupt first-boot setup
+if command -v cloud-init >/dev/null 2>&1; then
+    CI_STATUS=$(cloud-init status 2>/dev/null || echo "unknown")
+    echo "cloud-init: $CI_STATUS"
+    if echo "$CI_STATUS" | grep -q "running"; then
+        echo "CLOUD_INIT_ACTIVE"
+        exit 0
+    fi
+fi
+if [ "$NEEDS" = "1" ]; then
+    echo "REBOOT_NEEDED:${REASONS}"
+else
+    echo "NO_REBOOT_NEEDED"
+fi
+'@
+        $rebootCheck = Invoke-LinuxVmCommand -VmName $VmName -IPAddress $IPAddress `
+            -Sudo -TimeoutSeconds 20 -SuppressLog -BashCommand $rebootCheckBash `
+            -DisplayName "reboot-check"
+
+        if ($rebootCheck -and -not $rebootCheck.ScriptBlockFailed -and $rebootCheck.ExitCode -eq 0) {
+            $checkOutput = $rebootCheck.ScriptBlockOutput
+            if ($checkOutput -match 'CLOUD_INIT_ACTIVE') {
+                Write-Log "$VmName`: cloud-init still running; skipping reboot to avoid interrupting first-boot setup" -Warning
+                return $IPAddress
+            }
+            elseif ($checkOutput -match 'NO_REBOOT_NEEDED') {
+                Write-Log "$VmName`: SSH functional and no reboot pending; skipping reboot (caller should retry)" -Warning
+                return $IPAddress
+            }
+            elseif ($checkOutput -match 'REBOOT_NEEDED:(.+)') {
+                $reasons = $Matches[1].Trim()
+                Write-Log "$VmName`: Reboot warranted ($reasons); proceeding with reboot" -LogOnly
+                foreach ($line in ($checkOutput -split "`n")) {
+                    Write-Log "$VmName`:   reboot-check> $line" -LogOnly
+                }
+            }
+        }
+        else {
+            Write-Log "$VmName`: SSH reboot-check failed (exit=$($rebootCheck.ExitCode)); proceeding with reboot" -LogOnly
+        }
+    }
 
     Write-Log "$VmName`: Rebooting VM for retry..."
     # Try graceful SSH reboot first; if SSH is broken, fall back to Hyper-V.
