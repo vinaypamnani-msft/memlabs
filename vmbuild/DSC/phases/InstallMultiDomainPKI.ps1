@@ -150,15 +150,19 @@ if (Test-Path $cm_svc_file) {
 
     foreach ($network in $networks) {
         Write-DscStatus "New Boundary $DomainFullName - $network - $Externaldomainsitecode"
-        #New-CMBoundary -DisplayName "$DomainFullName - $network" -BoundaryType IPSubNet -Value "$network/24" *>&1 | Write-StatusLogEntry
+        # Compute usable host range (.1 to .254), matching CM's Forest Discovery convention.
         $IP = $network
         $mask = '255.255.255.0'
         $IPBits = [int[]]$IP.Split('.')
         $MaskBits = [int[]]$Mask.Split('.')
         $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
         $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
-        $NetworkID = $NetworkIDBits -join '.'
-        $Broadcast = $BroadcastBits -join '.'
+        $NetworkIDBits[3] = 1          # first usable host
+        $BroadcastBits[3] = 254        # last usable host
+        $FirstHost = $NetworkIDBits -join '.'
+        $LastHost = $BroadcastBits -join '.'
+        $rangeValue = "$FirstHost-$LastHost"
+        $boundaryName = "$DomainFullName - $network"
 
         $sitesystems = @()
         $sitesystems += (Get-CMDistributionPoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
@@ -166,24 +170,35 @@ if (Test-Path $cm_svc_file) {
         $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
         $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
 
-        try {
-            "New-CMBoundary -Type IPRange -Name `"$DomainFullName - $network`" -Value `"$($NetworkID)-$($Broadcast)`"" | Write-StatusLogEntry
-            New-CMBoundary -Type IPRange -Name "$DomainFullName - $network" -Value "$($NetworkID)-$($Broadcast)" *>&1 | Write-StatusLogEntry
-        
+        # Check by name first, then by value to catch Forest Discovery auto-created boundaries
+        $existingBoundary = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+        if (-not $existingBoundary) {
+            $existingBoundary = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
         }
-        catch {
-            Write-DscStatus "Failed to create New-CMBoundary for $DomainFullName - $network - $sitecode $_" -Log
+        if (-not $existingBoundary) {
+            try {
+                "New-CMBoundary -Type IPRange -Name `"$boundaryName`" -Value `"$rangeValue`"" | Write-StatusLogEntry
+                New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue *>&1 | Write-StatusLogEntry
+            }
+            catch {
+                Write-DscStatus "Failed to create New-CMBoundary for $boundaryName - $sitecode $_" -Log
+            }
         }
-        try {
-            "New-CMBoundaryGroup -Name `"$DomainFullName - $network`" -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems" | Write-StatusLogEntry
-            New-CMBoundaryGroup -Name "$DomainFullName - $network" -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems *>&1 | Write-StatusLogEntry
-        }
-        catch {
-            Write-DscStatus "Failed to create New-CMBoundaryGroup for $DomainFullName - $network - $Externaldomainsitecode $_" -Log
+        else {
+            $boundaryName = $existingBoundary.DisplayName
+            Write-DscStatus "Boundary '$boundaryName' ($rangeValue) already exists, reusing"
         }
 
-        Add-CMBoundaryToGroup -BoundaryName "$DomainFullName - $network" -BoundaryGroupName "$DomainFullName - $network" *>&1 | Write-StatusLogEntry
-        "Add-CMBoundaryToGroup -BoundaryName `"$DomainFullName - $network`" -BoundaryGroupName `"$DomainFullName - $network`"" | Write-StatusLogEntry
+        try {
+            "New-CMBoundaryGroup -Name `"$boundaryName`" -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems" | Write-StatusLogEntry
+            New-CMBoundaryGroup -Name $boundaryName -DefaultSiteCode $Externaldomainsitecode -AddSiteSystemServerName $sitesystems *>&1 | Write-StatusLogEntry
+        }
+        catch {
+            Write-DscStatus "Failed to create New-CMBoundaryGroup for $boundaryName - $Externaldomainsitecode $_" -Log
+        }
+
+        Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $boundaryName *>&1 | Write-StatusLogEntry
+        "Add-CMBoundaryToGroup -BoundaryName `"$boundaryName`" -BoundaryGroupName `"$boundaryName`"" | Write-StatusLogEntry
     }
     Write-DscStatus "Set-CMClientPushInstallation $cm_svc"
     $accounts = (get-CMClientPushInstallation -SiteCode $Externaldomainsitecode).EmbeddedPropertyLists.Reserved2.values

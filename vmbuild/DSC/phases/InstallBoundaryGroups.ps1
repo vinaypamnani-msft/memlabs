@@ -143,29 +143,40 @@ foreach ($bgsitecode in ($bgs.SiteCode | Select-Object -Unique)) {
 # Create Boundaries for each subnet and add to BG
 Write-DscStatus "Create Boundaries for each subnet and add to BG"
 foreach ($bg in $bgs) {
+    # Compute usable host range (.1 to .254), matching the convention CM uses
+    # when auto-creating boundaries from AD subnets via Forest Discovery.
+    # Using .0-.255 (network/broadcast) would create a duplicate boundary
+    # alongside the Forest Discovery auto-created .1-.254 range.
+    $IP = $bg.Subnet
+    $mask = '255.255.255.0'
+    $IPBits = [int[]]$IP.Split('.')
+    $MaskBits = [int[]]$Mask.Split('.')
+    $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
+    $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+    $NetworkIDBits[3] = 1          # first usable host
+    $BroadcastBits[3] = 254        # last usable host
+    $FirstHost = $NetworkIDBits -join '.'
+    $LastHost = $BroadcastBits -join '.'
+    $rangeValue = "$FirstHost-$LastHost"
+
+    # Check by name first, then by value to catch Forest Discovery auto-created boundaries
     $exists = Get-CMBoundary -BoundaryName $bg.Subnet
+    if (-not $exists) {
+        $exists = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
+    }
     if ($exists) {
         try {
-            Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-            Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+            Write-DscStatus "Adding Boundary '$($exists.DisplayName)' ($rangeValue) to Boundary Group $($bg.SiteCode)"
+            Add-CMBoundaryToGroup -BoundaryName $exists.DisplayName -BoundaryGroupName $bg.SiteCode
         }
         catch {
-            Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+            Write-DscStatus "Failed to add boundary '$($exists.DisplayName)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
         }
     }
     else {
         try {
-            Write-DscStatus "Creating Boundary $($bg.SiteCode) with subnet $($bg.Subnet)"
-            #New-CMBoundary -Type IPSubnet -Name $bg.Subnet -Value "$($bg.Subnet)/24"
-            $IP = $bg.Subnet
-            $mask = '255.255.255.0'
-            $IPBits = [int[]]$IP.Split('.')
-            $MaskBits = [int[]]$Mask.Split('.')
-            $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
-            $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
-            $NetworkID = $NetworkIDBits -join '.'
-            $Broadcast = $BroadcastBits -join '.'
-            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value "$($NetworkID)-$($Broadcast)"
+            Write-DscStatus "Creating Boundary $($bg.SiteCode) with range $rangeValue"
+            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value $rangeValue
             try {
                 Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
                 Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
