@@ -1154,7 +1154,7 @@ $global:VM_Config = {
         }
 
         # Get VM Session
-        Write-Progress2 $Activity -Status "Establishing a connection with the VM" -percentcomplete 0 -force
+        Write-Progress2 $Activity -Status "Waiting for VM to respond" -percentcomplete 0 -force
 
         # Verify again that VM is connectable, in case DSC caused a reboot
         $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -SkipDiskTest:$alreadyCopiedDSC
@@ -1205,10 +1205,12 @@ $global:VM_Config = {
             return
         }
 
+        Write-Progress2 $Activity -Status "Establishing a session with the VM" -percentcomplete 2 -force
         $ps = Get-VmSession -VmName $currentItem.vmName -VmDomainName $domainName
 
         if (-not $ps) {
 
+            Write-Progress2 $Activity -Status "Session failed, rebooting VM and retrying" -percentcomplete 3 -force
             Write-Log "$($currentItem.vmName)`: Failed to connect.  Attempting to reboot vm." 
             stop-vm2 -Name $currentItem.vmName
             Start-Sleep -seconds 10

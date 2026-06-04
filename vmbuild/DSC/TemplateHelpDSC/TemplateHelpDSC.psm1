@@ -4375,7 +4375,16 @@ class JoinClusterByIP {
         $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
         $_NodeName = $env:COMPUTERNAME
         $_ClusterName = $this.ClusterName
+        $_Credential = $this.DomainAdministratorCredential
+
+        $impersonationContext = $null
+        $newToken = [IntPtr]::Zero
+
         try {
+            if ($_Credential) {
+                ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
+            }
+
             $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
             if ($node) {
                 if ($node.State -eq 'Up' -or $node.State -eq 'Paused') {
@@ -4389,6 +4398,13 @@ class JoinClusterByIP {
         }
         catch {
             Write-Verbose "Could not query cluster membership via IP $_ClusterIP`: $_"
+        }
+        finally {
+            if ($impersonationContext) {
+                $impersonationContext.Undo()
+                $impersonationContext.Dispose()
+                Close-UserToken -Token $newToken
+            }
         }
         Write-Verbose "Node '$_NodeName' is not a member of cluster '$_ClusterName'"
         return $false
