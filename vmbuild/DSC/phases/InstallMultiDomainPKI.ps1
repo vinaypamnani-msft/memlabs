@@ -149,7 +149,6 @@ if (Test-Path $cm_svc_file) {
     }
 
     foreach ($network in $networks) {
-        Write-DscStatus "New Boundary $DomainFullName - $network - $Externaldomainsitecode"
         # Compute usable host range (.1 to .254), matching CM's Forest Discovery convention.
         $IP = $network
         $mask = '255.255.255.0'
@@ -157,12 +156,15 @@ if (Test-Path $cm_svc_file) {
         $MaskBits = [int[]]$Mask.Split('.')
         $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
         $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+        $NetworkID = $NetworkIDBits -join '.'
         $NetworkIDBits[3] = 1          # first usable host
         $BroadcastBits[3] = 254        # last usable host
         $FirstHost = $NetworkIDBits -join '.'
         $LastHost = $BroadcastBits -join '.'
         $rangeValue = "$FirstHost-$LastHost"
-        $boundaryName = "$DomainFullName - $network"
+        # Match AD Forest Discovery naming: domain/SiteCode/NetworkID/prefix
+        $boundaryName = "$DomainFullName/$Externaldomainsitecode/$NetworkID/24"
+        Write-DscStatus "New Boundary '$boundaryName' ($rangeValue)"
 
         $sitesystems = @()
         $sitesystems += (Get-CMDistributionPoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
@@ -170,8 +172,11 @@ if (Test-Path $cm_svc_file) {
         $sitesystems += (Get-CMSoftwareUpdatePoint -SiteCode $Externaldomainsitecode).NetworkOSPath -replace "\\", ""
         $sitesystems = $sitesystems | Where-Object { $_ -and $_.Trim() } | Select-Object -Unique
 
-        # Check by name first, then by value to catch Forest Discovery auto-created boundaries
+        # Check by name first, then by old name, then by value
         $existingBoundary = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+        if (-not $existingBoundary) {
+            $existingBoundary = Get-CMBoundary -BoundaryName "$DomainFullName - $network" -ErrorAction SilentlyContinue
+        }
         if (-not $existingBoundary) {
             $existingBoundary = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
         }

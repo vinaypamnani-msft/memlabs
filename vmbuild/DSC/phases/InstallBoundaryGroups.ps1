@@ -153,14 +153,21 @@ foreach ($bg in $bgs) {
     $MaskBits = [int[]]$Mask.Split('.')
     $NetworkIDBits = 0..3 | Foreach-Object { $IPBits[$_] -band $MaskBits[$_] }
     $BroadcastBits = 0..3 | Foreach-Object { $NetworkIDBits[$_] + ($MaskBits[$_] -bxor 255) }
+    $NetworkID = $NetworkIDBits -join '.'
     $NetworkIDBits[3] = 1          # first usable host
     $BroadcastBits[3] = 254        # last usable host
     $FirstHost = $NetworkIDBits -join '.'
     $LastHost = $BroadcastBits -join '.'
     $rangeValue = "$FirstHost-$LastHost"
+    # Match AD Forest Discovery naming: domain/SiteCode/NetworkID/prefix
+    $boundaryName = "$DomainFullName/$($bg.SiteCode)/$NetworkID/24"
 
     # Check by name first, then by value to catch Forest Discovery auto-created boundaries
-    $exists = Get-CMBoundary -BoundaryName $bg.Subnet
+    $exists = Get-CMBoundary -BoundaryName $boundaryName -ErrorAction SilentlyContinue
+    if (-not $exists) {
+        # Also check the old naming convention (just the subnet IP)
+        $exists = Get-CMBoundary -BoundaryName $bg.Subnet -ErrorAction SilentlyContinue
+    }
     if (-not $exists) {
         $exists = Get-CMBoundary | Where-Object { $_.BoundaryType -eq 3 -and $_.Value -eq $rangeValue }
     }
@@ -175,18 +182,17 @@ foreach ($bg in $bgs) {
     }
     else {
         try {
-            Write-DscStatus "Creating Boundary $($bg.SiteCode) with range $rangeValue"
-            New-CMBoundary -Type IPRange -Name $bg.Subnet -Value $rangeValue
+            Write-DscStatus "Creating Boundary '$boundaryName' with range $rangeValue"
+            New-CMBoundary -Type IPRange -Name $boundaryName -Value $rangeValue
             try {
-                Write-DscStatus "Adding Boundary $($bg.SiteCode) with subnet $($bg.Subnet) to Boundary Group $($bg.SiteCode)"
-                Add-CMBoundaryToGroup -BoundaryName $bg.Subnet -BoundaryGroupName $bg.SiteCode
+                Add-CMBoundaryToGroup -BoundaryName $boundaryName -BoundaryGroupName $bg.SiteCode
             }
             catch {
-                Write-DscStatus "Failed to add boundary '$($bg.Subnet)' to Boundary Group '$($bg.SiteCode)'. Error: $_"
+                Write-DscStatus "Failed to add boundary '$boundaryName' to Boundary Group '$($bg.SiteCode)'. Error: $_"
             }
         }
         catch {
-            Write-DscStatus "Failed to create boundary '$($bg.Subnet)'. Error: $_"
+            Write-DscStatus "Failed to create boundary '$boundaryName'. Error: $_"
         }
     }
 
