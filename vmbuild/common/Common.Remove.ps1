@@ -554,6 +554,10 @@ function Remove-Domain {
     # Remove-VirtualMachine.
     $removingDomain = ($all -or [bool]$DC)
 
+    # Capture parent's $Common so ThreadJob workers can skip the init block.
+    # ThreadJobs share the same process, so $using: gives the live object.
+    $parentCommon = $global:Common
+
     $DeleteVMs = {
     
         try {
@@ -562,11 +566,11 @@ function Remove-Domain {
             #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
     
             $rootPath = Split-Path $using:PSScriptRoot -Parent
-            # StartupProfile Fast skips Initialize-Storage (the main remaining
-            # cost in -InJob mode) plus the 4 InJob-already-skipped probes.
-            # Remove-VirtualMachine only needs Get-List / Get-VM2 / DHCP cmdlets
-            # / $Common.CachePath -- none of which depend on storage init,
-            # supported-options, hotfix lookup, or env detection.
+            # Pre-seed $global:Common from the parent so Common.ps1's init
+            # block (if -not $Common.Initialized) is skipped. The dot-source
+            # still loads all function definitions; only the expensive init
+            # (New-Directory x15, git branch, storage, etc.) is avoided.
+            $global:Common = $using:parentCommon
             . $rootPath\Common.ps1 -InJob -StartupProfile RemoveOnly -VerboseEnabled:$using:enableVerbose -DevBranch:$using:devBranchValue
 
             $currentItem = $using:currentItem
