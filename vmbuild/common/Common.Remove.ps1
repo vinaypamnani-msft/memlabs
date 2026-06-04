@@ -127,8 +127,10 @@ function Remove-VirtualMachine {
             -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
     if ($vmFromList.AGIPAddress) {
-        Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion..." -HostOnly
-        Remove-DhcpServerv4ExclusionRange -ScopeId 10.250.250.0 `
+        # AG listener IP is on the domain subnet, not the cluster subnet.
+        $agScopeId = if ($vmFromList.network) { $vmFromList.network } else { '10.250.250.0' }
+        Write-Log "$VmName`: Removing $($vmFromList.AGIPAddress) Exclusion (scope $agScopeId)..." -HostOnly
+        Remove-DhcpServerv4ExclusionRange -ScopeId $agScopeId `
             -StartRange $vmFromList.AGIPAddress -EndRange $vmFromList.AGIPAddress `
             -ErrorAction SilentlyContinue -WhatIf:$WhatIf
     }
