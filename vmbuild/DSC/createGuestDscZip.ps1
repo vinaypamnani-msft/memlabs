@@ -97,50 +97,29 @@ try {
     # Guest VMs run PS 5.1 which reads files without a UTF-8 BOM as Windows-1252.
     # Non-ASCII characters (em-dashes, smart quotes, etc.) in string literals
     # silently break parsing, causing dot-sourced scripts to fail with no output.
-    Write-Host "`nPS5.1 parse-checking guest scripts..."
-    $parseCheckDirs = @('.\phases', '.\TemplateHelpDSC')
-    $parseFailures = @()
-    foreach ($dir in $parseCheckDirs) {
-        foreach ($ps1 in Get-ChildItem -Path $dir -Filter '*.ps1' -Recurse) {
-            $tokens = $null; $errors = $null
-            # Use powershell.exe (PS5.1) to parse, since it reads non-BOM files as ANSI
-            $parseResult = powershell.exe -NoProfile -Command "& {
-                `$t = `$null; `$e = `$null
-                [void][System.Management.Automation.Language.Parser]::ParseFile('$($ps1.FullName)', [ref]`$t, [ref]`$e)
-                if (`$e.Count -gt 0) { `$e | ForEach-Object { `"L`$(`$_.Extent.StartLineNumber): `$(`$_.Message)`" } }
-            }" 2>&1
-            if ($parseResult) {
-                $parseFailures += [PSCustomObject]@{ File = $ps1.FullName; Errors = ($parseResult -join '; ') }
+    #
+    # Run as a background job so the test config compilation can proceed in parallel.
+    # Results are checked at the end after the test config finishes.
+    Write-Host "`nStarting PS5.1 parse-check in background..."
+    $parseCheckDirs = @((Resolve-Path '.\phases').Path, (Resolve-Path '.\TemplateHelpDSC').Path)
+    $parseCheckJob = Start-Job -ScriptBlock {
+        param($dirs)
+        $failures = @()
+        foreach ($dir in $dirs) {
+            foreach ($f in Get-ChildItem -Path $dir -Include '*.ps1', '*.psm1' -Recurse) {
+                $t = $null; $e = $null
+                [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$t, [ref]$e)
+                if ($e.Count -gt 0) {
+                    $failures += [PSCustomObject]@{
+                        File   = $f.FullName
+                        Errors = ($e | ForEach-Object { "L$($_.Extent.StartLineNumber): $($_.Message)" }) -join '; '
+                    }
+                }
             }
         }
-        foreach ($psm1 in Get-ChildItem -Path $dir -Filter '*.psm1' -Recurse) {
-            $parseResult = powershell.exe -NoProfile -Command "& {
-                `$t = `$null; `$e = `$null
-                [void][System.Management.Automation.Language.Parser]::ParseFile('$($psm1.FullName)', [ref]`$t, [ref]`$e)
-                if (`$e.Count -gt 0) { `$e | ForEach-Object { `"L`$(`$_.Extent.StartLineNumber): `$(`$_.Message)`" } }
-            }" 2>&1
-            if ($parseResult) {
-                $parseFailures += [PSCustomObject]@{ File = $psm1.FullName; Errors = ($parseResult -join '; ') }
-            }
-        }
-    }
-    if ($parseFailures.Count -gt 0) {
-        Write-Host ""
-        Write-Host "ERROR: $($parseFailures.Count) file(s) failed PS5.1 parse check!" -ForegroundColor Red
-        Write-Host "These files will silently fail when dot-sourced on guest VMs." -ForegroundColor Red
-        Write-Host "Common cause: non-ASCII characters (em-dash, smart quotes) in files without UTF-8 BOM." -ForegroundColor Red
-        Write-Host ""
-        foreach ($f in $parseFailures) {
-            Write-Host "  $($f.File)" -ForegroundColor Yellow
-            Write-Host "    $($f.Errors)" -ForegroundColor DarkYellow
-        }
-        Write-Host ""
-        throw "PS5.1 parse check failed. Fix the above files before deploying to guest VMs."
-    }
-    else {
-        $checkedCount = (Get-ChildItem -Path $parseCheckDirs -Include '*.ps1', '*.psm1' -Recurse).Count
-        Write-Host "All $checkedCount guest scripts passed PS5.1 parse check." -ForegroundColor Green
-    }
+        $checked = ($dirs | ForEach-Object { Get-ChildItem -Path $_ -Include '*.ps1', '*.psm1' -Recurse }).Count
+        [PSCustomObject]@{ Failures = $failures; CheckedCount = $checked }
+    } -ArgumentList (,$parseCheckDirs)
 
     # Create test config, for testing if the config definition is good.
     $role = $ThisVM.role
@@ -175,8 +154,34 @@ try {
 write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath ""C:\Temp\$($role)-Config"" "
     & "$($dscRole)" -DeployConfigPath $filePath -AdminCreds $adminCreds -ConfigurationData $cd -OutputPath "C:\Temp\$($role)-Config" | out-host
     Add-CmdHistory "$($dscRole) -DeployConfigPath $filePath -AdminCreds (Get-Credential) -ConfigurationData $cd -OutputPath `"C:\Temp\$($role)-Config`""
+
+    # Wait for the background parse-check job to finish and report results.
+    if ($parseCheckJob) {
+        Write-Host "`nWaiting for PS5.1 parse-check to complete..."
+        $parseResult = $parseCheckJob | Receive-Job -Wait -AutoRemoveJob
+        $parseFailures = $parseResult.Failures
+        if ($parseFailures.Count -gt 0) {
+            Write-Host ""
+            Write-Host "ERROR: $($parseFailures.Count) file(s) failed PS5.1 parse check!" -ForegroundColor Red
+            Write-Host "These files will silently fail when dot-sourced on guest VMs." -ForegroundColor Red
+            Write-Host "Common cause: non-ASCII characters (em-dash, smart quotes) in files without UTF-8 BOM." -ForegroundColor Red
+            Write-Host ""
+            foreach ($f in $parseFailures) {
+                Write-Host "  $($f.File)" -ForegroundColor Yellow
+                Write-Host "    $($f.Errors)" -ForegroundColor DarkYellow
+            }
+            Write-Host ""
+            throw "PS5.1 parse check failed. Fix the above files before deploying to guest VMs."
+        }
+        else {
+            Write-Host "All $($parseResult.CheckedCount) guest scripts passed PS5.1 parse check." -ForegroundColor Green
+        }
+    }
 }
 finally {
+    if ($parseCheckJob -and $parseCheckJob.State -eq 'Running') {
+        $parseCheckJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
+    }
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
     Set-Location $parentDir
 }
