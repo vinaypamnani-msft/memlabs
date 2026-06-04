@@ -910,7 +910,7 @@ if ($UpdateRequired) {
             $retrytimes++
             continue
         }
-        if ($updatepack.state -eq 196612) {
+        if ($updatepack.state -eq 196612 -or $updatepack.state -eq 199612) {
             $updateCompleted = $true
             break
         }
