@@ -232,6 +232,14 @@ Configuration Phase5
 
         #$node2 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
 
+        # Determine cluster network roles based on where the cluster IP lives.
+        # Old labs: cluster IP on 10.250.250.x — heartbeat network needs client access (Role 3).
+        # New labs: cluster IP on domain subnet — heartbeat is cluster-only (Role 1),
+        #           domain network needs cluster + client access (Role 3).
+        $clusterIPOnHeartbeat = $thisVM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
+        $heartbeatNetRole = if ($clusterIPOnHeartbeat) { '3' } else { '1' }
+        $domainNetRole    = if ($clusterIPOnHeartbeat) { '0' } else { '3' }
+
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
         }
@@ -313,14 +321,14 @@ Configuration Phase5
 
         WriteStatus 'ChangeNetwork-10' {
             DependsOn = $nextDepend
-            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
+            Status    = "Setting 10.250.250.0 to Role $heartbeatNetRole"
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = '1'
+            Role                 = $heartbeatNetRole
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -492,14 +500,14 @@ Configuration Phase5
 
         WriteStatus 'ChangeNetwork-192' {
             DependsOn = $nextDepend
-            Status    = "Adding $($thisVM.thisParams.vmNetwork) to Cluster"
+            Status    = "Setting $($thisVM.thisParams.vmNetwork) to Role $domainNetRole"
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
             Address              = $thisVM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
-            Role                 = '0'
+            Role                 = $domainNetRole
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -705,6 +713,11 @@ Configuration Phase5
 
         #$node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
 
+        # Determine cluster network roles based on where the cluster IP lives.
+        $clusterIPOnHeartbeat = $Node1VM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
+        $heartbeatNetRole = if ($clusterIPOnHeartbeat) { '3' } else { '1' }
+        $domainNetRole    = if ($clusterIPOnHeartbeat) { '0' } else { '3' }
+
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
         }
@@ -816,7 +829,7 @@ Configuration Phase5
         $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
 
         WriteStatus "ChangeNetwork-10" {
-            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
+            Status    = "Setting 10.250.250.0 to Role $heartbeatNetRole"
             DependsOn = $nextDepend
         }
 
@@ -824,7 +837,7 @@ Configuration Phase5
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = '1'
+            Role                 = $heartbeatNetRole
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -988,7 +1001,7 @@ Configuration Phase5
         $nextDepend = '[WaitForAll]AG'
 
         WriteStatus "ChangeNetwork-192" {
-            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to Type 0"
+            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to Role $domainNetRole"
             DependsOn = $nextDepend
         }
 
@@ -996,7 +1009,7 @@ Configuration Phase5
             Address              = $Node1VM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
-            Role                 = '0'
+            Role                 = $domainNetRole
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
