@@ -8,7 +8,7 @@ Configuration Phase5
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'xFailOverCluster', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -278,14 +278,14 @@ Configuration Phase5
             Status    = "Creating Cluster $($thisVM.ClusterName) on $($thisVM.thisParams.SQLAO.ClusterIPAddress)"
         }
 
-        xCluster CreateCluster {
+        Cluster CreateCluster {
             Name                          = $thisVM.ClusterName
             StaticIPAddress               = $thisVM.thisParams.SQLAO.ClusterIPAddress
             # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
             DomainAdministratorCredential = $Admincreds
             DependsOn                     = $nextDepend
         }
-        $nextDepend = '[xCluster]CreateCluster'
+        $nextDepend = '[Cluster]CreateCluster'
 
         WriteStatus EnsureClusterDns {
             DependsOn = $nextDepend
@@ -309,7 +309,7 @@ Configuration Phase5
 
         WaitForAny CreateCluster {
             NodeName             = $node2
-            ResourceName         = "[xCluster]JoinSecondNodeToCluster"
+            ResourceName         = "[Cluster]JoinSecondNodeToCluster"
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
@@ -322,7 +322,7 @@ Configuration Phase5
             Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
         }
 
-        xClusterNetwork 'ChangeNetwork-10' {
+        ClusterNetwork 'ChangeNetwork-10' {
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
@@ -330,7 +330,7 @@ Configuration Phase5
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xClusterNetwork]ChangeNetwork-10'
+        $nextDepend = '[ClusterNetwork]ChangeNetwork-10'
 
         WriteStatus WaitForFS {
             Status    = "Waiting for '$($thisVM.fileServerVM)' to Complete"
@@ -353,11 +353,11 @@ Configuration Phase5
 
         WaitForAny WaitForClusterJoin {
             NodeName             = $node2
-            ResourceName         = '[xClusterQuorum]ClusterWitness'
+            ResourceName         = '[ClusterQuorum]ClusterWitness'
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[xCluster]CreateCluster'
+            DependsOn            = '[Cluster]CreateCluster'
         }
 
         $nextDepend = "[WaitForAny]WaitForClusterJoin"
@@ -503,7 +503,7 @@ Configuration Phase5
             Status    = "Setting $($thisVM.thisParams.vmNetwork) to cluster + client (Role 3)"
         }
 
-        xClusterNetwork 'ChangeNetwork-192' {
+        ClusterNetwork 'ChangeNetwork-192' {
             Address              = $thisVM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
@@ -511,7 +511,7 @@ Configuration Phase5
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+        $nextDepend = '[ClusterNetwork]ChangeNetwork-192'
         } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SQLAG {
@@ -778,14 +778,14 @@ Configuration Phase5
             DependsOn = $nextDepend
         }
 
-        xWaitForCluster WaitForCluster {
+        WaitForCluster WaitForCluster {
             Name                 = $Node1VM.ClusterName
             RetryIntervalSec     = 180
             RetryCount           = 20
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xWaitForCluster]WaitForCluster'
+        $nextDepend = '[WaitForCluster]WaitForCluster'
 
         WriteStatus WaitClusterAccess {
             Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to be accessible by name"
@@ -808,13 +808,13 @@ Configuration Phase5
             DependsOn = $nextDepend
         }
 
-        xCluster JoinSecondNodeToCluster {
+        Cluster JoinSecondNodeToCluster {
             Name                          = $Node1VM.ClusterName
             StaticIPAddress               = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             DomainAdministratorCredential = $Admincreds
             DependsOn                     = $nextDepend
         }
-        $nextDepend = '[xCluster]JoinSecondNodeToCluster'
+        $nextDepend = '[Cluster]JoinSecondNodeToCluster'
 
         WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
@@ -837,7 +837,7 @@ Configuration Phase5
             DependsOn = $nextDepend
         }
 
-        xClusterNetwork 'ChangeNetwork-10' {
+        ClusterNetwork 'ChangeNetwork-10' {
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
@@ -845,7 +845,7 @@ Configuration Phase5
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xClusterNetwork]ChangeNetwork-10'
+        $nextDepend = '[ClusterNetwork]ChangeNetwork-10'
 
 
 
@@ -870,14 +870,14 @@ Configuration Phase5
         }
 
 
-        xClusterQuorum 'ClusterWitness' {
+        ClusterQuorum 'ClusterWitness' {
             IsSingleInstance     = 'Yes'
             Type                 = 'NodeAndFileShareMajority'
             Resource             = $node1VM.thisParams.SQLAO.WitnessShareFQ
             DependsOn            = '[WaitForAny]FileShareComplete'
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xClusterQuorum]ClusterWitness'
+        $nextDepend = '[ClusterQuorum]ClusterWitness'
         } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SqlLogins {
@@ -1011,7 +1011,7 @@ Configuration Phase5
             DependsOn = $nextDepend
         }
 
-        xClusterNetwork 'ChangeNetwork-192' {
+        ClusterNetwork 'ChangeNetwork-192' {
             Address              = $Node1VM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
@@ -1019,7 +1019,7 @@ Configuration Phase5
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+        $nextDepend = '[ClusterNetwork]ChangeNetwork-192'
         } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SQLAO2 {
@@ -1130,6 +1130,62 @@ Configuration Phase5
             }
 
             $adGroupDependency += "[ADGroup]SQLAOGroup$($pNode.vmName)"
+
+            # Create PTR records for the cluster IP and AG listener IP so that
+            # reverse DNS lookups work. OpenCluster() and other cluster APIs may
+            # need reverse resolution. Skip legacy labs on the heartbeat subnet.
+            $_clusterIP = $pNode.thisParams.SQLAO.ClusterIPAddress -replace '/.*$', ''
+            $_agIP = $pNode.thisParams.SQLAO.AGIPAddress -replace '/.*$', ''
+            $_clusterFqdn = "$($pNode.ClusterName).$DomainName"
+            $_listenerFqdn = "$($pNode.thisParams.SQLAO.AlwaysOnListenerName).$DomainName"
+
+            Script "ClusterPtrRecords$i" {
+                SetScript  = {
+                    $entries = @(
+                        @{ IP = $using:_clusterIP; FQDN = $using:_clusterFqdn },
+                        @{ IP = $using:_agIP; FQDN = $using:_listenerFqdn }
+                    )
+                    foreach ($entry in $entries) {
+                        if ($entry.IP -match '^10\.250\.250\.') { continue }
+                        $octets = $entry.IP.Split('.')
+                        $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                        $hostOctet = $octets[3]
+
+                        $zone = Get-DnsServerZone -Name $zoneName -ErrorAction SilentlyContinue
+                        if (-not $zone) {
+                            $networkId = "$($octets[0]).$($octets[1]).$($octets[2]).0/24"
+                            Add-DnsServerPrimaryZone -NetworkId $networkId -ReplicationScope Domain -DynamicUpdate Secure -ErrorAction Stop
+                        }
+
+                        $existing = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
+                        if ($existing) {
+                            Remove-DnsServerResourceRecord -ZoneName $zoneName -InputObject $existing -Force -ErrorAction SilentlyContinue
+                        }
+                        Add-DnsServerResourceRecordPtr -ZoneName $zoneName -Name $hostOctet -PtrDomainName "$($entry.FQDN)." -ErrorAction Stop
+                    }
+                }
+                TestScript = {
+                    $entries = @(
+                        @{ IP = $using:_clusterIP; FQDN = $using:_clusterFqdn },
+                        @{ IP = $using:_agIP; FQDN = $using:_listenerFqdn }
+                    )
+                    foreach ($entry in $entries) {
+                        if ($entry.IP -match '^10\.250\.250\.') { continue }
+                        $octets = $entry.IP.Split('.')
+                        $zoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                        $hostOctet = $octets[3]
+
+                        $ptr = Get-DnsServerResourceRecord -ZoneName $zoneName -Name $hostOctet -RRType Ptr -ErrorAction SilentlyContinue
+                        if (-not $ptr -or $ptr.RecordData.PtrDomainName -ne "$($entry.FQDN).") {
+                            return $false
+                        }
+                    }
+                    return $true
+                }
+                GetScript  = { return @{ Result = "N/A" } }
+                DependsOn  = '[WriteStatus]SQLAOGroup'
+            }
+            $adGroupDependency += "[Script]ClusterPtrRecords$i"
         }
 
         WriteStatus Complete {

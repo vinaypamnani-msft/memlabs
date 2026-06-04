@@ -8,7 +8,7 @@ Configuration Phase8
         [System.Management.Automation.PSCredential]$Admincreds
     )
 
-    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'xFailOverCluster', 'AccessControlDsc', 'SqlServerDsc'
+    Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'TemplateHelpDSC', 'ActiveDirectoryDsc', 'ComputerManagementDsc', 'FailoverClusterDsc', 'AccessControlDsc', 'SqlServerDsc'
 
     # Read config
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json

@@ -40,7 +40,7 @@ try {
         'SqlServerDsc',
         'xDhcpServer',
         'NetworkingDsc',
-        'xFailOverCluster',
+        'FailoverClusterDsc',
         'AccessControlDsc',
         'UpdateServicesDsc',
         'LanguageDsc',
