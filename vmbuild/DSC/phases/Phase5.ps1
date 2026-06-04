@@ -771,9 +771,10 @@ Configuration Phase5
         }
 
         JoinClusterByIP JoinSecondNodeToCluster {
-            ClusterName          = $Node1VM.ClusterName
-            ClusterIPAddress     = $Node1VM.thisParams.SQLAO.ClusterIPAddress
-            DependsOn            = $nextDepend
+            ClusterName                   = $Node1VM.ClusterName
+            ClusterIPAddress              = $Node1VM.thisParams.SQLAO.ClusterIPAddress
+            DomainAdministratorCredential = $Admincreds
+            DependsOn                     = $nextDepend
         }
         $nextDepend = '[JoinClusterByIP]JoinSecondNodeToCluster'
 

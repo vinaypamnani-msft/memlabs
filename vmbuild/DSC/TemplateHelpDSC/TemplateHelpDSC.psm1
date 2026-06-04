@@ -4269,24 +4269,42 @@ class JoinClusterByIP {
         $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
         $_NodeName = $env:COMPUTERNAME
         $_ClusterName = $this.ClusterName
+        $_Credential = $this.DomainAdministratorCredential
 
-        # Check for existing node in Down state — must remove before re-adding (matches xCluster behavior)
-        try {
-            $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
-            if ($existingNode -and $existingNode.State -eq 'Down') {
-                Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
-                Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
-                Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
+        # Build a scriptblock that runs cluster commands.  When a credential is
+        # supplied we invoke it inside a fresh logon session (Invoke-Command to
+        # localhost) so the Kerberos token can authenticate to the remote
+        # cluster — otherwise Add-ClusterNode hits the double-hop problem.
+        $clusterWork = {
+            param ($ClusterIP, $NodeName, $ClusterName)
+
+            # Check for existing node in Down state — must remove before re-adding
+            try {
+                $existingNode = Get-ClusterNode -Cluster $ClusterIP -Name $NodeName -ErrorAction SilentlyContinue
+                if ($existingNode -and $existingNode.State -eq 'Down') {
+                    Write-Verbose "Node '$NodeName' is in Down state in cluster '$ClusterName' — removing before re-add"
+                    Remove-ClusterNode -Name $NodeName -Cluster $ClusterIP -Force -ErrorAction Stop
+                    Write-Verbose "Removed downed node '$NodeName' from cluster '$ClusterName'"
+                }
             }
-        }
-        catch {
-            Write-Status "Error checking/removing downed node: $_"
-            # Continue — Add-ClusterNode will fail with a clear error if the node still exists
+            catch {
+                Write-Verbose "Error checking/removing downed node: $_"
+            }
+
+            Write-Verbose "Joining node '$NodeName' to cluster '$ClusterName' via IP $ClusterIP"
+            Add-ClusterNode -Name $NodeName -Cluster $ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
+            Write-Verbose "Successfully joined '$NodeName' to cluster '$ClusterName'"
         }
 
         Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
         try {
-            Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
+            if ($_Credential) {
+                # Fresh logon session avoids Kerberos double-hop
+                Invoke-Command -ComputerName localhost -Credential $_Credential -ScriptBlock $clusterWork -ArgumentList $_ClusterIP, $_NodeName, $_ClusterName -ErrorAction Stop
+            }
+            else {
+                & $clusterWork $_ClusterIP $_NodeName $_ClusterName
+            }
             Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
         }
         catch {
