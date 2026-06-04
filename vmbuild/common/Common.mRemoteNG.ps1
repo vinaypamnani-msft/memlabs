@@ -898,6 +898,98 @@ function Remove-MissingDomainsFromMRemoteNG {
     return $return
 }
 
+function Get-MECMSiteHierarchy {
+    <#
+    .SYNOPSIS
+        Analyzes the VM list and returns MECM site hierarchy info for grouping.
+    .DESCRIPTION
+        Returns site entries ordered by rank (CAS, PRI, SEC) and a mapping
+        of each MECM-related VM to its owning site code.
+    #>
+    param([array]$VmListFull)
+
+    $siteServers = @($VmListFull | Where-Object { $_.Role -in "CAS", "Primary", "Secondary" })
+    if ($siteServers.Count -eq 0) { return $null }
+
+    $rankMap = @{ "CAS" = 0; "Primary" = 1; "Secondary" = 2 }
+    $sites = @($siteServers | Sort-Object { $rankMap[$_.Role] }, SiteCode | ForEach-Object {
+        [PSCustomObject]@{
+            SiteCode       = $_.SiteCode
+            Role           = $_.Role
+            ParentSiteCode = $_.ParentSiteCode
+            RoleLabel      = switch ($_.Role) { "CAS" { "CAS" } "Primary" { "PRI" } "Secondary" { "SEC" } }
+        }
+    })
+
+    # Map each MECM VM to its owning site code
+    $vmSiteMap = @{}
+    foreach ($vm in $VmListFull) {
+        # VMs with a direct SiteCode and an MECM role
+        if ($vm.SiteCode -and $vm.Role -in "CAS", "Primary", "Secondary", "SiteSystem", "PassiveSite") {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+
+        # WSUS with SUP belongs to its site
+        if ($vm.Role -eq "WSUS" -and ($vm.installSUP -or $vm.InstallSUP) -and $vm.SiteCode) {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+
+        # SQLAO or DomainMember with SqlVersion hosting a site DB
+        if ($vm.SqlVersion -or $vm.Role -eq "SQLAO") {
+            $primaryNode = $vm
+            if ($vm.Role -eq "SQLAO" -and -not $vm.OtherNode) {
+                $primaryNode = $VmListFull | Where-Object { $_.OtherNode -eq $vm.vmName } | Select-Object -First 1
+                if (-not $primaryNode) { $primaryNode = $vm }
+            }
+            $siteRef = $VmListFull | Where-Object { $_.RemoteSQLVM -eq $primaryNode.vmName -and $_.Role -in "Primary", "CAS" } | Select-Object -First 1
+            if ($siteRef) {
+                $vmSiteMap[$vm.vmName] = $siteRef.SiteCode
+                if ($vm.OtherNode) { $vmSiteMap[$vm.OtherNode] = $siteRef.SiteCode }
+                continue
+            }
+        }
+
+        # DomainMember with installSUP
+        if ($vm.Role -eq "DomainMember" -and ($vm.installSUP -or $vm.InstallSUP) -and $vm.SiteCode) {
+            $vmSiteMap[$vm.vmName] = $vm.SiteCode
+            continue
+        }
+    }
+
+    $label = "{" + (($sites | ForEach-Object { $_.SiteCode }) -join ", ") + "}"
+
+    return [PSCustomObject]@{
+        Sites     = $sites
+        VmSiteMap = $vmSiteMap
+        Label     = $label
+    }
+}
+
+function Get-MECMSiteRolePriority {
+    <#
+    .SYNOPSIS
+        Returns a numeric sort priority for a VM within its MECM site group.
+        Lower values sort first (site server → passive → SQL → site systems).
+    #>
+    param($Vm)
+    switch ($Vm.Role) {
+        "CAS"          { return 0 }
+        "Primary"      { return 1 }
+        "Secondary"    { return 2 }
+        "PassiveSite"  { return 3 }
+        "SQLAO"        { return 4 }
+        "SiteSystem"   { return 6 }
+        "WSUS"         { return 7 }
+        "DomainMember" {
+            if ($Vm.SqlVersion) { return 5 }
+            return 8
+        }
+        default        { return 9 }
+    }
+}
+
 function New-MRemoteNGFileFromHyperV {
     [CmdletBinding()]
     param(
@@ -1052,9 +1144,15 @@ function New-MRemoteNGFileFromHyperV {
         $groupContainers = @{}
         foreach ($grpName in $groupOrder) {
             if (-not $neededGroups[$grpName]) { continue }
-            $existing = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $grpName } | Select-Object -First 1
-            if ($existing) {
-                $groupContainers[$grpName] = $existing
+            # MECMServers container may have been renamed to include site codes (e.g. "MECMServers {YUM, NOM}")
+            if ($grpName -eq "MECMServers") {
+                $existingGrp = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -match '^MECMServers' } | Select-Object -First 1
+            }
+            else {
+                $existingGrp = $container.SelectNodes("Node[@Type='Container']") | Where-Object { $_.Name -eq $grpName } | Select-Object -First 1
+            }
+            if ($existingGrp) {
+                $groupContainers[$grpName] = $existingGrp
             }
             else {
                 $expanded = $grpName -in @("MECMServers", "DomainServers")
@@ -1063,6 +1161,65 @@ function New-MRemoteNGFileFromHyperV {
                 [void]$container.AppendChild($grpNode)
                 $groupContainers[$grpName] = $grpNode
                 $shouldSave = $true
+            }
+        }
+
+        # --- MECM site hierarchy sub-containers ---
+        $siteHierarchy = $null
+        $siteContainers = @{}
+        if ($neededGroups["MECMServers"]) {
+            $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
+            if ($siteHierarchy) {
+                $mecmContainer = $groupContainers["MECMServers"]
+
+                # Update container name to show site codes
+                $mecmLabel = "MECMServers $($siteHierarchy.Label)"
+                if ($mecmContainer.GetAttribute("Name") -ne $mecmLabel) {
+                    $mecmContainer.SetAttribute("Name", $mecmLabel)
+                    $shouldSave = $true
+                }
+
+                # Migrate: remove direct connections from MECMServers container
+                # (they belong in site sub-containers and will be re-added below)
+                $directConns = @($mecmContainer.SelectNodes("Node[@Type='Connection']"))
+                if ($directConns.Count -gt 0) {
+                    foreach ($conn in $directConns) {
+                        [void]$mecmContainer.RemoveChild($conn)
+                    }
+                    $shouldSave = $true
+                }
+
+                # Create/find site sub-containers ordered by rank (CAS, PRI, SEC)
+                foreach ($site in $siteHierarchy.Sites) {
+                    $siteName = "$($site.RoleLabel) ($($site.SiteCode))"
+                    $existingSite = $mecmContainer.SelectNodes("Node[@Type='Container']") |
+                        Where-Object { $_.Name -eq $siteName -or $_.Name -match "^$([regex]::Escape($site.RoleLabel))\s*\($([regex]::Escape($site.SiteCode))\)" } |
+                        Select-Object -First 1
+                    if ($existingSite) {
+                        if ($existingSite.GetAttribute("Name") -ne $siteName) {
+                            $existingSite.SetAttribute("Name", $siteName)
+                            $shouldSave = $true
+                        }
+                        $siteContainers[$site.SiteCode] = $existingSite
+                    }
+                    else {
+                        $siteNode = New-MRemoteNGContainerNode -Doc $doc -Name $siteName `
+                            -Username $username -Domain $domain -Password $encryptedPass -Expanded $true
+                        [void]$mecmContainer.AppendChild($siteNode)
+                        $siteContainers[$site.SiteCode] = $siteNode
+                        $shouldSave = $true
+                    }
+
+                    # Clear existing connections for fresh rebuild (ensures correct site placement)
+                    $sc = $siteContainers[$site.SiteCode]
+                    $existingConns = @($sc.SelectNodes("Node[@Type='Connection']"))
+                    if ($existingConns.Count -gt 0) {
+                        foreach ($econn in $existingConns) {
+                            [void]$sc.RemoveChild($econn)
+                        }
+                        $shouldSave = $true
+                    }
+                }
             }
         }
 
@@ -1145,6 +1302,14 @@ function New-MRemoteNGFileFromHyperV {
             $vmGroup = Get-MRemoteNGGroupForVM -Vm $vm -VmListFull $vmListFull
             $targetContainer = $groupContainers[$vmGroup]
             if (-not $targetContainer) { $targetContainer = $container }
+
+            # Route MECM VMs to site sub-containers
+            if ($vmGroup -eq "MECMServers" -and $siteHierarchy -and $siteContainers.Count -gt 0) {
+                $vmSite = $siteHierarchy.VmSiteMap[$vm.vmName]
+                if ($vmSite -and $siteContainers[$vmSite]) {
+                    $targetContainer = $siteContainers[$vmSite]
+                }
+            }
 
             $comment = Format-MRemoteNGTooltip -Vm $vm -CmVersion $cmVersion -VmListFull $vmListFull
             $name = $vm.VmName
@@ -1263,6 +1428,34 @@ function New-MRemoteNGFileFromHyperV {
                     -UseEnhancedMode $(if ($vmID) { $true } else { $false }) `
                     -ForceOverwrite $ForceOverwrite) {
                 $shouldSave = $true
+            }
+        }
+
+        # --- Sort MECM site sub-containers by role priority ---
+        if ($siteHierarchy -and $siteContainers.Count -gt 0) {
+            foreach ($siteCode in $siteContainers.Keys) {
+                $siteContainer = $siteContainers[$siteCode]
+                $connections = @($siteContainer.SelectNodes("Node[@Type='Connection']"))
+                if ($connections.Count -le 1) { continue }
+
+                $sorted = @($connections | Sort-Object {
+                    $hostname = $_.GetAttribute("Hostname")
+                    $vm = $vmListFull | Where-Object { $_.vmName -eq $hostname } | Select-Object -First 1
+                    if ($vm) { Get-MECMSiteRolePriority -Vm $vm } else { 99 }
+                })
+
+                $needsReorder = $false
+                for ($i = 0; $i -lt $sorted.Count; $i++) {
+                    if ($connections[$i].GetAttribute("Name") -ne $sorted[$i].GetAttribute("Name")) {
+                        $needsReorder = $true
+                        break
+                    }
+                }
+                if ($needsReorder) {
+                    foreach ($conn in $sorted) { [void]$siteContainer.RemoveChild($conn) }
+                    foreach ($conn in $sorted) { [void]$siteContainer.AppendChild($conn) }
+                    $shouldSave = $true
+                }
             }
         }
 

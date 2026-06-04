@@ -442,6 +442,9 @@ function New-RDCManFileFromHyperV {
             $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
         }
 
+        # Compute MECM site hierarchy for per-site smartGroup generation
+        $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
+
         $hasLinuxRdp = $false
         foreach ($vm in $vmListFull) {
             if (Test-VmIsLinux -Vm $vm) {
@@ -536,6 +539,11 @@ function New-RDCManFileFromHyperV {
                         $c | Add-Member -MemberType NoteProperty -Name "Comment" -Value "PlainMemberServer" -force
                     }
                 }
+            }
+
+            # Tag MECM VMs with their owning site for per-site smartGroup matching
+            if ($siteHierarchy -and $siteHierarchy.VmSiteMap[$vm.vmName]) {
+                $c | Add-Member -MemberType NoteProperty -Name "SiteGroupTag" -Value "site_$($siteHierarchy.VmSiteMap[$vm.vmName])" -Force
             }
 
             $comment = $c | ConvertTo-Json
@@ -687,6 +695,45 @@ function New-RDCManFileFromHyperV {
             $clonedItem = $existing.ImportNode($clonedItem, $true)
             [void]$findGroup.AppendChild($clonedItem)
         }
+
+        # Replace the flat MECMServers smartGroup with per-site smartGroups
+        if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
+            $mecmSG = $findgroup.SelectNodes('smartGroup') | Where-Object { $_.properties.name -eq "MECMServers" } | Select-Object -First 1
+            if ($mecmSG) {
+                $insertBefore = $mecmSG.NextSibling
+                [void]$findGroup.RemoveChild($mecmSG)
+
+                foreach ($site in $siteHierarchy.Sites) {
+                    $sgName = "$($site.RoleLabel) ($($site.SiteCode))"
+
+                    [xml]$sgXml = @"
+<smartGroup>
+    <properties>
+        <expanded>True</expanded>
+        <name>$sgName</name>
+    </properties>
+    <ruleGroup operator="Any">
+        <rule>
+            <property>Comment</property>
+            <operator>Matches</operator>
+            <value>"site_$($site.SiteCode)"</value>
+        </rule>
+    </ruleGroup>
+</smartGroup>
+"@
+
+                    $importedSG = $existing.ImportNode($sgXml.smartGroup, $true)
+                    if ($insertBefore) {
+                        [void]$findGroup.InsertBefore($importedSG, $insertBefore)
+                    }
+                    else {
+                        [void]$findGroup.AppendChild($importedSG)
+                    }
+                }
+                $shouldSave = $true
+            }
+        }
+
         $roles = $vmListFull | Select-Object -ExpandProperty role
         $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object { $_.properties.name -eq "Servers" } | Select-Object -First 1
         #write-host $SmartGroupToClone.properties.name
