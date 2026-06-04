@@ -1656,13 +1656,15 @@ $global:VM_Config = {
             }
 
             # Copy DSC files
-            Write-Progress2 $Activity -Status "Copying DSC files to the VM." -percentcomplete 35 -force
+            Write-Progress2 $Activity -Status "Creating C:\staging\DSC" -percentcomplete 33 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -DisplayName "Creating C:\staging\DSC"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create staging directory on the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
+
+            Write-Progress2 $Activity -Status "Copying DSC files to the VM" -percentcomplete 35 -force
 
             # Copy-ItemSafe has 3 internal retries (~12 min worst case).
             # DSC copy is critical, so retry up to 2 more times at the caller level.
@@ -1671,6 +1673,7 @@ $global:VM_Config = {
                 if ($copyAttempt -gt 1) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Caller retry $($copyAttempt - 1)/2 after 30s delay..." -Warning
                     Start-Sleep -Seconds 30
+                    Write-Progress2 $Activity -Status "Copying DSC files to the VM (retry $($copyAttempt - 1)/2)" -percentcomplete 36 -force
                 }
                 $copyResults = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path "$rootPath\DSC" -Destination "C:\staging" -Recurse -Container -Force
                 if ($copyResults -ne $false) { break }
