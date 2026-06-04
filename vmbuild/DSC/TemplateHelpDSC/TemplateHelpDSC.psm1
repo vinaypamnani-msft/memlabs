@@ -4347,16 +4347,16 @@ class JoinClusterByIP {
 
             if ($_Role -eq 'Create') {
                 Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
-                New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue
+                New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false
                 Write-Status "Successfully created cluster '$_ClusterName'"
             }
             else {
                 # Check for existing node in Down state — must remove before re-adding
                 try {
-                    $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
+                    $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
                     if ($existingNode -and $existingNode.State -eq 'Down') {
                         Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
-                        Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
+                        Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop -Verbose:$false
                         Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
                     }
                 }
@@ -4397,7 +4397,7 @@ class JoinClusterByIP {
                 ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
             }
 
-            $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
+            $node = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
             if ($node) {
                 if ($node.State -eq 'Up' -or $node.State -eq 'Paused') {
                     Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' (State: $($node.State))"
