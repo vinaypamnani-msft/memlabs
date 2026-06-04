@@ -3898,9 +3898,33 @@ class WaitForClusterAccess {
                     }
 
                     if ($nameResOnline) {
-                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online — accepting as accessible"
-                        $this.LastError = $null
-                        return $true
+                        # Cluster Name resource is Online but Get-Cluster by name
+                        # still failed — force DNS re-registration and retry once
+                        # by name. xCluster and other resources connect by name,
+                        # so we can't accept IP-only access.
+                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online — forcing DNS update and retrying by name"
+                        try {
+                            $nameRes2 = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
+                                Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
+                            if ($nameRes2) {
+                                $nameRes2 | Update-ClusterNetworkNameResource -ErrorAction Stop
+                                Write-Verbose "Update-ClusterNetworkNameResource succeeded"
+                            }
+                        } catch {
+                            Write-Verbose "Update-ClusterNetworkNameResource failed: $_"
+                        }
+                        Clear-DnsClientCache
+                        Start-Sleep -Seconds 5
+
+                        try {
+                            $null = Get-Cluster -Name $name -ErrorAction Stop
+                            Write-Status "Get-Cluster by name succeeded after DNS update"
+                            $this.LastError = $null
+                            return $true
+                        } catch {
+                            $this.LastError = "Get-Cluster by name still fails after DNS update ($($_.Exception.Message)); IP $_ClusterIP works, Cluster Name Online — will retry"
+                            return $false
+                        }
                     }
 
                     $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED — Cluster Name resource not Online"
