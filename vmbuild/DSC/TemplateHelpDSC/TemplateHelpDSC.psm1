@@ -6071,12 +6071,18 @@ class DisableClusterNicDnsRegistration {
         Clear-DnsClientCache -ErrorAction SilentlyContinue
 
         # 4. Scope cluster heartbeat firewall rule to cluster subnet only.
+        #    Derive CIDR from the subnet property (e.g. '10.250.250.' -> '10.250.250.0/24')
+        #    by counting the octets provided. 3 octets = /24, 2 = /16, 1 = /8.
+        $octets = ($_subnet.TrimEnd('.') -split '\.').Count
+        $cidrBits = $octets * 8
+        $networkAddr = $_subnet.TrimEnd('.') + ('.0' * (4 - $octets))
+        $cidr = "$networkAddr/$cidrBits"
         $ruleName = 'WSFC Heartbeat (Cluster Subnet)'
         if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
             New-NetFirewallRule -DisplayName $ruleName `
                 -Direction Inbound -Protocol UDP -LocalPort 3343 `
-                -RemoteAddress "${_subnet}0/24" -Action Allow -ErrorAction SilentlyContinue | Out-Null
-            Write-Status "Created firewall rule '$ruleName'"
+                -RemoteAddress $cidr -Action Allow -ErrorAction SilentlyContinue | Out-Null
+            Write-Status "Created firewall rule '$ruleName' ($cidr)"
         }
 
         # 5. Set RegisterAllProvidersIP=0 on the Cluster Name resource so only the
@@ -6089,7 +6095,11 @@ class DisableClusterNicDnsRegistration {
                 $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
                 if ($regAll -ne 0) {
                     $clusNameRes | Set-ClusterParameter -Name RegisterAllProvidersIP -Value 0 -ErrorAction Stop
-                    Write-Status "Set RegisterAllProvidersIP=0 on Cluster Name resource"
+                    # Bounce the resource so the parameter takes effect immediately
+                    # instead of waiting for the next failover.
+                    $clusNameRes | Stop-ClusterResource -ErrorAction SilentlyContinue
+                    $clusNameRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                    Write-Status "Set RegisterAllProvidersIP=0 on Cluster Name resource (restarted)"
                 }
             }
             catch {
