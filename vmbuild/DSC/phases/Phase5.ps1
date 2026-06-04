@@ -232,13 +232,10 @@ Configuration Phase5
 
         #$node2 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode2' }).NodeName
 
-        # Determine cluster network roles based on where the cluster IP lives.
-        # Old labs: cluster IP on 10.250.250.x — heartbeat network needs client access (Role 3).
-        # New labs: cluster IP on domain subnet — heartbeat is cluster-only (Role 1),
-        #           domain network needs cluster + client access (Role 3).
+        # Detect legacy labs where the cluster IP is on the 10.250.250.x heartbeat
+        # subnet. Skip all cluster setup steps for those — the cluster is already
+        # running. New labs set up the cluster fresh with proper network roles.
         $clusterIPOnHeartbeat = $thisVM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
-        $heartbeatNetRole = if ($clusterIPOnHeartbeat) { '3' } else { '1' }
-        $domainNetRole    = if ($clusterIPOnHeartbeat) { '0' } else { '3' }
 
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
@@ -258,6 +255,7 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
+        if (-not $clusterIPOnHeartbeat) {
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
 
         WriteStatus PreClusterNicConfig {
@@ -321,14 +319,14 @@ Configuration Phase5
 
         WriteStatus 'ChangeNetwork-10' {
             DependsOn = $nextDepend
-            Status    = "Setting 10.250.250.0 to Role $heartbeatNetRole"
+            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = $heartbeatNetRole
+            Role                 = '1'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -393,6 +391,7 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
+        } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SvcAccount {
             DependsOn = $nextDepend
@@ -498,20 +497,22 @@ Configuration Phase5
         }
         $nextDepend = '[SqlAlwaysOnService]EnableHADR'
 
+        if (-not $clusterIPOnHeartbeat) {
         WriteStatus 'ChangeNetwork-192' {
             DependsOn = $nextDepend
-            Status    = "Setting $($thisVM.thisParams.vmNetwork) to Role $domainNetRole"
+            Status    = "Setting $($thisVM.thisParams.vmNetwork) to cluster + client (Role 3)"
         }
 
         xClusterNetwork 'ChangeNetwork-192' {
             Address              = $thisVM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
-            Role                 = $domainNetRole
+            Role                 = '3'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+        } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SQLAG {
             DependsOn = $nextDepend
@@ -559,6 +560,7 @@ Configuration Phase5
         }
         $nextDepend = '[SqlAGListener]AvailabilityGroupListener'
 
+        if (-not $clusterIPOnHeartbeat) {
         WriteStatus ClusterRemoveUnwantedIPs {
             DependsOn = $nextDepend
             Status    = "Removing DHCP IPs from Cluster"
@@ -570,6 +572,7 @@ Configuration Phase5
             DependsOn            = $nextDepend
         }
         $nextDepend = '[ClusterRemoveUnwantedIPs]ClusterRemoveUnwantedIPs'
+        } # end if (-not $clusterIPOnHeartbeat)
 
 
         $lspn1 = "MSSQLSvc/" + $thisVM.thisParams.SQLAO.AlwaysOnListenerName
@@ -713,10 +716,10 @@ Configuration Phase5
 
         #$node1 = ($AllNodes | Where-Object { $_.Role -eq 'ClusterNode1' }).NodeName
 
-        # Determine cluster network roles based on where the cluster IP lives.
+        # Detect legacy labs where the cluster IP is on the 10.250.250.x heartbeat
+        # subnet. Skip all cluster setup steps for those — the cluster is already
+        # running. New labs set up the cluster fresh with proper network roles.
         $clusterIPOnHeartbeat = $Node1VM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
-        $heartbeatNetRole = if ($clusterIPOnHeartbeat) { '3' } else { '1' }
-        $domainNetRole    = if ($clusterIPOnHeartbeat) { '0' } else { '3' }
 
         WriteStatus WindowsFeature {
             Status = "Adding Windows Features"
@@ -736,6 +739,7 @@ Configuration Phase5
 
         $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
 
+        if (-not $clusterIPOnHeartbeat) {
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
 
         WriteStatus PreClusterNicConfig {
@@ -829,7 +833,7 @@ Configuration Phase5
         $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
 
         WriteStatus "ChangeNetwork-10" {
-            Status    = "Setting 10.250.250.0 to Role $heartbeatNetRole"
+            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
             DependsOn = $nextDepend
         }
 
@@ -837,7 +841,7 @@ Configuration Phase5
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = $heartbeatNetRole
+            Role                 = '1'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -874,6 +878,7 @@ Configuration Phase5
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xClusterQuorum]ClusterWitness'
+        } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SqlLogins {
             Status    = "Adding SQL Logins"
@@ -1000,8 +1005,9 @@ Configuration Phase5
         }
         $nextDepend = '[WaitForAll]AG'
 
+        if (-not $clusterIPOnHeartbeat) {
         WriteStatus "ChangeNetwork-192" {
-            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to Role $domainNetRole"
+            Status    = "Setting Domain Network $($Node1VM.thisParams.vmNetwork) to cluster + client (Role 3)"
             DependsOn = $nextDepend
         }
 
@@ -1009,11 +1015,12 @@ Configuration Phase5
             Address              = $Node1VM.thisParams.vmNetwork
             AddressMask          = '255.255.255.0'
             Name                 = 'Domain Network'
-            Role                 = $domainNetRole
+            Role                 = '3'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
         $nextDepend = '[xClusterNetwork]ChangeNetwork-192'
+        } # end if (-not $clusterIPOnHeartbeat)
 
         WriteStatus SQLAO2 {
             DependsOn = $nextDepend
