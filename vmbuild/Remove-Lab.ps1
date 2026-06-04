@@ -40,8 +40,8 @@ if ($Common.Initialized) {
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
-# Dot source common
-. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose
+# Dot source common (RemoveOnly profile skips ~20 files and expensive init)
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -StartupProfile RemoveOnly
 
 if ($Orphaned.IsPresent) {
     Remove-Orphaned -WhatIf:$WhatIf

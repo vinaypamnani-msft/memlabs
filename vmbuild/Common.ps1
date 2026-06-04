@@ -5528,7 +5528,7 @@ if (-not $Common.Initialized) {
     $profileSkipEnvironmentDetection = $false
     $profileSkipHostPreparation = $false
 
-    if ($StartupProfile -eq "Fast") {
+    if ($StartupProfile -eq "Fast" -or $removeOnlyProfile) {
         $profileSkipStorageInit = $true
         $profileSkipMaintenanceRefresh = $true
         $profileSkipVmCacheRefresh = $true
