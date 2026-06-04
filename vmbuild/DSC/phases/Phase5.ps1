@@ -286,7 +286,7 @@ Configuration Phase5
 
         WaitForAny CreateCluster {
             NodeName             = $node2
-            ResourceName         = "[JoinClusterByIP]JoinSecondNodeToCluster"
+            ResourceName         = "[xCluster]JoinSecondNodeToCluster"
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
@@ -759,14 +759,13 @@ Configuration Phase5
             DependsOn = $nextDepend
         }
 
-        JoinClusterByIP JoinSecondNodeToCluster {
-            ClusterName                   = $Node1VM.ClusterName
-            ClusterIPAddress              = $Node1VM.thisParams.SQLAO.ClusterIPAddress
+        xCluster JoinSecondNodeToCluster {
+            Name                          = $Node1VM.ClusterName
+            StaticIPAddress               = $Node1VM.thisParams.SQLAO.ClusterIPAddress
             DomainAdministratorCredential = $Admincreds
-            PsDscRunAsCredential          = $Admincreds
             DependsOn                     = $nextDepend
         }
-        $nextDepend = '[JoinClusterByIP]JoinSecondNodeToCluster'
+        $nextDepend = '[xCluster]JoinSecondNodeToCluster'
 
         WriteStatus DisableClusterDns {
             DependsOn = $nextDepend
