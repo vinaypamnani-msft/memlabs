@@ -3357,6 +3357,8 @@ function New-VirtualMachine {
                     # subnet can't come online (WSFC refuses client access on Role 1 networks).
                     $domainScopeId = $DeployConfig.vmOptions.network
                     $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
+                    # Exclude the cluster IP immediately so the next call can't return the same address
+                    Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | Out-Null
                     $AGIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
 
                     Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
