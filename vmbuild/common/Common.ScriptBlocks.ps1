@@ -1605,14 +1605,15 @@ $global:VM_Config = {
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Enable-PSRemoting -ErrorAction SilentlyContinue -Confirm:$false -SkipNetworkProfileCheck } -DisplayName "DSC: Enable-PSRemoting. Ignore failures."
         }
 
-        Write-Progress2 $Activity -Status "Upgrading Modules" -percentcomplete 30 -force
+        Write-Progress2 $Activity -Status "Checking DSC modules" -percentcomplete 30 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+            New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
             [PSCustomObject]@{
                 Hash        = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
                 FlagExists  = Test-Path "C:\staging\DSC\DSC.zip.Installed"
             }
-        } -DisplayName "DSC: Detect modules."
+        } -DisplayName "DSC: Detect modules and ensure staging directory."
         $guestZipHash = $result.ScriptBlockOutput.Hash
         $guestFlagExists = $result.ScriptBlockOutput.FlagExists
 
@@ -1656,15 +1657,8 @@ $global:VM_Config = {
             }
 
             # Copy DSC files
-            Write-Progress2 $Activity -Status "Creating C:\staging\DSC" -percentcomplete 33 -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { New-Item -Path "C:\staging\DSC" -ItemType Directory -Force } -DisplayName "Creating C:\staging\DSC"
-            if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create staging directory on the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                return
-            }
-
             Write-Progress2 $Activity -Status "Copying DSC files to the VM" -percentcomplete 35 -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying DSC files to the VM."
 
             # Copy-ItemSafe has 3 internal retries (~12 min worst case).
             # DSC copy is critical, so retry up to 2 more times at the caller level.
