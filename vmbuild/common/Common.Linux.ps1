@@ -2215,34 +2215,82 @@ function Restart-LinuxVmAndWait {
             -Sudo -TimeoutSeconds 10 -SuppressLog
     }
     Start-Sleep -Seconds 10
-    # Wait for the VM to leave any transitional state (Stopping, Starting,
-    # etc.) before attempting Hyper-V operations. The SSH reboot may have
-    # started a shutdown that hasn't completed yet.
-    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-    if ($vm -and $vm.State -notin @('Running', 'Off')) {
-        Write-Log "$VmName`: VM in '$($vm.State)' state; waiting up to 60s for stable state" -LogOnly
-        $stableTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($stableTimer.Elapsed.TotalSeconds -lt 60) {
-            Start-Sleep -Seconds 3
-            $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-            if (-not $vm -or $vm.State -in @('Running', 'Off')) { break }
+
+    # Helper: wait for the VM to leave any transitional state (Stopping,
+    # Starting, Saving, etc.). Returns the final VM object.
+    $waitForStable = {
+        param([string]$Name, [int]$MaxWaitSec)
+        $vmObj = Get-VM -Name $Name -ErrorAction SilentlyContinue
+        if ($vmObj -and $vmObj.State -notin @('Running', 'Off')) {
+            Write-Log "$Name`: VM in '$($vmObj.State)' state; waiting up to ${MaxWaitSec}s for stable state" -LogOnly
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt $MaxWaitSec) {
+                Start-Sleep -Seconds 3
+                $vmObj = Get-VM -Name $Name -ErrorAction SilentlyContinue
+                if (-not $vmObj -or $vmObj.State -in @('Running', 'Off')) { break }
+            }
+            $sw.Stop()
+            if ($vmObj -and $vmObj.State -notin @('Running', 'Off')) {
+                Write-Log "$Name`: VM still in '$($vmObj.State)' after ${MaxWaitSec}s" -Warning
+            }
         }
-        $stableTimer.Stop()
+        return $vmObj
     }
+
+    $vm = & $waitForStable $VmName 60
+
     # If the VM is still running after the SSH reboot attempt, force via Hyper-V.
-    if ($vm -and $vm.State -eq 'Running') {
-        try {
-            Stop-VM -Name $VmName -Force -ErrorAction Stop
-            Start-Sleep -Seconds 3
-            Start-VM -Name $VmName -ErrorAction Stop
+    # Retry once if the first attempt fails (common when the VM is mid-transition).
+    $maxAttempts = 2
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($vm -and $vm.State -eq 'Running') {
+            try {
+                Stop-VM -Name $VmName -Force -ErrorAction Stop
+                Start-Sleep -Seconds 3
+                Start-VM -Name $VmName -ErrorAction Stop
+                Write-Log "$VmName`: Hyper-V reboot succeeded (attempt $attempt)" -LogOnly
+                break
+            }
+            catch {
+                Write-Log "$VmName`: Hyper-V reboot failed (attempt $attempt/$maxAttempts): $_" -Warning
+                if ($attempt -lt $maxAttempts) {
+                    # Re-wait for stable state before retrying
+                    $vm = & $waitForStable $VmName 90
+                }
+            }
         }
-        catch {
-            Write-Log "$VmName`: Hyper-V reboot failed: $_" -Warning
+        elseif ($vm -and $vm.State -eq 'Off') {
+            try {
+                Start-VM -Name $VmName -ErrorAction Stop
+                Write-Log "$VmName`: Start-VM succeeded (was Off)" -LogOnly
+                break
+            }
+            catch {
+                Write-Log "$VmName`: Start-VM failed (attempt $attempt/$maxAttempts): $_" -Warning
+                if ($attempt -lt $maxAttempts) {
+                    Start-Sleep -Seconds 10
+                    $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+                }
+            }
         }
-    }
-    elseif ($vm -and $vm.State -eq 'Off') {
-        try { Start-VM -Name $VmName -ErrorAction Stop } catch {
-            Write-Log "$VmName`: Start-VM failed: $_" -Warning
+        else {
+            # VM in unexpected state or missing — wait and re-check
+            if ($attempt -lt $maxAttempts) {
+                $vm = & $waitForStable $VmName 90
+            }
+            else {
+                Write-Log "$VmName`: VM in unexpected state '$($vm.State)' after $maxAttempts attempts" -Warning
+                # Last resort: TurnOff is instantaneous and works in any state
+                try {
+                    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    Start-Sleep -Seconds 3
+                    Start-VM -Name $VmName -ErrorAction Stop
+                    Write-Log "$VmName`: TurnOff + Start-VM succeeded as last resort" -LogOnly
+                }
+                catch {
+                    Write-Log "$VmName`: Last-resort TurnOff + Start failed: $_" -Warning
+                }
+            }
         }
     }
 
@@ -2350,9 +2398,10 @@ coredump_dir /var/spool/squid
 
     $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
 
-    # Retry with reboot: if the first attempt failed, reboot the VM to clear
-    # stale dpkg locks, broken service state, or hung apt processes, then try
-    # once more before declaring failure.
+    # ── Resilient retry logic ──
+    # Separate "script ran fine but squid slow to start" (exit=0, no PROXY_READY)
+    # from actual failures (exit!=0 or ScriptBlockFailed). The former just needs
+    # more time; the latter needs a full reboot.
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0 -or $result.ScriptBlockOutput -notmatch 'PROXY_READY') {
         $tail = $null
         if ($result -and $result.ScriptBlockOutput) {
@@ -2360,14 +2409,37 @@ coredump_dir /var/spool/squid
             $tail = ($lines | Select-Object -Last 20) -join "`n"
         }
         Write-Log "[Proxy] $vmName`: First attempt failed (exit=$($result.ExitCode), ScriptBlockFailed=$($result.ScriptBlockFailed)). Output tail:`n$tail" -Warning
-        Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
-        $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-        $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
-        if (-not $ip) {
-            Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
-            return $false
+
+        $needsReboot = $true
+
+        # If the install itself succeeded (exit=0) but squid just didn't start
+        # listening in time, try a lightweight self-test before rebooting.
+        # On a busy host squid may simply need more time to initialize.
+        if (-not $result.ScriptBlockFailed -and $result.ExitCode -eq 0) {
+            Write-Log "[Proxy] $vmName`: Install exited 0; checking if squid just needs more time..." -Warning
+            $selfTest = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -Sudo -TimeoutSeconds 90 `
+                -BashCommand 'for i in $(seq 1 60); do if ss -ltn "sport = :3128" 2>/dev/null | grep -q ":3128"; then echo "PROXY_READY"; exit 0; fi; sleep 1; done; echo "squid still not listening"; systemctl --no-pager status squid 2>&1 | head -15; exit 1' `
+                -DisplayName "Squid self-test (extended)"
+            if ($selfTest -and -not $selfTest.ScriptBlockFailed -and $selfTest.ExitCode -eq 0 -and $selfTest.ScriptBlockOutput -match 'PROXY_READY') {
+                Write-Log "[Proxy] $vmName`: Squid came up on extended self-test (no reboot needed)" -Success
+                $result = $selfTest
+                $needsReboot = $false
+            }
+            else {
+                Write-Log "[Proxy] $vmName`: Extended self-test still negative; will reboot." -Warning
+            }
         }
-        $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid (retry)"
+
+        if ($needsReboot) {
+            Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
+            $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
+            $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
+            if (-not $ip) {
+                Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
+                return $false
+            }
+            $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid (retry)"
+        }
     }
 
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0) {

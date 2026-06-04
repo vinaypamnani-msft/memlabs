@@ -59,9 +59,10 @@ systemctl --no-pager status squid 2>&1 | head -15 || true
 # Open 3128 in ufw (no-op if already allowed)
 command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
 
-# Self-test: wait up to 15s for Squid to start listening.
+# Self-test: wait up to 60s for Squid to start listening.
+# On a busy host with 25+ VMs, systemd can take 30+ seconds to fully start squid.
 echo "[install-squid] Waiting for squid to listen on :3128..."
-for i in $(seq 1 15); do
+for i in $(seq 1 60); do
     if ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
         echo "[install-squid] squid listening on :3128 after ${i}s"
         echo "PROXY_READY"
@@ -69,7 +70,7 @@ for i in $(seq 1 15); do
     fi
     sleep 1
 done
-echo "[install-squid] squid NOT listening on :3128 after 15s"
+echo "[install-squid] squid NOT listening on :3128 after 60s"
 echo "[install-squid] Squid error log (last 30 lines):"
 tail -30 /var/log/squid/cache.log 2>/dev/null || echo "(no cache.log found)"
 echo "[install-squid] journalctl squid (last 20 lines):"
