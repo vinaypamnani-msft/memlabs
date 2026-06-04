@@ -18,10 +18,15 @@ if command -v squid >/dev/null 2>&1 && systemctl is-active --quiet squid && \
     FAST_PATH=1
 fi
 
+echo "[install-squid] Starting (FAST_PATH=$FAST_PATH)"
+
 if [ "$FAST_PATH" = "0" ]; then
+    echo "[install-squid] Running apt-get update..."
     wait_for_apt_lock
     apt_retry apt-get update -y
+    echo "[install-squid] Installing squid, ufw, python3-flask..."
     apt_retry apt-get install -y squid ufw python3-flask
+    echo "[install-squid] Packages installed"
 fi
 
 install -d -m 0755 /etc/squid
@@ -37,23 +42,36 @@ chmod 0644 "$NEW_CONF"
 
 if [ -f /etc/squid/squid.conf ] && cmp -s "$NEW_CONF" /etc/squid/squid.conf; then
     rm -f "$NEW_CONF"
+    echo "[install-squid] Config unchanged"
 else
     mv "$NEW_CONF" /etc/squid/squid.conf
+    echo "[install-squid] Config deployed"
 fi
 
+echo "[install-squid] Enabling and restarting squid service..."
 systemctl enable squid >/dev/null 2>&1 || true
 systemctl restart squid
+echo "[install-squid] squid service restarted (rc=$?)"
+
+# Show squid service status for diagnostics
+systemctl --no-pager status squid 2>&1 | head -15 || true
 
 # Open 3128 in ufw (no-op if already allowed)
 command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
 
 # Self-test: wait up to 15s for Squid to start listening.
+echo "[install-squid] Waiting for squid to listen on :3128..."
 for i in $(seq 1 15); do
     if ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
+        echo "[install-squid] squid listening on :3128 after ${i}s"
         echo "PROXY_READY"
         exit 0
     fi
     sleep 1
 done
-echo "squid not listening on 3128 after 15s"
+echo "[install-squid] squid NOT listening on :3128 after 15s"
+echo "[install-squid] Squid error log (last 30 lines):"
+tail -30 /var/log/squid/cache.log 2>/dev/null || echo "(no cache.log found)"
+echo "[install-squid] journalctl squid (last 20 lines):"
+journalctl -u squid --no-pager -n 20 2>/dev/null || echo "(no journal entries)"
 exit 1

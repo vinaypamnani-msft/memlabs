@@ -2204,7 +2204,7 @@ function Restart-LinuxVmAndWait {
         [Parameter(Mandatory = $true)][string]$VmName,
         [Parameter(Mandatory = $false)][string]$IPAddress,
         [Parameter(Mandatory = $false)][string]$ExpectedIPAddress,
-        [Parameter(Mandatory = $false)][int]$WaitTimeoutSeconds = 300
+        [Parameter(Mandatory = $false)][int]$WaitTimeoutSeconds = 900
     )
 
     Write-Log "$VmName`: Rebooting VM for retry..."
@@ -2354,9 +2354,15 @@ coredump_dir /var/spool/squid
     # stale dpkg locks, broken service state, or hung apt processes, then try
     # once more before declaring failure.
     if ($result.ScriptBlockFailed -or $result.ExitCode -ne 0 -or $result.ScriptBlockOutput -notmatch 'PROXY_READY') {
-        Write-Log "[Proxy] $vmName`: First attempt failed (exit=$($result.ExitCode)); rebooting and retrying..." -Warning
+        $tail = $null
+        if ($result -and $result.ScriptBlockOutput) {
+            $lines = ($result.ScriptBlockOutput -split "`n")
+            $tail = ($lines | Select-Object -Last 20) -join "`n"
+        }
+        Write-Log "[Proxy] $vmName`: First attempt failed (exit=$($result.ExitCode), ScriptBlockFailed=$($result.ScriptBlockFailed)). Output tail:`n$tail" -Warning
+        Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
         $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-        $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 300
+        $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
         if (-not $ip) {
             Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
             return $false
@@ -2757,7 +2763,7 @@ fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock 2>&1 || echo "no locks
                 }
                 Write-Log "[LinuxConfig] $vmName`: module '$($op.Name)' failed (exit=$($result.ExitCode)); rebooting for retry. Tail:`n$tail" -Warning
                 $rebooted = $true
-                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 300
+                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
                 if (-not $ip) {
                     Write-Log "[LinuxConfig] $vmName`: VM not reachable after reboot; aborting." -Failure
                     return $false
