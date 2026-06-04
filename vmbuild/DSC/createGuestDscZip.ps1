@@ -29,7 +29,7 @@ Set-Location $PSScriptRoot
 # Modules used by VM Guests, include all so the ZIP contains all required modules to make it easier to move them to guest VMs.
 
 try {
-    Write-Host "Importing Modules.."
+    Write-Host "Checking Modules.."
     $modules = @(
         'Az.Compute',
         'PSDesiredStateConfiguration',
@@ -48,8 +48,11 @@ try {
         'CertificateDsc'
     )
 
+    # Single Get-Module call instead of 15 individual lookups
+    $allAvailable = @(Get-Module -ListAvailable).Name | Sort-Object -Unique
+    $missing = @()
     foreach ($module in $modules) {
-        if (Get-Module -ListAvailable -Name $module) {
+        if ($allAvailable -contains $module) {
             if ($force) {
                 Write-Host "Module exists: $module. Updating..."
                 Update-Module $module -Force
@@ -59,12 +62,34 @@ try {
             }
         }
         else {
-            Write-Host "Import Module: $module "
-            Install-Module $module -Force
+            $missing += $module
         }
     }
 
-    # Tell common to re-init
+    foreach ($module in $missing) {
+        Write-Host "Installing Module: $module "
+        Install-Module $module -Force
+    }
+
+    # Install TemplateHelpDSC module on this machine (needed before test compilation)
+    Write-Host "Installing TemplateHelpDSC on this machine.."
+    Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
+
+    # Start ZIP creation as a background job — runs in parallel with everything below.
+    # Nothing else depends on DSC.zip; we wait for it at the very end.
+    Write-Host "Starting DSC.zip creation in background..."
+    $dscDir = $PSScriptRoot
+    $zipJob = Start-Job -ScriptBlock {
+        param($dir)
+        Set-Location $dir
+        Write-Output "Creating DSC.zip..."
+        Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
+        Write-Output "Adding TemplateHelpDSC to DSC.zip..."
+        Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
+        Write-Output "DSC.zip creation complete."
+    } -ArgumentList $dscDir
+
+    # Tell common to re-init (runs in parallel with ZIP creation above)
     if ($Common.Initialized) {
         $Common.Initialized = $false
     }
@@ -82,16 +107,6 @@ try {
     $filePath = "C:\temp\deployConfig.json"
     $deployConfigCopy.parameters.ThisMachineName = $vmName
     $deployConfigCopy | ConvertTo-Json -Depth 5 | Out-File $filePath -Force
-
-    # Create local compressed file and inject appropriate appropriate TemplateHelpDSC
-    Write-Host "Creating DSC.zip..."
-    Publish-AzVMDscConfiguration .\DummyConfig.ps1 -OutputArchivePath .\DSC.zip -Force -Confirm:$false
-    Write-Host "Adding TemplateHelpDSC to DSC.ZIP.."
-    Compress-Archive -Path .\TemplateHelpDSC -Update -DestinationPath .\DSC.zip
-
-    # install templatehelpdsc module on this machine
-    Write-Host "Installing TemplateHelpDSC on this machine.."
-    Copy-Item .\TemplateHelpDSC "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force
 
     # PS5.1 parse-check all phase scripts and TemplateHelpDSC module.
     # Guest VMs run PS 5.1 which reads files without a UTF-8 BOM as Windows-1252.
@@ -177,8 +192,20 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
             Write-Host "All $($parseResult.CheckedCount) guest scripts passed PS5.1 parse check." -ForegroundColor Green
         }
     }
+
+    # Wait for background ZIP creation job to finish.
+    if ($zipJob) {
+        Write-Host "`nWaiting for DSC.zip background job..."
+        $zipOutput = $zipJob | Receive-Job -Wait -AutoRemoveJob
+        $zipJob = $null
+        $zipOutput | ForEach-Object { Write-Host "  $_" }
+        Write-Host "DSC.zip ready."
+    }
 }
 finally {
+    if ($zipJob -and $zipJob.State -eq 'Running') {
+        $zipJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
+    }
     if ($parseCheckJob -and $parseCheckJob.State -eq 'Running') {
         $parseCheckJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
     }
