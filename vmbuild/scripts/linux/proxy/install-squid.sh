@@ -59,10 +59,10 @@ systemctl --no-pager status squid 2>&1 | head -15 || true
 # Open 3128 in ufw (no-op if already allowed)
 command -v ufw >/dev/null 2>&1 && ufw allow 3128/tcp || true
 
-# Self-test: wait up to 60s for Squid to start listening.
-# On a busy host with 25+ VMs, systemd can take 30+ seconds to fully start squid.
+# Self-test: wait up to 120s for Squid to start listening.
+# On a busy host with 25+ VMs, systemd can take 60+ seconds to fully start squid.
 echo "[install-squid] Waiting for squid to listen on :3128..."
-for i in $(seq 1 60); do
+for i in $(seq 1 120); do
     if ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
         echo "[install-squid] squid listening on :3128 after ${i}s"
         echo "PROXY_READY"
@@ -71,10 +71,10 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-# Not listening after 60s. Before failing, check if squid is still actively
+# Not listening after 120s. Before failing, check if squid is still actively
 # starting up (cache.log growing, squid process alive). If so, give it
 # another 120s — on a very busy host the initial cache/swap build can be slow.
-echo "[install-squid] squid not listening after 60s; checking if still starting up..."
+echo "[install-squid] squid not listening after 120s; checking if still starting up..."
 SQUID_PID=$(pgrep -x squid 2>/dev/null || true)
 CACHE_LOG="/var/log/squid/cache.log"
 if [ -n "$SQUID_PID" ] && [ -f "$CACHE_LOG" ]; then
@@ -82,7 +82,7 @@ if [ -n "$SQUID_PID" ] && [ -f "$CACHE_LOG" ]; then
     echo "[install-squid] squid PID=$SQUID_PID, cache.log size=$PREV_SIZE; extending wait..."
     for i in $(seq 1 120); do
         if ss -ltn 'sport = :3128' 2>/dev/null | grep -q ':3128'; then
-            echo "[install-squid] squid listening on :3128 after $((60 + i))s (extended wait)"
+            echo "[install-squid] squid listening on :3128 after $((120 + i))s (extended wait)"
             echo "PROXY_READY"
             exit 0
         fi
