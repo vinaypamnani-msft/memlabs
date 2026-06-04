@@ -4249,6 +4249,67 @@ class WaitForClusterAccess {
 # which triggers a non-terminating error that causes the LCM to abort. This
 # resource uses IP-based access (Get-Cluster -Name $IP / Add-ClusterNode -Cluster $IP)
 # which bypasses the broken name resolution layer entirely.
+
+# Impersonation helpers (matching FailoverClusterDsc pattern).
+# LogonUser with LOGON32_LOGON_NEW_CREDENTIALS (type 9) creates a token that
+# uses the supplied credentials for network access while keeping the local
+# identity — this solves the Kerberos double-hop without needing WinRM loopback.
+function Get-ImpersonateLib {
+    if ($script:ImpersonateLib) {
+        return $script:ImpersonateLib
+    }
+
+    $sig = @'
+[DllImport("advapi32.dll", SetLastError = true)]
+public static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, ref IntPtr phToken);
+
+[DllImport("kernel32.dll")]
+public static extern Boolean CloseHandle(IntPtr hObject);
+'@
+
+    $script:ImpersonateLib = Add-Type -PassThru -Namespace 'Lib.Impersonation' -Name ImpersonationLib -MemberDefinition $sig
+    return $script:ImpersonateLib
+}
+
+function Set-ImpersonateAs {
+    param (
+        [Parameter(Mandatory)]
+        [PSCredential] $Credential
+    )
+
+    [IntPtr] $userToken = [Security.Principal.WindowsIdentity]::GetCurrent().Token
+    $ImpersonateLib = Get-ImpersonateLib
+
+    $bLogin = $ImpersonateLib::LogonUser(
+        $Credential.GetNetworkCredential().UserName,
+        $Credential.GetNetworkCredential().Domain,
+        $Credential.GetNetworkCredential().Password,
+        9,  # LOGON32_LOGON_NEW_CREDENTIALS
+        0,  # LOGON32_PROVIDER_DEFAULT
+        [ref]$userToken
+    )
+
+    if ($bLogin) {
+        $Identity = New-Object Security.Principal.WindowsIdentity $userToken
+        $context = $Identity.Impersonate()
+    }
+    else {
+        throw "Unable to impersonate user '$($Credential.GetNetworkCredential().UserName)'"
+    }
+
+    return $context, $userToken
+}
+
+function Close-UserToken {
+    param (
+        [Parameter(Mandatory)]
+        [IntPtr] $Token
+    )
+
+    $ImpersonateLib = Get-ImpersonateLib
+    $ImpersonateLib::CloseHandle($Token) | Out-Null
+}
+
 [DscResource()]
 class JoinClusterByIP {
     [DscProperty(Key)]
@@ -4271,45 +4332,42 @@ class JoinClusterByIP {
         $_ClusterName = $this.ClusterName
         $_Credential = $this.DomainAdministratorCredential
 
-        # Build a scriptblock that runs cluster commands.  When a credential is
-        # supplied we invoke it inside a fresh logon session (Invoke-Command to
-        # localhost) so the Kerberos token can authenticate to the remote
-        # cluster — otherwise Add-ClusterNode hits the double-hop problem.
-        $clusterWork = {
-            param ($ClusterIP, $NodeName, $ClusterName)
+        $impersonationContext = $null
+        $newToken = [IntPtr]::Zero
+
+        try {
+            if ($_Credential) {
+                Write-Status "Impersonating '$($_Credential.GetNetworkCredential().UserName)' for cluster access"
+                ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
+            }
 
             # Check for existing node in Down state — must remove before re-adding
             try {
-                $existingNode = Get-ClusterNode -Cluster $ClusterIP -Name $NodeName -ErrorAction SilentlyContinue
+                $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
                 if ($existingNode -and $existingNode.State -eq 'Down') {
-                    Write-Verbose "Node '$NodeName' is in Down state in cluster '$ClusterName' — removing before re-add"
-                    Remove-ClusterNode -Name $NodeName -Cluster $ClusterIP -Force -ErrorAction Stop
-                    Write-Verbose "Removed downed node '$NodeName' from cluster '$ClusterName'"
+                    Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
+                    Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
+                    Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
                 }
             }
             catch {
-                Write-Verbose "Error checking/removing downed node: $_"
+                Write-Status "Error checking/removing downed node: $_"
             }
 
-            Write-Verbose "Joining node '$NodeName' to cluster '$ClusterName' via IP $ClusterIP"
-            Add-ClusterNode -Name $NodeName -Cluster $ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
-            Write-Verbose "Successfully joined '$NodeName' to cluster '$ClusterName'"
-        }
-
-        Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
-        try {
-            if ($_Credential) {
-                # Fresh logon session avoids Kerberos double-hop
-                Invoke-Command -ComputerName localhost -Credential $_Credential -ScriptBlock $clusterWork -ArgumentList $_ClusterIP, $_NodeName, $_ClusterName -ErrorAction Stop
-            }
-            else {
-                & $clusterWork $_ClusterIP $_NodeName $_ClusterName
-            }
+            Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
+            Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
             Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
         }
         catch {
             Write-Status "Add-ClusterNode failed: $_"
             throw
+        }
+        finally {
+            if ($impersonationContext) {
+                $impersonationContext.Undo()
+                $impersonationContext.Dispose()
+                Close-UserToken -Token $newToken
+            }
         }
     }
 
