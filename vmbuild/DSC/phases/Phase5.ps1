@@ -237,23 +237,12 @@ Configuration Phase5
         # running. New labs set up the cluster fresh with proper network roles.
         $clusterIPOnHeartbeat = $thisVM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
 
-        WriteStatus WindowsFeature {
-            Status = "Adding Windows Features"
-        }
-
-        WindowsFeatureSet WindowsFeatureSet
-        {
-            Name                 = @('RSAT-AD-PowerShell', 'Failover-clustering', 'RSAT-Clustering-PowerShell', 'RSAT-Clustering-CmdInterface', 'RSAT-Clustering-Mgmt' )
-            Ensure               = 'Present'
-            IncludeAllSubFeature = $true
-        }
-
         ModuleAdd SQLServerModule {
             Key             = 'Always'
             CheckModuleName = 'SqlServer'
         }
 
-        $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
+        $nextDepend = "[ModuleAdd]SQLServerModule"
 
         if (-not $clusterIPOnHeartbeat) {
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
@@ -296,7 +285,7 @@ Configuration Phase5
             ClusterName          = $thisVM.ClusterName
             ClusterIPAddress     = $thisVM.thisParams.SQLAO.ClusterIPAddress
             RetryIntervalSec     = 15
-            RetryCount           = 40
+            RetryCount           = 10
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -309,7 +298,7 @@ Configuration Phase5
 
         WaitForAny CreateCluster {
             NodeName             = $node2
-            ResourceName         = "[Cluster]JoinSecondNodeToCluster"
+            ResourceName         = "[JoinClusterByIP]JoinSecondNodeToCluster"
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
@@ -721,23 +710,12 @@ Configuration Phase5
         # running. New labs set up the cluster fresh with proper network roles.
         $clusterIPOnHeartbeat = $Node1VM.thisParams.SQLAO.ClusterIPAddress -match '^10\.250\.250\.'
 
-        WriteStatus WindowsFeature {
-            Status = "Adding Windows Features"
-        }
-
-        WindowsFeatureSet WindowsFeatureSet
-        {
-            Name                 = @('RSAT-AD-PowerShell', 'Failover-clustering', 'RSAT-Clustering-PowerShell', 'RSAT-Clustering-CmdInterface', 'RSAT-Clustering-Mgmt' )
-            Ensure               = 'Present'
-            IncludeAllSubFeature = $true
-        }
-
         ModuleAdd SQLServerModule {
             Key             = 'Always'
             CheckModuleName = 'SqlServer'
         }
 
-        $nextDepend = "[WindowsFeatureSet]WindowsFeatureSet", "[ModuleAdd]SQLServerModule"
+        $nextDepend = "[ModuleAdd]SQLServerModule"
 
         if (-not $clusterIPOnHeartbeat) {
         $DC = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
@@ -787,34 +765,17 @@ Configuration Phase5
         }
         $nextDepend = '[WaitForCluster]WaitForCluster'
 
-        WriteStatus WaitClusterAccess {
-            Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to be accessible by name"
+        WriteStatus JoinCluster {
+            Status    = "Joining Windows Cluster '$($Node1VM.ClusterName)' via IP"
             DependsOn = $nextDepend
         }
 
-        WaitForClusterAccess WaitClusterAccess {
+        JoinClusterByIP JoinSecondNodeToCluster {
             ClusterName          = $Node1VM.ClusterName
             ClusterIPAddress     = $Node1VM.thisParams.SQLAO.ClusterIPAddress
-            RetryIntervalSec     = 15
-            RetryCount           = 40
             DependsOn            = $nextDepend
-            PsDscRunAsCredential = $Admincreds
         }
-        $nextDepend = '[WaitForClusterAccess]WaitClusterAccess'
-
-
-        WriteStatus JoinCluster {
-            Status    = "Joining Windows Cluster '$($Node1VM.ClusterName)' on '$node1'"
-            DependsOn = $nextDepend
-        }
-
-        Cluster JoinSecondNodeToCluster {
-            Name                          = $Node1VM.ClusterName
-            StaticIPAddress               = $Node1VM.thisParams.SQLAO.ClusterIPAddress
-            DomainAdministratorCredential = $Admincreds
-            DependsOn                     = $nextDepend
-        }
-        $nextDepend = '[Cluster]JoinSecondNodeToCluster'
+        $nextDepend = '[JoinClusterByIP]JoinSecondNodeToCluster'
 
         WriteStatus PostClusterDnsConfig {
             DependsOn = $nextDepend
