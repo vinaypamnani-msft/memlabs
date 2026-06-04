@@ -3377,6 +3377,11 @@ function New-VirtualMachine {
                         return $false
                     }
 
+                    if ($clusterIP -eq $AGIP) {
+                        write-log -failure "$VmName`: ClusterIP and AGIP are the same ($clusterIP). DHCP scope $domainScopeId may be exhausted."
+                        return $false
+                    }
+
                     # Validate both IPs are on the domain subnet, not the heartbeat subnet.
                     # If they land on 10.250.250.x, the cluster can't come online (Role 1 network).
                     $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
