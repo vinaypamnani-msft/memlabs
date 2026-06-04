@@ -296,14 +296,14 @@ Configuration Phase5
 
         WriteStatus 'ChangeNetwork-10' {
             DependsOn = $nextDepend
-            Status    = "Adding '10.250.250.0' to Cluster"
+            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
         }
 
         xClusterNetwork 'ChangeNetwork-10' {
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = '3'
+            Role                 = '1'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }
@@ -783,7 +783,7 @@ Configuration Phase5
         $nextDepend = '[DisableClusterNicDnsRegistration]DisableClusterDns'
 
         WriteStatus "ChangeNetwork-10" {
-            Status    = "Setting Cluster Network 10.250.250.0 to Type 3"
+            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
             DependsOn = $nextDepend
         }
 
@@ -791,7 +791,7 @@ Configuration Phase5
             Address              = '10.250.250.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
-            Role                 = '3'
+            Role                 = '1'
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
         }

@@ -6013,6 +6013,9 @@ class DisableClusterNicDnsRegistration {
                 $wmiNic.SetTcpipNetbios(2) | Out-Null
             }
 
+            # Disable IPv6 on the cluster NIC to prevent AAAA record registration.
+            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
+
             # Rename to something descriptive if still using a generic Windows name.
             if ($adapter.Name -match '^Ethernet(\s\d+)?$') {
                 try {
@@ -6066,6 +6069,33 @@ class DisableClusterNicDnsRegistration {
         #    IP caused OpenCluster() failures because the Cluster Name resource
         #    serves on the domain-network IP, not the cluster-subnet IP.
         Clear-DnsClientCache -ErrorAction SilentlyContinue
+
+        # 4. Scope cluster heartbeat firewall rule to cluster subnet only.
+        $ruleName = 'WSFC Heartbeat (Cluster Subnet)'
+        if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
+            New-NetFirewallRule -DisplayName $ruleName `
+                -Direction Inbound -Protocol UDP -LocalPort 3343 `
+                -RemoteAddress "${_subnet}0/24" -Action Allow -ErrorAction SilentlyContinue | Out-Null
+            Write-Status "Created firewall rule '$ruleName'"
+        }
+
+        # 5. Set RegisterAllProvidersIP=0 on the Cluster Name resource so only the
+        #    active node's IP is registered in DNS (not all node IPs). Prevents
+        #    clients from resolving the cluster name to a node that isn't hosting.
+        $_clusterName = $this.ClusterName
+        if ($_clusterName) {
+            try {
+                $clusNameRes = Get-ClusterResource -Cluster $_clusterName -Name 'Cluster Name' -ErrorAction Stop
+                $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
+                if ($regAll -ne 0) {
+                    $clusNameRes | Set-ClusterParameter -Name RegisterAllProvidersIP -Value 0 -ErrorAction Stop
+                    Write-Status "Set RegisterAllProvidersIP=0 on Cluster Name resource"
+                }
+            }
+            catch {
+                Write-Verbose "Could not set RegisterAllProvidersIP: $_"
+            }
+        }
     }
 
     [bool] Test() {
