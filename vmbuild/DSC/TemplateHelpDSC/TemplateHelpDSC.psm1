@@ -4319,6 +4319,9 @@ class JoinClusterByIP {
     [string] $ClusterIPAddress
 
     [DscProperty()]
+    [string] $Role = 'Join'  # 'Create' for Node1, 'Join' for Node2
+
+    [DscProperty()]
     [PSCredential] $DomainAdministratorCredential
 
     hidden [string] StripCidr([string] $ip) {
@@ -4331,6 +4334,7 @@ class JoinClusterByIP {
         $_NodeName = $env:COMPUTERNAME
         $_ClusterName = $this.ClusterName
         $_Credential = $this.DomainAdministratorCredential
+        $_Role = $this.Role
 
         $impersonationContext = $null
         $newToken = [IntPtr]::Zero
@@ -4341,25 +4345,33 @@ class JoinClusterByIP {
                 ($impersonationContext, $newToken) = Set-ImpersonateAs -Credential $_Credential
             }
 
-            # Check for existing node in Down state — must remove before re-adding
-            try {
-                $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
-                if ($existingNode -and $existingNode.State -eq 'Down') {
-                    Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
-                    Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
-                    Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
+            if ($_Role -eq 'Create') {
+                Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
+                New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue
+                Write-Status "Successfully created cluster '$_ClusterName'"
+            }
+            else {
+                # Check for existing node in Down state — must remove before re-adding
+                try {
+                    $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue
+                    if ($existingNode -and $existingNode.State -eq 'Down') {
+                        Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
+                        Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop
+                        Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
+                    }
                 }
-            }
-            catch {
-                Write-Status "Error checking/removing downed node: $_"
-            }
+                catch {
+                    Write-Status "Error checking/removing downed node: $_"
+                }
 
-            Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
-            Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
-            Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
+                Write-Status "Joining node '$_NodeName' to cluster '$_ClusterName' via IP $_ClusterIP"
+                Add-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -NoStorage -ErrorAction Stop -Verbose:$false
+                Write-Status "Successfully joined '$_NodeName' to cluster '$_ClusterName'"
+            }
         }
         catch {
-            Write-Status "Add-ClusterNode failed: $_"
+            $action = if ($_Role -eq 'Create') { 'New-Cluster' } else { 'Add-ClusterNode' }
+            Write-Status "$action failed: $_"
             throw
         }
         finally {

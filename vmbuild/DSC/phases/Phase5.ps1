@@ -267,14 +267,14 @@ Configuration Phase5
             Status    = "Creating Cluster $($thisVM.ClusterName) on $($thisVM.thisParams.SQLAO.ClusterIPAddress)"
         }
 
-        Cluster CreateCluster {
-            Name                          = $thisVM.ClusterName
-            StaticIPAddress               = $thisVM.thisParams.SQLAO.ClusterIPAddress
-            # This user must have the permission to create the CNO (Cluster Name Object) in Active Directory, unless it is prestaged.
+        JoinClusterByIP CreateCluster {
+            ClusterName                   = $thisVM.ClusterName
+            ClusterIPAddress              = $thisVM.thisParams.SQLAO.ClusterIPAddress
+            Role                          = 'Create'
             DomainAdministratorCredential = $Admincreds
             DependsOn                     = $nextDepend
         }
-        $nextDepend = '[Cluster]CreateCluster'
+        $nextDepend = '[JoinClusterByIP]CreateCluster'
 
         WriteStatus EnsureClusterDns {
             DependsOn = $nextDepend
@@ -346,7 +346,7 @@ Configuration Phase5
             RetryIntervalSec     = 10
             RetryCount           = 360
             PsDscRunAsCredential = $Admincreds
-            DependsOn            = '[Cluster]CreateCluster'
+            DependsOn            = '[JoinClusterByIP]CreateCluster'
         }
 
         $nextDepend = "[WaitForAny]WaitForClusterJoin"
