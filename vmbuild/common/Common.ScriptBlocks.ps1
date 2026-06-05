@@ -1322,6 +1322,18 @@ $global:VM_Config = {
 
 
         $Stop_RunningDSC = {
+            # Kill WMI provider hosts FIRST. The DSC LCM runs inside
+            # WmiPrvSE.exe; killing it terminates any stuck DSC operation
+            # and ensures .NET picks up machine.config changes (e.g.
+            # <defaultProxy>) instead of using a stale cached copy.
+            # Doing this before Stop-DscConfiguration avoids the 60s+
+            # timeout that occurs when Stop-DscConfiguration hangs on
+            # a busy/stuck WMI provider.
+            try {
+                Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            } catch {}
+
             # Stop any existing DSC runs
             try {
                 get-job | remove-job
@@ -1369,15 +1381,6 @@ $global:VM_Config = {
                 }
             }
             catch {}
-
-            # Kill WMI provider hosts so the next DSC run starts a fresh
-            # WmiPrvSE AppDomain. This ensures .NET picks up any machine.config
-            # changes (e.g. <defaultProxy> written by SetWindowsProxy in the
-            # previous phase) instead of using a stale cached copy.
-            try {
-                Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-                Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            } catch {}
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
