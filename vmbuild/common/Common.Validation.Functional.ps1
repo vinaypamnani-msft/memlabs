@@ -839,6 +839,114 @@ function Test-SQLAOFunctionality {
             }
 
             # ==============================================================
+            # 1b. Network configuration validation
+            # ==============================================================
+            $results.Details.Add("CMD: Validate cluster network configuration")
+            try {
+                $clusterSubnet = '10.250.250.'
+
+                # Classify adapters by subnet
+                $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })
+                $heartbeatAdapters = @()
+                $domainAdapters = @()
+                foreach ($a in $allAdapters) {
+                    $ips = Get-NetIPAddress -InterfaceIndex $a.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                    if ($ips | Where-Object { $_.IPAddress -like "${clusterSubnet}*" }) {
+                        $heartbeatAdapters += $a
+                    }
+                    else {
+                        $domainAdapters += $a
+                    }
+                }
+
+                # Heartbeat NIC: DNS registration must be disabled
+                foreach ($hb in $heartbeatAdapters) {
+                    $dnsClient = Get-DnsClient -InterfaceIndex $hb.InterfaceIndex -ErrorAction SilentlyContinue
+                    if ($dnsClient.RegisterThisConnectionsAddress) {
+                        $results.Details.Add("WARN: Heartbeat adapter '$($hb.Name)' has DNS registration enabled")
+                    }
+                    else {
+                        $results.Details.Add("OK: Heartbeat adapter '$($hb.Name)' DNS registration disabled")
+                    }
+
+                    # No default gateway on heartbeat NIC
+                    $gw = Get-NetRoute -InterfaceIndex $hb.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
+                    if ($gw) {
+                        $results.Details.Add("WARN: Heartbeat adapter '$($hb.Name)' has a default gateway")
+                    }
+                }
+
+                # NIC metrics: domain (lower) should be preferred over heartbeat (higher)
+                if ($domainAdapters -and $heartbeatAdapters) {
+                    $domMetric = (Get-NetIPInterface -InterfaceIndex $domainAdapters[0].InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+                    $hbMetric  = (Get-NetIPInterface -InterfaceIndex $heartbeatAdapters[0].InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+                    if ($domMetric -ge $hbMetric) {
+                        $results.Details.Add("WARN: Domain NIC metric ($domMetric) >= heartbeat NIC metric ($hbMetric) — domain should be preferred")
+                    }
+                    else {
+                        $results.Details.Add("OK: Domain NIC metric ($domMetric) < heartbeat NIC metric ($hbMetric)")
+                    }
+                }
+
+                # Cluster network roles: heartbeat = 1 (cluster only), domain = 3 (cluster + client)
+                $clusterNetworks = Get-ClusterNetwork -ErrorAction SilentlyContinue
+                foreach ($cn in $clusterNetworks) {
+                    $roleDesc = switch ([int]$cn.Role) { 0 { 'None' }; 1 { 'Cluster Only' }; 3 { 'Cluster + Client' }; default { "Unknown ($($cn.Role))" } }
+                    $isHeartbeat = $cn.Address -like "${clusterSubnet}*"
+                    if ($isHeartbeat -and $cn.Role -ne 1) {
+                        $results.Details.Add("WARN: Heartbeat network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster Only')")
+                    }
+                    elseif (-not $isHeartbeat -and $cn.Role -ne 3) {
+                        $results.Details.Add("WARN: Domain network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc' (expected 'Cluster + Client')")
+                    }
+                    else {
+                        $results.Details.Add("OK: Network '$($cn.Name)' ($($cn.Address)) role is '$roleDesc'")
+                    }
+                }
+
+                # RegisterAllProvidersIP on Cluster Name resource should be 0
+                try {
+                    $clusNameRes = Get-ClusterResource -Name 'Cluster Name' -ErrorAction Stop
+                    $regAll = ($clusNameRes | Get-ClusterParameter -Name RegisterAllProvidersIP -ErrorAction SilentlyContinue).Value
+                    if ($null -ne $regAll -and $regAll -ne 0) {
+                        $results.Details.Add("WARN: Cluster Name RegisterAllProvidersIP = $regAll (expected 0)")
+                    }
+                    else {
+                        $results.Details.Add("OK: Cluster Name RegisterAllProvidersIP = 0")
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not check RegisterAllProvidersIP: $($_.Exception.Message)")
+                }
+
+                # Cluster Group IP resources should be on Domain Network, not heartbeat
+                $clusterGroupIPs = Get-ClusterResource -ErrorAction SilentlyContinue |
+                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'IP Address' }
+                foreach ($cgIP in $clusterGroupIPs) {
+                    $ipNetwork = ($cgIP | Get-ClusterParameter -Name Network -ErrorAction SilentlyContinue).Value
+                    $ipAddr    = ($cgIP | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                    if ($ipNetwork -and $ipAddr -notlike "${clusterSubnet}*" -and $ipNetwork -ne 'Domain Network') {
+                        $results.Details.Add("WARN: Cluster Group IP '$($cgIP.Name)' ($ipAddr) is on '$ipNetwork' (expected 'Domain Network')")
+                    }
+                }
+
+                # Hostname must not resolve to heartbeat subnet (breaks remote connectivity)
+                $hostname = $env:COMPUTERNAME
+                $dnsRecords = @(Resolve-DnsName -Name $hostname -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
+                $staleRecords = @($dnsRecords | Where-Object { $_.IPAddress -like "${clusterSubnet}*" })
+                if ($staleRecords.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Hostname '$hostname' has DNS record(s) on heartbeat subnet: $($staleRecords.IPAddress -join ', ')")
+                }
+                else {
+                    $results.Details.Add("OK: Hostname '$hostname' has no stale heartbeat DNS records")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Network config validation error: $($_.Exception.Message)")
+            }
+
+            # ==============================================================
             # 2. Remediation pass: fix common issues before testing AG health
             # ==============================================================
 
