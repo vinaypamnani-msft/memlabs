@@ -516,7 +516,11 @@ function Stop-VM2 {
         if ($global:ps_cache) {
             foreach ($key in @($global:ps_cache.Keys)) {
                 if ($key -like "$Name-*") {
-                    try { Remove-PSSession $global:ps_cache[$key] -ErrorAction SilentlyContinue } catch {}
+                    if (Get-Command Remove-VmSession -ErrorAction SilentlyContinue) {
+                        Remove-VmSession $global:ps_cache[$key]
+                    } else {
+                        try { Remove-PSSession $global:ps_cache[$key] -ErrorAction SilentlyContinue } catch {}
+                    }
                     $global:ps_cache.Remove($key)
                 }
             }

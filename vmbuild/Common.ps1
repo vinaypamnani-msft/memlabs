@@ -4141,9 +4141,33 @@ function New-PSSessionWithTimeout {
     }
 
     $psi.Dispose()
-    $rs.Close()
-    $rs.Dispose()
+
+    if ($session) {
+        # Keep the runspace alive — closing it can destroy the PSSession
+        # whose transport was established through it.  Attach it to the
+        # session so it can be cleaned up when the session is evicted.
+        $session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
+    }
+    else {
+        $rs.Close()
+        $rs.Dispose()
+    }
     return $session
+}
+
+# Dispose a PSSession and its owner runspace (if created by
+# New-PSSessionWithTimeout).  Use this instead of Remove-PSSession
+# directly when evicting sessions from ps_cache.
+function Remove-VmSession {
+    param([object]$Session)
+    if (-not $Session) { return }
+    try {
+        if ($Session._OwnerRunspace) {
+            $Session._OwnerRunspace.Close()
+            $Session._OwnerRunspace.Dispose()
+        }
+    } catch {}
+    try { Remove-PSSession $Session -ErrorAction SilentlyContinue } catch {}
 }
 
 function Get-VmSession {
@@ -4195,7 +4219,7 @@ function Get-VmSession {
         else {
             $global:ps_cache.Remove($cacheKey)
             $global:ps_lastGoodCred.Remove($VmName)
-            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+            Remove-VmSession $ps
         }
     }
 
@@ -4213,7 +4237,7 @@ function Get-VmSession {
             else {
                 $global:ps_cache.Remove($existingKey)
                 $global:ps_lastGoodCred.Remove($VmName)
-                try { Remove-PSSession $existingPs -ErrorAction SilentlyContinue } catch {}
+                Remove-VmSession $existingPs
             }
         }
     }
@@ -4311,7 +4335,7 @@ function Get-VmSession {
                 $global:ps_cache[$cacheKey] = $ps
                 return $ps
             }
-            try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
+            Remove-VmSession $ps
         }
 
         $triedList = $triedNames -join ', '
