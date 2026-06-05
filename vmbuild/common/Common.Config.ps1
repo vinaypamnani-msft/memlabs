@@ -2118,9 +2118,10 @@ function Get-VMNetworkCached {
 }
 
 # Bulk-fetch all VM network adapters in a single WMI call and populate the
-# in-memory NetCache. Per-VM Get-VMNetworkCached calls then hit the cache
-# instead of making individual ~2-3s WMI round-trips. Called before operations
-# that iterate many VMs (RDCMan/mRemoteNG generation).
+# in-memory NetCache AND the per-VM .network.json disk cache. Start-Job
+# workers (separate processes) can't share in-memory cache, but they CAN
+# read the disk files — so pre-populating them here means every job worker
+# gets instant cache hits instead of triggering its own WMI calls.
 function Invoke-VMNetworkBulkWarmup {
     if ($global:Common.NetCache) { return }  # Already warm
     Write-Log "Invoke-VMNetworkBulkWarmup: fetching all VM network adapters in one call..." -LogOnly
@@ -2128,6 +2129,7 @@ function Invoke-VMNetworkBulkWarmup {
     try {
         $allAdapters = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue
         $now = Get-Date -Format "MM/dd/yyyy HH:mm"
+        $cachePath = $global:Common.CachePath
         foreach ($adapter in $allAdapters) {
             if (-not $adapter.VMId) { continue }
             $entry = [PSCustomObject]@{
@@ -2137,6 +2139,14 @@ function Invoke-VMNetworkBulkWarmup {
                 EntryAdded = $now
             }
             $global:Common.NetCache[$adapter.VMId] = $entry
+
+            # Persist to disk so Start-Job workers (separate processes) get
+            # instant cache hits without any WMI calls.
+            if ($entry.SwitchName -and $cachePath) {
+                $jsonFile = $adapter.VMId.ToString() + ".network.json"
+                $cacheFile = Join-Path $cachePath $jsonFile
+                try { ConvertTo-Json $entry | Out-File $cacheFile -Force } catch {}
+            }
         }
         Write-Log "Invoke-VMNetworkBulkWarmup: cached $($global:Common.NetCache.Count) adapters." -LogOnly
     }
