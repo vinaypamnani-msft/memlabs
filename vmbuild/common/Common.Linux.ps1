@@ -2430,6 +2430,43 @@ function Install-LinuxProxyServer {
         return $false
     }
 
+    # ── Network validation ──
+    # The proxy VM needs outbound internet access for apt.  DNS and HTTP
+    # must work before we attempt the install, otherwise apt hangs for
+    # minutes/hours with no useful output.  Retry with backoff to allow
+    # time for NAT/routing to come up on the host.
+    $netCheckBash = @'
+DNS_OK=0; HTTP_OK=0
+if getent hosts archive.ubuntu.com >/dev/null 2>&1; then DNS_OK=1; fi
+if [ "$DNS_OK" = "1" ]; then
+    if curl --connect-timeout 10 -sI http://archive.ubuntu.com/ubuntu/dists/ 2>/dev/null | head -1 | grep -q "200\|301\|302"; then
+        HTTP_OK=1
+    fi
+fi
+echo "DNS=$DNS_OK HTTP=$HTTP_OK"
+'@
+    $netOk = $false
+    for ($netAttempt = 1; $netAttempt -le 6; $netAttempt++) {
+        $netResult = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $netCheckBash `
+            -Sudo -TimeoutSeconds 30 -SuppressLog -DisplayName "Network check"
+        if ($netResult -and -not $netResult.ScriptBlockFailed -and $netResult.ScriptBlockOutput -match 'DNS=1 HTTP=1') {
+            $netOk = $true
+            Write-Log "[Proxy] $vmName`: Network OK (DNS + HTTP verified)" -LogOnly
+            break
+        }
+        $status = if ($netResult.ScriptBlockOutput -match 'DNS=(\d) HTTP=(\d)') { "DNS=$($Matches[1]) HTTP=$($Matches[2])" } else { "unreachable" }
+        Write-Log "[Proxy] $vmName`: Network check $netAttempt/6 failed ($status); retrying in 30s..." -Warning
+        Start-Sleep -Seconds 30
+    }
+    if (-not $netOk) {
+        # Collect diagnostics before failing
+        $diagBash = 'echo "=== resolv.conf ==="; cat /etc/resolv.conf; echo "=== ip route ==="; ip route show; echo "=== resolvectl ==="; resolvectl status 2>/dev/null | head -20'
+        $diag = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $diagBash -Sudo -TimeoutSeconds 15 -SuppressLog -DisplayName "Network diagnostics"
+        $diagText = if ($diag -and $diag.ScriptBlockOutput) { $diag.ScriptBlockOutput } else { "(no output)" }
+        Write-Log "[Proxy] $vmName`: No internet access after 6 attempts. apt requires DNS + HTTP to archive.ubuntu.com.`n$diagText" -Failure -OutputStream
+        return $false
+    }
+
     $squidConf = @"
 # memlabs Squid forward proxy
 # Managed by Install-LinuxProxyServer -- changes will be overwritten.
