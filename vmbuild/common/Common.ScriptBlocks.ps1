@@ -2554,6 +2554,11 @@ $global:VM_Config = {
         [int]$failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
 
         $noStatus = $true
+        $lastStatusChangeTime = [DateTime]::UtcNow
+        $staleWarningMinutes = 15
+        $staleRestartMinutes = 30
+        $staleRestartDone = $false
+        $lastStaleWarningTime = [DateTime]::MinValue
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Ready and Waiting for job progress"
@@ -2837,6 +2842,27 @@ $global:VM_Config = {
 
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                         $previousStatus = $currentStatus
+                        $lastStatusChangeTime = [DateTime]::UtcNow
+                        $staleRestartDone = $false
+                        $lastStaleWarningTime = [DateTime]::MinValue
+                    }
+                    else {
+                        # Status unchanged — check for stale progress
+                        $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
+                        if ($staleMins -ge $staleRestartMinutes -and -not $staleRestartDone) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Forcefully restarting VM." -Warning -OutputStream
+                            Stop-VM2 -name $currentItem.vmName
+                            Start-Sleep -Seconds 20
+                            Start-VM2 -Name $currentItem.vmName
+                            Start-Sleep -Seconds 15
+                            $staleRestartDone = $true
+                            $lastStatusChangeTime = [DateTime]::UtcNow
+                            $lastStaleWarningTime = [DateTime]::MinValue
+                        }
+                        elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())')" -Warning
+                            $lastStaleWarningTime = [DateTime]::UtcNow
+                        }
                     }
 
                     # Special case to write log ConfigMgrSetup.log entries in progress
