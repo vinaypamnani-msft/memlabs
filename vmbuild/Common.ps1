@@ -4090,6 +4090,58 @@ function Invoke-VmCommand {
 }
 
 $global:ps_cache = @{}
+
+# New-PSSessionWithTimeout
+# Wraps New-PSSession -VMId in a separate runspace so the call can be
+# capped at $TimeoutSec seconds.  PSDirect's VMId parameter set does
+# not accept -SessionOption (which carries OpenTimeout), so there is
+# no native way to prevent an indefinite hang when PSDirect is broken
+# inside the guest (e.g. during BDC promotion).
+# Returns the PSSession on success, $null on timeout or failure.
+function New-PSSessionWithTimeout {
+    param(
+        [string]$Name,
+        [guid]$VMId,
+        [pscredential]$Credential,
+        [int]$TimeoutSec = 30
+    )
+
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+
+    $psi = [System.Management.Automation.PowerShell]::Create()
+    $psi.Runspace = $rs
+
+    $null = $psi.AddScript({
+        param($name, $vmId, $cred)
+        New-PSSession -Name $name -VMId $vmId -Credential $cred -ErrorAction Stop
+    }).AddArgument($Name).AddArgument($VMId).AddArgument($Credential)
+
+    $async = $psi.BeginInvoke()
+
+    if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
+        # Timed out — abort the connection attempt
+        $psi.Stop()
+        $psi.Dispose()
+        $rs.Close()
+        $rs.Dispose()
+        return $null
+    }
+
+    $session = $null
+    try {
+        $session = $psi.EndInvoke($async) | Select-Object -First 1
+    }
+    catch {
+        # Connection failed (bad creds, VM not ready, etc.)
+    }
+
+    $psi.Dispose()
+    $rs.Close()
+    $rs.Dispose()
+    return $session
+}
+
 function Get-VmSession {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VM Name")]
@@ -4167,17 +4219,17 @@ function Get-VmSession {
         }
 
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
-        if ($Err0.Count -ne 0) {
+        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+        if (-not $ps) {
             try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
             if ($VmDomainName -ne $VmName) {
-                Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                Write-Log "$VmName`: Failed to establish a session using $username." -Warning -Verbose
                 $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
                 $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
                 $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
-                if ($Err1.Count -ne 0) {
+                $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+                if (-not $ps) {
                     try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
                     if ($VM) {
@@ -4185,7 +4237,7 @@ function Get-VmSession {
                         $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
                         $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
                         $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
                     }
                     # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
                     if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
@@ -4193,14 +4245,14 @@ function Get-VmSession {
                         $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
                         $cacheKey = $VmName + "-$VmDomainName-Administrator"
                         Write-Log "$VmName`: Falling back to $username4." -Verbose
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
                     }
                     if (-not $ps) {
                         if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning
+                            Write-Log "$VmName`: Failed to establish a session using $username, $username2, $username3." -Warning
                         }
                         else {
-                            Write-Log "$VmName`: Failed to establish a session using $username and $username2 $username3. Error: $Err1" -Warning -Verbose
+                            Write-Log "$VmName`: Failed to establish a session using $username, $username2, $username3." -Warning -Verbose
                         }
                         continue
                     }
@@ -4208,12 +4260,10 @@ function Get-VmSession {
             }
             else {
                 if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning
+                    Write-Log "$VmName`: Failed to establish a session using $username." -Warning
                 }
                 else {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    Write-Log "$VmName`: Failed to establish a session using $username. Error: $Err0" -Warning -Verbose
+                    Write-Log "$VmName`: Failed to establish a session using $username." -Warning -Verbose
                 }
                 continue
             }
