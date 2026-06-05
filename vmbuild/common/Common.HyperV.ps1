@@ -507,6 +507,24 @@ function Stop-VM2 {
             return
         }
 
+        # Proactively invalidate the PSDirect session cache for this VM.
+        # After a stop/restart cycle the session will be broken, and the
+        # credential that last worked (e.g. local in Phase 1) may no
+        # longer be valid (e.g. VM is now domain-joined after Phase 2).
+        # Clearing here avoids a 30s timeout trying stale credentials on
+        # the next Get-VmSession call.
+        if ($global:ps_cache) {
+            foreach ($key in @($global:ps_cache.Keys)) {
+                if ($key -like "$Name-*") {
+                    try { Remove-PSSession $global:ps_cache[$key] -ErrorAction SilentlyContinue } catch {}
+                    $global:ps_cache.Remove($key)
+                }
+            }
+        }
+        if ($global:ps_lastGoodCred) {
+            $global:ps_lastGoodCred.Remove($Name)
+        }
+
         Write-Log "${Name}: Stopping VM" -LogOnly
 
         if ($vm) {
