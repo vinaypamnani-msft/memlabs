@@ -2162,10 +2162,37 @@ function Test-NetworkNat {
 
     )
 
+    $expectedPrefix = "$($NetworkSubnet)/24"
     $exists = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
     if ($exists) {
-        Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
-        return $true
+        # Validate the existing NAT is healthy: correct prefix and the
+        # internal interface still exists.  A partial removal of a
+        # previous deployment can leave a stale NAT that has the right
+        # name but references a deleted adapter, breaking all outbound
+        # traffic for VMs on that subnet.
+        $healthy = $true
+        if ($exists.InternalIPInterfaceAddressPrefix -ne $expectedPrefix) {
+            Write-Log "NAT '$NetworkSubnet' has wrong prefix '$($exists.InternalIPInterfaceAddressPrefix)' (expected '$expectedPrefix'). Recreating." -Warning
+            $healthy = $false
+        }
+        if ($healthy) {
+            # Check that the NAT's internal interface is reachable:
+            # there should be a host adapter with an IP on this subnet.
+            $subnetBase = $NetworkSubnet.Substring(0, $NetworkSubnet.LastIndexOf("."))
+            $hostIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -like "$subnetBase.*" }
+            if (-not $hostIp) {
+                Write-Log "NAT '$NetworkSubnet' exists but no host adapter has an IP on $subnetBase.x. Recreating." -Warning
+                $healthy = $false
+            }
+        }
+        if ($healthy) {
+            Write-Log "'$NetworkSubnet' is already present in NAT." -Verbose
+            return $true
+        }
+        # Stale NAT — remove before recreating
+        Write-Log "Removing stale NAT '$NetworkSubnet'..." -Warning
+        Remove-NetNat -Name $NetworkSubnet -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     try {
@@ -2176,11 +2203,11 @@ function Test-NetworkNat {
             Restart-Service RemoteAccess -ErrorAction Stop -WarningAction SilentlyContinue
         }
 
-        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix "$($NetworkSubnet)/24" -ErrorAction Stop
+        New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix $expectedPrefix -ErrorAction Stop
         return $true
     }
     catch {
-        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$($NetworkSubnet)/24`" failed with error: $_" -Failure
+        Write-Log "New-NetNat -Name $NetworkSubnet -InternalIPInterfaceAddressPrefix `"$expectedPrefix`" failed with error: $_" -Failure
         return $false
     }
 
