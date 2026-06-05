@@ -4347,7 +4347,19 @@ class JoinClusterByIP {
 
             if ($_Role -eq 'Create') {
                 Write-Status "Creating cluster '$_ClusterName' on '$_NodeName' with IP $_ClusterIP"
-                New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false
+                try {
+                    New-Cluster -Name $_ClusterName -Node $_NodeName -StaticAddress $_ClusterIP -NoStorage -Force -ErrorAction Stop -WarningAction SilentlyContinue -Verbose:$false
+                }
+                catch {
+                    # If the node is already in the target cluster (re-run), treat as success
+                    $localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+                    if ($localCluster -and $localCluster.Name -eq $_ClusterName) {
+                        Write-Status "Node '$_NodeName' is already in cluster '$_ClusterName'"
+                    }
+                    else {
+                        throw
+                    }
+                }
                 Write-Status "Successfully created cluster '$_ClusterName'"
             }
             else {
@@ -4418,6 +4430,20 @@ class JoinClusterByIP {
                 Close-UserToken -Token $newToken
             }
         }
+
+        # Fallback: if IP-based query failed or timed out, check local cluster membership
+        try {
+            $localCluster = Get-Cluster -ErrorAction SilentlyContinue -Verbose:$false
+            if ($localCluster -and $localCluster.Name -eq $_ClusterName) {
+                $localNode = Get-ClusterNode -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
+                if ($localNode -and ($localNode.State -eq 'Up' -or $localNode.State -eq 'Paused')) {
+                    Write-Verbose "Node '$_NodeName' confirmed in cluster '$_ClusterName' via local query (IP-based query failed)"
+                    return $true
+                }
+            }
+        }
+        catch { }
+
         Write-Verbose "Node '$_NodeName' is not a member of cluster '$_ClusterName'"
         return $false
     }
@@ -4432,9 +4458,18 @@ class ClusterRemoveUnwantedIPs {
     [DscProperty(Key)]
     [string] $ClusterName
 
+    [DscProperty()]
+    [string] $ClusterIPAddress
+
+    hidden [string] StripCidr([string] $ip) {
+        if ($ip -match '^([^/]+)/') { return $Matches[1] }
+        return $ip
+    }
+
     [void] Set() {
         try {
             $_ClusterName = $this.ClusterName
+            $_KeepIP = if ($this.ClusterIPAddress) { $this.StripCidr($this.ClusterIPAddress) } else { $null }
             $valid = $false
             [int]$failCount = 0
             Write-Status "Getting Cluster $_ClusterName"
@@ -4464,7 +4499,14 @@ class ClusterRemoveUnwantedIPs {
             # Do NOT touch IP resources in AG listener groups — those belong to
             # the availability group and use domain-subnet IPs by design.
             $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
-            $ResourcesToRemove = ($clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
+            if ($_KeepIP) {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
+            }
+            else {
+                # Legacy fallback: keep heartbeat-subnet IPs
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            }
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
                     Write-Status "Cluster Removing $($resource.Name)"
@@ -4501,6 +4543,7 @@ class ClusterRemoveUnwantedIPs {
 
         try {
             $_ClusterName = $this.ClusterName
+            $_KeepIP = if ($this.ClusterIPAddress) { $this.StripCidr($this.ClusterIPAddress) } else { $null }
             $valid = $false
             [int]$failCount = 0
             $Cluster = Get-ClusterResource -Cluster $_ClusterName -ErrorAction Stop
@@ -4526,7 +4569,13 @@ class ClusterRemoveUnwantedIPs {
                 }
             }
             $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
-            $ResourcesToRemove = ($clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
+            if ($_KeepIP) {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
+            }
+            else {
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+            }
 
             if ($ResourcesToRemove) {
                 return $false

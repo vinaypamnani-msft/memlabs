@@ -557,6 +557,7 @@ Configuration Phase5
 
         ClusterRemoveUnwantedIPs ClusterRemoveUnwantedIPs {
             ClusterName          = $thisVM.ClusterName
+            ClusterIPAddress     = $thisVM.thisParams.SQLAO.ClusterIPAddress
             PsDscRunAsCredential = $Admincreds
             DependsOn            = $nextDepend
         }
