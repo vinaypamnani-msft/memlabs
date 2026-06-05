@@ -4146,9 +4146,6 @@ function Get-VmSession {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
         return $null
     }
-    # Prevent New-PSSession from hanging indefinitely when the VM is
-    # mid-reboot or PSDirect is unresponsive (e.g. BDC promotion).
-    $sessionOpt = New-PSSessionOption -OpenTimeout 30000  # 30 seconds
     $failCount = 0
     while ($true) {
         $ps = $null
@@ -4170,7 +4167,7 @@ function Get-VmSession {
         }
 
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -SessionOption $sessionOpt -ErrorVariable Err0 -ErrorAction SilentlyContinue
+        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
             try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
             if ($VmDomainName -ne $VmName) {
@@ -4179,7 +4176,7 @@ function Get-VmSession {
                 $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
                 $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
                 Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -SessionOption $sessionOpt -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                 if ($Err1.Count -ne 0) {
                     try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
                     $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
@@ -4188,7 +4185,7 @@ function Get-VmSession {
                         $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
                         $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
                         $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -SessionOption $sessionOpt -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
                     # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
                     if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
@@ -4196,7 +4193,7 @@ function Get-VmSession {
                         $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
                         $cacheKey = $VmName + "-$VmDomainName-Administrator"
                         Write-Log "$VmName`: Falling back to $username4." -Verbose
-                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -SessionOption $sessionOpt -ErrorVariable Err1 -ErrorAction SilentlyContinue
+                        $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -ErrorVariable Err1 -ErrorAction SilentlyContinue
                     }
                     if (-not $ps) {
                         if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
