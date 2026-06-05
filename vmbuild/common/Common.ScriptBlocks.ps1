@@ -2903,14 +2903,28 @@ $global:VM_Config = {
                         # Status unchanged — check for stale progress
                         $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
                         if ($staleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
-                            $staleRestartCount++
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                            Stop-VM2 -name $currentItem.vmName
-                            Start-Sleep -Seconds 20
-                            Start-VM2 -Name $currentItem.vmName
-                            Start-Sleep -Seconds 15
-                            $lastStatusChangeTime = [DateTime]::UtcNow
-                            $lastStaleWarningTime = [DateTime]::MinValue
+                            # Before restarting, check if DSC is still actively running
+                            $lcmCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                (Get-DscLocalConfigurationManager).LCMState
+                            } -SuppressLog
+                            if (-not $lcmCheck.ScriptBlockFailed -and $lcmCheck.ScriptBlockOutput -eq 'Busy') {
+                                # LCM is still actively applying configuration — not stuck
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())') but LCM is still Busy. Not restarting." -Warning
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
+                            else {
+                                # LCM is Idle/unreachable — VM may be genuinely stuck
+                                $staleRestartCount++
+                                $lcmState = if ($lcmCheck.ScriptBlockFailed) { "unreachable" } else { $lcmCheck.ScriptBlockOutput }
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). LCM state: $lcmState. Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                Stop-VM2 -name $currentItem.vmName
+                                Start-Sleep -Seconds 20
+                                Start-VM2 -Name $currentItem.vmName
+                                Start-Sleep -Seconds 15
+                                $lastStatusChangeTime = [DateTime]::UtcNow
+                                $lastStaleWarningTime = [DateTime]::MinValue
+                            }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())')" -Warning
