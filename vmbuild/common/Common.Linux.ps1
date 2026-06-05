@@ -2539,7 +2539,7 @@ echo "APT_CLEANUP_DONE"
                 }
             }
 
-            $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid (retry)"
+            $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid (retry)"
         }
     }
 
