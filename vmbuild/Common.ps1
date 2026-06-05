@@ -3929,12 +3929,13 @@ function Invoke-VmCommand {
 
         # Get VM Session
         $ps = $null
+        $localOnlySession = $SkipDomainFallback.IsPresent
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession
         }
 
         if (-not $ps) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession
         }
 
         if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
@@ -4181,7 +4182,9 @@ function Get-VmSession {
         [Parameter(Mandatory = $false, HelpMessage = "Show VM Session errors, very noisy")]
         [switch]$ShowVMSessionError,
         [Parameter(Mandatory = $false, HelpMessage = "Max retry attempts (default 3). Reduce for tight polling loops.")]
-        [int]$MaxRetries = 3
+        [int]$MaxRetries = 3,
+        [Parameter(Mandatory = $false, HelpMessage = "Only try local/primary credentials. Skip domain-lookup fallback.")]
+        [switch]$LocalOnly
     )
 
 
@@ -4268,17 +4271,19 @@ function Get-VmSession {
     }
 
     # Domain-lookup fallback: use the domain from Get-List VM record
-    $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
-    if ($vmRecord -and $vmRecord.Domain) {
-        $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"
-        $domainLookupCacheKey = "$VmName-$($vmRecord.Domain)-$($Common.LocalAdmin.UserName)"
-        if ($domainLookupUser -ne $username -and $domainLookupUser -ne $localUser) {
-            $credEntries.Add(@{ Tag = 'domain-lookup'; Username = $domainLookupUser; CacheKey = $domainLookupCacheKey })
+    if (-not $LocalOnly) {
+        $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+        if ($vmRecord -and $vmRecord.Domain) {
+            $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"
+            $domainLookupCacheKey = "$VmName-$($vmRecord.Domain)-$($Common.LocalAdmin.UserName)"
+            if ($domainLookupUser -ne $username -and $domainLookupUser -ne $localUser) {
+                $credEntries.Add(@{ Tag = 'domain-lookup'; Username = $domainLookupUser; CacheKey = $domainLookupCacheKey })
+            }
         }
     }
 
     # Administrator fallback: DOMAIN\Administrator (after DC promotion)
-    if ($VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+    if (-not $LocalOnly -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
         $adminUser = "$VmDomainName\Administrator"
         $adminCacheKey = "$VmName-$VmDomainName-Administrator"
         if ($adminUser -ne $username) {
