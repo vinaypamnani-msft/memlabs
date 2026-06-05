@@ -4090,6 +4090,10 @@ function Invoke-VmCommand {
 }
 
 $global:ps_cache = @{}
+# Remembers which credential style last worked for each VM so the next
+# cold connect can try it first, avoiding 30s timeout on wrong creds.
+# Values: 'primary' | 'local' | 'domain-lookup' | 'administrator'.
+$global:ps_lastGoodCred = @{}
 
 # New-PSSessionWithTimeout
 # Wraps New-PSSession -VMId in a separate runspace so the call can be
@@ -4180,7 +4184,8 @@ function Get-VmSession {
     }
 
     Write-Log "$VmName`: Get-VmSession started with cachekey $cacheKey" -Verbose
-    # Retrieve session from cache
+
+    # ── Fast path: exact cache key match ──────────────────────────────────
     if ($global:ps_cache.ContainsKey($cacheKey)) {
         $ps = $global:ps_cache[$cacheKey]
         if ($ps.Availability -eq "Available") {
@@ -4193,11 +4198,83 @@ function Get-VmSession {
         }
     }
 
+    # ── Fast path: ANY available session for this VM ──────────────────────
+    # Between phases the caller often changes VmDomainName (WORKGROUP →
+    # domain or vice-versa), causing a cache miss even though a perfectly
+    # good session already exists under a different key.
+    foreach ($existingKey in @($global:ps_cache.Keys)) {
+        if ($existingKey -like "$VmName-*") {
+            $existingPs = $global:ps_cache[$existingKey]
+            if ($existingPs.Availability -eq "Available") {
+                Write-Log "$VmName`: Reusing existing session from key '$existingKey' (caller asked for '$cacheKey')." -Verbose
+                return $existingPs
+            }
+            else {
+                $global:ps_cache.Remove($existingKey)
+                try { Remove-PSSession $existingPs -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+    }
+
     $vm = get-vm2 -Fallback -Name $VmName
     if (-not $vm) {
         Write-Log "[Get-VMSession] $VmName`: Failed to find VM named $VmName" -Failure
         return $null
     }
+
+    # ── Build ordered credential list ─────────────────────────────────────
+    # Each entry: @{ Tag; Username; CacheKey }.  The 'primary' credential
+    # (what the caller asked for) is always present.  Additional fallbacks
+    # are appended when they differ from primary.  If a previous call for
+    # this VM already succeeded with a known credential tag, that entry is
+    # moved to the front so we try it first (avoids 30s timeout on wrong
+    # creds).
+    $credEntries = [System.Collections.Generic.List[hashtable]]::new()
+
+    # Primary: what the caller asked for
+    $credEntries.Add(@{ Tag = 'primary'; Username = $username; CacheKey = $cacheKey })
+
+    # Local fallback: VMNAME\localadmin (only if different from primary)
+    $localUser = "$VmName\$($Common.LocalAdmin.UserName)"
+    $localCacheKey = "$VmName-WORKGROUP-$($Common.LocalAdmin.UserName)"
+    if ($localUser -ne $username) {
+        $credEntries.Add(@{ Tag = 'local'; Username = $localUser; CacheKey = $localCacheKey })
+    }
+
+    # Domain-lookup fallback: use the domain from Get-List VM record
+    $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
+    if ($vmRecord -and $vmRecord.Domain) {
+        $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"
+        $domainLookupCacheKey = "$VmName-$($vmRecord.Domain)-$($Common.LocalAdmin.UserName)"
+        if ($domainLookupUser -ne $username -and $domainLookupUser -ne $localUser) {
+            $credEntries.Add(@{ Tag = 'domain-lookup'; Username = $domainLookupUser; CacheKey = $domainLookupCacheKey })
+        }
+    }
+
+    # Administrator fallback: DOMAIN\Administrator (after DC promotion)
+    if ($VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
+        $adminUser = "$VmDomainName\Administrator"
+        $adminCacheKey = "$VmName-$VmDomainName-Administrator"
+        if ($adminUser -ne $username) {
+            $credEntries.Add(@{ Tag = 'administrator'; Username = $adminUser; CacheKey = $adminCacheKey })
+        }
+    }
+
+    # If we remember which credential last worked, move it to the front
+    $lastGood = $global:ps_lastGoodCred[$VmName]
+    if ($lastGood) {
+        $idx = -1
+        for ($i = 0; $i -lt $credEntries.Count; $i++) {
+            if ($credEntries[$i].Tag -eq $lastGood) { $idx = $i; break }
+        }
+        if ($idx -gt 0) {
+            $entry = $credEntries[$idx]
+            $credEntries.RemoveAt($idx)
+            $credEntries.Insert(0, $entry)
+            Write-Log "$VmName`: Trying last-known-good credential '$lastGood' ($($entry.Username)) first." -Verbose
+        }
+    }
+
     $failCount = 0
     while ($true) {
         $ps = $null
@@ -4218,68 +4295,32 @@ function Get-VmSession {
             continue
         }
 
-        $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
-        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
-        if (-not $ps) {
+        # Try each credential in order; stop on first success
+        $triedNames = @()
+        foreach ($entry in $credEntries) {
+            $triedNames += $entry.Username
+            $creds = New-Object System.Management.Automation.PSCredential ($entry.Username, $Common.LocalAdmin.Password)
+            Write-Log "$VmName`: Trying credential '$($entry.Username)' (tag=$($entry.Tag))." -Verbose
+            $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+            if ($ps -and $ps.Availability -eq "Available") {
+                $cacheKey = $entry.CacheKey
+                $global:ps_lastGoodCred[$VmName] = $entry.Tag
+                Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
+                $global:ps_cache[$cacheKey] = $ps
+                return $ps
+            }
             try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-            if ($VmDomainName -ne $VmName) {
-                Write-Log "$VmName`: Failed to establish a session using $username." -Warning -Verbose
-                $username2 = "$VmName\$($Common.LocalAdmin.UserName)"
-                $creds = New-Object System.Management.Automation.PSCredential ($username2, $Common.LocalAdmin.Password)
-                $cacheKey = $VmName + "-WORKGROUP-" + $Common.LocalAdmin.UserName
-                Write-Log "$VmName`: Falling back to local account and attempting to get a session using $username2." -Verbose
-                $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
-                if (-not $ps) {
-                    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-                    $VM = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
-                    if ($VM) {
-
-                        $username3 = "$($VM.Domain)\$($Common.LocalAdmin.UserName)"
-                        $creds = New-Object System.Management.Automation.PSCredential ($username3, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$($VM.Domain)-" + $Common.LocalAdmin.UserName
-                        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
-                    }
-                    # Fallback: try DOMAIN\Administrator (works after DC promotion where local admin becomes domain Administrator)
-                    if (-not $ps -and $VmDomainName -ne "WORKGROUP" -and $VmDomainName -ne $VmName) {
-                        $username4 = "$VmDomainName\Administrator"
-                        $creds = New-Object System.Management.Automation.PSCredential ($username4, $Common.LocalAdmin.Password)
-                        $cacheKey = $VmName + "-$VmDomainName-Administrator"
-                        Write-Log "$VmName`: Falling back to $username4." -Verbose
-                        $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
-                    }
-                    if (-not $ps) {
-                        if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                            Write-Log "$VmName`: Failed to establish a session using $username, $username2, $username3." -Warning
-                        }
-                        else {
-                            Write-Log "$VmName`: Failed to establish a session using $username, $username2, $username3." -Warning -Verbose
-                        }
-                        continue
-                    }
-                }
-            }
-            else {
-                if ($ShowVMSessionError.IsPresent -or ($failCount -eq 3)) {
-                    Write-Log "$VmName`: Failed to establish a session using $username." -Warning
-                }
-                else {
-                    Write-Log "$VmName`: Failed to establish a session using $username." -Warning -Verbose
-                }
-                continue
-            }
         }
 
-        if ($ps.Availability -eq "Available") {
-            # Cache & return session
-            Write-Log "$VmName`: Created session with VM using $username. CacheKey [$cacheKey]" -Success -Verbose
-            $global:ps_cache[$cacheKey] = $ps
-            return $ps
+        $triedList = $triedNames -join ', '
+        if ($ShowVMSessionError.IsPresent -or ($failCount -eq $MaxRetries)) {
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning
         }
-        try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-        Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Warning
+        else {
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose
+        }
     }
-    try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
-    Write-Log "$VmName`: Could not create session with VM using $username. CacheKey [$cacheKey]" -Failure
+    Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
 }
 
 
