@@ -650,16 +650,25 @@ function Write-ScriptWorkFlowData {
         $ConfigurationFile
     )
 
-    $mutexName = "ScriptWorkflow"
-
-    $mtx = New-Object System.Threading.Mutex($false, $mutexName)
-    [void]$mtx.WaitOne()
+    $mtx = $null
+    try {
+        $mtx = New-Object System.Threading.Mutex($false, "ScriptWorkflow")
+        [void]$mtx.WaitOne()
+    }
+    catch {
+        # Mutex creation can fail after snapshot restore if a stale kernel
+        # object exists with a different security context.  Proceed without
+        # synchronization — ScriptWorkflow runs sequentially.
+        $mtx = $null
+    }
     try {
         $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
     }
     finally {
-        [void]$mtx.ReleaseMutex()
-        [void]$mtx.Dispose()
+        if ($mtx) {
+            [void]$mtx.ReleaseMutex()
+            [void]$mtx.Dispose()
+        }
     }
 }
 
