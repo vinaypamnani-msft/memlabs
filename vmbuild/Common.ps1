@@ -4097,6 +4097,14 @@ function Get-VmSession {
             break
         }
 
+        # Skip New-PSSession entirely if the VM is not running.
+        # Avoids 30s+ timeout per credential attempt on a dead/rebooting VM.
+        $vmState = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).State
+        if ($vmState -ne 'Running') {
+            Write-Log "$VmName`: VM state is '$vmState'; skipping session attempt $failCount/$MaxRetries" -Verbose
+            continue
+        }
+
         $creds = New-Object System.Management.Automation.PSCredential ($username, $Common.LocalAdmin.Password)
         $ps = New-PSSession -Name $VmName -VMId $vm.vmID -Credential $creds -SessionOption $sessionOpt -ErrorVariable Err0 -ErrorAction SilentlyContinue
         if ($Err0.Count -ne 0) {
