@@ -15,6 +15,10 @@
 # ---------------------------------------------------------------------------
 wait_for_apt_lock() {
     local max_wait=${1:-300} waited=0
+    # Stop unattended-upgrades first — it's the #1 cause of held locks.
+    # On deployed VMs the service should be masked, but belt-and-suspenders.
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    pkill -9 -x unattended-upgr 2>/dev/null || true
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
           fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
           fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do

@@ -21,6 +21,40 @@ fi
 echo "[install-squid] Starting (FAST_PATH=$FAST_PATH)"
 
 if [ "$FAST_PATH" = "0" ]; then
+    # Verify DNS + network before apt operations.  apt-get hangs indefinitely
+    # if DNS is broken (systemd-resolved misconfigured, no upstream forwarder).
+    echo "[install-squid] Checking DNS and network connectivity..."
+    DNS_OK=0
+    for attempt in 1 2 3; do
+        if getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+            DNS_OK=1
+            break
+        fi
+        echo "[install-squid] DNS probe $attempt/3 failed; waiting 10s..." >&2
+        # If systemd-resolved is broken, try adding a public fallback
+        if [ "$attempt" = "2" ]; then
+            echo "[install-squid] Adding 8.8.8.8 as fallback DNS..." >&2
+            if command -v resolvectl >/dev/null 2>&1; then
+                resolvectl dns eth0 8.8.8.8 2>/dev/null || true
+            fi
+            # Direct fallback if resolvectl doesn't help
+            if ! getent hosts archive.ubuntu.com >/dev/null 2>&1; then
+                echo "nameserver 8.8.8.8" >> /etc/resolv.conf 2>/dev/null || true
+            fi
+        fi
+        sleep 10
+    done
+    if [ "$DNS_OK" = "0" ]; then
+        echo "[install-squid] ERROR: Cannot resolve archive.ubuntu.com after 3 attempts" >&2
+        echo "[install-squid] DNS config:" >&2
+        resolvectl status 2>/dev/null | head -20 >&2 || cat /etc/resolv.conf >&2
+        exit 1
+    fi
+    echo "[install-squid] DNS OK"
+
+    # Kill unattended-upgrades if running — it holds the dpkg lock for minutes.
+    systemctl stop unattended-upgrades.service 2>/dev/null || true
+    pkill -9 -x unattended-upgr 2>/dev/null || true
     echo "[install-squid] Running apt-get update..."
     wait_for_apt_lock
     apt_retry apt-get update -y

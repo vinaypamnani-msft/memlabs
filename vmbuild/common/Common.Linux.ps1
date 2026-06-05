@@ -2508,9 +2508,21 @@ coredump_dir /var/spool/squid
             if ($wasTimeout) {
                 Write-Log "[Proxy] $vmName`: First attempt timed out; killing orphaned apt/dpkg processes..." -Warning
                 $killBash = @'
-# Kill any orphaned package-manager processes left from the timed-out SSH session
-for proc in apt-get dpkg apt; do
+# Kill any orphaned processes left from the timed-out SSH session.
+# The SSH timeout kills the local ssh.exe but the remote bash -s
+# (and its children) keep running.  Kill them all.
+for proc in apt-get dpkg apt squid; do
     pkill -9 -x "$proc" 2>/dev/null && echo "killed $proc" || true
+done
+# Kill orphaned bash scripts that look like our install payloads.
+# Match on the 'bash -s' processes spawned by SSH (PPID=1 after
+# the SSH channel dies and they get reparented to init).
+for pid in $(pgrep -x bash); do
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ "$ppid" = "1" ]; then
+        echo "killed orphaned bash PID=$pid"
+        kill -9 "$pid" 2>/dev/null || true
+    fi
 done
 # Release stale lock files
 rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
