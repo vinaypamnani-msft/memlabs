@@ -2089,7 +2089,7 @@ function Get-VMNetworkCached {
     # Check the in-memory bulk cache (populated by Invoke-VMNetworkBulkWarmup)
     if ($global:Common.NetCache -and $global:Common.NetCache.ContainsKey($vm.Id)) {
         $vmCacheEntry = $global:Common.NetCache[$vm.Id]
-        if ($vmCacheEntry.SwitchName -and -not $Common.InJob) {
+        if ($vmCacheEntry.SwitchName) {
             ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
         }
         return $vmCacheEntry
@@ -2106,7 +2106,12 @@ function Get-VMNetworkCached {
         EntryAdded = (Get-Date -format "MM/dd/yyyy HH:mm")
     }
 
-    if ($vmNet.SwitchName -and -not $Common.InJob) {
+    # Populate in-memory cache so subsequent calls in the same runspace
+    # (e.g. a second Get-List on the same thread) don't repeat the WMI hit.
+    if (-not $global:Common.NetCache) { $global:Common.NetCache = @{} }
+    $global:Common.NetCache[$vm.Id] = $vmCacheEntry
+
+    if ($vmNet.SwitchName) {
         ConvertTo-Json $vmCacheEntry | Out-File $cacheFile -Force
     }
     return $vmCacheEntry

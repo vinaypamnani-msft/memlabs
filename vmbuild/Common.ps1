@@ -3866,7 +3866,7 @@ function Invoke-VmCommand {
         [Parameter(Mandatory = $false, HelpMessage = "Domain Account to use for creating domain creds")]
         [string]$VmDomainAccount,
         [Parameter(Mandatory = $false, HelpMessage = "Argument List to supply to ScriptBlock")]
-        [string[]]$ArgumentList,
+        [object[]]$ArgumentList,
         [Parameter(Mandatory = $false, HelpMessage = "Display Name of the script for log/console")]
         [string]$DisplayName,
         [Parameter(Mandatory = $false, HelpMessage = "Suppress log entries. Useful when waiting for VM to be ready to run commands.")]
