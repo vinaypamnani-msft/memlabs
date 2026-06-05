@@ -2465,7 +2465,7 @@ coredump_dir /var/spool/squid
 
     $bash = Get-LinuxScript -Name 'proxy/install-squid' -Variables @{ CONF_B64 = $confB64 } -IncludeAptRetry
 
-    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid"
+    $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 900 -DisplayName "Install Squid"
 
     # ── Resilient retry logic ──
     # Separate "script ran fine but squid slow to start" (exit=0, no PROXY_READY)
@@ -2500,13 +2500,45 @@ coredump_dir /var/spool/squid
         }
 
         if ($needsReboot) {
-            Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
-            $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
-            $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
-            if (-not $ip) {
-                Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
-                return $false
+            # If the first attempt timed out, the SSH channel was severed but
+            # the remote apt-get/dpkg process keeps running and holds the lock.
+            # Kill orphaned apt/dpkg processes before retrying so
+            # wait_for_apt_lock doesn't spin for 300s and fail.
+            $wasTimeout = $result.ScriptBlockFailed -and $result.ScriptBlockOutput -match 'TIMEOUT'
+            if ($wasTimeout) {
+                Write-Log "[Proxy] $vmName`: First attempt timed out; killing orphaned apt/dpkg processes..." -Warning
+                $killBash = @'
+# Kill any orphaned package-manager processes left from the timed-out SSH session
+for proc in apt-get dpkg apt; do
+    pkill -9 -x "$proc" 2>/dev/null && echo "killed $proc" || true
+done
+# Release stale lock files
+rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+# Recover interrupted dpkg state
+dpkg --configure -a 2>/dev/null || true
+echo "APT_CLEANUP_DONE"
+'@
+                $cleanup = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $killBash `
+                    -Sudo -TimeoutSeconds 60 -DisplayName "Kill orphaned apt processes"
+                if ($cleanup -and $cleanup.ScriptBlockOutput -match 'APT_CLEANUP_DONE') {
+                    Write-Log "[Proxy] $vmName`: Orphaned processes cleaned up; retrying without reboot" -LogOnly
+                }
+                else {
+                    Write-Log "[Proxy] $vmName`: Cleanup inconclusive; falling back to reboot" -Warning
+                    $wasTimeout = $false
+                }
             }
+
+            if (-not $wasTimeout) {
+                Write-Log "[Proxy] $vmName`: Rebooting and retrying..." -Warning
+                $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $ProxyVM -DeployConfig $deployConfig
+                $ip = Restart-LinuxVmAndWait -VmName $vmName -IPAddress $ip -ExpectedIPAddress $expectedIp -WaitTimeoutSeconds 900
+                if (-not $ip) {
+                    Write-Log "[Proxy] $vmName`: VM not reachable after reboot; aborting." -Failure
+                    return $false
+                }
+            }
+
             $result = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $bash -Sudo -TimeoutSeconds 600 -DisplayName "Install Squid (retry)"
         }
     }
