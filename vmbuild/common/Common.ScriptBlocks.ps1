@@ -1322,50 +1322,52 @@ $global:VM_Config = {
 
 
         $Stop_RunningDSC = {
-            # Kill WMI provider hosts FIRST. The DSC LCM runs inside
-            # WmiPrvSE.exe; killing it terminates any stuck DSC operation
-            # and ensures .NET picks up machine.config changes (e.g.
-            # <defaultProxy>) instead of using a stale cached copy.
-            # Doing this before Stop-DscConfiguration avoids the 60s+
-            # timeout that occurs when Stop-DscConfiguration hangs on
-            # a busy/stuck WMI provider.
+            # 1. Try a clean stop first (flushes DSC logs so they're readable).
+            #    Use a short timeout — on first run there's nothing to stop and
+            #    it should return instantly; on re-runs a healthy LCM stops in
+            #    seconds.
+            $cleanStop = $false
+            try {
+                get-job | remove-job -ErrorAction SilentlyContinue
+                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue | Out-Null
+                $job = Stop-DscConfiguration -Force -AsJob
+                $wait = Wait-Job -Timeout 30 $job
+                if ($wait.State -eq "Completed") {
+                    get-job | remove-job -ErrorAction SilentlyContinue
+                    $cleanStop = $true
+                }
+                else {
+                    # Clean stop timed out — kill the job
+                    Stop-Job $job -ErrorAction SilentlyContinue
+                    get-job | remove-job -ErrorAction SilentlyContinue
+                }
+            }
+            catch {}
+
+            # 2. If clean stop failed/timed out, kill WMI provider hosts to
+            #    force-terminate a stuck DSC LCM, then retry.
+            if (-not $cleanStop) {
+                try {
+                    Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                } catch {}
+                # Brief pause for WMI service to respawn
+                Start-Sleep -Seconds 2
+                try {
+                    Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue | Out-Null
+                    Stop-DscConfiguration -Force -ErrorAction SilentlyContinue | Out-Null
+                } catch {}
+            }
+
+            # 3. Always kill WmiPrvSE at the end so .NET picks up any
+            #    machine.config changes (e.g. <defaultProxy> from a prior
+            #    phase) in a fresh AppDomain.
             try {
                 Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                 Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
             } catch {}
 
-            # Stop any existing DSC runs
-            try {
-                get-job | remove-job
-
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force | out-null
-                $job = Stop-DscConfiguration -Force -AsJob
-                $wait = Wait-Job -Timeout 600 $job
-                if ($wait.State -eq "Running") {
-                    Stop-Job $job
-                    get-job | remove-job
-                    Restart-Service -Name WinMgmt -force
-                }
-                else {
-                    if ($wait.State -eq "Completed") {
-                        get-job | remove-job
-                    }
-                    else {
-                        write-host "State = $($wait.State)"
-                        Stop-Job $job
-                        get-job | remove-job
-                        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                        Stop-DscConfiguration -Verbose -Force
-                    }
-
-                }
-                Disable-DscDebug -force | Out-Null
-
-            }
-            catch {
-                Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force
-                Stop-DscConfiguration -Verbose -Force
-            }
+            try { Disable-DscDebug -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
 
             # Stop the ScriptWorkflow scheduled task if still running from a previous phase.
             # Phase 8/9 register this task to run ScriptWorkflow.ps1 which writes to DSC_Status.txt
