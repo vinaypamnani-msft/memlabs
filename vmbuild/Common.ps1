@@ -6139,7 +6139,9 @@ if (-not $Common.Initialized) {
 
         if (-not $InJob) {
             Write-Log "Memlabs $($global:Common.MemLabsVersion) Initializing" -LogOnly
-            Set-TitleBar "Init Phase"
+            if (-not $removeOnlyProfile) {
+                Set-TitleBar "Init Phase"
+            }
             Write-Log "Loading required modules." -Verbose
         }
 
@@ -6162,7 +6164,7 @@ if (-not $Common.Initialized) {
                 $getresults = $false
                 Write-Log "Skipping storage initialization due to startup switches. Using Offline Mode." -LogOnly
             }
-            if (-not $getresults ) {
+            if (-not $getresults -and -not $effectiveSkipStorageInit) {
                 $common.OfflineMode = $true
                 Write-Log "failed to get the storage JSON file. Using Offline Mode" -Warning
             }
