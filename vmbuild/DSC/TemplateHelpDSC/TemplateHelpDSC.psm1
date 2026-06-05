@@ -4470,9 +4470,25 @@ class ClusterRemoveUnwantedIPs {
                     Write-Status "Cluster Removing $($resource.Name)"
                     Remove-ClusterResource -Name $resource.Name -Force
                 }
+                # Let the cluster settle after IP removal before re-registering DNS
+                Start-Sleep -Seconds 10
             }
             Write-Status "Cluster Registering new DNS records"
-            Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource
+            $dnsRegistered = $false
+            for ($dnsAttempt = 1; $dnsAttempt -le 3; $dnsAttempt++) {
+                try {
+                    Get-ClusterResource -Name "Cluster Name" | Update-ClusterNetworkNameResource -ErrorAction Stop
+                    $dnsRegistered = $true
+                    break
+                }
+                catch {
+                    Write-Verbose "DNS registration attempt $dnsAttempt/3 failed: $_"
+                    if ($dnsAttempt -lt 3) { Start-Sleep -Seconds 15 }
+                }
+            }
+            if (-not $dnsRegistered) {
+                Write-Verbose "DNS registration failed after 3 attempts. Cluster may re-register on next consistency check."
+            }
             Write-Status "Finished Removing Unwanted Cluster IPs"
         }
         catch {
