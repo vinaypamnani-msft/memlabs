@@ -1864,6 +1864,43 @@ function Add-SwitchAndDhcp {
 
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
+    # ── Stale-networking safeguard ──────────────────────────────────────────
+    # If the vSwitch exists but NO Hyper-V VMs are connected to it, the
+    # switch/NAT/DHCP are left over from a failed removal of a previous
+    # deployment.  Remove them so they get cleanly recreated below.
+    # Skip shared switches (Internet, Cluster, External) — they are not
+    # domain-specific and may legitimately have zero VMs temporarily.
+    $isSharedSwitch = $NetworkName -in @('Internet', 'Cluster', 'External')
+    if (-not $isSharedSwitch) {
+        $existingSwitch = Get-VMSwitch2 -NetworkName $NetworkName
+        if ($existingSwitch) {
+            $attachedVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq $existingSwitch.Name })
+            if ($attachedVMs.Count -eq 0) {
+                Write-Log "Switch '$NetworkName' exists but no VMs are connected. Cleaning up stale networking." -Warning
+
+                # Remove DHCP scope
+                $dhcpScope = Get-DhcpServerv4Scope -ScopeID $NetworkSubnet -ErrorAction SilentlyContinue
+                if ($dhcpScope) {
+                    Write-Log "  Removing stale DHCP scope '$($dhcpScope.Name)' [$NetworkSubnet]" -Warning
+                    $dhcpScope | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+                }
+
+                # Remove NAT entry
+                $nat = Get-NetNat -Name $NetworkSubnet -ErrorAction SilentlyContinue
+                if ($nat) {
+                    Write-Log "  Removing stale NAT '$NetworkSubnet'" -Warning
+                    Remove-NetNat -Name $NetworkSubnet -Confirm:$false -ErrorAction SilentlyContinue
+                }
+
+                # Remove the switch itself
+                Write-Log "  Removing stale switch '$($existingSwitch.Name)'" -Warning
+                $existingSwitch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
+
     $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet -DomainName $DomainName
     if (-not $switch) {
         Write-Log "Failed to verify/create Hyper-V switch for $NetworkName network ($NetworkSubnet). Exiting." -Failure
