@@ -2610,7 +2610,8 @@ $global:VM_Config = {
         $lastStatusChangeTime = [DateTime]::UtcNow
         $staleWarningMinutes = 15
         $staleRestartMinutes = 30
-        $staleRestartDone = $false
+        $staleRestartCount = 0
+        $staleRestartMax = 2
         $lastStaleWarningTime = [DateTime]::MinValue
 
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Started Monitoring $($currentItem.role) configuration."
@@ -2896,19 +2897,18 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Current Status for $($currentItem.role): $currentStatusTrimmed"
                         $previousStatus = $currentStatus
                         $lastStatusChangeTime = [DateTime]::UtcNow
-                        $staleRestartDone = $false
                         $lastStaleWarningTime = [DateTime]::MinValue
                     }
                     else {
                         # Status unchanged — check for stale progress
                         $staleMins = [int]([DateTime]::UtcNow - $lastStatusChangeTime).TotalMinutes
-                        if ($staleMins -ge $staleRestartMinutes -and -not $staleRestartDone) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Forcefully restarting VM." -Warning -OutputStream
+                        if ($staleMins -ge $staleRestartMinutes -and $staleRestartCount -lt $staleRestartMax) {
+                            $staleRestartCount++
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
                             Stop-VM2 -name $currentItem.vmName
                             Start-Sleep -Seconds 20
                             Start-VM2 -Name $currentItem.vmName
                             Start-Sleep -Seconds 15
-                            $staleRestartDone = $true
                             $lastStatusChangeTime = [DateTime]::UtcNow
                             $lastStaleWarningTime = [DateTime]::MinValue
                         }

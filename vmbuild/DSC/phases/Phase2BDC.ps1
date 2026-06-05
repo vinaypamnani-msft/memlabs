@@ -199,6 +199,83 @@
 
         $nextDepend = "[RebootNow]RebootNow"
 
+        # Pre-compute values for Domain Admins membership verification.
+        # After reboot the BDC is still a workgroup machine, so we use an
+        # explicit LDAP bind to the PDC to confirm the admin account is in
+        # Domain Admins before attempting promotion.  This avoids the race
+        # where the BDC's cached Kerberos PAC pre-dates the PDC adding the
+        # account to Domain Admins, which causes Install-ADDSDomainController
+        # to fail with a credential-permissions warning.
+        $cvDomainDN = (($DomainName).Split('.') | ForEach-Object { "DC=$_" }) -join ','
+        $cvAdminUser = $Admincreds.UserName
+        $cvAdminPassB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Admincreds.GetNetworkCredential().Password))
+
+        WriteStatus VerifyCreds {
+            DependsOn = $nextDepend
+            Status    = "Verifying Domain Admins membership before promotion"
+        }
+
+        Script VerifyDomainAdminCreds {
+            DependsOn  = "[WriteStatus]VerifyCreds"
+            GetScript  = { return @{ Result = (Get-Date).ToString() } }
+            TestScript = {
+                if (Test-Path 'C:\Temp\VerifyDomainAdmin.txt') { return `$true }
+                return `$false
+            }
+            SetScript  = [string]"
+                `$pdcIP     = '$PDCIPAddress'
+                `$domain    = '$DomainName'
+                `$domainDN  = '$cvDomainDN'
+                `$adminUser = '$cvAdminUser'
+                `$adminPass = [System.Text.Encoding]::Unicode.GetString(
+                                  [Convert]::FromBase64String('$cvAdminPassB64'))
+
+                `$maxWait = 600   # 10 minutes
+                `$waited  = 0
+                `$verified = `$false
+
+                while (`$waited -lt `$maxWait) {
+                    try {
+                        `$de = New-Object System.DirectoryServices.DirectoryEntry(
+                            ""LDAP://`$pdcIP/`$domainDN"",
+                            ""`$domain\`$adminUser"",
+                            `$adminPass)
+                        `$searcher = New-Object System.DirectoryServices.DirectorySearcher(`$de)
+                        `$searcher.Filter = ""(&(objectClass=group)(cn=Domain Admins))""
+                        `$searcher.PropertiesToLoad.Add(""member"") | Out-Null
+                        `$result = `$searcher.FindOne()
+                        if (`$result) {
+                            `$found = @(`$result.Properties[""member""]) |
+                                      Where-Object { `$_ -like ""CN=`$adminUser,*"" }
+                            if (`$found) {
+                                Write-Verbose ""User '`$adminUser' confirmed in Domain Admins via LDAP""
+                                `$verified = `$true
+                                break
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Verbose ""LDAP query to `$pdcIP failed: `$_""
+                    }
+
+                    Start-Sleep -Seconds 15
+                    `$waited += 15
+                    Write-Verbose ""Waiting for '`$adminUser' in Domain Admins (`$waited s / `$maxWait s)""
+                }
+
+                if (-not `$verified) {
+                    Write-Warning ""Could not verify Domain Admins membership after `$maxWait seconds. Proceeding anyway.""
+                }
+
+                # Purge any cached Kerberos tickets so promotion uses a fresh TGT
+                klist purge 2>&1 | Out-Null
+
+                New-Item -Path 'C:\Temp\VerifyDomainAdmin.txt' -ItemType File -Force | Out-Null
+            "
+        }
+
+        $nextDepend = "[Script]VerifyDomainAdminCreds"
+
         WriteStatus PromoteDC {
             DependsOn = $nextDepend
             Status    = "Promoting to Domain Controller (this takes 10-20 minutes)"

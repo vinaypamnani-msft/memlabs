@@ -332,7 +332,13 @@
             MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
             DependsOn        = "[ADGroup]AddToDomainAdmin"
         }
-        $nextDepend = "[ADGroup]AddToSchemaAdmin"
+
+        ADGroup AddToEnterpriseAdmin {
+            GroupName        = "Enterprise Admins"
+            MembersToInclude = @($DomainAdminName, $Admincreds.UserName)
+            DependsOn        = "[ADGroup]AddToSchemaAdmin"
+        }
+        $nextDepend = "[ADGroup]AddToEnterpriseAdmin"
 
 
 
