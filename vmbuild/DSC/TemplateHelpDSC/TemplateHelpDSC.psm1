@@ -3967,6 +3967,40 @@ class WaitForClusterAccess {
                 $nameRes = $clusterResources | Where-Object { $_.ResourceType -eq 'Network Name' }
                 $ipRes = $clusterResources | Where-Object { $_.ResourceType -eq 'IP Address' }
 
+                # If the Cluster IP resource is missing entirely (deleted by a
+                # previous buggy ClusterRemoveUnwantedIPs run), recreate it.
+                $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
+                if (-not $ipRes -and $_ClusterIP) {
+                    Write-Status "Cluster IP resource is MISSING. Recreating for $_ClusterIP..."
+                    try {
+                        $ipBytes = $_ClusterIP.Split('.')
+                        $subnetPrefix = "$($ipBytes[0]).$($ipBytes[1]).$($ipBytes[2])."
+                        $clusterNetwork = Get-ClusterNetwork -ErrorAction Stop |
+                            Where-Object { $_.Address -and "$($_.Address)".StartsWith($subnetPrefix) } |
+                            Select-Object -First 1
+
+                        $resName = "Cluster IP Address"
+                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $setParams = @{ Address = $_ClusterIP; SubnetMask = "255.255.255.0" }
+                        if ($clusterNetwork) { $setParams['Network'] = $clusterNetwork.Name }
+                        $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
+
+                        if ($nameRes) {
+                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
+                        }
+
+                        Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        $ipRes = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        $actions.Add("IPRecreated:$($ipRes.State)")
+                        Write-Status "Cluster IP resource recreated: $($ipRes.State)"
+                    }
+                    catch {
+                        $actions.Add("IPRecreate failed: $_")
+                        Write-Status "Failed to recreate Cluster IP: $_"
+                    }
+                }
+
                 if ($nameRes -and $nameRes.State -ne 'Online') {
                     Write-Status "Cluster Name resource is $($nameRes.State). Attempting to bring online..."
                     # IP must be online before name can come online
@@ -4514,6 +4548,57 @@ class ClusterRemoveUnwantedIPs {
                 }
                 # Let the cluster settle after IP removal before re-registering DNS
                 Start-Sleep -Seconds 10
+            }
+
+            # Verify the intended IP resource still exists.  A previous version
+            # of this code removed ALL domain-subnet IPs, including the one the
+            # cluster needs.  Recreate it if missing.
+            if ($_KeepIP) {
+                $currentClusterRes = Get-ClusterResource -Cluster $_ClusterName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'IP Address' }
+                $remainingIPs = $currentClusterRes |
+                    Get-ClusterParameter -Name 'Address' -ErrorAction SilentlyContinue
+                $hasIntendedIP = $remainingIPs | Where-Object { $_.Value -eq $_KeepIP }
+                if (-not $hasIntendedIP) {
+                    Write-Status "Cluster IP resource for $_KeepIP is missing. Recreating..."
+                    try {
+                        # Find the cluster network for this IP's subnet
+                        $ipBytes = $_KeepIP.Split('.')
+                        $subnetPrefix = "$($ipBytes[0]).$($ipBytes[1]).$($ipBytes[2])."
+                        $clusterNetwork = Get-ClusterNetwork -ErrorAction Stop |
+                            Where-Object { $_.Address -and "$($_.Address)".StartsWith($subnetPrefix) } |
+                            Select-Object -First 1
+
+                        $resName = "Cluster IP Address"
+                        # Avoid name collision with existing resources
+                        $existing = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        if ($existing) { $resName = "Cluster IP Address ($_KeepIP)" }
+
+                        $newIP = Add-ClusterResource -Name $resName -Group "Cluster Group" -ResourceType "IP Address" -ErrorAction Stop
+                        $setParams = @{ Address = $_KeepIP; SubnetMask = "255.255.255.0" }
+                        if ($clusterNetwork) {
+                            $setParams['Network'] = $clusterNetwork.Name
+                        }
+                        $newIP | Set-ClusterParameter -Multiple $setParams -ErrorAction Stop
+
+                        # Cluster Name must depend on this IP
+                        $nameRes = Get-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
+                        if ($nameRes) {
+                            Add-ClusterResourceDependency -Resource "Cluster Name" -Provider $resName -ErrorAction SilentlyContinue
+                        }
+
+                        Start-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        # Try to bring the Cluster Name online now that it has an IP
+                        if ($nameRes -and $nameRes.State -ne 'Online') {
+                            Start-ClusterResource -Name "Cluster Name" -ErrorAction SilentlyContinue
+                        }
+                        Write-Status "Cluster IP resource $_KeepIP recreated"
+                    }
+                    catch {
+                        Write-Status "Failed to recreate Cluster IP resource: $_"
+                    }
+                }
             }
             Write-Status "Cluster Registering new DNS records"
             $dnsRegistered = $false
