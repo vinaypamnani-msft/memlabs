@@ -263,14 +263,43 @@
                     Write-Verbose ""Waiting for '`$adminUser' in Domain Admins (`$waited s / `$maxWait s)""
                 }
 
-                if (-not `$verified) {
-                    Write-Warning ""Could not verify Domain Admins membership after `$maxWait seconds. Proceeding anyway.""
-                }
-
                 # Purge any cached Kerberos tickets so promotion uses a fresh TGT
                 klist purge 2>&1 | Out-Null
 
-                New-Item -Path 'C:\Temp\VerifyDomainAdmin.txt' -ItemType File -Force | Out-Null
+                if (`$verified) {
+                    New-Item -Path 'C:\Temp\VerifyDomainAdmin.txt' -ItemType File -Force | Out-Null
+                }
+                else {
+                    # Not verified — request a guarded reboot to refresh credential state.
+                    # Allow one reboot immediately, then at most once per hour.
+                    `$rebootFile = 'C:\Temp\VerifyDomainAdmin.reboot'
+                    `$shouldReboot = `$false
+
+                    if (-not (Test-Path `$rebootFile)) {
+                        `$shouldReboot = `$true
+                    }
+                    else {
+                        try {
+                            `$lastReboot = [DateTime]::Parse((Get-Content `$rebootFile -First 1))
+                            if (([DateTime]::UtcNow - `$lastReboot).TotalMinutes -ge 60) {
+                                `$shouldReboot = `$true
+                            }
+                        }
+                        catch {
+                            `$shouldReboot = `$true
+                        }
+                    }
+
+                    if (`$shouldReboot) {
+                        [DateTime]::UtcNow.ToString('o') | Out-File `$rebootFile -Force -Encoding ASCII
+                        Write-Verbose ""Requesting reboot to refresh credential state""
+                        `$global:DSCMachineStatus = 1
+                    }
+                    else {
+                        Write-Warning ""Could not verify Domain Admins membership and reboot was recent. Proceeding anyway.""
+                        New-Item -Path 'C:\Temp\VerifyDomainAdmin.txt' -ItemType File -Force | Out-Null
+                    }
+                }
             "
         }
 
