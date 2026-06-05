@@ -4194,6 +4194,7 @@ function Get-VmSession {
         }
         else {
             $global:ps_cache.Remove($cacheKey)
+            $global:ps_lastGoodCred.Remove($VmName)
             try { Remove-PSSession $ps -ErrorAction SilentlyContinue } catch {}
         }
     }
@@ -4211,6 +4212,7 @@ function Get-VmSession {
             }
             else {
                 $global:ps_cache.Remove($existingKey)
+                $global:ps_lastGoodCred.Remove($VmName)
                 try { Remove-PSSession $existingPs -ErrorAction SilentlyContinue } catch {}
             }
         }
