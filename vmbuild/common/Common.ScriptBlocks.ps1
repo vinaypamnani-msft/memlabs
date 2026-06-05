@@ -874,11 +874,10 @@ $global:VM_Create = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Initializing Disks"
             Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Starting" -force
             $count = 0
-            $label = $null
             $diskNum = 1
+            $diskEntries = @()
             foreach ($disk in $currentItem.AdditionalDisks.psobject.properties) {
                 $label = $null
-                Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Status "Initializing" -Log
 
                 if ($currentItem.Role -eq "FileServer") {
                     if ($diskNum -eq 1) {
@@ -912,15 +911,64 @@ $global:VM_Create = {
                     $label = "DATA`_$count"
                     $count++
                 }
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $global:Initialize_Disk -ArgumentList @($disk.Name, $disk.Value, $label)
+                $diskEntries += @{ Letter = $disk.Name; Size = $disk.Value; Label = $label }
+            }
+
+            if ($diskEntries.Count -gt 0) {
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -ScriptBlock {
+                    param($entries)
+                    $OriginalPref = $ProgressPreference
+                    $ProgressPreference = "SilentlyContinue"
+                    try { Import-Module Storage } catch {}
+
+                    foreach ($entry in $entries) {
+                        $letter = $entry.Letter
+                        $size = ($entry.Size / 1)
+                        $label = $entry.Label
+
+                        if (-not $letter -or $letter -eq "AUTO") {
+                            $usedLetters = Get-Volume | Select-Object -ExpandProperty DriveLetter
+                            $allLetters = [char[]]([char]'E'..[char]'X')
+                            $availableLetters = $allLetters | Where-Object { $_ -notin $usedLetters }
+                            $letter = $availableLetters[0]
+                        }
+
+                        try {
+                            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                        }
+                        catch {
+                            try {
+                                (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                                Get-Disk | Update-Disk
+                                Start-Sleep -Seconds 10
+                            } catch {}
+                            $rawdisk = Get-Disk | Where-Object { $_.PartitionStyle -eq "RAW" -and $_.Size -eq $size } | Select-Object -First 1
+                        }
+                        if ($rawdisk) {
+                            try {
+                                $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                            }
+                            catch {
+                                try {
+                                    (Get-Volume).DriveLetter | ForEach-Object { if ($_) { Write-VolumeCache -Driveletter $_ } }
+                                    Get-Disk | Update-Disk
+                                    Start-Sleep -Seconds 10
+                                } catch {}
+                                $rawdisk | Initialize-Disk -PartitionStyle GPT -PassThru | New-Partition -UseMaximumSize -DriveLetter $letter | Format-Volume -FileSystem NTFS -NewFileSystemLabel $label -Confirm:$false -Force | Out-Null
+                            }
+                        }
+                    }
+
+                    # Create NO_SMS_ON_DRIVE.SMS
+                    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+
+                    $ProgressPreference = $OriginalPref
+                } -ArgumentList @(, $diskEntries)
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
-                else {
-                    Write-Progress2 -Activity "$($currentItem.vmName): Assigning $($disk.Name) Drive Letter to disk with size $($disk.Value)" -Status "Done" -Completed -Log
-                }
-            
+                Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log
             }
             # Copy SQL files to VM
             if ($currentItem.sqlVersion -and $createVM) {
