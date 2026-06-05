@@ -4270,8 +4270,11 @@ function Get-VmSession {
         $credEntries.Add(@{ Tag = 'local'; Username = $localUser; CacheKey = $localCacheKey })
     }
 
-    # Domain-lookup fallback: use the domain from Get-List VM record
-    if (-not $LocalOnly) {
+    # Domain-lookup fallback: use the domain from Get-List VM record.
+    # Skip in job context — jobs know the domain from deployConfig, and
+    # Get-List's cold path (Get-VM + bulk warmup) is extremely expensive
+    # when 20+ job workers all hit it simultaneously.
+    if (-not $LocalOnly -and -not $Common.InJob) {
         $vmRecord = Get-List -type VM | Where-Object { $_.VmName -eq $VmName }
         if ($vmRecord -and $vmRecord.Domain) {
             $domainLookupUser = "$($vmRecord.Domain)\$($Common.LocalAdmin.UserName)"

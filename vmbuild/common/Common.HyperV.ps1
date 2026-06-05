@@ -62,6 +62,15 @@ function Get-VM2 {
         [switch]$Fallback
     )
 
+    # In job workers (Start-Job = separate process), skip Get-List entirely.
+    # Get-List's cold path does Get-VM + Get-VMNetworkAdapter -All to build
+    # the full VM cache — with 20+ workers all doing this simultaneously,
+    # the WMI calls serialize on vmms.exe and create a 10+ minute logjam.
+    # A direct Get-VM -Name is a single targeted WMI call.
+    if ($Common.InJob) {
+        return (Get-VM -Name $Name -ErrorAction SilentlyContinue)
+    }
+
     $vmFromList = Get-List -Type VM | Where-Object { $_.vmName -eq $Name }
 
     if ($vmFromList) {
