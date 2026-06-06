@@ -1809,6 +1809,8 @@ class WaitForExtendSchemaFile {
     }
 
     [bool] Test() {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        Write-Status "WaitForExtendSchemaFile: running as '$($identity.Name)' (AuthType=$($identity.AuthenticationType), IsSystem=$($identity.IsSystem))"
         return $false
     }
 
