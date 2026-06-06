@@ -1701,7 +1701,10 @@ class WaitForExtendSchemaFile {
                         $chk = & repadmin /replsummary 2>&1
                         # Look for error/fail indicators — more reliable than
                         # parsing error codes, since replsummary format varies by OS.
-                        $errors = $chk | Where-Object { $_ -match 'error|fail|\*' -and $_ -notmatch 'largest delta' }
+                        # Exclude header lines ("Source DSA ... largest delta  fails/total %  error"
+                        # and the matching Destination DSA header) which contain the
+                        # words "fails" and "error" as column labels, not real errors.
+                        $errors = $chk | Where-Object { $_ -match 'error|fail|\*' -and $_ -notmatch '^(Source|Destination) DSA' -and $_ -notmatch 'largest delta' }
                         if (-not $errors) { break }
                         Write-Status "Replication settling ($([int]$sw.Elapsed.TotalSeconds)s)..."
                     }
@@ -1741,9 +1744,12 @@ class WaitForExtendSchemaFile {
                 else {
                     # extadsch.exe ran but didn't produce a log — likely a
                     # permissions or working-directory issue, not a schema
-                    # problem.  Surface the captured stdout/stderr instead.
+                    # problem.  Note: extadsch.exe writes diagnostics to
+                    # C:\ExtADSch.log, not stdout, so console capture is
+                    # usually empty.  A missing log typically means a
+                    # filesystem ACL or working-directory problem on C:\.
                     $consoleOut = if ($extOutput) { ($extOutput | Select-Object -First 5) -join ' | ' } else { '(no output)' }
-                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log file at $logFile. Console output: $consoleOut"
+                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log at $logFile — check C:\ filesystem permissions. Console: $consoleOut"
                 }
 
                 if ($attempt -lt $maxAttempts) {
