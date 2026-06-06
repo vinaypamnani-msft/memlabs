@@ -285,8 +285,7 @@ function Test-DCFunctionality {
             if ($vm.hidden) { continue }
             if ($vm.domain -and $vm.domain -ne $Domain) { continue }
             # Workgroup/InternetClient VMs are not domain-joined and won't have DNS A records.
-            # StandaloneRootCA is offline by design and may not have (or need) a DNS record.
-            if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient', 'StandaloneRootCA')) { continue }
+            if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
                 $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
                     Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }

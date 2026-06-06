@@ -1039,6 +1039,43 @@ Empty=True
     }
     Write-Log "[TwoTierPKI] Root CA files copied to host: $hostStagingPath"
 
+    # Register a static DNS A record (and reverse PTR) for the Root CA on the DC.
+    # The Root CA is a workgroup member and won't self-register via dynamic DNS.
+    # Other VMs may need to resolve its name for CRL/AIA distribution points.
+    try {
+        $rootIP = (Get-VMNetworkAdapter -VMName $rootCAVMName -ErrorAction Stop).IPAddresses |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+        if ($rootIP) {
+            $dnsScript = {
+                param($vmName, $zone, $ip)
+                $existing = Resolve-DnsName -Name "$vmName.$zone" -Type A -Server 127.0.0.1 -DnsOnly -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Type -eq 'A' }
+                if (-not $existing) {
+                    Add-DnsServerResourceRecordA -ZoneName $zone -Name $vmName -IPv4Address $ip -ErrorAction Stop
+                }
+                # Reverse PTR
+                $octets = $ip.Split('.')
+                $reverseZone = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+                $ptrZone = Get-DnsServerZone -Name $reverseZone -ErrorAction SilentlyContinue
+                if ($ptrZone) {
+                    $ptrExisting = Get-DnsServerResourceRecord -ZoneName $reverseZone -Name $octets[3] -RRType Ptr -ErrorAction SilentlyContinue
+                    if (-not $ptrExisting) {
+                        Add-DnsServerResourceRecordPtr -ZoneName $reverseZone -Name $octets[3] -PtrDomainName "$vmName.$zone." -ErrorAction Stop
+                    }
+                }
+            }
+            $null = Invoke-VmCommand -VmName $dcVMName -VmDomainName $domainName -DisplayName "Register Root CA DNS" -SuppressLog `
+                -ScriptBlock $dnsScript -ArgumentList $rootCAVMName, $domainName, $rootIP
+            Write-Log "[TwoTierPKI] Registered DNS A record: $rootCAVMName.$domainName -> $rootIP"
+        }
+        else {
+            Write-Log "[TwoTierPKI] Could not determine Root CA IP; skipping DNS registration" -Warning
+        }
+    }
+    catch {
+        Write-Log "[TwoTierPKI] DNS registration for Root CA failed: $($_.Exception.Message)" -Warning
+    }
+
     #---------------------------------------------------------------------------
     # STEP 2: Prepare Intermediate CA
     #---------------------------------------------------------------------------
