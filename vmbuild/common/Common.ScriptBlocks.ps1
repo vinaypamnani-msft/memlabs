@@ -1694,7 +1694,19 @@ $global:VM_Config = {
 
                         # Assign static IP — no gateway, no DNS (heartbeat only)
                         New-NetIPAddress -InterfaceIndex $idx -IPAddress $targetIP -PrefixLength 24 | Out-Null
-                        return "${info}Configured $targetIP"
+
+                        # Verify the IP actually took — if it didn't, SQLAO will
+                        # hang for hours waiting for a cluster network that can't form.
+                        Start-Sleep -Seconds 2
+                        $verify = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object { $_.IPAddress -eq $targetIP }
+                        if (-not $verify) {
+                            # Dump current state for diagnostics
+                            $currentIPs = (Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress -join ', '
+                            $dhcpNow = (Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+                            throw "New-NetIPAddress did not error but $targetIP is not on the adapter. Current IPs: [$currentIPs] DHCP: $dhcpNow"
+                        }
+                        return "${info}Configured $targetIP (verified)"
                     }
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
                         -ScriptBlock $setStaticIP -ArgumentList @($heartbeatIP, $clusterMAC) `
