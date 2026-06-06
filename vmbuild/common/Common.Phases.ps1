@@ -1002,7 +1002,14 @@ function Get-ConfigurationData {
         Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VMs are running" -PercentComplete $global:preparePhasePercent
 
-        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
+        $nodes = @($cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") })
+        # Ensure all BDCs are started alongside the primary DC in every phase.
+        # ConfigurationData for phases 4-9 only includes the primary DC, but
+        # BDCs must be running for AD replication and DNS availability.
+        $bdcNames = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "BDC" -and -not $_.hidden } | ForEach-Object { $_.vmName })
+        foreach ($bdc in $bdcNames) {
+            if ($bdc -notin $nodes) { $nodes += $bdc }
+        }
         if ($nodes) {
             $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
         }

@@ -451,9 +451,9 @@ function Get-CriticalVMs {
     # Exclude Offline Root CA - it should only be started manually via Hyper-V
     $vms = $vms | Where-Object { $_.Role -ne "StandaloneRootCA" }
 
-    $return.dc += $vms | Where-Object { $_.Role -eq "DC" }
-    $return.ALLCRIT += $vms | Where-Object { $_.Role -eq "DC" }
-    $vms = $vms | Where-Object { $_.Role -ne "DC" }
+    $return.dc += $vms | Where-Object { $_.Role -in "DC", "BDC" }
+    $return.ALLCRIT += $vms | Where-Object { $_.Role -in "DC", "BDC" }
+    $vms = $vms | Where-Object { $_.Role -notin "DC", "BDC" }
 
     #$sqlServers = $vms | Where-Object { $_.Role -eq "DomainMember" -and $null -ne $_.SqlVersion }
     $sqlServerNames = ($vms | Where-Object { $_.remoteSQLVM }).remoteSQLVM | Select-Object -Unique
