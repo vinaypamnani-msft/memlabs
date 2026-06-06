@@ -1829,16 +1829,20 @@ function Test-NetworkFastPath {
         return $false
     }
 
-    # 4. DHCP scope exists?
-    $hasScope = $Cache.Scopes | Where-Object { $_.ScopeId.IPAddressToString -eq $NetworkSubnet }
-    if (-not $hasScope) {
-        Write-Log "  Fast-path miss: DHCP scope '$NetworkSubnet' not in cache." -LogOnly
-        return $false
+    # 4. DHCP scope exists? (skip for switches that intentionally have no DHCP)
+    if ($NetworkName -ne 'ClusterV2') {
+        $hasScope = $Cache.Scopes | Where-Object { $_.ScopeId.IPAddressToString -eq $NetworkSubnet }
+        if (-not $hasScope) {
+            Write-Log "  Fast-path miss: DHCP scope '$NetworkSubnet' not in cache." -LogOnly
+            return $false
+        }
     }
 
     # All checks passed — emit the same log lines the full path would.
     Write-Log "HyperV Network switch for '$NetworkName' already exists."
-    Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."
+    if ($NetworkName -ne 'ClusterV2') {
+        Write-GreenCheck "'$NetworkSubnet ($NetworkName)' scope is already present in DHCP."
+    }
     return $true
 }
 
@@ -1870,7 +1874,7 @@ function Add-SwitchAndDhcp {
     # deployment.  Remove them so they get cleanly recreated below.
     # Skip shared switches (Internet, Cluster, External) — they are not
     # domain-specific and may legitimately have zero VMs temporarily.
-    $isSharedSwitch = $NetworkName -in @('Internet', 'Cluster', 'External')
+    $isSharedSwitch = $NetworkName -in @('Internet', 'Cluster', 'ClusterV2', 'External')
     if (-not $isSharedSwitch) {
         $existingSwitch = Get-VMSwitch2 -NetworkName $NetworkName
         if ($existingSwitch) {
@@ -1928,6 +1932,34 @@ function Add-SwitchAndDhcp {
     return $true
 }
 
+function Add-SwitchNoDhcp {
+    # Creates a Hyper-V Internal switch with a host adapter IP but no DHCP
+    # scope and no NAT. Used for the ClusterV2 heartbeat network where VMs
+    # get static IPs and only need to reach each other on the same host.
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkName,
+        [Parameter(Mandatory = $true)]
+        [string]$NetworkSubnet,
+        [Parameter(Mandatory = $false)]
+        [switch]$WhatIf
+    )
+
+    if ($WhatIf.IsPresent) {
+        Write-Log "[What-If] Will create/verify Hyper-V switch '$NetworkName' (no DHCP/NAT)."
+        return $true
+    }
+
+    Write-Log "Creating/verifying Hyper-V switch '$NetworkName' (no DHCP, no NAT)." -Activity
+
+    $switch = Test-NetworkSwitch -NetworkName $NetworkName -NetworkSubnet $NetworkSubnet
+    if (-not $switch) {
+        Write-Log "Failed to verify/create Hyper-V switch for $NetworkName network ($NetworkSubnet). Exiting." -Failure
+        return $false
+    }
+    return $true
+}
+
 function Test-NetworkSwitch {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "Network Name.")]
@@ -1951,6 +1983,10 @@ function Test-NetworkSwitch {
         $notes = $NetworkName
         if ($NetworkName -eq "Cluster") {
             $notes = "Cluster network shared by all domains"
+            $doNotRecreate = $true
+        }
+        if ($NetworkName -eq "ClusterV2") {
+            $notes = "Cluster heartbeat network shared by all domains (no DHCP)"
             $doNotRecreate = $true
         }
         if ($NetworkName -eq "Internet") {
@@ -2056,6 +2092,11 @@ function Test-NetworkSwitch {
         if (-not $hasDesired) {
             Write-Log "Unable to set IP for '$interfaceAlias' network adapter to $desiredIp."
             return $false
+        }
+
+        # ClusterV2 is a pure internal switch — no NAT needed (heartbeat only)
+        if ($NetworkName -eq 'ClusterV2') {
+            return $true
         }
 
         $valid = Test-NetworkNat -NetworkSubnet $NetworkSubnet

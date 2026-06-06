@@ -154,7 +154,7 @@ function Test-ValidVmOptions {
         }
 
         if ($ConfigObject.vmOptions.network -eq "10.250.251.0") {
-            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'Cluster'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
+            Add-ValidationMessage -Message "VM Options Validation: vmOptions.network [$($ConfigObject.vmoptions.network)] value is reserved for 'ClusterV2'. Please use a different subnet." -ReturnObject $ReturnObject -Warning
         }
 
         if ($ConfigObject.vmOptions.network -eq "10.1.0.0") {

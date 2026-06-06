@@ -586,7 +586,7 @@ function Get-EnhancedNetworkList {
         }
 
 
-        if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+        if ($sb -eq "Internet" -or ($sb -eq "cluster") -or ($sb -eq "ClusterV2")) {
             $returnSubnetList += $subnet
             continue
         }
@@ -649,7 +649,7 @@ function Get-EnhancedSubnetList {
 
 
     foreach ($sb in $SubnetList) {
-        if ($sb -eq "Internet" -or ($sb -eq "cluster")) {
+        if ($sb -eq "Internet" -or ($sb -eq "cluster") -or ($sb -eq "ClusterV2")) {
             $subnetListModified += $sb
             continue
         }

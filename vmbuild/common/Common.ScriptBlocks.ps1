@@ -515,7 +515,7 @@ $global:VM_Create = {
             }
 
             if ($currentItem.role -eq "SQLAO") {
-                $HashArguments.Add("SwitchName2", "cluster")
+                $HashArguments.Add("SwitchName2", "ClusterV2")
             }
 
             $created = New-VirtualMachine @HashArguments
@@ -1587,27 +1587,60 @@ $global:VM_Config = {
             $heartbeatIP = $currentItem.ClusterHeartbeatIP
             if ($heartbeatIP) {
                 $vm = Get-VM2 $currentItem.vmName
-                $clusterMAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
+                # Try ClusterV2 first (new deployments), fall back to Cluster (legacy)
+                $clusterMAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "ClusterV2" }).MacAddress
+                if (-not $clusterMAC) {
+                    $clusterMAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
+                }
                 if ($clusterMAC) {
                     $setStaticIP = {
                         param($targetIP, $targetMAC)
                         $targetMAC = ($targetMAC -replace '-','').ToLower()
                         $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '-','').ToLower() -eq $targetMAC }
                         if (-not $nic) { throw "Could not find NIC with MAC $targetMAC" }
+                        $idx = $nic.InterfaceIndex
+                        $info = ""
+
+                        # Check if DHCP is active on this NIC and kill it first.
+                        # On legacy "Cluster" switches, the DHCP scope hands out
+                        # 10.250.250.x which fights with the static 10.250.251.x
+                        # we want to assign. Release the lease and disable DHCP
+                        # before touching IP addresses.
+                        $dhcpStatus = (Get-NetIPInterface -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+                        if ($dhcpStatus -eq 'Enabled') {
+                            $dhcpIPs = @(Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.PrefixOrigin -eq 'Dhcp' })
+                            if ($dhcpIPs) {
+                                $info = "Removed DHCP IP(s) $($dhcpIPs.IPAddress -join ','); "
+                            }
+                            # Release the DHCP lease via ipconfig (works even when
+                            # Set-NetIPInterface hasn't disabled DHCP yet)
+                            $alias = $nic.InterfaceAlias
+                            & ipconfig /release "$alias" 2>&1 | Out-Null
+                            # Disable DHCP client on this interface
+                            Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
+                        }
 
                         # Check if the IP is already configured (idempotent for reruns)
-                        $existing = Get-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        $existing = Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.IPAddress -eq $targetIP }
-                        if ($existing) { return "Already configured" }
+                        if ($existing) {
+                            # Ensure DHCP stays disabled even on idempotent rerun
+                            Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
+                            return "${info}Already configured"
+                        }
 
                         # Remove APIPA or stale IPs from this adapter
-                        Get-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                        Get-NetIPAddress -InterfaceIndex $idx -AddressFamily IPv4 -ErrorAction SilentlyContinue |
                             Where-Object { $_.PrefixOrigin -ne 'WellKnown' } |
                             Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
 
+                        # Disable DHCP on this interface so it can't reclaim the address
+                        Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
+
                         # Assign static IP — no gateway, no DNS (heartbeat only)
-                        New-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -IPAddress $targetIP -PrefixLength 24 | Out-Null
-                        return "Configured $targetIP"
+                        New-NetIPAddress -InterfaceIndex $idx -IPAddress $targetIP -PrefixLength 24 | Out-Null
+                        return "${info}Configured $targetIP"
                     }
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
                         -ScriptBlock $setStaticIP -ArgumentList @($heartbeatIP, $clusterMAC) `

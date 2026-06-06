@@ -547,7 +547,7 @@ function Remove-Domain {
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" } # Internet subnet could be shared between multiple domains
+    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" -and $_ -ne "ClusterV2" } # Internet/Cluster subnets could be shared between multiple domains
 
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName

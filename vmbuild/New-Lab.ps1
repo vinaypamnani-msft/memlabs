@@ -758,6 +758,16 @@ try {
                 exit 1
             }
         }
+
+        # ClusterV2: dedicated heartbeat switch with static IPs only (no DHCP,
+        # no NAT). New SQLAO deployments connect their 2nd NIC here so the
+        # heartbeat network is free from DHCP interference.
+        if (-not (Test-NetworkFastPath -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -Cache $_netCache)) {
+            $worked = Add-SwitchNoDhcp -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -WhatIf:$WhatIf
+            if (-not $worked) {
+                exit 1
+            }
+        }
     }
 
     #Make sure DHCP is still running

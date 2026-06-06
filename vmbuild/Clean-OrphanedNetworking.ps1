@@ -54,7 +54,7 @@ $networksInUse = @(Get-List -Type UniqueSwitch -SmartUpdate)
 
 # Internet and Cluster are shared infrastructure that should always be
 # protected even when no VMs currently sit on those networks.
-foreach ($infra in @('Internet', 'Cluster')) {
+foreach ($infra in @('Internet', 'Cluster', 'ClusterV2')) {
     if ($networksInUse -notcontains $infra) {
         $networksInUse += $infra
     }
@@ -64,9 +64,10 @@ foreach ($infra in @('Internet', 'Cluster')) {
 # "Internet" map to subnet 172.31.250.0 and "Cluster" to 10.250.250.0.
 $subnetsInUse = @($networksInUse | ForEach-Object {
     switch ($_) {
-        'Internet' { '172.31.250.0' }
-        'Cluster'  { '10.250.250.0' }
-        default    { $_ }
+        'Internet'  { '172.31.250.0' }
+        'Cluster'   { '10.250.250.0' }
+        'ClusterV2' { '10.250.251.0' }
+        default     { $_ }
     }
 })
 
@@ -155,7 +156,7 @@ foreach ($sw in $switches) {
     # Only consider switches that look like memlabs created them:
     # subnet-named (e.g. "192.168.1.0") or well-known names.
     $isMemlabs = $sw.Name -match '^\d+\.\d+\.\d+\.\d+$' -or
-                 $sw.Name -in @('Internet', 'Cluster', 'MemLabsNAT')
+                 $sw.Name -in @('Internet', 'Cluster', 'ClusterV2', 'MemLabsNAT')
     if (-not $isMemlabs) { continue }
 
     $inUse = $false
