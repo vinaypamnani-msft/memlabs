@@ -529,6 +529,18 @@ function Start-PhaseJobs {
 
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {
 
+            # Phase 10/11: ensure the VM is running before dispatching its job.
+            # Phases 2-9 use Invoke-SmartStartVMs via the ConfigurationData path,
+            # but Phase 10/11 skip that, so VMs left off after the auto-snapshot
+            # would fail with "could not create session".
+            if ($Phase -ge 10 -and $currentItem.Role -notin @("OSDClient", "AADClient")) {
+                $vmState = (Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue).State
+                if ($vmState -and $vmState -ne 'Running') {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM is $vmState. Starting..." -LogOnly
+                    Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
+                }
+            }
+
             if ($Phase -eq 11) {
                 # Phase 11 = functional validation. Skip only roles that have no
                 # PSDirect-reachable validation surface (OSDClient is the boot
