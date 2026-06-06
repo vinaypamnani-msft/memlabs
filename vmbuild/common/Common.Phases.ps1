@@ -1010,11 +1010,13 @@ function Get-ConfigurationData {
         # Start BDCs alongside the primary DC in every phase.  BDCs aren't in
         # ConfigurationData for phases 4-9 (no DSC work for them), but they
         # must be running for AD replication and DNS availability.
-        $bdcVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "BDC" })
+        # Use Get-List to discover all BDCs in the domain, since deployConfig
+        # only contains VMs explicitly added to the current configuration.
+        $allDomainVMs = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate
+        $bdcVMs = @($allDomainVMs | Where-Object { $_.Role -eq "BDC" })
         foreach ($bdc in $bdcVMs) {
-            $vm = Get-VM2 -Name $bdc.vmName -ErrorAction SilentlyContinue
-            if ($vm -and $vm.State -ne 'Running') {
-                Write-Log "[Phase $Phase] BDC [$($bdc.vmName)] is $($vm.State). Starting..." -LogOnly
+            if ($bdc.State -ne 'Running') {
+                Write-Log "[Phase $Phase] BDC [$($bdc.vmName)] is $($bdc.State). Starting..." -LogOnly
                 Start-VM2 -Name $bdc.vmName -ErrorAction SilentlyContinue
             }
         }
