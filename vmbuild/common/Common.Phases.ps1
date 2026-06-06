@@ -536,6 +536,7 @@ function Start-PhaseJobs {
             if ($Phase -ge 10 -and $currentItem.Role -notin @("OSDClient", "AADClient")) {
                 $vmState = (Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue).State
                 if ($vmState -and $vmState -ne 'Running') {
+                    Write-Progress2 "Preparing Phase $Phase" -Status "Starting VM $($currentItem.vmName) ($vmState)" -PercentComplete $global:preparePhasePercent
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): VM is $vmState. Starting..." -LogOnly
                     Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
                 }
