@@ -799,8 +799,23 @@ $global:VM_Create = {
             } catch { $warnings += "Fix Default Profile: $_" }
 
             # Fix Local Account Password Expiration
+            # After sysprep/OOBE the local account may not be queryable
+            # immediately even though PSDirect can already authenticate.
+            # Retry a few times with a short delay.
             try {
-                Set-LocalUser -Name "vmbuildadmin" -PasswordNeverExpires $true
+                $acctSet = $false
+                for ($acctTry = 1; $acctTry -le 5; $acctTry++) {
+                    try {
+                        $localUser = Get-LocalUser -Name "vmbuildadmin" -ErrorAction Stop
+                        Set-LocalUser -Name $localUser.Name -PasswordNeverExpires $true -ErrorAction Stop
+                        $acctSet = $true
+                        break
+                    }
+                    catch {
+                        if ($acctTry -lt 5) { Start-Sleep -Seconds 3 }
+                        else { throw }
+                    }
+                }
             } catch { $warnings += "Fix Local Account: $_" }
 
             # Set Timezone
@@ -1447,10 +1462,16 @@ $global:VM_Config = {
                 $IPAddress = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { (Get-NetIPConfiguration).Ipv4Address.IpAddress } -DisplayName "GetIPs"
                 $success = $true
                 if ($IPAddress.ScriptBlockOutput) {
-                    foreach ($ip in $IPAddress.ScriptBlockOutput) {
-                        if ($ip.StartsWith("169.254")) {
+                    # A VM with multiple NICs (e.g. SQLAO with a ClusterV2 NIC)
+                    # may have 169.254 on NICs that intentionally have no DHCP.
+                    # Only fail if there are NO valid (non-APIPA) IPs at all.
+                    $allIPs = @($IPAddress.ScriptBlockOutput)
+                    $validIPs = @($allIPs | Where-Object { $_ -and -not $_.StartsWith("169.254") })
+                    $apipaIPs = @($allIPs | Where-Object { $_ -and $_.StartsWith("169.254") })
+
+                    if ($validIPs.Count -eq 0 -and $apipaIPs.Count -gt 0) {
                             $success = $false
-                            #$currentItem.network
+                            $ip = $apipaIPs[0]
                             $currentNetwork = $currentItem.network
                             if (-not $currentNetwork) {
                                 $currentNetwork = $deployConfig.vmOptions.Network
@@ -1497,7 +1518,6 @@ $global:VM_Config = {
                                 return
                             }
                             $retryCount++
-                        }
                     }
                 }
             }
