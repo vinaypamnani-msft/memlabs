@@ -442,29 +442,118 @@ function New-RDCManFileFromHyperV {
             $cmVersion = "CM" + $dcVM.domainDefaults.CMVersion
         }
 
-        # Compute MECM site hierarchy for per-site smartGroup generation
+        # Compute MECM site hierarchy for per-site group generation
         $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
 
-        $hasLinuxRdp = $false
+        # --- Set up category groups (regular <group> elements, order preserved) ---
+        # Clean up any leftover SmartGroups from previous runs
+        $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
+        foreach ($item in $CurrentSmartGroups) {
+            [void]$findGroup.RemoveChild($item)
+        }
+
+        # Migrate from old format: remove zAllVirtualMachines group (servers
+        # will be re-added to the correct category groups by the VM loop)
+        $oldAllVMs = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq "zAllVirtualMachines" } | Select-Object -First 1
+        if ($oldAllVMs) {
+            [void]$findGroup.RemoveChild($oldAllVMs)
+            $shouldSave = $true
+        }
+
+        # On re-runs, clear all servers from category groups so they get
+        # re-placed into the correct group (handles role/category changes).
+        foreach ($childGroup in @($findGroup.SelectNodes('group'))) {
+            foreach ($srv in @($childGroup.SelectNodes('server'))) {
+                [void]$childGroup.RemoveChild($srv)
+            }
+        }
+
+        # Ensure the standard category groups exist from the template.
+        # Template order: Domain Servers, MECM Servers, Servers, Clients
+        $categoryNames = @("Domain Servers", "MECM Servers", "Servers", "Clients")
+        foreach ($catName in $categoryNames) {
+            $existing_cat = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq $catName } | Select-Object -First 1
+            if ($null -eq $existing_cat) {
+                $templateCat = $groupFromTemplate.SelectNodes('group') | Where-Object { $_.properties.name -eq $catName } | Select-Object -First 1
+                if ($templateCat) {
+                    $clonedCat = $existing.ImportNode($templateCat.Clone(), $true)
+                    # Remove any template server placeholders
+                    foreach ($srv in @($clonedCat.SelectNodes('server'))) { [void]$clonedCat.RemoveChild($srv) }
+                    [void]$findGroup.AppendChild($clonedCat)
+                }
+            }
+        }
+
+        # Replace "MECM Servers" placeholder with per-site groups if we have sites
+        if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
+            $mecmGroup = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq "MECM Servers" } | Select-Object -First 1
+            if ($mecmGroup) {
+                $insertBefore = $mecmGroup.NextSibling
+                [void]$findGroup.RemoveChild($mecmGroup)
+
+                foreach ($site in $siteHierarchy.Sites) {
+                    $siteName = "$($site.RoleLabel) ($($site.SiteCode))"
+                    # Check if this site group already exists
+                    $existingSiteGroup = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq $siteName } | Select-Object -First 1
+                    if ($null -eq $existingSiteGroup) {
+                        [xml]$siteGroupXml = @"
+<group>
+    <properties>
+        <expanded>True</expanded>
+        <name>$siteName</name>
+    </properties>
+</group>
+"@
+                        $importedGroup = $existing.ImportNode($siteGroupXml.group, $true)
+                        if ($insertBefore) {
+                            [void]$findGroup.InsertBefore($importedGroup, $insertBefore)
+                        }
+                        else {
+                            [void]$findGroup.AppendChild($importedGroup)
+                        }
+                    }
+                }
+                $shouldSave = $true
+            }
+        }
+
+        # Also remove old per-site groups/smartGroups that no longer have a matching site
+        if ($siteHierarchy) {
+            $validSiteNames = @($siteHierarchy.Sites | ForEach-Object { "$($_.RoleLabel) ($($_.SiteCode))" })
+        } else {
+            $validSiteNames = @()
+        }
+        $sitePatterns = @("^CAS \(", "^PRI \(", "^SEC \(")
+        foreach ($childGroup in @($findGroup.SelectNodes('group'))) {
+            $gName = $childGroup.properties.name
+            $isSiteGroup = $false
+            foreach ($pat in $sitePatterns) {
+                if ($gName -match $pat) { $isSiteGroup = $true; break }
+            }
+            if ($isSiteGroup -and $gName -notin $validSiteNames) {
+                [void]$findGroup.RemoveChild($childGroup)
+                $shouldSave = $true
+            }
+        }
+
+        # Build a lookup of category group elements for the VM loop
+        $catGroups = @{}
+        foreach ($g in $findGroup.SelectNodes('group')) {
+            $catGroups[$g.properties.name] = $g
+        }
+
+        # --- VM loop: route each VM into the correct category group ---
+        $hasOsdOrAad = $false
         foreach ($vm in $vmListFull) {
             if (Test-VmIsLinux -Vm $vm) {
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
-                    $isLinuxClient = $vm.Role -eq 'LinuxClient'
-                    if (-not ($rdpOn -or $isLinuxClient)) {
+                $isLinuxClient = $vm.Role -eq 'LinuxClient'
+                if (-not ($rdpOn -or $isLinuxClient)) {
                     Write-Verbose "Skipping Linux VM $($vm.VmName) (enableRDP not set)"
                     continue
                 }
-                    # Linux VM with xrdp enabled (or LinuxClient which has xrdp baked in).
-                    # Add as a regular server entry in the
-                # domain group (zAllVirtualMachines) with Comment="Linux" so the
-                # per-domain "Linux" smartGroup picks it up via rule match. Per-server
-                # logonCredentials uses vmbuildadmin + LocalAdmin password (matches
-                # cloud-init chpasswd).
-                $hasLinuxRdp = $true
-                # Use IP as the RDCMan connection target. The host resolves
-                # Windows VMs via LLMNR, but Ubuntu doesn't respond to LLMNR
-                # so hostname-based connections fail. Fall back to vmName if
-                # no IP is available (VM never started).
+                # Linux VM with xrdp enabled (or LinuxClient which has xrdp baked in).
+                # Use IP since Ubuntu doesn't respond to LLMNR.
                 $linuxIp = $vm.LastKnownIP
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) {
                     try {
@@ -479,11 +568,19 @@ function New-RDCManFileFromHyperV {
                 foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
                     $cLinux | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -Force
                 }
-                # Comment="Linux" is what the smartGroup rule matches against
                 $cLinux | Add-Member -MemberType NoteProperty -Name "Comment" -Value "Linux" -Force
                 $linuxComment = ($cLinux | ConvertTo-Json -Depth 4 -Compress)
+
+                # Ensure Linux group exists (appended after Clients)
+                if (-not $catGroups.ContainsKey("Linux")) {
+                    [xml]$linuxGroupXml = '<group><properties><expanded>True</expanded><name>Linux</name></properties></group>'
+                    $importedLinux = $existing.ImportNode($linuxGroupXml.group, $true)
+                    [void]$findGroup.AppendChild($importedLinux)
+                    $catGroups["Linux"] = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq "Linux" } | Select-Object -Last 1
+                }
+
                 if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
-                        -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing `
+                        -targetGroup $catGroups["Linux"] -groupfromtemplate $groupFromTemplate -existing $existing `
                         -comment $linuxComment -ForceOverwrite:$true `
                         -domain '' -username 'vmbuildadmin') -eq $True) {
                     $shouldSave = $true
@@ -541,7 +638,7 @@ function New-RDCManFileFromHyperV {
                 }
             }
 
-            # Tag MECM VMs with their owning site for per-site smartGroup matching
+            # Tag MECM VMs with their owning site for identification
             if ($siteHierarchy -and $siteHierarchy.VmSiteMap[$vm.vmName]) {
                 $c | Add-Member -MemberType NoteProperty -Name "SiteGroupTag" -Value "site_$($siteHierarchy.VmSiteMap[$vm.vmName])" -Force
             }
@@ -669,81 +766,44 @@ function New-RDCManFileFromHyperV {
             $vmID = $null
             if ($vm.Role -in ("OSDClient", "AADClient")) {
                 $vmID = $vm.vmId
+                $hasOsdOrAad = $true
             }
 
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
-                $shouldSave = $true
-            }
-        }
-        try {
-            $return = Add-RDCManSmartGroupToGroup -vmListFull $vmListFull -findgroup $findGroup -existing $existing
-            if ($return) {
-                $shouldSave = $true
-            }
-        }
-        catch {}
-
-        $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
-        foreach ($item in $CurrentSmartGroups) {
-            #Write-Log $item.properties.name
-            [void]$findGroup.RemoveChild($item)
-        }
-
-        foreach ($item in $groupFromTemplate.SelectNodes('smartGroup')) {
-            #write-host "template: $($item.properties.name)"
-            $clonedItem = $item.clone()
-            $clonedItem = $existing.ImportNode($clonedItem, $true)
-            [void]$findGroup.AppendChild($clonedItem)
-        }
-
-        # Replace the flat MECMServers smartGroup with per-site smartGroups
-        if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
-            $mecmSG = $findgroup.SelectNodes('smartGroup') | Where-Object { $_.properties.name -eq "MECMServers" } | Select-Object -First 1
-            if ($mecmSG) {
-                $insertBefore = $mecmSG.NextSibling
-                [void]$findGroup.RemoveChild($mecmSG)
-
-                foreach ($site in $siteHierarchy.Sites) {
-                    $sgName = "$($site.RoleLabel) ($($site.SiteCode))"
-
-                    [xml]$sgXml = @"
-<smartGroup>
-    <properties>
-        <expanded>True</expanded>
-        <name>$sgName</name>
-    </properties>
-    <ruleGroup operator="Any">
-        <rule>
-            <property>Comment</property>
-            <operator>Matches</operator>
-            <value>"site_$($site.SiteCode)"</value>
-        </rule>
-    </ruleGroup>
-</smartGroup>
-"@
-
-                    $importedSG = $existing.ImportNode($sgXml.smartGroup, $true)
-                    if ($insertBefore) {
-                        [void]$findGroup.InsertBefore($importedSG, $insertBefore)
-                    }
-                    else {
-                        [void]$findGroup.AppendChild($importedSG)
-                    }
+            # Determine which category group this VM belongs to
+            $targetGroupName = "Servers"  # default
+            if ($siteHierarchy -and $siteHierarchy.VmSiteMap[$vm.vmName]) {
+                $vmSiteCode = $siteHierarchy.VmSiteMap[$vm.vmName]
+                $vmSite = $siteHierarchy.Sites | Where-Object { $_.SiteCode -eq $vmSiteCode } | Select-Object -First 1
+                if ($vmSite) {
+                    $targetGroupName = "$($vmSite.RoleLabel) ($($vmSite.SiteCode))"
                 }
+            }
+            elseif ($vm.Role -in "DC", "BDC", "FileServer", "StandaloneRootCA") {
+                $targetGroupName = "Domain Servers"
+            }
+            elseif ($vm.Role -eq "DomainMember" -and $vm.InstallCA) {
+                $targetGroupName = "Domain Servers"
+            }
+            elseif ($vm.Role -in "OSDClient", "AADClient", "InternetClient") {
+                $targetGroupName = "Clients"
+            }
+            elseif (($vm.Role -in "DomainMember", "WorkgroupMember") -and $vm.deployedOS -and $vm.deployedOS -notmatch "Server") {
+                $targetGroupName = "Clients"
+            }
+
+            $targetGroup = $catGroups[$targetGroupName]
+            if ($null -eq $targetGroup) {
+                # Fallback: use Servers group
+                $targetGroup = $catGroups["Servers"]
+            }
+
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $targetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString() -ForceOverwrite:$ForceOverwrite -vmID $vmID -domain $vm.Domain -username $vm.domainUser) -eq $True) {
                 $shouldSave = $true
             }
         }
 
-        $roles = $vmListFull | Select-Object -ExpandProperty role
-        $SmartGroupToClone = $findgroup.SelectNodes('//smartGroup') | where-object { $_.properties.name -eq "Servers" } | Select-Object -First 1
-        #write-host $SmartGroupToClone.properties.name
-        #$ruleToClone = $SmartGroupToClone.ruleGroup.rule
-        $clonedSG = $SmartGroupToClone.clone()
-        if ($roles -contains "OSDClient" -or $roles -contains "AADClient") {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "OSD Clients"
-            $clonedSG.ruleGroup.rule.value = "OSDClient"
-            [void]$findgroup.AppendChild($clonedSG)
+        # Set CredSSP policy defaults when OSD/AAD console connections are present
+        if ($hasOsdOrAad) {
             $policyDefaultsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults"
             $subKeys = @(
                 "AllowDefaultCredentialsDomain",
@@ -758,7 +818,6 @@ function New-RDCManFileFromHyperV {
             )
             foreach ($subKey in $subKeys) {
                 $fullPath = Join-Path $policyDefaultsPath $subKey
-
                 if (-not (Test-Path $fullPath)) {
                     New-Item -Path $fullPath -Force | Out-Null
                 }
@@ -773,26 +832,14 @@ function New-RDCManFileFromHyperV {
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentials -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
             New-ItemProperty -Path HKLM:SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults\AllowSavedCredentialsWhenNTLMOnly -Name Hyper-V -PropertyType String -Value "Microsoft Virtual Console Service/*" -Force | Out-Null
         }
-        $clonedSG = $SmartGroupToClone.clone()
-        #if ($roles -contains "AADClient") {
-        #    Write-Host "Adding SmartGroup AAD Clients"
-        #    $clonedSG = $SmartGroupToClone.clone()
-        #    $clonedSG.properties.name = "Members - AAD"
-        #    $clonedSG.ruleGroup.rule.value = "AADClient"
-        #    #    $findgroup.AppendChild($clonedSG)
-        #}
-        #if ($roles -contains "WorkgroupMember") {
-        #    $clonedSG = $SmartGroupToClone.clone()
-        #    $clonedSG.properties.name = "Members - Workgroup"
-        #    $clonedSG.ruleGroup.rule.value = "WorkgroupMember"
-        #    #    $findgroup.AppendChild($clonedSG)
-        #}
-        if ($hasLinuxRdp) {
-            $clonedSG = $SmartGroupToClone.clone()
-            $clonedSG.properties.name = "Linux"
-            $clonedSG.ruleGroup.rule.value = "Linux"
-            [void]$findgroup.AppendChild($clonedSG)
+
+        # Remove empty category groups (e.g., no MECM servers, no Linux VMs)
+        foreach ($g in @($findGroup.SelectNodes('group'))) {
+            if ($g.SelectNodes('server').Count -eq 0 -and $g.SelectNodes('group').Count -eq 0) {
+                [void]$findGroup.RemoveChild($g)
+            }
         }
+
         # Add new group
         [void]$file.AppendChild($findgroup)
 
@@ -811,12 +858,23 @@ function New-RDCManFileFromHyperV {
             Write-Log "Failed to find group to modify" -Failure
             return
         }
-        $findGroup.group.properties.expanded = "True"
 
-        $smartGroups = $null
-        $smartGroups = $findGroup.SelectNodes('/smartGroup')
-        foreach ($smartGroup in $smartGroups) {
-            [void]$findgroup.RemoveChild($smartGroup)
+        # Clean up any leftover SmartGroups
+        foreach ($sg in @($findGroup.SelectNodes('smartGroup'))) {
+            [void]$findgroup.RemoveChild($sg)
+        }
+
+        # Use "Servers" group for unknown VMs, or the first available child group
+        $unknownTargetGroup = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq "Servers" } | Select-Object -First 1
+        if ($null -eq $unknownTargetGroup) {
+            $unknownTargetGroup = $findGroup.SelectNodes('group') | Select-Object -First 1
+        }
+        if ($null -eq $unknownTargetGroup) {
+            # No child groups at all - create one
+            [xml]$ugXml = '<group><properties><expanded>True</expanded><name>Servers</name></properties></group>'
+            $importedUg = $existing.ImportNode($ugXml.group, $true)
+            [void]$findGroup.AppendChild($importedUg)
+            $unknownTargetGroup = $findGroup.SelectNodes('group') | Select-Object -Last 1
         }
 
         foreach ($vm in $unknownVMs) {
@@ -830,8 +888,15 @@ function New-RDCManFileFromHyperV {
             $comment = $c | ConvertTo-Json
             $name = $($vm.VmName)
             $displayName = $($vm.VmName)
-            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -findgroup $findgroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
+            if ((Add-RDCManServerToGroup -ServerName $name -DisplayName $displayName -targetGroup $unknownTargetGroup -groupfromtemplate $groupFromTemplate -existing $existing -comment $comment.ToString()) -eq $True) {
                 $shouldSave = $true
+            }
+        }
+
+        # Remove empty category groups
+        foreach ($g in @($findGroup.SelectNodes('group'))) {
+            if ($g.SelectNodes('server').Count -eq 0) {
+                [void]$findGroup.RemoveChild($g)
             }
         }
 
@@ -892,12 +957,13 @@ function Remove-MissingServersFromGroup {
     $return = $false
 
     $completeServerList = Get-List -Type VM | Select-Object -ExpandProperty vmName
-    foreach ($item in $findgroup.group.server) {
+    # Search all child groups (and direct children) for servers to remove
+    foreach ($item in @($findgroup.SelectNodes('.//server'))) {
         if ($item.properties.displayName -in $completeServerList -or $item.properties.name -in $completeServerList) {
             continue;
         }
         Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose
-        $findGroup.group.RemoveChild($item) | out-null
+        $item.ParentNode.RemoveChild($item) | out-null
         $return = $true
     }
 
@@ -929,7 +995,7 @@ function Add-RDCManServerToGroup {
     param(
         [string]$serverName,
         [string]$displayName,
-        [object]$findgroup,
+        [object]$targetGroup,
         [object]$groupFromTemplate,
         [object]$existing,
         [string]$comment,
@@ -954,19 +1020,18 @@ function Add-RDCManServerToGroup {
             $displayNameList += $displayName + "($username)"
         }
 
-        $findservers = $findgroup.group.server | Where-Object { $_.properties.displayName -in $displayNameList -or $_.properties.name -in $displayNameList }
+        $findservers = $targetGroup.server | Where-Object { $_.properties.displayName -in $displayNameList -or $_.properties.name -in $displayNameList }
 
         foreach ($item in $findservers) {
             Write-Log ("Removing $($item.properties.displayName)") -LogOnly -Verbose
-            $findGroup.group.RemoveChild($item)
+            $targetGroup.RemoveChild($item)
         }
     }
 
-    $findserver = $findgroup.group.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName } | Select-Object -First 1
+    $findserver = $targetGroup.server | Where-Object { $_.properties.displayName -eq $displayName -or $_.properties.displayName -eq $serverName -or $_.properties.name -eq $displayName -or $_.properties.name -eq $serverName } | Select-Object -First 1
     if ($null -eq $findserver) {
         Write-Log "Added $displayName to RDG Group" -LogOnly -Verbose
-        #$subgroup = $groupFromTemplate.group
-        $server = $groupFromTemplate.SelectNodes('//server') | Select-Object -First 1
+        $server = $groupFromTemplate.SelectNodes('.//server') | Select-Object -First 1
         $newserver = $server.clone()
         $newserver.properties.name = $serverName
         $newserver.properties.displayName = $displayName
@@ -1017,7 +1082,7 @@ function Add-RDCManServerToGroup {
             }
             $clonedNode.logonCredentials.password = $encryptedPass
         }
-        $findgroup.group.AppendChild($clonedNode)
+        $targetGroup.AppendChild($clonedNode)
         return $True
     }
     else {
@@ -1025,50 +1090,6 @@ function Add-RDCManServerToGroup {
         return $False
     }
     return $False
-}
-
-function Add-RDCManSmartGroupToGroup {
-    [CmdletBinding()]
-    param(
-        [object]$vmListFull,
-        [object]$findgroup,
-        [object]$existing
-
-    )
-
-    #Delete Old Records and let them be regenerated
-
-    $findservers = $findgroup.group.smartGroup
-
-    foreach ($item in $findservers) {
-        $findGroup.group.RemoveChild($item)
-    }
-
-    $return = $false
-    $networks = $vmListFull.network | Select-Object -Unique
-    foreach ($network in $networks) {
-
-        [xml]$smartGroupTemplate = @"
-    <smartGroup>
-        <properties>
-            <expanded>False</expanded>
-            <name>$network</name>
-        </properties>
-        <ruleGroup operator="Any">
-            <rule>
-                <property>Comment</property>
-                <operator>Matches</operator>
-                    <value>"$network"</value>
-            </rule>
-        </ruleGroup>
-    </smartGroup>
-"@
-
-        $findgroup.group.AppendChild($existing.ImportNode($smartGroupTemplate.smartGroup, $true))
-        $return = $true
-    }
-    return $return
-
 }
 
 # This gets the <Group> section from the template. Either makes a new one, or returns an existing one.
@@ -1090,10 +1111,9 @@ function Get-RDCManGroupToModify {
         $findGroup = $groupFromTemplate.Clone()
         $findGroup.properties.name = $domain
         $findGroup.logonCredentials.domain = $domain
-        $subgroup = $findGroup.group
-        $ChildNodes = $subgroup.SelectNodes('//server')
-        foreach ($Child in $ChildNodes) {
-            [void]$Child.ParentNode.RemoveChild($Child)
+        # Remove template server placeholders from all child groups
+        foreach ($srv in @($findGroup.SelectNodes('.//server'))) {
+            [void]$srv.ParentNode.RemoveChild($srv)
         }
         $findGroup = $existing.ImportNode($findGroup, $true)
     }
