@@ -1645,14 +1645,16 @@ class WaitForExtendSchemaFile {
             }
 
             # Verify Schema Admin membership (extadsch.exe requires it)
+            $isSchemaAdmin = $false
             try {
                 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
                 $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
                 if ($currentUser.Groups -notcontains $schemaAdminsSID) {
-                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins"
+                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins — extadsch.exe will likely fail. Ensure PsDscRunAsCredential is set to a domain admin account."
                 }
                 else {
-                    Write-Status "Schema Admin membership confirmed"
+                    Write-Status "Schema Admin membership confirmed for '$($currentUser.Name)'"
+                    $isSchemaAdmin = $true
                 }
             }
             catch {

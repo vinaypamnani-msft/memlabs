@@ -220,10 +220,11 @@ Configuration Phase9
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = $parentName
-                ExtFolder   = $CM
-                Ensure      = "Present"
-                DependsOn   = "[WriteStatus]WaitExtSchema"
+                MachineName          = $parentName
+                ExtFolder            = $CM
+                Ensure               = "Present"
+                DependsOn            = "[WriteStatus]WaitExtSchema"
+                PsDscRunAsCredential = $DomainCreds
             }
         }
 

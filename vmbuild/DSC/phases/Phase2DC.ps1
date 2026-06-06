@@ -674,11 +674,12 @@
             }
 
             WaitForExtendSchemaFile WaitForExtendSchemaFile {
-                MachineName = $ThisVM.ThisParams.ExternalTopLevelSiteServer
-                ExtFolder   = "CMCB"
-                Ensure      = "Present"
-                DependsOn   = $waitOnDependency
-                AdminCreds  = $groupCreds
+                MachineName          = $ThisVM.ThisParams.ExternalTopLevelSiteServer
+                ExtFolder            = "CMCB"
+                Ensure               = "Present"
+                DependsOn            = $waitOnDependency
+                AdminCreds           = $groupCreds
+                PsDscRunAsCredential = $DomainCreds
             }
             $waitOnDependency = "[WaitForExtendSchemaFile]WaitForExtendSchemaFile"
 
