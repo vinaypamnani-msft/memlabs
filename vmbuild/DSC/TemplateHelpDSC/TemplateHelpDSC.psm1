@@ -3273,8 +3273,8 @@ class OpenFirewallPortForSCCM {
 
         Write-Status "Opening firewall ports for Role:$_Role"
 
-        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress "10.250.250.0/24"
-        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress "10.250.250.0/24"
+        New-NetFirewallRule -DisplayName "Cluster Network Outbound" -Profile Any -Direction Outbound -Action Allow -RemoteAddress @("10.250.250.0/24", "10.250.251.0/24")
+        New-NetFirewallRule -DisplayName "Cluster Network Inbound" -Profile Any -Direction Inbound -Action Allow -RemoteAddress @("10.250.250.0/24", "10.250.251.0/24")
 
         New-NetFirewallRule -DisplayName 'WinRM Outbound' -Profile Any -Direction Outbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
         New-NetFirewallRule -DisplayName 'WinRM Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort @(5985, 5986) -Group "For WinRM"
@@ -4705,8 +4705,8 @@ class ClusterRemoveUnwantedIPs {
                 $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
             }
             else {
-                # Legacy fallback: keep heartbeat-subnet IPs
-                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+                # Legacy fallback: keep heartbeat-subnet IPs (both old and new subnets)
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" -and $_.Value -notlike "10.250.251.*" }).ClusterObject
             }
             if ($ResourcesToRemove) {
                 foreach ($Resource in $ResourcesToRemove) {
@@ -4826,7 +4826,7 @@ class ClusterRemoveUnwantedIPs {
                 $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -ne $_KeepIP }).ClusterObject
             }
             else {
-                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" }).ClusterObject
+                $ResourcesToRemove = ($ipParams | Where-Object { $_.Value -notlike "10.250.250.*" -and $_.Value -notlike "10.250.251.*" }).ClusterObject
             }
 
             if ($ResourcesToRemove) {
@@ -6390,7 +6390,7 @@ class SetDNSAddress {
 [DscResource()]
 class DisableClusterNicDnsRegistration {
     [DscProperty(Key)]
-    [string] $ClusterSubnet = '10.250.250.'
+    [string] $ClusterSubnet = '10.250.251.'
 
     [DscProperty(Key)]
     [string] $Stage = 'Full'

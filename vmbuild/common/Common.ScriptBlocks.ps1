@@ -1580,73 +1580,52 @@ $global:VM_Config = {
 
 
         if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO") {
-            Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            $vm = Get-VM2 $currentItem.vmName
-            $MAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
-            #$Get_MAC = {
-            # (Get-NetAdapter | Where-Object { $_.InterfaceDescription.contains('#2') }).MacAddress
-            #}
-            # Test DHCP Reservations
+            # Set static IP on the cluster heartbeat NIC before DSC runs.
+            # The heartbeat NIC has no DHCP — we configure it directly via
+            # PowerShell Direct using the IP allocated during VM creation.
+            Write-Progress2 $Activity -Status "Configuring heartbeat NIC" -percentcomplete 9 -force
+            $heartbeatIP = $currentItem.ClusterHeartbeatIP
+            if ($heartbeatIP) {
+                $vm = Get-VM2 $currentItem.vmName
+                $clusterMAC = ($vm.NetworkAdapters | Where-Object { $_.SwitchName -eq "Cluster" }).MacAddress
+                if ($clusterMAC) {
+                    $setStaticIP = {
+                        param($targetIP, $targetMAC)
+                        $targetMAC = ($targetMAC -replace '-','').ToLower()
+                        $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '-','').ToLower() -eq $targetMAC }
+                        if (-not $nic) { throw "Could not find NIC with MAC $targetMAC" }
 
-            #$script = Invoke-VmCommand -SuppressLog -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Get_MAC -DisplayName "Get 2nd Mac"
-            #Write-Progress2 $Activity -Status "Testing DHCP Reservations" -percentcomplete 9 -force
-            #$MAC = $script.ScriptBlockOutput
-            if ($MAC) {
-                $MAC = $MAC.ToLower()
-                if ($reservation) {
-                    #Reservation is now a using statement, as getting the data here causes status to break
-                    if ($reservation.Contains($MAC)) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC was found" -LogOnly
+                        # Check if the IP is already configured (idempotent for reruns)
+                        $existing = Get-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object { $_.IPAddress -eq $targetIP }
+                        if ($existing) { return "Already configured" }
+
+                        # Remove APIPA or stale IPs from this adapter
+                        Get-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object { $_.PrefixOrigin -ne 'WellKnown' } |
+                            Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+
+                        # Assign static IP — no gateway, no DNS (heartbeat only)
+                        New-NetIPAddress -InterfaceIndex $nic.InterfaceIndex -IPAddress $targetIP -PrefixLength 24 | Out-Null
+                        return "Configured $targetIP"
+                    }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
+                        -ScriptBlock $setStaticIP -ArgumentList @($heartbeatIP, $clusterMAC) `
+                        -DisplayName "Set heartbeat static IP $heartbeatIP"
+                    if ($result.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set heartbeat IP $heartbeatIP" -Warning
                     }
                     else {
-                        #Get-DhcpServerv4Reservation -ClientId $MAC -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
-                        #if (!$reservation) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Reservation for $MAC not found" -Warning -LogOnly
-                        $dc = $deployConfig.virtualMachines | Where-Object { $_.role -eq "DC" }
-                        if (-not ($dc.network)) {
-                            $dns = $deployConfig.vmOptions.network.Substring(0, $deployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
-                        }
-                        else {
-                            $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
-                        }
-                        $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
-                        if (! $iprange) {
-                            $iprange = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -NumAddress 2 -ErrorAction Stop
-                        }
-                        if (! $iprange) {
-                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address" -Failure
-                            return $false
-                        }
-                        if ($currentItem.OtherNode) {
-                            $ip = $iprange[1]
-                        }
-                        else {
-                            $ip = $iprange[0]
-                        }
-                        if ($ip) {
-                            Remove-DHCPReservation -ip $ip -vmName $currentItem.vmName                             
-                        }
-
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName   
-                        Remove-DHCPReservation -vmName $currentItem.vmName 
-                        
-
-                        Write-Progress2 $Activity -Status "Adding DHCP Reservations for scope 10.250.250.0 ip: $ip MAC: $MAC" -percentcomplete 11 -force
-                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $MAC -Description "Reservation for $($currentItem.VMName)" -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Start-DHCP | out-null
-                        Start-Sleep -seconds 30
-                        $script = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "renew DHCP"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat NIC: $($result.ScriptBlockOutput)" -LogOnly
                     }
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No Cluster NIC found on VM" -Warning
                 }
             }
             else {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName):  $MAC was not found" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): No ClusterHeartbeatIP in deploy config — legacy cluster on DHCP?" -Warning
             }
-
-
-
         }
 
 

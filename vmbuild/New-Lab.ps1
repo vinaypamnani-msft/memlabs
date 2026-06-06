@@ -749,6 +749,9 @@ try {
     # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
     if ($containsAO) {
+        # Ensure the base "Cluster" switch exists (may already be present from
+        # a legacy deployment on 10.250.250.0). This creates the vSwitch, host
+        # adapter, DHCP scope, and NAT for the legacy subnet.
         if (-not (Test-NetworkFastPath -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -Cache $_netCache)) {
             $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
             if (-not $worked) {

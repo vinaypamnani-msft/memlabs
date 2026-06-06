@@ -254,7 +254,7 @@ Configuration Phase5
 
         DisableClusterNicDnsRegistration PreClusterNicConfig {
             Stage                = 'PreCluster'
-            ClusterSubnet        = '10.250.250.'
+            ClusterSubnet        = '10.250.251.'
             DomainName           = $DomainName
             DCName               = $DC
             DependsOn            = $nextDepend
@@ -308,11 +308,11 @@ Configuration Phase5
 
         WriteStatus 'ChangeNetwork-10' {
             DependsOn = $nextDepend
-            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
+            Status    = "Setting 10.250.251.0 to cluster-only (Role 1)"
         }
 
         ClusterNetwork 'ChangeNetwork-10' {
-            Address              = '10.250.250.0'
+            Address              = '10.250.251.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
             Role                 = '1'
@@ -372,7 +372,7 @@ Configuration Phase5
 
         DisableClusterNicDnsRegistration PostClusterDnsConfig {
             Stage                = 'PostCluster'
-            ClusterSubnet        = '10.250.250.'
+            ClusterSubnet        = '10.250.251.'
             DomainName           = $DomainName
             DCName               = $DC
             ClusterName          = $thisVM.ClusterName
@@ -728,7 +728,7 @@ Configuration Phase5
 
         DisableClusterNicDnsRegistration PreClusterNicConfig {
             Stage                = 'PreCluster'
-            ClusterSubnet        = '10.250.250.'
+            ClusterSubnet        = '10.250.251.'
             DomainName           = $DomainName
             DCName               = $DC
             DependsOn            = $nextDepend
@@ -786,7 +786,7 @@ Configuration Phase5
 
         DisableClusterNicDnsRegistration PostClusterDnsConfig {
             Stage                = 'PostCluster'
-            ClusterSubnet        = '10.250.250.'
+            ClusterSubnet        = '10.250.251.'
             DomainName           = $DomainName
             DCName               = $DC
             ClusterName          = $Node1VM.ClusterName
@@ -796,12 +796,12 @@ Configuration Phase5
         $nextDepend = '[DisableClusterNicDnsRegistration]PostClusterDnsConfig'
 
         WriteStatus "ChangeNetwork-10" {
-            Status    = "Setting 10.250.250.0 to cluster-only (Role 1)"
+            Status    = "Setting 10.250.251.0 to cluster-only (Role 1)"
             DependsOn = $nextDepend
         }
 
         ClusterNetwork 'ChangeNetwork-10' {
-            Address              = '10.250.250.0'
+            Address              = '10.250.251.0'
             AddressMask          = '255.255.255.0'
             Name                 = 'Cluster Network'
             Role                 = '1'

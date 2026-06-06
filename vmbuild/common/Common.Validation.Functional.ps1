@@ -288,7 +288,7 @@ function Test-DCFunctionality {
             if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
                 $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
-                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' }
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' -and $_ -notlike '10.250.251.*' }
                 $ip = $ips | Select-Object -First 1
                 if ($ip) { $entries.Add("$($vm.vmName)=$ip") }
             }
@@ -931,7 +931,7 @@ function Test-SQLAOFunctionality {
             # ==============================================================
             $results.Details.Add("CMD: Validate cluster network configuration")
             try {
-                $clusterSubnet = '10.250.250.'
+                $clusterSubnet = '10.250.251.'
 
                 # Classify adapters by subnet
                 $allAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' })

@@ -3342,83 +3342,56 @@ function New-VirtualMachine {
                     }
                 }
 
-                $dc = Get-List2 -DeployConfig $DeployConfig -SmartUpdate | Where-Object { $_.Role -eq "DC" }
-                if (-not ($dc.network)) {
-                    $dns = $DeployConfig.vmOptions.network.Substring(0, $DeployConfig.vmOptions.network.LastIndexOf(".")) + ".1"
+                # Allocate a static heartbeat IP from 10.250.251.x.
+                # No DHCP scope is used; we scan VM notes to find IPs already assigned.
+                $heartbeatSubnet = "10.250.251"
+                $heartbeatRangeStart = 20
+                $heartbeatRangeEnd = 199
+
+                # Collect IPs already in use from existing VM notes
+                $usedHeartbeatIPs = @()
+                try {
+                    $allVMs = Get-List -Type VM -SmartUpdate
+                    foreach ($existingVM in $allVMs) {
+                        if ($existingVM.ClusterHeartbeatIP) {
+                            $usedHeartbeatIPs += $existingVM.ClusterHeartbeatIP
+                        }
+                    }
                 }
-                else {
-                    $dns = $dc.network.Substring(0, $dc.network.LastIndexOf(".")) + ".1"
+                catch {
+                    Write-Log "$VmName`: Warning: Could not enumerate existing VMs for heartbeat IP check: $_" -Warning
                 }
 
-
-                if (-not $dns) {
-                    write-Log -Failure "$VmName`:Could not determine DNS for cluster network"
-                    return $false
+                # Also check VMs in the current deploy config (handles parallel creation)
+                foreach ($vm in $DeployConfig.virtualMachines) {
+                    if ($vm.ClusterHeartbeatIP -and $vm.ClusterHeartbeatIP -notin $usedHeartbeatIPs) {
+                        $usedHeartbeatIPs += $vm.ClusterHeartbeatIP
+                    }
                 }
 
                 $ip = $null
-                try {
-                    $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                    if (! $ip) {
-                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                    }
-                    if (! $ip) {
-                        Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
-                        return $false
-                    }
-                    else {
-                        Remove-DHCPReservation -ip $ip -vmName $VmName
-                    }
-
-                    Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
-                    Remove-DHCPReservation -vmName $VmName
-
-
-                    Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                }
-                catch {
-                    #retry
-                    Start-DHCP -Restart | out-null
-                    $ip = $null
-                    try {
-                        $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                        if (! $ip) {
-                            $ip = Get-DhcpServerv4FreeIPAddress -ScopeId "10.250.250.0" -ErrorAction Stop
-                        }
-                        if (! $ip) {
-                            Write-Log "$VmName`: Could not acquire a free cluster DHCP Address"
-                            return $false
-                        }
-                        else {
-                            Remove-DHCPReservation -ip $ip -vmName $currentItem.vmName
-                        }
-                        Write-Log "$VmName`: Adding a second nic connected to switch $SwitchName2 with ip $ip and DNS $dns Mac:$($vmnet.MacAddress)"
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Remove-DHCPReservation -vmName $currentItem.vmName
-
-
-                        Add-DhcpServerv4Reservation -ScopeId "10.250.250.0" -IPAddress $ip -ClientId $vmnet.MacAddress -Description "Reservation for $VMName" -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 6 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                        Set-DhcpServerv4OptionValue -optionID 44 -value $dns -ReservedIP $ip -Force -ErrorAction Stop | out-null
-                    }
-                    catch {
-                        write-log -failure "$VmName`:Failed to reserve IP address $ip for DNS: $dns and Mac:$($vmnet.MacAddress)"
-                        Write-Log "$_ $($_.ScriptStackTrace)" -LogOnly
-                        return $false
+                for ($i = $heartbeatRangeStart; $i -le $heartbeatRangeEnd; $i++) {
+                    $candidate = "$heartbeatSubnet.$i"
+                    if ($candidate -notin $usedHeartbeatIPs) {
+                        $ip = $candidate
+                        break
                     }
                 }
+
+                if (-not $ip) {
+                    Write-Log "$VmName`: Could not find a free heartbeat IP in ${heartbeatSubnet}.${heartbeatRangeStart}-${heartbeatRangeEnd}" -Failure
+                    return $false
+                }
+
+                Write-Log "$VmName`: Assigned static heartbeat IP $ip on $SwitchName2 (Mac: $($vmnet.MacAddress))"
 
                 $currentItem = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName }
-                #$currentItem | Add-Member -MemberType NoteProperty -Name "ClusterNetworkIP" -Value $ip -Force
-                #$currentItem | Add-Member -MemberType NoteProperty -Name "DNSServer" -Value $dns -Force
+                $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterHeartbeatIP" -Value $ip -Force
                 if ($currentItem.OtherNode) {
                     # Both the cluster IP and AG listener IP are allocated from the domain
-                    # subnet so they're reachable by clients. The 10.250.250.0 network is
-                    # set to Role 1 (cluster-only) for heartbeat, so virtual IPs on that
-                    # subnet can't come online (WSFC refuses client access on Role 1 networks).
+                    # subnet so they're reachable by clients. The heartbeat network is
+                    # set to Role 1 (cluster-only), so virtual IPs on that subnet can't
+                    # come online (WSFC refuses client access on Role 1 networks).
                     $domainScopeId = $DeployConfig.vmOptions.network
                     $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
                     # Exclude the cluster IP immediately so the next call can't return the same address
@@ -3447,7 +3420,7 @@ function New-VirtualMachine {
                     }
 
                     # Validate both IPs are on the domain subnet, not the heartbeat subnet.
-                    # If they land on 10.250.250.x, the cluster can't come online (Role 1 network).
+                    # If they land on the heartbeat subnet, the cluster can't come online (Role 1 network).
                     $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
                     foreach ($entry in @(@{Name='ClusterIP'; IP=$clusterIP}, @{Name='AGIP'; IP=$AGIP})) {
                         if ($entry.IP -notmatch [regex]::Escape($domainPrefix)) {

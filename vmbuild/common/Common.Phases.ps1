@@ -623,23 +623,7 @@ function Start-PhaseJobs {
         }
         else {
             $reservation = $null
-            #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node, create Cluster IP reservation
-            if ($Phase -eq 5) {
-                #Vm_Config captures this variable
-                $reservation = (Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ea SilentlyContinue).ClientID
-                $reservation = $reservation -replace "-", ""
-
-                # Strip DHCP option 15 (domain suffix) from existing cluster-scope
-                # reservations so the cluster NIC never triggers DNS registration.
-                $clusterReservations = Get-DhcpServerv4Reservation -ScopeId 10.250.250.0 -ErrorAction SilentlyContinue
-                foreach ($res in $clusterReservations) {
-                    $opt15 = Get-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -ErrorAction SilentlyContinue
-                    if ($opt15) {
-                        Write-Log "Removing DHCP option 15 (domain suffix) from cluster reservation $($res.IPAddress) ($($res.Description))"
-                        Remove-DhcpServerv4OptionValue -ReservedIP $res.IPAddress -OptionId 15 -ErrorAction SilentlyContinue
-                    }
-                }
-            }
+            #Phase 5 is for SQL Always on.. So if we are in this phase, it is a SQLAO node
             $alreadyCopiedDSC = $false
             if (-not $global:DSC_Copied) {
                 $global:DSC_Copied = @()
