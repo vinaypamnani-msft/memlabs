@@ -449,6 +449,33 @@ function New-RDCManFileFromHyperV {
         # Compute MECM site hierarchy for per-site group generation
         $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
 
+        # Build client→siteCode map: for each client VM, determine which
+        # Primary site would push the ConfigMgr client to it (same logic
+        # as Common.GenConfig.ps1 ClientPush — network affinity).
+        $clientPushSiteMap = @{}
+        if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
+            $primaries = $vmListFull | Where-Object { $_.Role -eq "Primary" }
+            foreach ($pri in $primaries) {
+                $priNetwork = $pri.network
+                $priSiteCode = $pri.SiteCode
+                # Clients on the Primary's own network
+                foreach ($vm in $vmListFull) {
+                    if ($vm.network -eq $priNetwork -and -not $clientPushSiteMap.ContainsKey($vm.vmName)) {
+                        $clientPushSiteMap[$vm.vmName] = $priSiteCode
+                    }
+                }
+                # Clients on Secondary subnets under this Primary
+                $secondaries = $vmListFull | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $priSiteCode }
+                foreach ($sec in $secondaries) {
+                    foreach ($vm in $vmListFull) {
+                        if ($vm.network -eq $sec.network -and -not $clientPushSiteMap.ContainsKey($vm.vmName)) {
+                            $clientPushSiteMap[$vm.vmName] = $priSiteCode
+                        }
+                    }
+                }
+            }
+        }
+
         # --- Set up category groups (regular <group> elements, order preserved) ---
         # Clean up any leftover SmartGroups from previous runs
         $CurrentSmartGroups = $findgroup.SelectNodes('smartGroup')
@@ -748,6 +775,9 @@ function New-RDCManFileFromHyperV {
                     $displayName += "->$($vm.ParentSiteCode)"
                 }
                 $displayName += ")"
+            }
+            elseif ($clientPushSiteMap.ContainsKey($vm.vmName)) {
+                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
             }
             if ($vm.Role -eq "AADClient" -or $vm.Role -eq "InternetClient") {
                 if (-not [string]::IsNullOrWhiteSpace($vm.LastKnownIP)) {

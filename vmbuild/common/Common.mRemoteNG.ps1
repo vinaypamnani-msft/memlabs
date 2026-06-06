@@ -1169,6 +1169,30 @@ function New-MRemoteNGFileFromHyperV {
         $siteContainers = @{}
         if ($neededGroups["MECMServers"]) {
             $siteHierarchy = Get-MECMSiteHierarchy -VmListFull $vmListFull
+
+            # Build client→siteCode map: for each client VM, determine which
+            # Primary site would push the ConfigMgr client to it (network affinity).
+            $clientPushSiteMap = @{}
+            if ($siteHierarchy -and $siteHierarchy.Sites.Count -gt 0) {
+                $primaries = $vmListFull | Where-Object { $_.Role -eq "Primary" }
+                foreach ($pri in $primaries) {
+                    $priNetwork = $pri.network
+                    $priSiteCode = $pri.SiteCode
+                    foreach ($v in $vmListFull) {
+                        if ($v.network -eq $priNetwork -and -not $clientPushSiteMap.ContainsKey($v.vmName)) {
+                            $clientPushSiteMap[$v.vmName] = $priSiteCode
+                        }
+                    }
+                    $secondaries = $vmListFull | Where-Object { $_.Role -eq "Secondary" -and $_.parentSiteCode -eq $priSiteCode }
+                    foreach ($sec in $secondaries) {
+                        foreach ($v in $vmListFull) {
+                            if ($v.network -eq $sec.network -and -not $clientPushSiteMap.ContainsKey($v.vmName)) {
+                                $clientPushSiteMap[$v.vmName] = $priSiteCode
+                            }
+                        }
+                    }
+                }
+            }
             if ($siteHierarchy) {
                 $mecmContainer = $groupContainers["MECMServers"]
 
@@ -1382,6 +1406,9 @@ function New-MRemoteNGFileFromHyperV {
                 $displayName += " ($($vm.SiteCode)"
                 if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
                 $displayName += ")"
+            }
+            elseif ($clientPushSiteMap.ContainsKey($vm.vmName)) {
+                $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
             }
 
             # IP-based hostname for AAD/Internet clients
