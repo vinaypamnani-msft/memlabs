@@ -494,6 +494,41 @@ function Test-DCFunctionality {
             }
         }
 
+        # FSMO role check (primary DC only) — all five roles should remain on
+        # the first DC unless intentionally moved.
+        if (-not $isBdc) {
+            try {
+                $forest = Get-ADForest -ErrorAction Stop
+                $domain = Get-ADDomain -ErrorAction Stop
+                $localFQDN = "$env:COMPUTERNAME.$domainFqdn"
+
+                $fsmoRoles = [ordered]@{
+                    'Schema Master'          = $forest.SchemaMaster
+                    'Domain Naming Master'   = $forest.DomainNamingMaster
+                    'PDC Emulator'           = $domain.PDCEmulator
+                    'RID Master'             = $domain.RIDMaster
+                    'Infrastructure Master'  = $domain.InfrastructureMaster
+                }
+
+                $moved = @()
+                foreach ($role in $fsmoRoles.GetEnumerator()) {
+                    if ($role.Value -ine $localFQDN) {
+                        $moved += "$($role.Key) -> $($role.Value)"
+                    }
+                }
+
+                if ($moved.Count -gt 0) {
+                    $results.Details.Add("WARN: FSMO role(s) not on primary DC: $($moved -join '; ')")
+                }
+                else {
+                    $results.Details.Add("OK: All 5 FSMO roles on primary DC")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: FSMO role check failed: $($_.Exception.Message)")
+            }
+        }
+
         # ConfigMgr AD schema extension check (primary DC only, CM deployments only)
         if (-not $isBdc -and $hasCmSites) {
             $cmSchemaAttrs = @('mSSMSSiteCode', 'mSSMSAssignmentSiteCode', 'mSSMSCapabilities', 'mSSMSMPName', 'mSSMSMPAddress')

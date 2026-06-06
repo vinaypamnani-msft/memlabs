@@ -1630,11 +1630,84 @@ class WaitForExtendSchemaFile {
             Write-Status "WARNING: extadsch.exe not found in any expected path"
         }
         else {
+            # --- Pre-flight checks ---
+            $schemaNC = $null
+            $schemaOk = $false
+            try {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $schemaNC = (Get-ADRootDSE).schemaNamingContext
+            }
+            catch {
+                Write-Status "WARNING: Could not query AD schema naming context: $($_.Exception.Message)"
+            }
+
+            # Verify Schema Admin membership (extadsch.exe requires it)
+            try {
+                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+                $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
+                if ($currentUser.Groups -notcontains $schemaAdminsSID) {
+                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins"
+                }
+                else {
+                    Write-Status "Schema Admin membership confirmed"
+                }
+            }
+            catch {
+                Write-Status "WARNING: Could not verify Schema Admins membership: $($_.Exception.Message)"
+            }
+
+            # Verify Schema Master FSMO is reachable
+            try {
+                $schemaMaster = (Get-ADForest -ErrorAction Stop).SchemaMaster
+                $localFQDN = [System.Net.Dns]::GetHostEntry("").HostName
+                Write-Status "Schema Master: $schemaMaster (local: $localFQDN)"
+                if ($localFQDN -ine $schemaMaster) {
+                    if (-not (Test-Connection -ComputerName $schemaMaster -Count 1 -Quiet -ErrorAction SilentlyContinue)) {
+                        Write-Status "WARNING: Schema Master $schemaMaster is not reachable"
+                    }
+                }
+            }
+            catch {
+                Write-Status "WARNING: Could not identify Schema Master: $($_.Exception.Message)"
+            }
+
+            # Check if schema is already fully extended (skip extadsch if so)
+            if ($schemaNC) {
+                try {
+                    $existingObjs = @(Get-ADObject -SearchBase $schemaNC `
+                        -Filter "name -like 'MS-SMS-*' -or name -like 'mS-SMS-*'" -ErrorAction SilentlyContinue)
+                    if ($existingObjs.Count -ge 18) {
+                        Write-Status "CM schema already extended ($($existingObjs.Count) SMS objects found) - skipping extadsch.exe"
+                        $schemaOk = $true
+                    }
+                    elseif ($existingObjs.Count -gt 0) {
+                        Write-Status "Partial CM schema detected ($($existingObjs.Count)/18 objects) - will attempt to complete"
+                    }
+                }
+                catch {}
+            }
+
+            # Wait for replication convergence before schema extension (multi-DC only)
+            if (-not $schemaOk) {
+                $dcList = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                if ($dcList.Count -gt 1) {
+                    Write-Status "Waiting for replication convergence across $($dcList.Count) DCs..."
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($sw.Elapsed.TotalSeconds -lt 60) {
+                        Start-Sleep -Seconds 10
+                        $chk = & repadmin /replsummary 2>&1
+                        if (-not ($chk | Where-Object { $_ -match '\(\d{4,}\)' })) { break }
+                        Write-Status "Replication settling ($([int]$sw.Elapsed.TotalSeconds)s)..."
+                    }
+                    $sw.Stop()
+                }
+            }
+
             $logFile = "C:\ExtADSch.log"
             $maxAttempts = 3
-            $schemaOk = $false
 
             for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                if ($schemaOk) { break }
                 # Clear previous log so we read only this run's output
                 if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
 
@@ -1671,23 +1744,41 @@ class WaitForExtendSchemaFile {
                 }
             }
 
-            # If extadsch.exe reported failure, verify whether the attributes actually
-            # exist in the schema (they may have been created by a prior deployment).
-            if (-not $schemaOk) {
+            # Verify all required SMS schema attributes and classes exist.
+            # Catches both fresh extensions and re-runs where extadsch.exe
+            # reports "Failed" but the objects were created by a prior deployment.
+            if (-not $schemaOk -and $schemaNC) {
                 try {
-                    Import-Module ActiveDirectory -ErrorAction Stop
-                    $schemaPath = (Get-ADRootDSE).schemaNamingContext
-                    $test = Get-ADObject -SearchBase $schemaPath -Filter "cn -eq 'MS-SMS-Site-Code'" -ErrorAction Stop
-                    if ($test) {
-                        Write-Status "Schema attributes already present despite extadsch.exe errors (previously extended)"
+                    $reqAttrs = @('MS-SMS-Site-Code','mS-SMS-Assignment-Site-Code','MS-SMS-Site-Boundaries',
+                        'MS-SMS-Roaming-Boundaries','MS-SMS-Default-MP','mS-SMS-Device-Management-Point',
+                        'MS-SMS-MP-Name','MS-SMS-MP-Address','mS-SMS-Health-State','mS-SMS-Source-Forest',
+                        'MS-SMS-Ranged-IP-Low','MS-SMS-Ranged-IP-High','mS-SMS-Version','mS-SMS-Capabilities')
+                    $reqClasses = @('MS-SMS-Management-Point','MS-SMS-Server-Locator-Point',
+                        'MS-SMS-Site','MS-SMS-Roaming-Boundary-Range')
+
+                    $found = @(Get-ADObject -SearchBase $schemaNC `
+                        -Filter "name -like 'MS-SMS-*' -or name -like 'mS-SMS-*'" -ErrorAction SilentlyContinue |
+                        Select-Object -ExpandProperty Name)
+
+                    $missingA = @($reqAttrs | Where-Object { $found -notcontains $_ })
+                    $missingC = @($reqClasses | Where-Object { $found -notcontains $_ })
+
+                    if ($missingA.Count -eq 0 -and $missingC.Count -eq 0) {
+                        Write-Status "All $($reqAttrs.Count) attributes and $($reqClasses.Count) classes present in schema"
                         $schemaOk = $true
                     }
+                    else {
+                        if ($missingA.Count -gt 0) { Write-Status "Missing schema attributes ($($missingA.Count)): $($missingA -join ', ')" }
+                        if ($missingC.Count -gt 0) { Write-Status "Missing schema classes ($($missingC.Count)): $($missingC -join ', ')" }
+                    }
                 }
-                catch {}
+                catch {
+                    Write-Status "WARNING: Could not verify schema objects: $($_.Exception.Message)"
+                }
             }
 
             if (-not $schemaOk) {
-                Write-Status "WARNING: Schema extension failed after $maxAttempts attempts. AD publishing for ConfigMgr will not work. Check C:\ExtADSch.log on the DC."
+                Write-Status "WARNING: Schema extension incomplete. AD publishing for ConfigMgr will not work. Check C:\ExtADSch.log on the DC."
             }
         }
         Write-Status "Done Extending Schema"
