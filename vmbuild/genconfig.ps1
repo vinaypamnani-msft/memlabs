@@ -379,7 +379,7 @@ function Build-ConfigMenuOptions {
     $customOptions += [ordered]@{"P" = "Show Passwords" }
     $customOptions += [ordered]@{ "HP" = "Show the default passwords for all accounts in all domains" }
     $customOptions += [ordered]@{"*B5" = ""; "*BREAK5" = "Other%$($Global:Common.Colors.GenConfigHeader)" }
-    $customOptions += [ordered]@{"R" = "Regenerate Rdcman file (memlabs.rdg) from Hyper-V config %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
+    $customOptions += [ordered]@{"R" = "Regenerate Remote Connection files (RDCMan / mRemoteNG) %$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
     $customOptions += [ordered]@{ "HR" = "In case your memlabs.rdg file is broken, you can force it to get re-created" }
     if ($common.DevBranch) {
         $customOptions += [ordered]@{"#" = "Switch to Main branch%$($Global:Common.Colors.GenConfigNonDefault)%$($Global:Common.Colors.GenConfigNonDefaultNumber)" }
