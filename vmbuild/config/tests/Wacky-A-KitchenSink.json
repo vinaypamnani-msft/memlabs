@@ -11,7 +11,7 @@
   },
   "domainDefaults": {
     "DeploymentType": "CAS and Primary",
-    "CMVersion": "2603",
+    "CMVersion": "2503",
     "DomainName": "wacky.sandwich.lab",
     "Network": "172.19.77.0",
     "DefaultClientOS": "Windows 11 25H2",
@@ -28,7 +28,7 @@
     "OfflineRootCAVM": "OLIVE"
   },
   "cmOptions": {
-    "version": "2603",
+    "version": "2503",
     "install": true,
     "pushClientToDomainMembers": true,
     "EVALVersion": false,
