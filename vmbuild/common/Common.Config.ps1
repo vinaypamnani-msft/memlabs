@@ -2124,6 +2124,32 @@ function Get-VMNetworkCached {
 # gets instant cache hits instead of triggering its own WMI calls.
 function Invoke-VMNetworkBulkWarmup {
     if ($global:Common.NetCache) { return }  # Already warm
+
+    # Try to hydrate from on-disk cache files written by a previous run.
+    # If every file is less than 30 minutes old, skip the expensive WMI call.
+    $cachePath = $global:Common.CachePath
+    if ($cachePath) {
+        $diskFiles = @(Get-ChildItem -Path $cachePath -Filter "*.network.json" -ErrorAction SilentlyContinue)
+        if ($diskFiles.Count -gt 0) {
+            $cutoff = (Get-Date).AddMinutes(-30)
+            $allFresh = $true
+            $loaded = @{}
+            foreach ($f in $diskFiles) {
+                if ($f.LastWriteTime -lt $cutoff) { $allFresh = $false; break }
+                try {
+                    $entry = Get-Content $f.FullName -Raw | ConvertFrom-Json
+                    if ($entry.vmId) { $loaded[$entry.vmId] = $entry }
+                }
+                catch { $allFresh = $false; break }
+            }
+            if ($allFresh -and $loaded.Count -gt 0) {
+                $global:Common.NetCache = $loaded
+                Write-Log "Invoke-VMNetworkBulkWarmup: loaded $($loaded.Count) adapters from disk cache." -LogOnly
+                return
+            }
+        }
+    }
+
     Write-Log "Invoke-VMNetworkBulkWarmup: fetching all VM network adapters in one call..." -LogOnly
     $global:Common.NetCache = @{}
     try {
