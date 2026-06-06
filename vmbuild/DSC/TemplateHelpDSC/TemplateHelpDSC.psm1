@@ -1604,16 +1604,19 @@ class WaitForExtendSchemaFile {
         Write-Status "Extending the Active Directory schema..."
 
         # Force AD Replication (job-based with timeout; repadmin can hang if a
-        # DC's NTDS is still initializing, e.g. BDC just promoted)
+        # DC's NTDS is still initializing, e.g. BDC just promoted).
+        # Omit the DN argument so /AdeP walks ALL partitions (Domain,
+        # Configuration, AND Schema) — schema extension targets
+        # CN=Schema,CN=Configuration,... which is a separate NC from
+        # the domain DN.
         $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
         if ($domainControllers.Count -gt 1) {
             Write-Status "Forcing AD Replication on $($domainControllers.Name -join ',')"
             $dcNames = @($domainControllers.Name)
-            $dn = (Get-ADDomain).DistinguishedName
             $replJob = Start-Job -ScriptBlock {
-                param($dcNames, $dn)
-                $dcNames | ForEach-Object { repadmin /syncall $_ $dn /AdeP 2>&1 | Out-Null }
-            } -ArgumentList $dcNames, $dn
+                param($dcNames)
+                $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+            } -ArgumentList (,$dcNames)
             $null = Wait-Job $replJob -Timeout 60
             if ($replJob.State -eq 'Running') {
                 Stop-Job $replJob -ErrorAction SilentlyContinue
@@ -1696,7 +1699,10 @@ class WaitForExtendSchemaFile {
                     while ($sw.Elapsed.TotalSeconds -lt 60) {
                         Start-Sleep -Seconds 10
                         $chk = & repadmin /replsummary 2>&1
-                        if (-not ($chk | Where-Object { $_ -match '\(\d{4,}\)' })) { break }
+                        # Look for error/fail indicators — more reliable than
+                        # parsing error codes, since replsummary format varies by OS.
+                        $errors = $chk | Where-Object { $_ -match 'error|fail|\*' -and $_ -notmatch 'largest delta' }
+                        if (-not $errors) { break }
                         Write-Status "Replication settling ($([int]$sw.Elapsed.TotalSeconds)s)..."
                     }
                     $sw.Stop()
@@ -1735,11 +1741,11 @@ class WaitForExtendSchemaFile {
                     Write-Status "Retrying schema extension in ${delay}s..."
                     Start-Sleep -Seconds $delay
 
-                    # Force replication before retry in case Schema Master changed
+                    # Force replication before retry — omit DN so all partitions
+                    # (including Schema NC) are synced
                     $dcList = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
                     if ($dcList.Count -gt 1) {
-                        $dn = (Get-ADDomain -ErrorAction SilentlyContinue).DistinguishedName
-                        if ($dn) { repadmin /syncall $env:COMPUTERNAME $dn /AdeP 2>&1 | Out-Null }
+                        repadmin /syncall $env:COMPUTERNAME /AdeP 2>&1 | Out-Null
                     }
                 }
             }
