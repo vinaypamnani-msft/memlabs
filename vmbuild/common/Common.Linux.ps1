@@ -1806,7 +1806,7 @@ function Invoke-LinuxVmCommand {
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=NUL',
         '-o', 'BatchMode=yes',
-        '-o', 'ConnectTimeout=10',
+        '-o', 'ConnectTimeout=60',
         '-o', "ServerAliveInterval=$([Math]::Max(15, [int]($TimeoutSeconds / 4)))",
         '-o', 'LogLevel=ERROR',
         "$UserName@$IPAddress",
@@ -2156,14 +2156,34 @@ function Set-LinuxVmsDcDns {
     $allOk = $true
     foreach ($vm in $linuxVms) {
         $cmd = "/usr/local/sbin/memlabs-set-dns $dcIp $domain"
-        $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
-            -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60
-        if ($res.ScriptBlockFailed -or -not $res.CommandResult) {
+
+        # Invoke-LinuxVmCommand has its own 3-attempt SSH retry (10s/20s
+        # backoff), but during Phase 2 the Linux VM may simply not have
+        # sshd up yet.  Wrap with an outer retry so we keep trying longer.
+        $dnsOk = $false
+        $maxDnsRetries = 3
+        for ($dnsAttempt = 1; $dnsAttempt -le $maxDnsRetries; $dnsAttempt++) {
+            $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
+                -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60
+            if (-not $res.ScriptBlockFailed -and $res.CommandResult) {
+                Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
+                $dnsOk = $true
+                break
+            }
+            # Only retry on SSH transport failures (exit 255). If the remote
+            # command itself failed, retrying won't help.
+            if ($res.ExitCode -ne 255) {
+                break
+            }
+            if ($dnsAttempt -lt $maxDnsRetries) {
+                $delay = 30 * $dnsAttempt
+                Write-Log "[Linux DNS] $($vm.vmName): SSH unreachable (outer attempt $dnsAttempt/$maxDnsRetries). Waiting ${delay}s..." -Warning
+                Start-Sleep -Seconds $delay
+            }
+        }
+        if (-not $dnsOk) {
             Write-Log "[Linux DNS] $($vm.vmName): failed to flip to DC DNS. $($res.ScriptBlockOutput)" -Warning
             $allOk = $false
-        }
-        else {
-            Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
         }
 
         # Now that the DC is promoted and has the DNS Server role, register
