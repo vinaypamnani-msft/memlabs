@@ -1018,9 +1018,31 @@ function Get-File {
                 }
             }
 
-            $copyAttempts = if ($isVhdxCopy) { 2 } else { 1 }
+            $copyAttempts = if ($isVhdxCopy) { 3 } else { 1 }
+            $bitsFailed = $false
             for ($copyAttempt = 1; $copyAttempt -le $copyAttempts; $copyAttempt++) {
-                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                $bitsError = $null
+                try {
+                    Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                }
+                catch {
+                    $bitsError = $_
+                    # Clean up partial file so retry starts fresh
+                    if (Test-Path $Destination) {
+                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                    }
+                }
+
+                if ($bitsError) {
+                    if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
+                        $delay = 15 * $copyAttempt
+                        Write-Log "Get-File: BITS copy failed (attempt $copyAttempt/$copyAttempts): $($bitsError.ToString().Trim()). Retrying in ${delay}s..." -Warning
+                        Start-Sleep -Seconds $delay
+                        continue
+                    }
+                    $bitsFailed = $true
+                    break
+                }
 
                 if (Test-Path $Destination) {
                     return $true
@@ -1055,7 +1077,59 @@ function Get-File {
                     continue
                 }
 
-                Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
+                $bitsFailed = $true
+                break
+            }
+
+            # BITS exhausted — fall back to robocopy for local file copies
+            if ($bitsFailed -and (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                Write-Log "Get-File: BITS failed after $copyAttempts attempt(s). Falling back to robocopy for '$sourceDisplay'." -Warning
+                $roboSrc = Split-Path $Source -Parent
+                $roboDst = Split-Path $Destination -Parent
+                $roboFile = Split-Path $Source -Leaf
+                $destFile = Split-Path $Destination -Leaf
+
+                # robocopy copies with the source filename; if the destination
+                # filename differs we copy then rename.
+                $needsRename = $roboFile -ne $destFile
+
+                # Clean up any partial destination from BITS
+                if (Test-Path $Destination) {
+                    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                }
+
+                # /J = unbuffered I/O (avoids cache pressure on large files)
+                # /R:3 /W:15 = 3 retries, 15s wait (handles transient locks)
+                # /NP = no progress percentage (cleaner log output)
+                $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:3', '/W:15', '/NP')
+                Write-Log "Get-File: robocopy $($roboArgs -join ' ')" -LogOnly
+                $roboResult = & robocopy @roboArgs 2>&1
+                $roboExit = $LASTEXITCODE
+                # robocopy exit codes: 0 = nothing copied (already exists),
+                # 1 = files copied successfully, 2-7 = extra/mismatched (OK),
+                # 8+ = errors
+                if ($roboExit -lt 8) {
+                    if ($needsRename) {
+                        $copiedPath = Join-Path $roboDst $roboFile
+                        if (Test-Path $copiedPath) {
+                            Rename-Item -LiteralPath $copiedPath -NewName $destFile -Force -ErrorAction Stop
+                        }
+                    }
+                    if (Test-Path $Destination) {
+                        Write-Log "Get-File: robocopy fallback succeeded (exit $roboExit)."
+                        return $true
+                    }
+                }
+
+                $roboTail = ($roboResult | Select-Object -Last 5) -join "`n"
+                Write-Log "Get-File: robocopy fallback also failed (exit $roboExit). Output:`n$roboTail" -Failure
+                return $false
+            }
+
+            if ($bitsFailed) {
+                # Non-local source or source missing — cannot robocopy
+                if ($bitsError) { throw $bitsError }
+                Write-Log "Get-File: Copy of '$sourceDisplay' failed after $copyAttempts attempt(s)." -Failure
                 return $false
             }
 
