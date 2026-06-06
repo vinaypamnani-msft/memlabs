@@ -403,6 +403,44 @@ function Start-PhaseJobs {
     $maxVmNameLength = 0
     $maxRoleNameLength = 0
     $existingVMs = Get-List -Type VM
+
+    # Phase 10/11: start all required VMs in parallel before the per-VM job
+    # dispatch loop.  Phases 2-9 use Invoke-SmartStartVMs via ConfigurationData,
+    # but Phase 10/11 skip that path.  Doing it here in bulk avoids sequential
+    # Get-VM2/Start-VM2 calls inside the loop (which took ~1-2s per VM).
+    if ($Phase -ge 10) {
+        $excludedRoles = @("OSDClient", "AADClient", "StandaloneRootCA")
+        $vmsToStart = @()
+
+        # Include all non-hidden VMs from deployConfig
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.Role -notin $excludedRoles -and -not $vm.hidden) {
+                $vmsToStart += $vm.vmName
+            }
+        }
+
+        # Include BDCs (and any other DCs) from the domain that may not be in deployConfig
+        $allDomainVMs = Get-List -Type VM -DomainName $deployConfig.vmOptions.domainName -SmartUpdate
+        foreach ($domVm in $allDomainVMs) {
+            if ($domVm.Role -in @("DC", "BDC") -and $domVm.vmName -notin $vmsToStart) {
+                $vmsToStart += $domVm.vmName
+            }
+        }
+
+        $startedCount = 0
+        foreach ($vmName in $vmsToStart) {
+            $vmObj = $existingVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+            if ($vmObj -and $vmObj.State -ne 'Running') {
+                Write-Progress2 "Preparing Phase $Phase" -Status "Starting VM $vmName ($($vmObj.State))" -PercentComplete $global:preparePhasePercent
+                Start-VM2 -Name $vmName -ErrorAction SilentlyContinue
+                $startedCount++
+            }
+        }
+        if ($startedCount -gt 0) {
+            Write-Log "[Phase $Phase] Started $startedCount VMs." -LogOnly
+        }
+    }
+
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
@@ -528,19 +566,6 @@ function Start-PhaseJobs {
         }
 
         if ($Phase -eq 0 -or $Phase -eq 1 -or $Phase -eq 10 -or $Phase -eq 11) {
-
-            # Phase 10/11: ensure the VM is running before dispatching its job.
-            # Phases 2-9 use Invoke-SmartStartVMs via the ConfigurationData path,
-            # but Phase 10/11 skip that, so VMs left off after the auto-snapshot
-            # would fail with "could not create session".
-            if ($Phase -ge 10 -and $currentItem.Role -notin @("OSDClient", "AADClient")) {
-                $vmState = (Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue).State
-                if ($vmState -and $vmState -ne 'Running') {
-                    Write-Progress2 "Preparing Phase $Phase" -Status "Starting VM $($currentItem.vmName) ($vmState)" -PercentComplete $global:preparePhasePercent
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM is $vmState. Starting..." -LogOnly
-                    Start-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue
-                }
-            }
 
             if ($Phase -eq 11) {
                 # Phase 11 = functional validation. Skip only roles that have no
