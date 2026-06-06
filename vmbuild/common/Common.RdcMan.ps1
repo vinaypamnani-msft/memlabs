@@ -91,6 +91,10 @@ function Save-RdcManSettingsFile {
         $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
         $modified = $true
     }
+    if ($settings.GroupSortOrder -ne "NoSort") {
+        $settings.GroupSortOrder = "NoSort"
+        $modified = $true
+    }
 
     #FilesToOpen is missing!?
     if ($null -eq $FilesToOpen) {
