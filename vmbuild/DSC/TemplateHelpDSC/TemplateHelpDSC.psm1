@@ -1622,23 +1622,73 @@ class WaitForExtendSchemaFile {
             Start-Sleep -Seconds 3
         }
 
-        if (Test-Path $extadschpath) {
-            Write-Status "Running $extadschpath"
-            & $extadschpath | out-null
-        }
-        if (Test-Path $extadschpath2) {
-            Write-Status "Running $extadschpath2"
-            & $extadschpath2 | out-null
-        }
+        # Find the first valid extadsch.exe path
+        $extExe = @($extadschpath, $extadschpath2, $extadschpath3, $extadschpath4) |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
 
-        if (Test-Path $extadschpath3) {
-            Write-Status "Running $extadschpath3"
-            & $extadschpath3 | out-null
+        if (-not $extExe) {
+            Write-Status "WARNING: extadsch.exe not found in any expected path"
         }
+        else {
+            $logFile = "C:\ExtADSch.log"
+            $maxAttempts = 3
+            $schemaOk = $false
 
-        if (Test-Path $extadschpath4) {
-            Write-Status "Running $extadschpath4"
-            & $extadschpath4 | out-null
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                # Clear previous log so we read only this run's output
+                if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+
+                Write-Status "Running extadsch.exe (attempt $attempt/$maxAttempts): $extExe"
+                $extOutput = & $extExe 2>&1
+                Start-Sleep -Seconds 2
+
+                # Parse ExtADSch.log for success/failure
+                if (Test-Path $logFile) {
+                    $logContent = Get-Content $logFile -Raw
+                    if ($logContent -match 'Successfully extended the Active Directory schema') {
+                        Write-Status "Schema extension succeeded (attempt $attempt)"
+                        $schemaOk = $true
+                        break
+                    }
+                    $failLines = ($logContent -split "`r?`n") | Where-Object { $_ -match 'Failed|Error code' } | Select-Object -First 5
+                    Write-Status "Schema extension failed (attempt $attempt): $($failLines -join ' | ')"
+                }
+                else {
+                    Write-Status "Schema extension (attempt $attempt): no log file at $logFile"
+                }
+
+                if ($attempt -lt $maxAttempts) {
+                    $delay = 30 * $attempt
+                    Write-Status "Retrying schema extension in ${delay}s..."
+                    Start-Sleep -Seconds $delay
+
+                    # Force replication before retry in case Schema Master changed
+                    $dcList = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
+                    if ($dcList.Count -gt 1) {
+                        $dn = (Get-ADDomain -ErrorAction SilentlyContinue).DistinguishedName
+                        if ($dn) { repadmin /syncall $env:COMPUTERNAME $dn /AdeP 2>&1 | Out-Null }
+                    }
+                }
+            }
+
+            # If extadsch.exe reported failure, verify whether the attributes actually
+            # exist in the schema (they may have been created by a prior deployment).
+            if (-not $schemaOk) {
+                try {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    $schemaPath = (Get-ADRootDSE).schemaNamingContext
+                    $test = Get-ADObject -SearchBase $schemaPath -Filter "cn -eq 'MS-SMS-Site-Code'" -ErrorAction Stop
+                    if ($test) {
+                        Write-Status "Schema attributes already present despite extadsch.exe errors (previously extended)"
+                        $schemaOk = $true
+                    }
+                }
+                catch {}
+            }
+
+            if (-not $schemaOk) {
+                Write-Status "WARNING: Schema extension failed after $maxAttempts attempts. AD publishing for ConfigMgr will not work. Check C:\ExtADSch.log on the DC."
+            }
         }
         Write-Status "Done Extending Schema"
     }

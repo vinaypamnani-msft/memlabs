@@ -301,8 +301,9 @@ function Test-DCFunctionality {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList, so any bool we pass
         # in arrives as the string 'True'/'False' (both truthy in `if`). Compare to
         # the string 'True' explicitly to avoid the BDC branch firing on every DC.
-        param($domainFqdn, $isBdcInner, $expectedDnsCsv)
+        param($domainFqdn, $isBdcInner, $expectedDnsCsv, $hasCmSitesInner)
         $isBdc = ($isBdcInner -eq 'True')
+        $hasCmSites = ($hasCmSitesInner -eq 'True')
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # Check critical services. KDC included: if it's stopped, machine-account
@@ -493,11 +494,63 @@ function Test-DCFunctionality {
             }
         }
 
+        # ConfigMgr AD schema extension check (primary DC only, CM deployments only)
+        if (-not $isBdc -and $hasCmSites) {
+            $cmSchemaAttrs = @('mSSMSSiteCode', 'mSSMSAssignmentSiteCode', 'mSSMSCapabilities', 'mSSMSMPName', 'mSSMSMPAddress')
+            try {
+                Import-Module ActiveDirectory -ErrorAction Stop
+                $schemaDN = (Get-ADRootDSE).schemaNamingContext
+                $missing = @()
+                foreach ($attr in $cmSchemaAttrs) {
+                    $obj = Get-ADObject -SearchBase $schemaDN -Filter "lDAPDisplayName -eq '$attr'" -ErrorAction SilentlyContinue
+                    if (-not $obj) { $missing += $attr }
+                }
+                if ($missing.Count -gt 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: ConfigMgr AD schema attributes missing: $($missing -join ', '). extadsch.exe may have failed — check C:\ExtADSch.log on the DC.")
+                }
+                else {
+                    $results.Details.Add("OK: ConfigMgr AD schema extension verified ($($cmSchemaAttrs.Count) attributes present)")
+
+                    # Verify schema has replicated to all DCs
+                    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue)
+                    if ($allDCs.Count -gt 1) {
+                        $staleDCs = @()
+                        foreach ($dc in $allDCs) {
+                            if ($dc.HostName -eq "$env:COMPUTERNAME.$domainFqdn") { continue }
+                            try {
+                                $testObj = Get-ADObject -Server $dc.HostName -SearchBase $schemaDN `
+                                    -Filter "lDAPDisplayName -eq 'mSSMSSiteCode'" -ErrorAction Stop
+                                if (-not $testObj) { $staleDCs += $dc.HostName }
+                            }
+                            catch {
+                                $staleDCs += "$($dc.HostName) (unreachable: $($_.Exception.Message))"
+                            }
+                        }
+                        if ($staleDCs.Count -gt 0) {
+                            $results.Details.Add("WARN: CM schema not replicated to: $($staleDCs -join ', ')")
+                        }
+                        else {
+                            $results.Details.Add("OK: CM schema replicated to all $($allDCs.Count) DC(s)")
+                        }
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: CM schema check failed: $($_.Exception.Message)")
+            }
+        }
+
         return $results
     }
 
+    $hasCmSites = $false
+    if ($DeployConfig) {
+        $hasCmSites = @($DeployConfig.virtualMachines | Where-Object { $_.role -in @('CAS', 'Primary', 'Secondary', 'PassiveSite') }).Count -gt 0
+    }
+
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites) `
         -DisplayName "Phase11-$label-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
