@@ -120,8 +120,9 @@ function Invoke-AutoSnapShotDomain {
         [string] $comment
     )
 
-    #Get Critical Server list.  These VM's should be stopped before snapshot
-    $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
+    #Get Critical Server list.  All domain VMs should be restarted after snapshot,
+    #not just the ones in the current phase's ConfigurationData.
+    $critlist = Get-CriticalVMs -domain $domain
 
     #Stop all VMs in Domain
     Invoke-StopVMs -domain $domain -quiet:$true
