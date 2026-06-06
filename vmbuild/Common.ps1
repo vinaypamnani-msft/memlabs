@@ -1018,123 +1018,131 @@ function Get-File {
                 }
             }
 
-            $copyAttempts = if ($isVhdxCopy) { 3 } else { 1 }
-            $bitsFailed = $false
-            for ($copyAttempt = 1; $copyAttempt -le $copyAttempts; $copyAttempt++) {
+            # --- Resilient copy loop for local files (especially VHDX) ---
+            # Strategy: alternate BITS and robocopy with increasing backoff.
+            # Only give up on non-recoverable errors (source missing, disk
+            # full, access denied). Transient I/O errors under heavy load
+            # are retried indefinitely.
+            if (-not $isVhdxCopy) {
+                # Non-VHDX: single BITS attempt, no retry loop
+                Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
+                if (Test-Path $Destination) { return $true }
+                Write-Log "Get-File: Transfer appeared to succeed but '$Destination' does not exist." -Failure
+                return $false
+            }
+
+            # VHDX copy — keep trying until it works or we hit a fatal error
+            $maxRounds = 10          # 10 rounds × (BITS + robocopy) = 20 total attempts
+            $lastError = $null
+            for ($round = 1; $round -le $maxRounds; $round++) {
+
+                # Check for non-recoverable conditions before each round
+                if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+                    Write-Log "Get-File: Source '$sourceDisplay' no longer exists. Cannot retry." -Failure
+                    return $false
+                }
+                try {
+                    $drvName = (Split-Path $Destination -Qualifier).TrimEnd(':')
+                    $drv = Get-PSDrive -Name $drvName -ErrorAction Stop
+                    $srcSize = (Get-Item -LiteralPath $Source -ErrorAction Stop).Length
+                    if ([int64]$drv.Free -lt ($srcSize + 1GB)) {
+                        $freeGb = [Math]::Round($drv.Free / 1GB, 2)
+                        $needGb = [Math]::Round(($srcSize + 1GB) / 1GB, 2)
+                        Write-Log "Get-File: Destination drive '$drvName':\ has only ${freeGb}GB free (need ${needGb}GB). Cannot retry." -Failure
+                        return $false
+                    }
+                }
+                catch {
+                    Write-Log "Get-File: Could not check free space: $($_.ToString().Trim())" -Warning
+                }
+
+                # --- Try BITS ---
                 $bitsError = $null
                 try {
+                    Write-Log "Get-File: BITS copy attempt (round $round/$maxRounds) for '$sourceDisplay'" -LogOnly
                     Start-BitsTransfer @HashArguments -Priority Foreground -ErrorAction Stop
                 }
                 catch {
                     $bitsError = $_
-                    # Clean up partial file so retry starts fresh
                     if (Test-Path $Destination) {
                         Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
                     }
                 }
 
-                if ($bitsError) {
-                    if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
-                        $delay = 15 * $copyAttempt
-                        Write-Log "Get-File: BITS copy failed (attempt $copyAttempt/$copyAttempts): $($bitsError.ToString().Trim()). Retrying in ${delay}s..." -Warning
-                        Start-Sleep -Seconds $delay
-                        continue
-                    }
-                    $bitsFailed = $true
-                    break
-                }
-
-                if (Test-Path $Destination) {
+                if (-not $bitsError -and (Test-Path $Destination)) {
                     return $true
                 }
 
-                # File missing after BITS reported success — gather diagnostics
-                $diagParts = @()
-                if (-not (Test-Path $destinationDirectory)) {
-                    $diagParts += "destination directory MISSING"
+                if ($bitsError) {
+                    $lastError = $bitsError
+                    # Check for access-denied / permission errors — non-recoverable
+                    $errMsg = $bitsError.ToString()
+                    if ($errMsg -match 'Access is denied|0x80070005') {
+                        Write-Log "Get-File: BITS access denied for '$sourceDisplay'. Cannot retry." -Failure
+                        throw $bitsError
+                    }
+                    Write-Log "Get-File: BITS failed (round $round): $($errMsg.Trim()). Trying robocopy..." -Warning
                 }
                 else {
-                    $dirFiles = @(Get-ChildItem -LiteralPath $destinationDirectory -ErrorAction SilentlyContinue)
-                    $diagParts += "directory exists ($($dirFiles.Count) files)"
+                    Write-Log "Get-File: BITS reported success but '$Destination' missing (round $round). Trying robocopy..." -Warning
                 }
-                try {
-                    $drive = Get-PSDrive -Name (Split-Path $Destination -Qualifier).TrimEnd(':') -ErrorAction Stop
-                    $diagParts += "drive free: $([Math]::Round($drive.Free / 1GB, 2))GB"
-                }
-                catch { $diagParts += "drive free: unknown" }
-                $diagMsg = $diagParts -join "; "
-                Write-Log "Get-File: BITS returned success but file missing. Diagnostics: $diagMsg" -Warning
 
-                if ($isVhdxCopy -and $copyAttempt -lt $copyAttempts) {
-                    Write-Log "Get-File: Transfer reported success but '$Destination' is missing. Waiting 30 seconds before retry ($copyAttempt/$copyAttempts)." -Warning
-                    Start-Sleep -Seconds 30
+                # --- Try robocopy ---
+                if (Test-Path -LiteralPath $Source -PathType Leaf) {
+                    $roboSrc = Split-Path $Source -Parent
+                    $roboDst = Split-Path $Destination -Parent
+                    $roboFile = Split-Path $Source -Leaf
+                    $destFile = Split-Path $Destination -Leaf
+                    $needsRename = $roboFile -ne $destFile
 
+                    # Clean up any partial file
                     if (Test-Path $Destination) {
-                        return $true
+                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
                     }
-
-                    Write-Log "Get-File: '$Destination' still missing after 30 seconds. Retrying copy." -Warning
-                    continue
-                }
-
-                $bitsFailed = $true
-                break
-            }
-
-            # BITS exhausted — fall back to robocopy for local file copies
-            if ($bitsFailed -and (Test-Path -LiteralPath $Source -PathType Leaf)) {
-                Write-Log "Get-File: BITS failed after $copyAttempts attempt(s). Falling back to robocopy for '$sourceDisplay'." -Warning
-                $roboSrc = Split-Path $Source -Parent
-                $roboDst = Split-Path $Destination -Parent
-                $roboFile = Split-Path $Source -Leaf
-                $destFile = Split-Path $Destination -Leaf
-
-                # robocopy copies with the source filename; if the destination
-                # filename differs we copy then rename.
-                $needsRename = $roboFile -ne $destFile
-
-                # Clean up any partial destination from BITS
-                if (Test-Path $Destination) {
-                    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-                }
-
-                # /J = unbuffered I/O (avoids cache pressure on large files)
-                # /R:3 /W:15 = 3 retries, 15s wait (handles transient locks)
-                # /NP = no progress percentage (cleaner log output)
-                $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:3', '/W:15', '/NP')
-                Write-Log "Get-File: robocopy $($roboArgs -join ' ')" -LogOnly
-                $roboResult = & robocopy @roboArgs 2>&1
-                $roboExit = $LASTEXITCODE
-                # robocopy exit codes: 0 = nothing copied (already exists),
-                # 1 = files copied successfully, 2-7 = extra/mismatched (OK),
-                # 8+ = errors
-                if ($roboExit -lt 8) {
                     if ($needsRename) {
-                        $copiedPath = Join-Path $roboDst $roboFile
-                        if (Test-Path $copiedPath) {
-                            Rename-Item -LiteralPath $copiedPath -NewName $destFile -Force -ErrorAction Stop
+                        $tempCopy = Join-Path $roboDst $roboFile
+                        if (Test-Path $tempCopy) {
+                            Remove-Item -LiteralPath $tempCopy -Force -ErrorAction SilentlyContinue
                         }
                     }
-                    if (Test-Path $Destination) {
-                        Write-Log "Get-File: robocopy fallback succeeded (exit $roboExit)."
-                        return $true
+
+                    # /J = unbuffered I/O (avoids cache pressure on large files)
+                    # /R:2 /W:10 = 2 retries, 10s wait (robocopy's own retries)
+                    # /NP = no progress percentage
+                    $roboArgs = @($roboSrc, $roboDst, $roboFile, '/J', '/R:2', '/W:10', '/NP')
+                    Write-Log "Get-File: robocopy (round $round) $($roboArgs -join ' ')" -LogOnly
+                    $roboResult = & robocopy @roboArgs 2>&1
+                    $roboExit = $LASTEXITCODE
+
+                    if ($roboExit -lt 8) {
+                        if ($needsRename) {
+                            $copiedPath = Join-Path $roboDst $roboFile
+                            if (Test-Path $copiedPath) {
+                                Rename-Item -LiteralPath $copiedPath -NewName $destFile -Force -ErrorAction Stop
+                            }
+                        }
+                        if (Test-Path $Destination) {
+                            Write-Log "Get-File: robocopy succeeded (round $round, exit $roboExit)."
+                            return $true
+                        }
                     }
+
+                    $roboTail = ($roboResult | Select-Object -Last 3) -join " | "
+                    $lastError = "robocopy exit $roboExit : $roboTail"
+                    Write-Log "Get-File: robocopy failed (round $round, exit $roboExit): $roboTail" -Warning
                 }
 
-                $roboTail = ($roboResult | Select-Object -Last 5) -join "`n"
-                Write-Log "Get-File: robocopy fallback also failed (exit $roboExit). Output:`n$roboTail" -Failure
-                return $false
+                # Backoff before next round — cap at 60s
+                if ($round -lt $maxRounds) {
+                    $delay = [Math]::Min(60, 15 * $round)
+                    Write-Log "Get-File: Copy of '$sourceDisplay' failed (round $round/$maxRounds). Retrying in ${delay}s..." -Warning
+                    Start-Sleep -Seconds $delay
+                }
             }
 
-            if ($bitsFailed) {
-                # Non-local source or source missing — cannot robocopy
-                if ($bitsError) { throw $bitsError }
-                Write-Log "Get-File: Copy of '$sourceDisplay' failed after $copyAttempts attempt(s)." -Failure
-                return $false
-            }
-
-            # All retry attempts exhausted without returning — should not reach here
-            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $copyAttempts attempt(s)." -Failure
+            # All rounds exhausted
+            Write-Log "Get-File: Copy of '$sourceDisplay' failed after $maxRounds rounds of BITS + robocopy. Last error: $lastError" -Failure
+            if ($lastError -is [System.Management.Automation.ErrorRecord]) { throw $lastError }
             return $false
         }
 
