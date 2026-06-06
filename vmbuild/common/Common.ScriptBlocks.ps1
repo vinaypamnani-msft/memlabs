@@ -1630,6 +1630,15 @@ $global:VM_Config = {
             # PowerShell Direct using the IP allocated during VM creation.
             Write-Progress2 $Activity -Status "Configuring heartbeat NIC" -percentcomplete 9 -force
             $heartbeatIP = $currentItem.ClusterHeartbeatIP
+            if (-not $heartbeatIP) {
+                # ClusterHeartbeatIP is added via Add-Member inside the Phase 1
+                # job, so it doesn't survive back to the parent process (the
+                # deploy config is deep-copied per job). Fall back to the VM
+                # Note, which New-VmNote persists at the end of each phase.
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): ClusterHeartbeatIP not in deploy config, reading from VM Note" -LogOnly
+                $vmNote = Get-VMNote -VMName $currentItem.vmName
+                if ($vmNote) { $heartbeatIP = $vmNote.ClusterHeartbeatIP }
+            }
             if ($heartbeatIP) {
                 $vm = Get-VM2 $currentItem.vmName
                 # Try ClusterV2 first (new deployments), fall back to Cluster (legacy)
@@ -1691,18 +1700,18 @@ $global:VM_Config = {
                         -ScriptBlock $setStaticIP -ArgumentList @($heartbeatIP, $clusterMAC) `
                         -DisplayName "Set heartbeat static IP $heartbeatIP"
                     if ($result.ScriptBlockFailed) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set heartbeat IP $heartbeatIP" -Warning
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to set heartbeat IP $heartbeatIP. SQLAO cluster network will not form without this. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     }
                     else {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat NIC: $($result.ScriptBlockOutput)" -LogOnly
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat NIC: $($result.ScriptBlockOutput)"
                     }
                 }
                 else {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No Cluster NIC found on VM" -Warning
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No Cluster/ClusterV2 NIC found on VM. SQLAO requires a dedicated heartbeat NIC." -Failure -OutputStream
                 }
             }
             else {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): No ClusterHeartbeatIP in deploy config — legacy cluster on DHCP?" -Warning
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): No ClusterHeartbeatIP found in deploy config or VM Note. Cannot configure heartbeat NIC — SQLAO will fail." -Failure -OutputStream
             }
         }
 
