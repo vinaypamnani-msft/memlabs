@@ -1090,7 +1090,10 @@ try {
         }
 
         # Retrieve guest-side component timing from ScriptWorkflow.json
-        Get-GuestTimingStats -deployConfig $deployConfig
+        # Skip on partial-phase runs — VMs may not be running and timing is incomplete
+        if (-not $Phase -and -not $SkipPhase) {
+            Get-GuestTimingStats -deployConfig $deployConfig
+        }
 
         # Show complete build stats
         Write-BuildSummary

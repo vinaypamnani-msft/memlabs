@@ -633,7 +633,7 @@ function Remove-Domain {
 
     if (-not $WhatIf.IsPresent) {
         Get-List -type VM -SmartUpdate | Out-Null
-        if (Get-Command -Name New-RDCManFileFromHyperV -ErrorAction SilentlyContinue) {
+        if ($Global:Common.LocalAdmin -and (Get-Command -Name New-RDCManFileFromHyperV -ErrorAction SilentlyContinue)) {
             New-RDCManFileFromHyperV -rdcmanfile $Global:Common.RdcManFilePath -OverWrite:$false
         }
         if (Get-Command -Name New-MRemoteNGFileFromHyperV -ErrorAction SilentlyContinue) {

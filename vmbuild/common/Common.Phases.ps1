@@ -1623,6 +1623,11 @@ function Get-GuestTimingStats {
     foreach ($vm in $deployConfig.virtualMachines) {
         if ($vm.hidden) { continue }
         if (Test-VmIsLinux -Vm $vm) { continue }
+        if ($vm.role -in @('OSDClient', 'AADClient')) { continue }
+
+        # Skip VMs that aren't running (avoids session errors on partial-phase runs)
+        $vmObj = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+        if (-not $vmObj -or $vmObj.State -ne 'Running') { continue }
 
         try {
             $json = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -TimeoutSeconds 30 -ScriptBlock {
