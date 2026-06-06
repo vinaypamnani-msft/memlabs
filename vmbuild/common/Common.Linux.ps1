@@ -2163,8 +2163,13 @@ function Set-LinuxVmsDcDns {
         $dnsOk = $false
         $maxDnsRetries = 3
         for ($dnsAttempt = 1; $dnsAttempt -le $maxDnsRetries; $dnsAttempt++) {
+            # On non-final outer attempts, suppress the inner "failed" log
+            # so a recoverable SSH timeout doesn't show as an ERROR.
+            # The outer loop logs its own warning instead.
+            $isLastOuter = ($dnsAttempt -eq $maxDnsRetries)
             $res = Invoke-LinuxVmCommand -VmName $vm.vmName -BashCommand $cmd -Sudo `
-                -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60
+                -DisplayName "memlabs-set-dns $dcIp $domain" -TimeoutSeconds 60 `
+                -SuppressLog:(-not $isLastOuter)
             if (-not $res.ScriptBlockFailed -and $res.CommandResult) {
                 Write-Log "[Linux DNS] $($vm.vmName): now using DC DNS ($dcIp). $($res.ScriptBlockOutput)" -Success
                 $dnsOk = $true

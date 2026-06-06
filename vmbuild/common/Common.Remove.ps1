@@ -327,6 +327,43 @@ function Remove-DhcpScope {
     }
 }
 
+function Remove-OrphanedNetNats {
+    <#
+    .SYNOPSIS
+        Silently remove memlabs-style NetNat entries that have no matching
+        Hyper-V switch. Called automatically from Remove-Domain / Remove-All
+        finally blocks so orphaned NATs never accumulate.
+    #>
+    [CmdletBinding()]
+    param()
+    try {
+        $switchNames = @((Get-VMSwitch -ErrorAction SilentlyContinue).Name)
+        # Also consider subnets from VMs still registered in Get-List
+        $vmSwitches = @()
+        try { $vmSwitches = @(Get-List -Type UniqueSwitch) } catch {}
+        $inUse = @($switchNames + $vmSwitches) | Select-Object -Unique
+
+        $natEntries = @(Get-NetNat -ErrorAction SilentlyContinue)
+        foreach ($nat in $natEntries) {
+            # Only touch memlabs-style NATs named with a dotted-quad subnet
+            if ($nat.Name -notmatch '^\d+\.\d+\.\d+\.\d+$') { continue }
+            if ($nat.Name -in $inUse) { continue }
+
+            Write-Log "Removing orphaned NAT '$($nat.Name)' ($($nat.InternalIPInterfaceAddressPrefix))" -Warning
+            Remove-NetNat -Name $nat.Name -Confirm:$false -ErrorAction SilentlyContinue
+
+            # Also clean up the DHCP scope for this orphan
+            $dhcp = Get-DhcpServerv4Scope -ScopeID $nat.Name -ErrorAction SilentlyContinue
+            if ($dhcp) {
+                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Log "Remove-OrphanedNetNats: $($_.Exception.Message)" -Warning
+    }
+}
+
 function Remove-Orphaned {
 
     param (
@@ -547,7 +584,11 @@ function Remove-Domain {
     }
     $DC = $vmsToDelete | Where-Object { $_.Role -eq "DC" }
 
+    # Capture scopes BEFORE deleting VMs — once VMs are gone, Get-List
+    # can't discover which switches belonged to this domain.
     $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName | Where-Object { $_ -ne "Internet" -and $_ -ne "Cluster" -and $_ -ne "ClusterV2" } # Internet/Cluster subnets could be shared between multiple domains
+
+    try {
 
     if ($DC) {
         Remove-ForestTrust -DomainName $DomainName
@@ -613,21 +654,22 @@ function Remove-Domain {
                 Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
             }
 
+            # Remove-VMSwitch2 now also removes the NAT + DHCP scope for
+            # the network, so the explicit NAT loop is no longer needed.
             Write-Log "Removing ALL Hyper-V Switches for '$DomainName'" -Activity
             foreach ($scope in $scopesToDelete) {
                 Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
             }
+        }
+    }
 
-            Write-Log "Removing NAT entries for '$DomainName'" -Activity
-            foreach ($scope in $scopesToDelete) {
-                $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
-                if ($nat) {
-                    Write-Log "Removing NAT entry '$scope'" -SubActivity
-                    if (-not $WhatIf) {
-                        Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
-                    }
-                }
-            }
+    } # end try
+    finally {
+        # Sweep for orphaned NATs whose switch is already gone.
+        # This catches leaks from partial deployments, crashes, or
+        # cases where VMs were deleted before Remove-Lab ran.
+        if (-not $WhatIf.IsPresent) {
+            Remove-OrphanedNetNats
         }
     }
 
@@ -657,7 +699,10 @@ function Remove-All {
     )
 
     $vmsToDelete = Get-List -Type VM
-    $scopesToDelete = Get-List -Type UniqueSwitch -DomainName $DomainName
+    # Get all unique switches across all domains (no DomainName filter)
+    $scopesToDelete = Get-List -Type UniqueSwitch
+
+    try {
 
     if ($vmsToDelete) {
         Write-Log "Removing ALL virtual machines" -Activity
@@ -672,20 +717,19 @@ function Remove-All {
             Remove-DhcpScope -ScopeId $scope -WhatIf:$WhatIf
         }
 
+        # Remove-VMSwitch2 now also removes the NAT + DHCP scope
         Write-Log "Removing ALL Hyper-V Switches" -Activity
         foreach ($scope in $scopesToDelete) {
             Remove-VMSwitch2 -NetworkName $scope -WhatIf:$WhatIf
         }
+    }
 
-        Write-Log "Removing ALL NAT entries" -Activity
-        foreach ($scope in $scopesToDelete) {
-            $nat = Get-NetNat -Name $scope -ErrorAction SilentlyContinue
-            if ($nat) {
-                Write-Log "Removing NAT entry '$scope'" -SubActivity
-                if (-not $WhatIf) {
-                    Remove-NetNat -Name $scope -Confirm:$false -ErrorAction SilentlyContinue
-                }
-            }
+    } # end try
+    finally {
+        # Sweep for any NATs that survived (switch already gone, partial
+        # deploy, VMs deleted externally, etc.)
+        if (-not $WhatIf.IsPresent) {
+            Remove-OrphanedNetNats
         }
     }
 

@@ -114,6 +114,22 @@ function Remove-VMSwitch2 {
             Write-Log "Hyper-V VM Switch '$($switch.Name)' exists. Removing." -SubActivity
             $switch | Remove-VMSwitch -Force -ErrorAction SilentlyContinue -WhatIf:$WhatIf
         }
+
+        # Always attempt NAT + DHCP cleanup for this network, even if the
+        # switch was already gone.  This closes the leak where a switch is
+        # removed but the NAT / DHCP scope survives.
+        if (-not $WhatIf) {
+            $nat = Get-NetNat -Name $NetworkName -ErrorAction SilentlyContinue
+            if ($nat) {
+                Write-Log "  Removing NAT '$NetworkName'" -SubActivity
+                Remove-NetNat -Name $NetworkName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            $dhcp = Get-DhcpServerv4Scope -ScopeID $NetworkName -ErrorAction SilentlyContinue
+            if ($dhcp) {
+                Write-Log "  Removing DHCP scope '$NetworkName'" -SubActivity
+                $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
     catch {
         # We tried..

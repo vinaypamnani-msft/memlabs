@@ -1950,6 +1950,20 @@ function Add-SwitchAndDhcp {
 
     Write-Log "Creating/verifying Hyper-V switch and DHCP Scopes for '$NetworkName' network." -Activity
 
+    # ── NetNat scavenge ─────────────────────────────────────────────────────
+    # Too many NetNat entries can cause WinNAT to silently drop traffic.
+    # If the count exceeds the threshold, remove orphans automatically
+    # before creating new networking.
+    $natCount = @(Get-NetNat -ErrorAction SilentlyContinue).Count
+    if ($natCount -ge 20) {
+        Write-Log "NetNat count is $natCount (threshold 20). Scavenging orphans..." -Warning
+        Remove-OrphanedNetNats
+        $newCount = @(Get-NetNat -ErrorAction SilentlyContinue).Count
+        if ($newCount -lt $natCount) {
+            Write-Log "Scavenged $($natCount - $newCount) orphaned NAT(s). Remaining: $newCount." -Warning
+        }
+    }
+
     # ── Stale-networking safeguard ──────────────────────────────────────────
     # If the vSwitch exists but NO Hyper-V VMs are connected to it, the
     # switch/NAT/DHCP are left over from a failed removal of a previous
