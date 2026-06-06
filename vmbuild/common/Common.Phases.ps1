@@ -1002,18 +1002,22 @@ function Get-ConfigurationData {
         Start-Sleep -Milliseconds 251
         Write-Progress2 "Preparing Phase $Phase" -Status "Verifying all required VMs are running" -PercentComplete $global:preparePhasePercent
 
-        $nodes = @($cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") })
-        # Ensure all BDCs are started alongside the primary DC in every phase.
-        # ConfigurationData for phases 4-9 only includes the primary DC, but
-        # BDCs must be running for AD replication and DNS availability.
-        $bdcNames = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "BDC" -and -not $_.hidden } | ForEach-Object { $_.vmName })
-        foreach ($bdc in $bdcNames) {
-            if ($bdc -notin $nodes) { $nodes += $bdc }
-        }
+        $nodes = $cd.AllNodes.NodeName | Where-Object { $_ -ne "*" -and ($_ -ne "LOCALHOST") }
         if ($nodes) {
             $critlist = Get-CriticalVMs -domain $deployConfig.vmOptions.domainName -vmNames $nodes
         }
 
+        # Start BDCs alongside the primary DC in every phase.  BDCs aren't in
+        # ConfigurationData for phases 4-9 (no DSC work for them), but they
+        # must be running for AD replication and DNS availability.
+        $bdcVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "BDC" -and -not $_.hidden })
+        foreach ($bdc in $bdcVMs) {
+            $vm = Get-VM2 -Name $bdc.vmName -ErrorAction SilentlyContinue
+            if ($vm -and $vm.State -ne 'Running') {
+                Write-Log "[Phase $Phase] BDC [$($bdc.vmName)] is $($vm.State). Starting..." -LogOnly
+                Start-VM2 -Name $bdc.vmName -ErrorAction SilentlyContinue
+            }
+        }
 
         $global:preparePhasePercent++
         Start-Sleep -Milliseconds 251
