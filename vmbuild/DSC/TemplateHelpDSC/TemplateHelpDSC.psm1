@@ -1714,8 +1714,14 @@ class WaitForExtendSchemaFile {
 
             for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
                 if ($schemaOk) { break }
-                # Clear previous log so we read only this run's output
-                if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+                # Rename previous log so we can detect whether extadsch.exe
+                # actually wrote a new one (vs failing silently due to
+                # permissions or path issues).
+                $logExisted = Test-Path $logFile
+                if ($logExisted) {
+                    $bak = "$logFile.attempt$($attempt - 1)"
+                    Rename-Item $logFile $bak -Force -ErrorAction SilentlyContinue
+                }
 
                 Write-Status "Running extadsch.exe (attempt $attempt/$maxAttempts): $extExe"
                 $extOutput = & $extExe 2>&1
@@ -1733,7 +1739,11 @@ class WaitForExtendSchemaFile {
                     Write-Status "Schema extension failed (attempt $attempt): $($failLines -join ' | ')"
                 }
                 else {
-                    Write-Status "Schema extension (attempt $attempt): no log file at $logFile"
+                    # extadsch.exe ran but didn't produce a log — likely a
+                    # permissions or working-directory issue, not a schema
+                    # problem.  Surface the captured stdout/stderr instead.
+                    $consoleOut = if ($extOutput) { ($extOutput | Select-Object -First 5) -join ' | ' } else { '(no output)' }
+                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log file at $logFile. Console output: $consoleOut"
                 }
 
                 if ($attempt -lt $maxAttempts) {
