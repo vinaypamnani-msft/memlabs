@@ -815,9 +815,12 @@ try {
         $existingVm = Get-VM2 -Fallback -Name $vm.vmName -ErrorAction SilentlyContinue
         if (-not $existingVm) {
             # VM doesn't exist — force Phase 1 so it gets created even with -StartPhase 2+
-            Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
             $global:ForcePhase1VmNames += $vm.vmName
             $forcePhase1ForAAD = $true
+            # Only warn if Phase 1 would have been skipped (otherwise it runs naturally)
+            if ($StartPhase -and $StartPhase -gt 1) {
+                Write-Log "[Phase 0] $($vm.vmName): AADClient does not exist. Forcing Phase 1 to create it." -Warning
+            }
             continue
         }
         $note = Get-VMNote -VMName $vm.vmName
