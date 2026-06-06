@@ -40,8 +40,10 @@ if ($Common.Initialized) {
 # Set Verbose
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
 
-# Dot source common (RemoveOnly profile skips ~20 files and expensive init)
-. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -StartupProfile RemoveOnly
+# Dot source common — skip expensive init that removal doesn't need
+# (env detection, maintenance, VM cache, host prep) but keep storage
+# init so $Common.LocalAdmin is available for RDCMan file generation.
+. $PSScriptRoot\Common.ps1 -VerboseEnabled:$enableVerbose -SkipMaintenanceRefresh -SkipVmCacheRefresh -SkipEnvironmentDetection -SkipHostPreparation
 
 if ($Orphaned.IsPresent) {
     Remove-Orphaned -WhatIf:$WhatIf
