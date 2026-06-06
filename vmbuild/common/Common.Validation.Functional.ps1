@@ -1577,57 +1577,85 @@ function Test-CMSiteFunctionality {
             return $results
         }
 
-        # Component health check - lenient for fresh builds.
-        # Status=2 means Error/Critical in SMS_ComponentSummarizer.
-        # Fresh deployments typically have 0-3 transient critical components
-        # for several minutes after services start. We retry a few times
-        # and allow up to 5 critical components as WARN (not FAIL).
-        # Exclude known-transient components that are expected on fresh builds.
+        # Component health check — verify current running state, not cumulative error history.
+        # SMS_ComponentSummarizer (TallyInterval '0001128000100008' = "since startup") accumulates
+        # Status=2 entries from transient startup errors that never clear, even when the component
+        # is healthy. Instead, query SMS_ComponentStatus which reflects each component's CURRENT
+        # State and AvailabilityState:
+        #   State: 0=Stopped, 1=Started, 2=Paused, 3=Installing, 4=Re-installing, 5=De-installing
+        #   AvailabilityState: 0=Online, 3=Offline, 4=Unknown
+        # A healthy component is State=1 (Started) AND AvailabilityState=0 (Online).
         $ignoredComponents = @(
             'SMS_WSUS_CONFIGURATION_MANAGER'   # Until SUP is fully configured
             'SMS_SITE_SQL_BACKUP'              # Backup not configured on new sites
         )
-        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter `"Status = 2 AND TallyInterval = '0001128000100008'`"")
-        $componentCheckAttempts = 3
-        $componentRetryDelay = 30
-        $criticalCount = 999
-        $criticalList = @()
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentStatus (checking State/AvailabilityState)")
+        $componentCheckAttempts = 5
+        $componentRetryDelay = 45
+        $unhealthyCount = 999
+        $unhealthyDetails = @()
         for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
             try {
-                $allCritical = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
-                    -Filter "Status = 2 AND TallyInterval = '0001128000100008'" -ErrorAction Stop)
-                $critical = @($allCritical | Where-Object { $_.ComponentName -notin $ignoredComponents })
-                $ignoredCount = $allCritical.Count - $critical.Count
-                $criticalCount = $critical.Count
-                $criticalList = $critical
-                if ($criticalCount -eq 0) {
-                    $msg = "OK: No critical component issues (attempt $attempt)"
+                $allComponents = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentStatus -ErrorAction Stop)
+                $checkable = @($allComponents | Where-Object { $_.ComponentName -notin $ignoredComponents })
+                $ignoredCount = $allComponents.Count - $checkable.Count
+
+                # Check each component's live state. Deduplicate by ComponentName
+                # (CAS sees entries from multiple servers) — take worst state per name.
+                $byName = @{}
+                foreach ($comp in $checkable) {
+                    $name = $comp.ComponentName
+                    $healthy = ($comp.State -eq 1 -and $comp.AvailabilityState -eq 0)
+                    if (-not $byName.ContainsKey($name)) {
+                        $byName[$name] = @{ Healthy = $healthy; State = $comp.State; Avail = $comp.AvailabilityState; Server = $comp.MachineName }
+                    }
+                    elseif (-not $healthy -and $byName[$name].Healthy) {
+                        # Worst-state wins for the same component name
+                        $byName[$name] = @{ Healthy = $false; State = $comp.State; Avail = $comp.AvailabilityState; Server = $comp.MachineName }
+                    }
+                }
+
+                $stateName = @{ 0='Stopped'; 1='Started'; 2='Paused'; 3='Installing'; 4='Re-installing'; 5='De-installing' }
+                $availName = @{ 0='Online'; 3='Offline'; 4='Unknown' }
+
+                $unhealthyDetails = @()
+                foreach ($kv in $byName.GetEnumerator()) {
+                    if (-not $kv.Value.Healthy) {
+                        $sn = if ($stateName.ContainsKey([int]$kv.Value.State)) { $stateName[[int]$kv.Value.State] } else { "State=$($kv.Value.State)" }
+                        $an = if ($availName.ContainsKey([int]$kv.Value.Avail)) { $availName[[int]$kv.Value.Avail] } else { "Avail=$($kv.Value.Avail)" }
+                        $unhealthyDetails += "$($kv.Key) ($sn/$an on $($kv.Value.Server))"
+                    }
+                }
+                $unhealthyCount = $unhealthyDetails.Count
+
+                if ($unhealthyCount -eq 0) {
+                    $msg = "OK: All $($byName.Count) components are Started/Online (attempt $attempt)"
                     if ($ignoredCount -gt 0) { $msg += " ($ignoredCount ignored: $($ignoredComponents -join ', '))" }
                     $results.Details.Add($msg)
                     break
                 }
-                $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $criticalCount critical component(s)")
+                $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $unhealthyCount component(s) not Started/Online")
                 if ($attempt -lt $componentCheckAttempts) {
                     Start-Sleep -Seconds $componentRetryDelay
                 }
             }
             catch {
-                $results.Details.Add("  Component health query attempt $attempt failed: $($_.Exception.Message)")
+                $results.Details.Add("  Component status query attempt $attempt failed: $($_.Exception.Message)")
                 if ($attempt -lt $componentCheckAttempts) {
                     Start-Sleep -Seconds $componentRetryDelay
                 }
             }
         }
 
-        if ($criticalCount -gt 0 -and $criticalCount -le 5) {
-            # Lenient: up to 5 critical components is a warning, not a failure
-            $names = ($criticalList | ForEach-Object { $_.ComponentName }) -join ', '
-            $results.Details.Add("WARN: $criticalCount component(s) in critical state: $names")
+        if ($unhealthyCount -gt 0 -and $unhealthyCount -le 5) {
+            # Lenient: up to 5 unhealthy components is a warning, not a failure
+            $names = $unhealthyDetails -join ', '
+            $results.Details.Add("WARN: $unhealthyCount component(s) not Started/Online: $names")
         }
-        elseif ($criticalCount -gt 5) {
+        elseif ($unhealthyCount -gt 5) {
             $results.Passed = $false
-            $names = ($criticalList | Select-Object -First 10 | ForEach-Object { $_.ComponentName }) -join ', '
-            $results.Details.Add("FAIL: $criticalCount components in critical state (exceeds threshold of 5): $names")
+            $names = ($unhealthyDetails | Select-Object -First 10) -join ', '
+            $results.Details.Add("FAIL: $unhealthyCount components not Started/Online (exceeds threshold of 5): $names")
         }
 
         return $results
