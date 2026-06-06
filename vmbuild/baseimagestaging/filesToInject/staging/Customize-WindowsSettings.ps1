@@ -64,8 +64,8 @@ if ($server) {
     Update-Log "Disable Windows Ink Workspace button"
     New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsInkWorkspace' -Force | New-ItemProperty -Name AllowWindowsInkWorkspace -Value 0 -Force | Out-Null
 
-    #Update-Log "Disable Windows Update"
-    #New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
+    Update-Log "Disable Windows Update"
+    New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
 }
 
 # Common Windows Settings

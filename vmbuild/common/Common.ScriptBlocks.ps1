@@ -113,11 +113,21 @@ $global:Phase11Job = {
 
         if ($passed) {
             # Remove the Read-DSCLog desktop shortcut now that validation passed
+            # and re-enable WU services that Phase 1 disabled for the deploy.
             $domainName = $deployConfig.vmOptions.domainName
             Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                 $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
                 Remove-Item (Join-Path $desktop 'Read DSC Log.lnk') -Force -ErrorAction SilentlyContinue
                 Remove-Item (Join-Path $desktop 'DSC ConfigurationStatus.lnk') -Force -ErrorAction SilentlyContinue
+                # Re-enable Windows Update services disabled in Phase 1.
+                # NoAutoUpdate policy keeps auto-update off; services just
+                # need to be startable for WSUS/ConfigMgr-initiated updates.
+                foreach ($svc in @('UsoSvc', 'wuauserv')) {
+                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($s -and $s.StartType -eq 'Disabled') {
+                        Set-Service $svc -StartupType Manual -ErrorAction SilentlyContinue
+                    }
+                }
             } -DisplayName "Phase11: Remove DSC shortcuts" -SuppressLog
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
         }
@@ -856,6 +866,21 @@ $global:VM_Create = {
                     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "LocalAccountTokenFilterPolicy" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
                 } catch { $warnings += "Fix WorkGroup: $_" }
             }
+
+            # Suppress Windows Update immediately so it can't install updates
+            # and trigger pending reboots before Phase 2 gets a chance to run.
+            # Disable the services rather than registry-only — UsoSvc on newer
+            # OS ignores NoAutoUpdate and restarts wuauserv on its own.
+            # Phase 2 sets the full policy (NoAutoUpdate / fake WSUS per config).
+            try {
+                foreach ($svc in @('wuauserv', 'UsoSvc')) {
+                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($s) {
+                        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+                        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch { $warnings += "Disable Windows Update services: $_" }
 
             [PSCustomObject]@{ Warnings = $warnings }
         }
