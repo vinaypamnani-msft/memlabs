@@ -288,7 +288,7 @@ function Test-DCFunctionality {
             if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
                 $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
-                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' }
                 $ip = $ips | Select-Object -First 1
                 if ($ip) { $entries.Add("$($vm.vmName)=$ip") }
             }
