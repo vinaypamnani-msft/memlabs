@@ -285,7 +285,8 @@ function Test-DCFunctionality {
             if ($vm.hidden) { continue }
             if ($vm.domain -and $vm.domain -ne $Domain) { continue }
             # Workgroup/InternetClient VMs are not domain-joined and won't have DNS A records.
-            if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
+            # StandaloneRootCA is offline by design and may not have (or need) a DNS record.
+            if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient', 'StandaloneRootCA')) { continue }
             try {
                 $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
                     Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
@@ -2597,7 +2598,7 @@ function Test-StandaloneRootCAFunctionality {
 
     # VM is running (Phase 10 maintenance started it) — validate CA, then shut down
     Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: VM is $($vm.State) - validating CA before shutdown" -LogOnly
-    $passed = Test-CAFunctionality -VMName $VMName -Domain $Domain
+    $passed = Test-CAFunctionality -VMName $VMName -Domain $Domain -Standalone
 
     # Shut down regardless of test result — correct end state is always Off
     Write-Log "[Phase $Phase] $VMName [StandaloneRootCA]: Shutting down Root CA VM (correct end state = Off)" -LogOnly
@@ -2616,13 +2617,16 @@ function Test-CAFunctionality {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$Domain
+        [Parameter(Mandatory)][string]$Domain,
+        [switch]$Standalone
     )
 
     $Phase = 11
-    Write-Log "[Phase $Phase] $VMName [CA]: Testing Certificate Authority services" -LogOnly
+    $label = if ($Standalone) { 'StandaloneCA' } else { 'CA' }
+    Write-Log "[Phase $Phase] $VMName [$label]: Testing Certificate Authority services" -LogOnly
 
     $scriptBlock = {
+        param($isStandalone)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         # CertSvc service (Active Directory Certificate Services)
@@ -2675,6 +2679,10 @@ function Test-CAFunctionality {
             $results.Details.Add("WARN: CA name check failed: $($_.Exception.Message)")
         }
 
+        # AD-specific checks — skip for standalone (offline root) CAs that are
+        # not domain-joined and have no AD access.
+        if (-not $isStandalone) {
+
         # Confirm the CA cert is published into the AD NTAuthCertificates store.
         # Without this, domain client-auth certs issued by the CA won't be
         # honoured for 802.1x / CM client comms.
@@ -2713,6 +2721,8 @@ function Test-CAFunctionality {
         catch {
             $results.Details.Add("WARN: AD Enrollment Services query failed: $($_.Exception.Message)")
         }
+
+        } # end if (-not $isStandalone)
 
         # ---- CRL freshness: base CRL must be valid; delta CRL must not exist or be valid ----
         $results.Details.Add("CMD: certutil.exe -crl")
@@ -2759,6 +2769,7 @@ function Test-CAFunctionality {
         # msPKI-Enterprise-Oid object so member servers can resolve the
         # template OID back to its display name (required for CertReq DSC
         # idempotency).
+        if (-not $isStandalone) {
         try {
             $cfg2 = ([ADSI]"LDAP://RootDSE").configurationNamingContext
             $tplBase = "CN=Certificate Templates,CN=Public Key Services,CN=Services,$cfg2"
@@ -2791,14 +2802,16 @@ function Test-CAFunctionality {
         catch {
             $results.Details.Add("WARN: OID mapping check failed: $($_.Exception.Message)")
         }
+        } # end if (-not $isStandalone)
 
         return $results
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-CA-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -ArgumentList $Standalone.IsPresent -DisplayName "Phase11-CA-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel 'CA' -Result $result)
+    $label = if ($Standalone) { 'StandaloneCA' } else { 'CA' }
+    return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
 }
 
 function Test-PKICertificatesOnVM {
