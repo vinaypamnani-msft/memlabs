@@ -219,8 +219,8 @@
             DependsOn  = "[WriteStatus]VerifyCreds"
             GetScript  = { return @{ Result = (Get-Date).ToString() } }
             TestScript = {
-                if (Test-Path 'C:\Temp\VerifyDomainAdmin.txt') { return `$true }
-                return `$false
+                if (Test-Path 'C:\Temp\VerifyDomainAdmin.txt') { return $true }
+                return $false
             }
             SetScript  = [string]"
                 `$pdcIP     = '$PDCIPAddress'
