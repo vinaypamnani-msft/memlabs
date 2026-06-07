@@ -1587,7 +1587,7 @@ function Test-CMSiteFunctionality {
         # excluded entirely.
         $ignoredComponents = @(
             'SMS_WSUS_CONFIGURATION_MANAGER'        # Until SUP is fully configured
-            'SMS_SITE_BACKUP'                       # Backup not configured on new sites
+            'SMS_SITE_SQL_BACKUP'                   # Backup not configured on new sites
             'SMS_OFFLINE_SERVICING_MANAGER'         # No packages to service on fresh builds
             # Not monitored — source skips writing operation management key for these
             'CONFIGURATION_MANAGER_UPDATE'
