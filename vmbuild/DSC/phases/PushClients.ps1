@@ -370,9 +370,29 @@ foreach ($client in $ClientNameList) {
         
     }
     if ($success) {
-        Write-DscStatus "Pushing client to $client."
-        Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
-        Start-Sleep -Seconds 5
+        # Re-check if client is already installed or ccmsetup is already running
+        # (automatic push may have beaten us). A second push races with the first
+        # and can cause E_ABORT (0x80004004).
+        $device = Get-CMDevice -Name $client -ErrorAction SilentlyContinue
+        if ($device.IsClient) {
+            Write-DscStatus "[ClientPush] $client already has the CM client (auto-push succeeded). Skipping manual push."
+        }
+        else {
+            $ccmRunning = $false
+            try {
+                $ccmRunning = [bool](Invoke-Command -ComputerName $client -ScriptBlock {
+                    Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
+                } -ErrorAction SilentlyContinue)
+            } catch {}
+            if ($ccmRunning) {
+                Write-DscStatus "[ClientPush] ccmsetup.exe already running on $client (auto-push in progress). Skipping manual push."
+            }
+            else {
+                Write-DscStatus "Pushing client to $client."
+                Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
+                Start-Sleep -Seconds 5
+            }
+        }
     }
 }
 } # end try
