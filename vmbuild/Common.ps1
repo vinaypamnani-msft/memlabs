@@ -3872,9 +3872,9 @@ function Wait-ForVm {
                     }
                     $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
                     Write-Log "$VmName`: OOBE not starting after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
-                    stop-vm2 -name $VmName -TurnOff
+                    stop-vm2 -name $VmName -TurnOff | Out-Null
                     start-sleep -seconds 8
-                    Start-vm2 -name $VmName
+                    Start-vm2 -name $VmName | Out-Null
                     Start-Sleep -Seconds 8
                     [int]$failures = 0
                 }
