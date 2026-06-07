@@ -1503,7 +1503,8 @@ function Test-CMSiteFunctionality {
     $siteCode = $CurrentItem.siteCode
 
     Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying ConfigMgr site $siteCode"
-    Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Testing ConfigMgr site services and WMI" -LogOnly
+    $roleLabel = "$($CurrentItem.role) ($siteCode)"
+    Write-Log "[Phase $Phase] $VMName [$roleLabel]: Testing ConfigMgr site services and WMI" -LogOnly
 
     $scriptBlock = {
         param($sc)
@@ -1579,17 +1580,31 @@ function Test-CMSiteFunctionality {
 
         # Component health check — verify current running state via SMS_ComponentSummarizer.
         # Filter by TallyInterval '0001128000100008' ("since site startup") to get one entry
-        # per component. State=1 (Started) + AvailabilityState=0 (Online) = healthy.
-        # Status (0=Green/1=Yellow/2=Red) reflects cumulative error counts which can be
-        # Yellow from transient startup errors even when the component is running fine,
-        # so we check State + AvailabilityState instead.
+        # per component. For fresh-build validation we only check State=1 (Started).
+        # AvailabilityState is ignored — many components report Offline between processing
+        # cycles (e.g. Started/Offline) which is normal, not a deployment failure.
+        # Discovery agents run on a schedule and are Stopped between cycles, so they're
+        # excluded entirely.
         $ignoredComponents = @(
-            'SMS_WSUS_CONFIGURATION_MANAGER'   # Until SUP is fully configured
-            'SMS_SITE_SQL_BACKUP'              # Backup not configured on new sites
+            'SMS_WSUS_CONFIGURATION_MANAGER'        # Until SUP is fully configured
+            'SMS_SITE_BACKUP'                       # Backup not configured on new sites
+            'SMS_OFFLINE_SERVICING_MANAGER'         # No packages to service on fresh builds
+            # Not monitored — source skips writing operation management key for these
+            'CONFIGURATION_MANAGER_UPDATE'
+            'SMS_MP_DEVICE_MANAGER'
+            'SMS_TEM'
+            'SMS_PROVIDERS'
+            # Discovery agents — always Stopped between cycles; not meaningful health indicators
+            'SMS_AD_SYSTEM_DISCOVERY_AGENT'
+            'SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT'
+            'SMS_AD_USER_DISCOVERY_AGENT'
+            'SMS_AD_FOREST_DISCOVERY_MANAGER'
+            'SMS_WINNT_SERVER_DISCOVERY_AGENT'
+            'SMS_NETWORK_DISCOVERY'
         )
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter TallyInterval='0001128000100008'")
-        $componentCheckAttempts = 10
-        $componentRetryDelay = 60
+        $componentCheckAttempts = 3
+        $componentRetryDelay = 30
         $unhealthyCount = 999
         $unhealthyDetails = @()
         for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
@@ -1609,7 +1624,7 @@ function Test-CMSiteFunctionality {
                 $byName = @{}
                 foreach ($comp in $checkable) {
                     $name = $comp.ComponentName
-                    $healthy = ($comp.State -eq 1 -and $comp.AvailabilityState -eq 0)
+                    $healthy = ($comp.State -eq 1)
                     if (-not $byName.ContainsKey($name)) {
                         $byName[$name] = @{ Healthy = $healthy; State = $comp.State; Avail = $comp.AvailabilityState; Server = $comp.MachineName }
                     }
@@ -1633,12 +1648,12 @@ function Test-CMSiteFunctionality {
                 $unhealthyCount = $unhealthyDetails.Count
 
                 if ($unhealthyCount -eq 0) {
-                    $msg = "OK: All $($byName.Count) components are Started/Online (attempt $attempt)"
+                    $msg = "OK: All $($byName.Count) components are Started (attempt $attempt)"
                     if ($ignoredCount -gt 0) { $msg += " ($ignoredCount ignored: $($ignoredComponents -join ', '))" }
                     $results.Details.Add($msg)
                     break
                 }
-                $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $unhealthyCount component(s) not Started/Online")
+                $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: $unhealthyCount component(s) not Started")
                 if ($attempt -lt $componentCheckAttempts) {
                     Start-Sleep -Seconds $componentRetryDelay
                 }
@@ -1657,14 +1672,14 @@ function Test-CMSiteFunctionality {
             $results.Details.Add("FAIL: SMS_ComponentSummarizer query returned no data on all $componentCheckAttempts attempts (ConfigMgr may still be initializing)")
         }
         elseif ($unhealthyCount -gt 0 -and $unhealthyCount -le 5) {
-            # Lenient: up to 5 unhealthy components is a warning, not a failure
+            # Lenient: up to 5 non-Started components is a warning, not a failure
             $names = $unhealthyDetails -join ', '
-            $results.Details.Add("WARN: $unhealthyCount component(s) not Started/Online: $names")
+            $results.Details.Add("WARN: $unhealthyCount component(s) not Started: $names")
         }
         elseif ($unhealthyCount -gt 5) {
             $results.Passed = $false
             $names = ($unhealthyDetails | Select-Object -First 10) -join ', '
-            $results.Details.Add("FAIL: $unhealthyCount components not Started/Online (exceeds threshold of 5): $names")
+            $results.Details.Add("FAIL: $unhealthyCount components not Started (exceeds threshold of 5): $names")
         }
 
         return $results
@@ -1672,9 +1687,10 @@ function Test-CMSiteFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
-        -DisplayName "Phase11-CM-Test" -SuppressLog
+        -DisplayName "Phase11-CM-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
-    $passed = Format-TestResult -VMName $VMName -RoleLabel "CM-$siteCode" -Result $result
+    $passed = Format-TestResult -VMName $VMName -RoleLabel $roleLabel -Result $result
 
     # Site-wide tests only run on a top-level site (Primary without parentSiteCode,
     # or CAS). On a child Primary under a CAS we skip these -- the CAS already owns
@@ -1692,7 +1708,7 @@ function Test-CMSiteFunctionality {
     $childSites = @($DeployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $siteCode })
     if ($passed -and $childSites.Count -gt 0) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying DRS replication links"
-        Write-Log "[Phase $Phase] $VMName [CM-$siteCode]: Checking DRS replication links to $($childSites.Count) child site(s)" -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$roleLabel]: Checking DRS replication links to $($childSites.Count) child site(s)" -LogOnly
 
         $childSiteCodes = @($childSites | ForEach-Object { $_.siteCode } | Select-Object -Unique)
 
@@ -1741,9 +1757,10 @@ function Test-CMSiteFunctionality {
 
         $drsResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $drsScriptBlock -ArgumentList $siteCode, $childSiteCodes `
-            -DisplayName "Phase11-DRS-Test" -SuppressLog
+            -DisplayName "Phase11-DRS-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
 
-        $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "DRS-$siteCode" -Result $drsResult
+        $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "DRS ($siteCode)" -Result $drsResult
         if (-not $drsPassed) { $passed = $false }
     }
 
@@ -4071,7 +4088,8 @@ function Test-CMSiteWideFunctionality {
         }
     }
 
-    Write-Log "[Phase $Phase] $VMName [CMSite-$siteCode]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
+    $siteRoleLabel = "$role ($siteCode)"
+    Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
 
     $scriptBlock = {
         # NOTE: Invoke-VmCommand declares [string[]]$ArgumentList which (a)
@@ -4254,9 +4272,10 @@ function Test-CMSiteWideFunctionality {
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv `
-        -DisplayName "Phase11-CMSite-Test" -SuppressLog
+        -DisplayName "Phase11-CMSite-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 600
 
-    return (Format-TestResult -VMName $VMName -RoleLabel "CMSite-$siteCode" -Result $result)
+    return (Format-TestResult -VMName $VMName -RoleLabel $siteRoleLabel -Result $result)
 }
 
 #region Proxy Validation Tests
