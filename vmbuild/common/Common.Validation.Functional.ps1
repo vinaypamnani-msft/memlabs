@@ -1577,26 +1577,30 @@ function Test-CMSiteFunctionality {
             return $results
         }
 
-        # Component health check — verify current running state, not cumulative error history.
-        # SMS_ComponentSummarizer (TallyInterval '0001128000100008' = "since startup") accumulates
-        # Status=2 entries from transient startup errors that never clear, even when the component
-        # is healthy. Instead, query SMS_ComponentStatus which reflects each component's CURRENT
-        # State and AvailabilityState:
-        #   State: 0=Stopped, 1=Started, 2=Paused, 3=Installing, 4=Re-installing, 5=De-installing
-        #   AvailabilityState: 0=Online, 3=Offline, 4=Unknown
-        # A healthy component is State=1 (Started) AND AvailabilityState=0 (Online).
+        # Component health check — verify current running state via SMS_ComponentSummarizer.
+        # Filter by TallyInterval '0001128000100008' ("since site startup") to get one entry
+        # per component. State=1 (Started) + AvailabilityState=0 (Online) = healthy.
+        # Status (0=Green/1=Yellow/2=Red) reflects cumulative error counts which can be
+        # Yellow from transient startup errors even when the component is running fine,
+        # so we check State + AvailabilityState instead.
         $ignoredComponents = @(
             'SMS_WSUS_CONFIGURATION_MANAGER'   # Until SUP is fully configured
             'SMS_SITE_SQL_BACKUP'              # Backup not configured on new sites
         )
-        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentStatus (checking State/AvailabilityState)")
-        $componentCheckAttempts = 5
-        $componentRetryDelay = 45
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter TallyInterval='0001128000100008'")
+        $componentCheckAttempts = 10
+        $componentRetryDelay = 60
         $unhealthyCount = 999
         $unhealthyDetails = @()
         for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
             try {
-                $allComponents = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentStatus -ErrorAction Stop)
+                $allComponents = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
+                    -Filter "TallyInterval='0001128000100008'" -ErrorAction Stop)
+                if ($allComponents.Count -eq 0) {
+                    $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: SMS_ComponentSummarizer returned 0 rows (site still initializing)")
+                    if ($attempt -lt $componentCheckAttempts) { Start-Sleep -Seconds $componentRetryDelay }
+                    continue
+                }
                 $checkable = @($allComponents | Where-Object { $_.ComponentName -notin $ignoredComponents })
                 $ignoredCount = $allComponents.Count - $checkable.Count
 
@@ -1647,7 +1651,12 @@ function Test-CMSiteFunctionality {
             }
         }
 
-        if ($unhealthyCount -gt 0 -and $unhealthyCount -le 5) {
+        if ($unhealthyCount -eq 999) {
+            # WMI query never returned data — site still initializing
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SMS_ComponentSummarizer query returned no data on all $componentCheckAttempts attempts (ConfigMgr may still be initializing)")
+        }
+        elseif ($unhealthyCount -gt 0 -and $unhealthyCount -le 5) {
             # Lenient: up to 5 unhealthy components is a warning, not a failure
             $names = $unhealthyDetails -join ', '
             $results.Details.Add("WARN: $unhealthyCount component(s) not Started/Online: $names")
@@ -3800,8 +3809,21 @@ function Test-PullDPConfiguration {
 
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"ServerName LIKE '%$dpName%'`"")
         try {
-            $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
-                -Filter "ServerName LIKE '%$dpName%'" -ErrorAction Stop | Select-Object -First 1
+            # DP may not appear in SMS_DistributionPointInfo immediately after
+            # the role is added — the site server needs to process the site
+            # control file change. Retry for up to ~3 minutes.
+            $dp = $null
+            $dpAttempts = 6
+            $dpDelay = 30
+            for ($i = 1; $i -le $dpAttempts; $i++) {
+                $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
+                    -Filter "ServerName LIKE '%$dpName%'" -ErrorAction Stop | Select-Object -First 1
+                if ($dp) { break }
+                if ($i -lt $dpAttempts) {
+                    $results.Details.Add("  Attempt $i/${dpAttempts}: DP '$dpName' not yet in SMS_DistributionPointInfo, retrying in ${dpDelay}s")
+                    Start-Sleep -Seconds $dpDelay
+                }
+            }
             if (-not $dp) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: DP '$dpName' not found in site '$sc'")
