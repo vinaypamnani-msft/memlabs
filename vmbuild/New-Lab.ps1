@@ -749,35 +749,27 @@ try {
     # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
 
-    # Auto-repair: if existing VMs are connected to infrastructure switches
-    # (from a legacy or different deployment), ensure their NAT/DHCP exists
-    # even if the current build doesn't use those networks.
-    if (-not $containsAO) {
-        $clusterSwitch = Get-VMSwitch -Name 'Cluster' -ErrorAction SilentlyContinue
-        if ($clusterSwitch) {
-            $clusterVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
-                Where-Object { $_.SwitchName -eq 'Cluster' })
-            if ($clusterVMs.Count -gt 0) {
-                Write-Log "Cluster switch has $($clusterVMs.Count) VM(s) from other deployments. Verifying NAT/DHCP..." -Warning
-                Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf | Out-Null
+    # Legacy SQLAO VMs use DHCP on the Cluster network (10.250.250.0).
+    # If any VMs are connected to the Cluster switch, ensure DHCP+NAT exist.
+    # New-style SQLAO uses static IPs on ClusterV2 and does not need the
+    # Cluster network at all.
+    $clusterSwitch = Get-VMSwitch -Name 'Cluster' -ErrorAction SilentlyContinue
+    if ($clusterSwitch) {
+        $clusterVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+            Where-Object { $_.SwitchName -eq 'Cluster' })
+        if ($clusterVMs.Count -gt 0) {
+            Write-Log "Cluster switch has $($clusterVMs.Count) legacy VM(s). Verifying DHCP/NAT..."
+            if (-not (Test-NetworkFastPath -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -Cache $_netCache)) {
+                $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
+                if (-not $worked) {
+                    exit 1
+                }
             }
         }
     }
 
+    # New-style SQLAO: ClusterV2 with static IPs only (no DHCP, no NAT).
     if ($containsAO) {
-        # Ensure the base "Cluster" switch exists (may already be present from
-        # a legacy deployment on 10.250.250.0). This creates the vSwitch, host
-        # adapter, DHCP scope, and NAT for the legacy subnet.
-        if (-not (Test-NetworkFastPath -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -Cache $_netCache)) {
-            $worked = Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf
-            if (-not $worked) {
-                exit 1
-            }
-        }
-
-        # ClusterV2: dedicated heartbeat switch with static IPs only (no DHCP,
-        # no NAT). New SQLAO deployments connect their 2nd NIC here so the
-        # heartbeat network is free from DHCP interference.
         if (-not (Test-NetworkFastPath -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -Cache $_netCache)) {
             $worked = Add-SwitchNoDhcp -NetworkName "ClusterV2" -NetworkSubnet "10.250.251.0" -WhatIf:$WhatIf
             if (-not $worked) {
