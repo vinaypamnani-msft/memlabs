@@ -1310,12 +1310,12 @@ $global:VM_Config = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient is Off (post-sysprep from prior run). Starting and waiting for OOBE." -OutputStream -Warning
                     $started = Start-VM2 -Name $currentItem.vmName -Passthru
                     if ($started) {
-                        $oobeStartedRecovery = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                        $oobeStartedRecovery = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 30
                         if ($oobeStartedRecovery) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient recovered — OOBE started. Marking complete." -OutputStream -Success
                         }
                         else {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient started but OOBE did not appear within 15 minutes." -OutputStream -Failure
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient started but OOBE did not appear within 30 minutes." -OutputStream -Failure
                             return
                         }
                     }
@@ -1753,7 +1753,7 @@ $global:VM_Config = {
                 else {
                     $started = Start-VM2 -Name $currentItem.vmName -Passthru
                     if ($started) {
-                        $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 15
+                        $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 30
                         if ($oobeStarted) {
                             Write-Progress2 -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
