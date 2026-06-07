@@ -3920,7 +3920,8 @@ function Wait-ForVm {
         }
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: $msg..." }
         $count = 0
-        $restarted = $false
+        [int]$restartCount = 0
+        [int]$maxRestarts = 2
         do {
             $count++
             if ($count -gt 1) {
@@ -3934,9 +3935,9 @@ function Wait-ForVm {
             if ($count -eq 1 -or $count % 3 -eq 0) {
                 $vmTest = Get-VM2 -Fallback -Name $VmName
                 if ($vmTest.State -ne "Running") {
-                    stop-vm2 -name $vmName
-                    start-sleep -seconds 15
-                    start-vm2 -name $vmName
+                    stop-vm2 -name $vmName -TurnOff | Out-Null
+                    start-sleep -seconds 10
+                    start-vm2 -name $vmName | Out-Null
                     start-sleep -seconds 20
                 }
             }
@@ -3958,16 +3959,20 @@ function Wait-ForVm {
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding. Waiting for $PathToVerify to exist."
                 }
                 else {
-                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding"
-                    if ($count -eq 3 -or $stopWatch.Elapsed.TotalMinutes -ge 5) {
-                        if (-not $restarted) {
-                            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Restarting VM"
-                            stop-vm2 -name $vmName
-                            start-sleep -seconds 15
-                            start-vm2 -name $vmName
-                            start-sleep -seconds 20
-                            $restarted = $true
-                        }
+                    # VM is not responding to PSDirect at all.
+                    # Check heartbeat to decide whether to hard-restart.
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding (heartbeat: $hb)"
+
+                    if ($restartCount -lt $maxRestarts -and ($count -ge 3 -or $stopWatch.Elapsed.TotalMinutes -ge 3)) {
+                        $restartCount++
+                        Write-Log "$VmName`: Not responding after $count polls (heartbeat: $hb). Hard-resetting VM (attempt $restartCount/$maxRestarts)." -Warning
+                        Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Hard-resetting VM (attempt $restartCount/$maxRestarts)"
+                        stop-vm2 -name $vmName -TurnOff | Out-Null
+                        start-sleep -seconds 10
+                        start-vm2 -name $vmName | Out-Null
+                        start-sleep -seconds 20
                     }
                 }
             }
