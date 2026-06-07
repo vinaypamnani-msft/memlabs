@@ -42,24 +42,45 @@ if (-not $SiteCode) {
     return
 }
 
-# Provider
-$smsProvider = Get-SMSProvider -SiteCode $SiteCode
-if (-not $smsProvider.FQDN) {
-    Write-DscStatus "Failed to get SMS Provider for site $SiteCode. Install may have failed. Check C:\ConfigMgrSetup.log" -Failure
-    return $false
+# Provider — retry connection since the provider may still be initializing
+# (InstallProvider.ps1 may have just finished installing a remote provider).
+$providerConnected = $false
+$providerMaxRetries = 6
+for ($provAttempt = 1; $provAttempt -le $providerMaxRetries; $provAttempt++) {
+    try {
+        $smsProvider = Get-SMSProvider -SiteCode $SiteCode
+        if (-not $smsProvider.FQDN) {
+            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Get-SMSProvider returned no FQDN"
+            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
+            continue
+        }
+
+        $worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
+        if (-not $worked) {
+            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Set-CMSiteProvider returned false"
+            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
+            continue
+        }
+
+        Set-Location "$($SiteCode):\"
+        if ((Get-Location).Drive.Name -ne $SiteCode) {
+            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Set-Location to $SiteCode`: failed"
+            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
+            continue
+        }
+
+        $providerConnected = $true
+        break
+    }
+    catch {
+        Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Provider connection failed: $_"
+        if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
+    }
 }
 
-# Set CMSite Provider
-$worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
-if (-not $worked) {
+if (-not $providerConnected) {
+    Write-DscStatus "[PushClients] Failed to connect to CM provider after $providerMaxRetries attempts. Skipping client push." -Warning
     return
-}
-
-# Set the current location to be the site code.
-Set-Location "$($SiteCode):\"
-if ((Get-Location).Drive.Name -ne $SiteCode) {
-    Write-DscStatus "Failed to Set-Location to $SiteCode`:"
-    return $false
 }
 
 $cm_svc = "$DomainFullName\cm_svc"
@@ -162,7 +183,12 @@ if ($CurrentRole -ne "CAS") {
 # When PKI/HTTPS is enabled, ccmsetup must be told to use the PKI cert to reach the HTTPS-only MP
 if ($usePKI -and $CurrentRole -ne "CAS") {
     Write-DscStatus "[ClientPush] PKI is enabled. Setting /UsePKICert installation property for client push."
-    Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Write-StatusLogEntry
+    try {
+        Set-CMClientPushInstallation -SiteCode $SiteCode -InstallationProperty "SMSSITECODE=$SiteCode /UsePKICert" *>&1 | Write-StatusLogEntry
+    }
+    catch {
+        Write-DscStatus "[ClientPush] WARNING: Failed to set /UsePKICert property: $_"
+    }
 
     # After EnableHTTPS sets IISSSLState=63, the site component manager must
     # republish the OperationalXml to AD. ccmsetup reads SecurityModeMaskEx
@@ -238,7 +264,9 @@ if (-not $pushClients) {
 $ClientNameList = $ClientNames.split(",")
 $AnyClientFound = $false
 foreach ($clientName in $ClientNameList) {
-    $isClient = (Get-CMDevice | Where-Object { $_.Name -eq $clientName -or $_Name -like "$($clientName).*" }).IsClient
+    try {
+        $isClient = (Get-CMDevice | Where-Object { $_.Name -eq $clientName -or $_Name -like "$($clientName).*" }).IsClient
+    } catch { $isClient = $false }
     if ($isClient) {
         $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
         $AnyClientFound = $true
@@ -266,7 +294,7 @@ else {
     return
 }
 
-
+try {
 $machinelist = (get-cmdevice -CollectionName $CollectionName).Name
 
 $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
@@ -346,6 +374,10 @@ foreach ($client in $ClientNameList) {
         Install-CMClient -DeviceName $client -SiteCode $SiteCode -AlwaysInstallClient $true *>&1 | Write-StatusLogEntry
         Start-Sleep -Seconds 5
     }
+}
+} # end try
+catch {
+    Write-DscStatus "[ClientPush] Client push failed: $_" -Warning
 }
 
 
