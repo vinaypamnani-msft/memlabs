@@ -3483,19 +3483,43 @@ function Test-DomainMemberFunctionality {
                 $results.Details.Add("OK: CcmExec service is Running")
             }
             else {
-                # CcmExec exists but won't start — check if ccmsetup is still running.
+                # CcmExec exists but won't start -- check if ccmsetup is still running.
                 $setup = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
                 if ($setup) {
-                    $results.Details.Add("WARN: CcmExec is $($ccm.Status) but ccmsetup.exe is still running (client install in progress)")
+                    # Wait up to 5 min for ccmsetup to finish
+                    $results.Details.Add("INFO: CcmExec is $($ccm.Status), ccmsetup.exe still running, waiting up to 5 min...")
+                    for ($w = 0; $w -lt 30; $w++) {
+                        Start-Sleep -Seconds 10
+                        if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
+                    }
+                    Start-Sleep -Seconds 15
+                    $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                    if ($ccm -and $ccm.Status -eq 'Running') {
+                        $results.Details.Add("OK: CcmExec is Running after waiting for ccmsetup to finish")
+                    }
+                    elseif ($ccm) {
+                        try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {}
+                        Start-Sleep -Seconds 10
+                        $ccm = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                        if ($ccm.Status -eq 'Running') {
+                            $results.Details.Add("OK: CcmExec is Running after waiting for ccmsetup + manual start")
+                        }
+                        else {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: CcmExec is $($ccm.Status) after ccmsetup finished")
+                        }
+                    }
                 }
                 else {
-                    # ccmsetup finished but service not running — attempt remediation.
+                    # ccmsetup finished but service not running -- check last exit line.
                     $logPath = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
                     $failDetail = $null
                     if (Test-Path $logPath) {
                         $logTail = Get-Content $logPath -Tail 50 -ErrorAction SilentlyContinue
-                        $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
-                        if ($failLine) { $failDetail = $failLine.Trim() }
+                        $exitLine = $logTail | Where-Object { $_ -match 'CcmSetup is exiting with return code|ccmsetup failed with error code' } | Select-Object -Last 1
+                        if ($exitLine -and $exitLine -notmatch 'return code 0\b') {
+                            $failDetail = $exitLine.Trim()
+                        }
                     }
                     if ($failDetail) {
                         $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail")
@@ -3514,13 +3538,56 @@ function Test-DomainMemberFunctionality {
             # CcmExec service doesn't exist at all — check if ccmsetup is in progress.
             $setup = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
             if ($setup) {
-                $results.Details.Add("WARN: CcmExec not yet installed but ccmsetup.exe is running (client install in progress)")
+                # ccmsetup is actively running -- wait up to 5 minutes for it to finish
+                $results.Details.Add("INFO: ccmsetup.exe is running, waiting up to 5 min for it to finish...")
+                for ($w = 0; $w -lt 30; $w++) {
+                    Start-Sleep -Seconds 10
+                    if (-not (Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue)) { break }
+                }
+                # Re-check CcmExec after ccmsetup finishes
+                Start-Sleep -Seconds 15
+                $ccmRetry = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                if ($ccmRetry -and $ccmRetry.Status -eq 'Running') {
+                    $results.Details.Add("OK: CcmExec is Running after waiting for ccmsetup to finish")
+                    return $results
+                }
+                elseif ($ccmRetry) {
+                    try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {}
+                    Start-Sleep -Seconds 10
+                    $ccmRetry = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                    if ($ccmRetry -and $ccmRetry.Status -eq 'Running') {
+                        $results.Details.Add("OK: CcmExec is Running after waiting for ccmsetup + manual start")
+                        return $results
+                    }
+                }
+                # Fall through to log check below
             }
-            elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
+            if (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
                 $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
-                $failLine = $logTail | Where-Object { $_ -match 'ccmsetup failed with error code' } | Select-Object -Last 1
-                if ($failLine) {
-                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($failLine.Trim())")
+                # Check the LAST exit line -- the log may contain both failures (from
+                # an earlier auto-push race) and a later success. Only the final exit matters.
+                $exitLine = $logTail | Where-Object { $_ -match 'CcmSetup is exiting with return code|ccmsetup failed with error code' } | Select-Object -Last 1
+                $isSuccess = $exitLine -and $exitLine -match 'return code 0\b'
+                if ($isSuccess) {
+                    # ccmsetup succeeded but CcmExec hasn't started yet -- give it a moment
+                    $results.Details.Add("INFO: ccmsetup exited successfully, waiting for CcmExec to start...")
+                    Start-Sleep -Seconds 20
+                    $ccmRetry = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                    if (-not $ccmRetry -or $ccmRetry.Status -ne 'Running') {
+                        try { Start-Service -Name 'CcmExec' -ErrorAction SilentlyContinue } catch {}
+                        Start-Sleep -Seconds 10
+                        $ccmRetry = Get-Service -Name 'CcmExec' -ErrorAction SilentlyContinue
+                    }
+                    if ($ccmRetry -and $ccmRetry.Status -eq 'Running') {
+                        $results.Details.Add("OK: CcmExec is Running (ccmsetup succeeded)")
+                        return $results
+                    }
+                    else {
+                        $results.Details.Add("WARN: ccmsetup succeeded but CcmExec still not Running")
+                    }
+                }
+                elseif ($exitLine) {
+                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim())")
                 }
                 else {
                     $results.Details.Add("WARN: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
