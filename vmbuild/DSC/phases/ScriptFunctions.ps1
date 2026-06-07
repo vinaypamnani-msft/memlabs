@@ -116,11 +116,18 @@ function Invoke-DotSource {
     # real infrastructure failures (missing file, parse errors). Runtime errors
     # from CM cmdlets are transient and the scripts have their own retry logic;
     # marking them as JOBFAILURE would abort the phase prematurely.
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-DscStatus "[Invoke-DotSource] START $scriptName" -NoStatus
     try {
         . $Script @Arguments
     }
     catch {
         Write-DscStatus "WARNING: exception in ${scriptName}: $_"
+    }
+    finally {
+        $sw.Stop()
+        $elapsed = $sw.Elapsed.ToString('hh\:mm\:ss')
+        Write-DscStatus "[Invoke-DotSource] END   $scriptName  ($elapsed elapsed)" -NoStatus
     }
 }
 
