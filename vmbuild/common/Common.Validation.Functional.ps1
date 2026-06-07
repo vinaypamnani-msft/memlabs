@@ -4732,6 +4732,16 @@ function Format-TestResult {
     }
     else {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure -LogOnly
+        # Ensure the console always shows why the test failed. The FAIL: detail
+        # lines above already get buffered, but if the test set Passed=$false
+        # without any FAIL:-prefixed detail, nothing would reach the console.
+        $hasFailDetail = $output.Details | Where-Object { $_ -match '^FAIL:' }
+        if (-not $hasFailDetail) {
+            $summary = if ($output.Details.Count -gt 0) {
+                ($output.Details | Select-Object -Last 3) -join '; '
+            } else { 'No failure detail provided by test script' }
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - $summary"; Level = 'Failure' })
+        }
         return $false
     }
 }
