@@ -3841,10 +3841,9 @@ function Wait-ForVm {
         Write-Log "$VmName`: $status"
         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text $status
 
-        [int]$failures = 0
-        [int]$maxFailures = 20
         [int]$powerCycles = 0
-        [int]$maxPowerCycles = 3
+        [int]$maxPowerCycles = 1
+        [bool]$powerCycleEligible = $false
 
         do {
             $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
@@ -3858,34 +3857,29 @@ function Wait-ForVm {
                 Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
                 $ready = $false
                 Start-Sleep -Seconds $WaitSeconds
-                [int]$failures++
 
-                if ($failures -ge $maxFailures) {
+                # After half the timeout has elapsed with NoContact heartbeat,
+                # try one power-cycle as a last resort.
+                if (-not $powerCycleEligible -and $stopWatch.Elapsed.TotalMinutes -ge ($TimeoutMinutes / 2)) {
                     $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
-                    # If the VM has heartbeat, the OS is booting (specialize
-                    # pass likely still running). Reset failures and keep
-                    # waiting instead of power-cycling.
-                    if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Heartbeat -notin @($null, "NoContact")) {
-                        Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat $($vmCheck.Heartbeat) — OS is booting, waiting longer." -Warning
-                        [int]$failures = [int]($maxFailures / 2)
+                    if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Heartbeat -eq "NoContact") {
+                        $powerCycleEligible = $true
                     }
-                    else {
-                        if ($vmCheck -and $vmCheck.State -eq "Running" -and $vmCheck.Uptime.TotalMinutes -ge 2 -and $vmCheck.Heartbeat -eq "NoContact") {
-                            Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat NoContact — possible boot failure. Check VM console: vmconnect localhost $VmName" -Warning
-                        }
-                        $powerCycles++
-                        if ($powerCycles -gt $maxPowerCycles) {
-                            Write-Log "$VmName`: OOBE not starting after $maxPowerCycles power-cycles ($([int]$stopWatch.Elapsed.TotalMinutes) min elapsed). Giving up." -Warning
-                            break
-                        }
-                        $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
-                        Write-Log "$VmName`: OOBE not starting after $failures poll failures. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
-                        stop-vm2 -name $VmName -TurnOff | Out-Null
-                        start-sleep -seconds 8
-                        Start-vm2 -name $VmName | Out-Null
-                        Start-Sleep -Seconds 30
-                        [int]$failures = 0
+                    elseif ($vmCheck -and $vmCheck.State -eq "Running") {
+                        Write-Log "$VmName`: VM is Running (uptime $([int]$vmCheck.Uptime.TotalMinutes)min) with heartbeat $($vmCheck.Heartbeat) — OS is still booting, continuing to wait." -Warning
                     }
+                }
+
+                if ($powerCycleEligible -and $powerCycles -lt $maxPowerCycles) {
+                    $powerCycles++
+                    $powerCycleEligible = $false
+                    $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+                    $vmState = if ($vmCheck) { $vmCheck.State } else { "Unknown" }
+                    Write-Log "$VmName`: OOBE not starting after $([int]$stopWatch.Elapsed.TotalMinutes) min with heartbeat NoContact. Power-cycling VM (attempt $powerCycles/$maxPowerCycles). VM state: $vmState" -Warning
+                    stop-vm2 -name $VmName -TurnOff | Out-Null
+                    start-sleep -seconds 8
+                    Start-vm2 -name $VmName | Out-Null
+                    Start-Sleep -Seconds 30
                 }
             }
         } until ($ready -or ($stopWatch.Elapsed -ge $timeSpan))
