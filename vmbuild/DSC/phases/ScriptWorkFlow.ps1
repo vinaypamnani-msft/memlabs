@@ -579,7 +579,12 @@ if ($ThisVM.role -ne "CAS") {
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+    catch {
+        Write-DscStatus "PushClients.ps1 failed: $_" -Warning
+    }
     Write-DscStatus "Complete!"
 }
 
