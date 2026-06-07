@@ -559,8 +559,21 @@ function Stop-VM2 {
         if ($vm) {
             $i = 0
             if ($TurnOff) {
-                Stop-VM -VM $vm -TurnOff -force:$force -WarningAction SilentlyContinue
-                start-sleep -seconds 5
+                # Use -AsJob so a wedged VM doesn't block forever
+                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                $null = $stopJob | Wait-Job -Timeout 15
+                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+                $vm = Get-VM2 -Name $Name -Fallback
+                if ($vm.State -eq "Off") {
+                    Write-Log "${Name}: VM is stopped." -LogOnly
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                    return
+                }
+                Write-Log "${Name}: VM still in '$($vm.State)' after TurnOff, escalating..." -Warning
             }
             do {
                 $i++
@@ -572,14 +585,45 @@ function Stop-VM2 {
             until ($i -gt $retryCount -or $StopError.Count -eq 0)
 
             if ($StopError.Count -ne 0) {
-                
-                Stop-VM -VM $vm -TurnOff -force:$true -WarningAction SilentlyContinue
+
+                # Escalation: TurnOff via -AsJob with timeout
+                $stopJob = Stop-VM -VM $vm -TurnOff -Force -WarningAction SilentlyContinue -AsJob
+                $null = $stopJob | Wait-Job -Timeout 15
+                if ($stopJob.State -eq 'Running') { Stop-Job $stopJob -ErrorAction SilentlyContinue }
+                Remove-Job $stopJob -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds $RetrySeconds
                 $vm = Get-VM2 -Name $Name -Fallback
                 if ($vm.State -eq "Off") {
-                    return $true
+                    if ($Passthru.IsPresent) {
+                        return $true
+                    }
+                    return
                 }
-                
+
+                # Nuclear option: kill the VM worker process when Stop-VM is
+                # completely stuck (e.g. VM wedged in "Shutting Down" state).
+                Write-Log "${Name}: Stop-VM failed, killing VM worker process" -Warning
+                try {
+                    $vmId = $vm.Id.ToString()
+                    $targetProc = Get-CimInstance Win32_Process -Filter "Name='vmwp.exe'" -ErrorAction SilentlyContinue |
+                        Where-Object { $_.CommandLine -match [regex]::Escape($vmId) }
+                    if ($targetProc) {
+                        Stop-Process -Id $targetProc.ProcessId -Force -ErrorAction Stop
+                        Start-Sleep -Seconds 5
+                        $vm = Get-VM2 -Name $Name -Fallback
+                        if ($vm.State -eq "Off") {
+                            Write-Log "${Name}: VM stopped after killing worker process" -Warning
+                            if ($Passthru.IsPresent) {
+                                return $true
+                            }
+                            return
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "${Name}: Failed to kill VM worker process: $_" -Warning
+                }
+
                 Write-Log "${Name}: Failed to stop the VM. $StopError" -Warning
                 
                 if ($Passthru.IsPresent) {
