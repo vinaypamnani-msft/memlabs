@@ -103,6 +103,7 @@ $global:Phase11Job = {
         # This must happen at top-level where -OutputStream goes to job output.
         if ($script:Phase11OutputBuffer) {
             foreach ($entry in $script:Phase11OutputBuffer) {
+                if ([string]::IsNullOrWhiteSpace($entry.Text)) { continue }
                 switch ($entry.Level) {
                     'Failure' { Write-Log $entry.Text -OutputStream -Failure }
                     'Warning' { Write-Log $entry.Text -OutputStream -Warning }

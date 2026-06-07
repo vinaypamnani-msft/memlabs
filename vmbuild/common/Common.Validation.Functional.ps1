@@ -4732,7 +4732,6 @@ function Format-TestResult {
     }
     else {
         Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAILED" -Failure -LogOnly
-        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAILED"; Level = 'Failure' })
         return $false
     }
 }
