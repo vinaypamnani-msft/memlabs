@@ -546,19 +546,34 @@ if (-not $cmo.UsePKI) {
     # Enable E-HTTP. This takes time on new install because SSLState flips, so start the script but don't monitor.
     Write-DscStatus "Not UsePKI Running EnableEHTTP.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableEHTTP.ps1"
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
+    catch {
+        Write-DscStatus "EnableEHTTP.ps1 failed: $_" -Warning
+    }
 }
 else {
     Write-DscStatus "UsePKI Running EnableHTTPS.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableHTTPS.ps1"
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath, $firstRun
+    }
+    catch {
+        Write-DscStatus "EnableHTTPS.ps1 failed: $_" -Warning
+    }
 }
 
 if ($TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+    catch {
+        Write-DscStatus "Perfloading.ps1 failed: $_" -Warning
+    }
 
 }
 
@@ -566,7 +581,12 @@ if ($TopLevelSiteServer) {
   Write-DscStatus "Running InstallProvider.ps1"
   $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
   Set-Location $LogPath
-  Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+  try {
+      Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+  }
+  catch {
+      Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
+  }
   
 # Mark ScriptWorkflow completed for DSC to move on.
 $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
@@ -593,7 +613,12 @@ if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Running EnableBLM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
     Set-Location $LogPath
-    Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    try {
+        Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+    }
+    catch {
+        Write-DscStatus "EnableBLM.ps1 failed: $_" -Warning
+    }
     # MUST re-assert Complete! -- EnableBLM's final status ("BitLocker Management
     # configuration complete") overwrites the earlier Complete! marker written
     # after PushClients. The orchestrator in Common.ScriptBlocks.ps1 polls for
