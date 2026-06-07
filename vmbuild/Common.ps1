@@ -4262,11 +4262,13 @@ function New-PSSessionWithTimeout {
     $async = $psi.BeginInvoke()
 
     if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000)) {
-        # Timed out — abort the connection attempt
-        $psi.Stop()
-        $psi.Dispose()
-        $rs.Close()
-        $rs.Dispose()
+        # Timed out — use BeginStop (non-blocking) instead of Stop() which
+        # blocks until the underlying VMBus call completes.  When PSDirect
+        # is wedged, Stop() hangs indefinitely, defeating the timeout.
+        # BeginStop queues the cancellation and returns immediately; the
+        # runspace and PowerShell instance are leaked until the async stop
+        # completes or the process exits — acceptable vs. hanging forever.
+        try { $psi.BeginStop($null, $null) } catch {}
         return $null
     }
 
