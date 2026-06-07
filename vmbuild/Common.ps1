@@ -3942,13 +3942,16 @@ function Wait-ForVm {
             }
 
             # Test if path exists; if present, VM is ready. SuppressLog since we're in a loop.
-            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
+            # Use -SessionMaxRetries 1: the outer do/until loop already retries, and
+            # 3 retries x 3 credentials x 30s timeout = 4.5 min per call freezes the
+            # progress display and starves the timeout check.
+            $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
             if ($ready) {
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
             elseif ($count -gt 1) {
-                $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path "C:\" } -SuppressLog
+                $outtest = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock { Test-Path "C:\" } -SuppressLog
                 $readytest = $true -eq $outtest.ScriptBlockOutput
 
                 if ($readytest) {
