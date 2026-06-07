@@ -1,4 +1,4 @@
-#InstallDPMPClient.ps1
+﻿#InstallDPMPClient.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

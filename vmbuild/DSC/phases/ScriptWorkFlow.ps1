@@ -1,4 +1,4 @@
-# ScriptWorkflow.ps1
+﻿# ScriptWorkflow.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

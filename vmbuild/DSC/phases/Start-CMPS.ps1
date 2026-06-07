@@ -1,4 +1,4 @@
-#Start-CMPS.ps1
+﻿#Start-CMPS.ps1
 function Set-CMSiteProvider {
     param($SiteCode, $ProviderFQDN)
 

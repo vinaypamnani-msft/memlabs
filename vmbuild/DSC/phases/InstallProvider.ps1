@@ -1,4 +1,4 @@
-#InstallProvider.ps1
+﻿#InstallProvider.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

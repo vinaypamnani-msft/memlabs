@@ -1,4 +1,4 @@
-#InstallRoles.ps1
+﻿#InstallRoles.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

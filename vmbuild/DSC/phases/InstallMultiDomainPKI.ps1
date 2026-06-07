@@ -1,4 +1,4 @@
-#InstallMultiDomainPKI.ps1
+﻿#InstallMultiDomainPKI.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

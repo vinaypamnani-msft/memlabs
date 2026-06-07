@@ -1,4 +1,4 @@
-# Connect-CMSite.ps1
+﻿# Connect-CMSite.ps1
 # Shared helper to import the ConfigMgr module and connect to the site PS drive.
 # Dot-source this file to get $SiteCode and the CM PS drive ready for use.
 

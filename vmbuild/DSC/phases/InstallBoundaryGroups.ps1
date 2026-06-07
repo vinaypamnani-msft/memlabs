@@ -1,4 +1,4 @@
-#InstallBoundaryGroups.ps1
+﻿#InstallBoundaryGroups.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

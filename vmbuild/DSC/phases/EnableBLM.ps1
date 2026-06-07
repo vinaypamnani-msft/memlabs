@@ -1,4 +1,4 @@
-#EnableBLM.ps1
+﻿#EnableBLM.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

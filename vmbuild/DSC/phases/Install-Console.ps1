@@ -1,4 +1,4 @@
-#Install-Console.ps1
+﻿#Install-Console.ps1
 param(
     [string]$SiteServer,
     [string]$CMInstallDir

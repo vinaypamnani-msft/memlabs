@@ -1,4 +1,4 @@
-# InstallPassiveSiteServer.ps1
+﻿# InstallPassiveSiteServer.ps1
 param(
     [string]$ConfigFilePath,
     [string]$LogPath

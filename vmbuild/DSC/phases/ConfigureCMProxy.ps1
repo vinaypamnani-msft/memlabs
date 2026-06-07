@@ -1,4 +1,4 @@
-# ConfigureCMProxy.ps1
+﻿# ConfigureCMProxy.ps1
 # Apply ConfigMgr site-system proxy settings to any opted-in site systems.
 # Extracted from the tail of InstallRoles.ps1 so it runs unconditionally
 # from ScriptWorkflow (the SUP-skip early-returns inside InstallRoles.ps1
