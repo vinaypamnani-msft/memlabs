@@ -240,9 +240,7 @@ Invoke-CMSystemDiscovery
 Start-Sleep -Seconds 5
 
 if ($ThisVm.thisParams.PassiveNode) {
-    Write-DscStatus "Skip Client Push since we're adding Passive site server"
-    $pushClients = $false
-    #return
+    Write-DscStatus "Passive site server detected — client push will proceed for other VMs"
 }
 
 # Push Clients
