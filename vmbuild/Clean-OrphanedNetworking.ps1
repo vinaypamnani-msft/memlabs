@@ -52,11 +52,19 @@ catch {
 # Get-List -Type UniqueSwitch returns switch names like "192.168.8.0", "Internet", "Cluster"
 $networksInUse = @(Get-List -Type UniqueSwitch -SmartUpdate)
 
-# Internet and Cluster are shared infrastructure that should always be
-# protected even when no VMs currently sit on those networks.
+# Shared infrastructure switches (Internet, Cluster, ClusterV2) are protected
+# only when VMs are actually connected to them. If no VMs use them, they're
+# genuinely orphaned and safe to clean up.
 foreach ($infra in @('Internet', 'Cluster', 'ClusterV2')) {
     if ($networksInUse -notcontains $infra) {
-        $networksInUse += $infra
+        $sw = Get-VMSwitch -Name $infra -ErrorAction SilentlyContinue
+        if ($sw) {
+            $attached = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq $infra })
+            if ($attached.Count -gt 0) {
+                $networksInUse += $infra
+            }
+        }
     }
 }
 

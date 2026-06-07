@@ -341,6 +341,18 @@ function Remove-OrphanedNetNats {
         # Also consider subnets from VMs still registered in Get-List
         $vmSwitches = @()
         try { $vmSwitches = @(Get-List -Type UniqueSwitch) } catch {}
+
+        # Protect infrastructure switches only when VMs are connected.
+        # If no VMs use them, they're genuinely orphaned.
+        foreach ($infra in @('Internet', 'Cluster', 'ClusterV2')) {
+            if ($infra -notin $switchNames -and $infra -notin $vmSwitches) { continue }
+            $attached = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq $infra })
+            if ($attached.Count -gt 0 -and $infra -notin $vmSwitches) {
+                $vmSwitches += $infra
+            }
+        }
+
         # Map infrastructure switch names to their subnet equivalents so
         # NATs named by subnet (e.g. '10.250.250.0') are recognized.
         $inUse = @($switchNames + $vmSwitches) | ForEach-Object {
