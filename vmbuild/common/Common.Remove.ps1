@@ -379,42 +379,6 @@ function Remove-OrphanedNetNats {
                 $dhcp | Remove-DhcpServerv4Scope -Force -ErrorAction SilentlyContinue
             }
         }
-
-        # ── Auto-repair: ensure infrastructure networks with connected VMs
-        #    still have their NAT and DHCP scope. Even if something upstream
-        #    (or this function on a prior run) removed them, repair now.
-        $infraMap = @{
-            'Cluster'   = @{ Subnet = '10.250.250.0'; Prefix = '10.250.250.0/24'; Start = '10.250.250.20'; End = '10.250.250.199'; Gateway = '10.250.250.200' }
-            'ClusterV2' = @{ Subnet = '10.250.251.0'; Prefix = '10.250.251.0/24'; Start = '10.250.251.20'; End = '10.250.251.199'; Gateway = '10.250.251.200' }
-        }
-        foreach ($infraName in $infraMap.Keys) {
-            $info = $infraMap[$infraName]
-            $sw = Get-VMSwitch -Name $infraName -ErrorAction SilentlyContinue
-            if (-not $sw) { continue }
-            $attached = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
-                Where-Object { $_.SwitchName -eq $infraName })
-            if ($attached.Count -eq 0) { continue }
-
-            # VMs are on this switch -- ensure NAT exists
-            $nat = Get-NetNat -Name $info.Subnet -ErrorAction SilentlyContinue
-            if (-not $nat) {
-                Write-Log "Auto-repair: recreating NAT '$($info.Subnet)' for $infraName ($($attached.Count) VM(s) connected)" -Warning
-                New-NetNat -Name $info.Subnet -InternalIPInterfaceAddressPrefix $info.Prefix -ErrorAction SilentlyContinue | Out-Null
-            }
-
-            # Ensure DHCP scope exists (cluster scopes have no options)
-            try {
-                $scope = Get-DhcpServerv4Scope -ScopeId $info.Subnet -ErrorAction SilentlyContinue
-                if (-not $scope) {
-                    Write-Log "Auto-repair: recreating DHCP scope '$($info.Subnet)' for $infraName" -Warning
-                    Add-DhcpServerv4Scope -Name $infraName -StartRange $info.Start -EndRange $info.End `
-                        -SubnetMask 255.255.255.0 -LeaseDuration (New-TimeSpan -Days 365) -ErrorAction Stop
-                }
-            }
-            catch {
-                Write-Log "Auto-repair: failed to recreate DHCP scope for $infraName`: $_" -Warning
-            }
-        }
     }
     catch {
         Write-Log "Remove-OrphanedNetNats: $($_.Exception.Message)" -Warning

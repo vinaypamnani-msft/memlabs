@@ -748,6 +748,22 @@ try {
 
     # AO VM switch and DHCP scope
     $containsAO = ($deployConfig.virtualMachines.role -contains "SQLAO")
+
+    # Auto-repair: if existing VMs are connected to infrastructure switches
+    # (from a legacy or different deployment), ensure their NAT/DHCP exists
+    # even if the current build doesn't use those networks.
+    if (-not $containsAO) {
+        $clusterSwitch = Get-VMSwitch -Name 'Cluster' -ErrorAction SilentlyContinue
+        if ($clusterSwitch) {
+            $clusterVMs = @(Get-VM | Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
+                Where-Object { $_.SwitchName -eq 'Cluster' })
+            if ($clusterVMs.Count -gt 0) {
+                Write-Log "Cluster switch has $($clusterVMs.Count) VM(s) from other deployments. Verifying NAT/DHCP..." -Warning
+                Add-SwitchAndDhcp -NetworkName "Cluster" -NetworkSubnet "10.250.250.0" -WhatIf:$WhatIf | Out-Null
+            }
+        }
+    }
+
     if ($containsAO) {
         # Ensure the base "Cluster" switch exists (may already be present from
         # a legacy deployment on 10.250.250.0). This creates the vSwitch, host
