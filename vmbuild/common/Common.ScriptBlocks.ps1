@@ -1681,6 +1681,8 @@ $global:VM_Config = {
                         if ($existing) {
                             # Ensure DHCP stays disabled even on idempotent rerun
                             Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
+                            # Ensure DNS registration is off even on rerun
+                            Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
                             return "${info}Already configured"
                         }
 
@@ -1691,6 +1693,9 @@ $global:VM_Config = {
 
                         # Disable DHCP on this interface so it can't reclaim the address
                         Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
+
+                        # Disable DNS registration — heartbeat IPs must not appear in DNS
+                        Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
 
                         # Assign static IP — no gateway, no DNS (heartbeat only)
                         New-NetIPAddress -InterfaceIndex $idx -IPAddress $targetIP -PrefixLength 24 | Out-Null
@@ -3214,6 +3219,68 @@ $global:VM_Config = {
 
         # Update VMNote and set new version, this code doesn't run when VM_Create failed
         if ($using:Phase -gt 1 -and -not $currentItem.hidden) {
+
+            # After Phase 5 DSC creates the failover cluster, the cluster
+            # virtual adapter and heartbeat NIC may have registered in DNS.
+            # Disable DNS registration on all non-domain adapters and scrub
+            # the stale A records so the hostname only resolves to the domain IP.
+            if ($Phase -eq 5 -and $currentItem.role -eq "SQLAO" -and $complete) {
+                Write-Progress2 $Activity -Status "Cleaning heartbeat DNS records" -percentcomplete 98 -force
+                $scrubDns = {
+                    param($hostname, $domainSubnet)
+                    $results = @()
+                    # Disable DNS registration on every adapter except the domain NIC
+                    foreach ($adapter in (Get-NetAdapter -ErrorAction SilentlyContinue)) {
+                        $ips = (Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+                        $isDomain = $ips | Where-Object { $_ -like "$domainSubnet*" }
+                        if (-not $isDomain) {
+                            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                            $results += "Disabled DNS reg on '$($adapter.InterfaceAlias)' ($($ips -join ','))"
+                        }
+                    }
+                    # Also cover the cluster virtual adapter (tunnel adapter, not in Get-NetAdapter)
+                    foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+                        if ($iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*') {
+                            Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                        }
+                    }
+                    # Force re-registration so only the domain adapter's IP remains
+                    & ipconfig /registerdns 2>&1 | Out-Null
+                    # Remove stale A records from DNS for this hostname
+                    try {
+                        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+                        $zone = ($hostname -split '\.', 2)[1]
+                        $shortName = ($hostname -split '\.')[0]
+                        if ($dnsServer -and $zone) {
+                            $records = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                            foreach ($rec in $records) {
+                                $ip = $rec.RecordData.IPv4Address.IPAddressToString
+                                if ($ip -notlike "$domainSubnet*") {
+                                    Remove-DnsServerResourceRecord -ZoneName $zone -Name $shortName -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
+                                    $results += "Removed DNS A record $ip"
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        $results += "DNS record cleanup skipped: $_"
+                    }
+                    return ($results -join '; ')
+                }
+                $domainSubnet = ($deployConfig.vmOptions.network -replace '\.\d+$', '.')
+                $fqdn = "$($currentItem.vmName).$($deployConfig.vmOptions.domainName)"
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName `
+                    -ScriptBlock $scrubDns -ArgumentList @($fqdn, $domainSubnet) `
+                    -DisplayName "Scrub heartbeat DNS records"
+                if ($result.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub failed: $($result.ScriptBlockOutput)" -Warning
+                }
+                else {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DNS scrub: $($result.ScriptBlockOutput)"
+                }
+            }
+
             New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $complete -Phase $Phase
         }
 
