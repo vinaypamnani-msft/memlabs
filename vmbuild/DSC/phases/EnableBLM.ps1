@@ -133,8 +133,12 @@ if ($blmCollection) {
     }
 
     # Force collection membership evaluation and verify members appear
+    # Trigger AD System Discovery first — devices must exist in CM before
+    # query rules can match them. PushClients may have already done this,
+    # but DDR processing can lag.
+    try { Invoke-CMSystemDiscovery } catch {}
     Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
-    Write-DscStatus "$Tag Triggered collection evaluation for $blmCollectionName"
+    Write-DscStatus "$Tag Triggered AD system discovery + collection evaluation for $blmCollectionName"
 
     # Wait for evaluation to complete - members must be visible for deployment to work
     # Query rules will match once the device is discovered (any ResourceID)
