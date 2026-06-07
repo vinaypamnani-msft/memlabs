@@ -2664,11 +2664,10 @@ function Test-DHCPScope {
             try {
                 if (-not $DomainScope) {
                     if ($ScopeName -eq "cluster") {
-                        # Cluster/heartbeat NICs must not have a default gateway.
-                        # Only set ScopeId — no Router, no DNS.
-                        $HashArguments = @{
-                            ScopeId = $ScopeID
-                        }
+                        # Cluster/heartbeat NICs must not have a default gateway,
+                        # DNS, or any other DHCP options. Just the scope is enough.
+                        Write-GreenCheck "Cluster scope '$ScopeID' created (no DHCP options needed)."
+                        return $true
                     }
                     else {
                         $HashArguments = @{
