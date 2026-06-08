@@ -2771,75 +2771,76 @@ $global:VM_Config = {
                         Start-VM2 -Name $failedNode
                         Wait-ForHeartbeat -VmName $failedNode | Out-Null
 
-                        # Immediately trigger DSC on the rebooted node instead of
-                        # waiting 3 min for the self-recovery timer in the monitoring loop.
-                        Write-Log "[Phase $Phase]: ${failedNode}: Triggering local DSC compile+start after reboot" -Warning -OutputStream
-                        $dscKickResult = Invoke-VmCommand -VmName $failedNode -VmDomainName $domainName -TimeoutSeconds 300 -ScriptBlock {
-                            param($DscFolder)
-                            $log = "C:\staging\DSC\DSC_Init.log"
-                            $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                            "`r`n=====`r`nDSC_HostKick: $time`r`n=====" | Out-File $log -Append -Force
-
-                            $lcm = Get-DscLocalConfigurationManager
-                            if ($lcm.LCMState -ne 'Idle') {
-                                "LCM is $($lcm.LCMState), skipping -- DSC already running" | Out-File $log -Append
-                                return "LCM_$($lcm.LCMState)"
-                            }
-
-                            $Phase = $using:Phase
-                            $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
-                            $dscRole = "Phase$Phase"
-                            $dscConfigScript = "C:\staging\DSC\$DscFolder\$dscRole.ps1"
-                            $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
-                            $deployConfigPath = 'C:\staging\DSC\deployConfig.json'
-
-                            if (-not (Test-Path $dscConfigScript)) {
-                                "Script not found: $dscConfigScript" | Out-File $log -Append
-                                return "SCRIPT_NOT_FOUND"
-                            }
-
-                            $netbiosName = $deployConfig.vmOptions.domainNetBiosName
-                            $user = "$netbiosName\$($using:Common.LocalAdmin.UserName)"
-                            $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
-
-                            $nodeName = $env:COMPUTERNAME
-                            $thisVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $nodeName }
-                            $cd = @{
-                                AllNodes = @(
-                                    @{ NodeName = '*'; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
-                                    @{ NodeName = $nodeName; Role = if ($thisVm) { $thisVm.Role } else { 'DomainMember' } }
-                                )
-                            }
-
-                            $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
-                            . "$dscConfigScript"
-
-                            "Compiling $dscRole for $nodeName (Role: $($cd.AllNodes[1].Role))" | Out-File $log -Append
+                        # Verify the DC can now reach this node via WinRM before pushing DSC.
+                        # If WinRM still fails, skip -- don't start DSC with broken cross-node
+                        # connectivity or it will hang on any resource that talks to other nodes.
+                        Write-Log "[Phase $Phase]: ${failedNode}: Verifying WinRM from DC after reboot" -OutputStream
+                        $winrmCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -TimeoutSeconds 30 -SuppressLog -ScriptBlock {
+                            param($TargetNode, $Cred)
                             try {
-                                & "$dscRole" -DeployConfigPath $deployConfigPath -AdminCreds $creds -ConfigurationData $cd -OutputPath $dscConfigPath
+                                $null = Test-WSMan -ComputerName $TargetNode -Credential $Cred -ErrorAction Stop
+                                return "OK"
                             }
                             catch {
-                                "Compilation failed: $_" | Out-File $log -Append
-                                return "COMPILE_FAILED"
+                                return "FAIL: $_"
                             }
+                        } -ArgumentList $failedNode, (New-Object System.Management.Automation.PSCredential ("$domainName\$($Common.LocalAdmin.UserName)", $Common.LocalAdmin.Password)) -DisplayName "DSC: Verify WinRM to $failedNode"
 
-                            $mofPath = Join-Path $dscConfigPath "$nodeName.mof"
+                        $winrmStatus = if ($winrmCheck.ScriptBlockOutput) { $winrmCheck.ScriptBlockOutput } else { "no output" }
+                        if ($winrmCheck.ScriptBlockFailed -or $winrmStatus -ne "OK") {
+                            Write-Log "[Phase $Phase]: ${failedNode}: WinRM still broken after reboot ($winrmStatus) -- skipping DSC push, self-recovery will handle it" -Warning -OutputStream
+                            continue
+                        }
+
+                        # WinRM is healthy -- have the DC re-push DSC to just this node
+                        Write-Log "[Phase $Phase]: ${failedNode}: WinRM OK -- DC re-pushing DSC" -OutputStream
+                        $dscKickResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -TimeoutSeconds 120 -ScriptBlock {
+                            param($DscFolder, $TargetNode)
+                            $log = "C:\staging\DSC\DSC_Init.log"
+                            $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+                            "`r`n=====`r`nDSC_Repush to ${TargetNode}: $time`r`n=====" | Out-File $log -Append -Force
+
+                            $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                            $mofPath = Join-Path $dscConfigPath "$TargetNode.mof"
                             if (-not (Test-Path $mofPath)) {
                                 "MOF not found: $mofPath" | Out-File $log -Append
                                 return "MOF_NOT_FOUND"
                             }
 
-                            Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
-                            "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
-                            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
-                            return "STARTED"
-                        } -ArgumentList $DscFolder -DisplayName "DSC: Host-kick $failedNode"
+                            # Copy just this node's MOF to a temp dir so Start-DscConfiguration
+                            # only pushes to this one node, not all nodes again
+                            $tempDir = Join-Path $dscConfigPath "repush_$TargetNode"
+                            New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+                            Copy-Item -Path $mofPath -Destination $tempDir -Force
+                            # Also copy the meta.mof if it exists (LCM settings)
+                            $metaMof = Join-Path $dscConfigPath "$TargetNode.meta.mof"
+                            if (Test-Path $metaMof) { Copy-Item -Path $metaMof -Destination $tempDir -Force }
+
+                            $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
+                            $userdomain = $deployConfig.vmOptions.domainNetBiosName
+                            $user = "$userdomain\$($using:Common.LocalAdmin.UserName)"
+                            $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+
+                            "Re-pushing DSC from $tempDir to $TargetNode" | Out-File $log -Append
+                            try {
+                                Start-DscConfiguration -Path $tempDir -Force -Verbose -ErrorAction Stop -Credential $creds
+                                "Re-push started successfully" | Out-File $log -Append
+                                return "PUSHED"
+                            }
+                            catch {
+                                "Re-push failed: $_" | Out-File $log -Append
+                                return "PUSH_FAILED: $_"
+                            }
+                            finally {
+                                Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                            }
+                        } -ArgumentList $DscFolder, $failedNode -DisplayName "DSC: Re-push to $failedNode"
                         $kickOutput = if ($dscKickResult.ScriptBlockOutput) { $dscKickResult.ScriptBlockOutput } else { "no output" }
-                        if ($dscKickResult.ScriptBlockFailed) {
-                            Write-Log "[Phase $Phase]: ${failedNode}: Host-kick DSC failed: $kickOutput (self-recovery will retry)" -Warning
+                        if ($dscKickResult.ScriptBlockFailed -or $kickOutput -notlike "PUSHED*") {
+                            Write-Log "[Phase $Phase]: ${failedNode}: DC re-push failed: $kickOutput (self-recovery will retry)" -Warning
                         }
                         else {
-                            Write-Log "[Phase $Phase]: ${failedNode}: Host-kick DSC: $kickOutput" -OutputStream
+                            Write-Log "[Phase $Phase]: ${failedNode}: DC re-push: $kickOutput" -OutputStream
                         }
                     }
                     else {
