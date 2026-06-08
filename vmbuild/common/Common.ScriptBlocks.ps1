@@ -2457,7 +2457,7 @@ $global:VM_Config = {
                                 } -ArgumentList $node, $creds
                             }
                             # Wait for all jobs (15s timeout covers WinRM connect timeout)
-                            $null = Wait-Job -Job $jobs.Values -Timeout 15
+                            $null = Wait-Job -Job @($jobs.Values) -Timeout 15
                             $stillDown = [System.Collections.Generic.List[string]]::new()
                             foreach ($node in $unreachable) {
                                 $job = $jobs[$node]
