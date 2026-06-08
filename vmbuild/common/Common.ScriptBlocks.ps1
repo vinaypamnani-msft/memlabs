@@ -365,7 +365,7 @@ $global:VM_Create = {
                     start-sleep -seconds 15
                 }
                 start-vm2 -name $vm.VmName
-                start-sleep -Seconds 20
+                Wait-ForHeartbeat -VmName $vm.VmName | Out-Null
             }
         }
 
@@ -717,6 +717,7 @@ $global:VM_Create = {
 
             Stop-VM2 -Name $currentItem.vmName
             Start-vm2 -Name $currentItem.vmName
+            Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
         }
 
         # Set PS Execution Policy (required on client OS)
@@ -1438,7 +1439,7 @@ $global:VM_Config = {
                 Start-Sleep -Seconds 10
                 start-vm2 -name  $currentItem.vmName
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
-                start-sleep -seconds 30
+                Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
                 $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
@@ -2637,9 +2638,9 @@ $global:VM_Config = {
                 if ($result.ScriptBlockFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Rebooting. $($result.ScriptBlockOutput)" -Warning
                     stop-vm2 -name $currentItem.vmName
-                    start-sleep -seconds 30
+                    start-sleep -seconds 10
                     start-vm2 -name $currentItem.vmName
-                    start-sleep -seconds 30 
+                    Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
                     if ($result.ScriptBlockFailed) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to Start $($currentItem.role) configuration. Exiting. $($result.ScriptBlockOutput)" -Failure -OutputStream
@@ -2733,8 +2734,9 @@ $global:VM_Config = {
                         $dscFails++
                         if ($dscFails -ge 20) {
                             stop-vm2 -name $currentItem.vmName
-                            start-sleep -Seconds 30
+                            start-sleep -Seconds 10
                             start-vm2 -name $currentItem.vmName
+                            Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                             $dscFails = 0
                         }
                         continue
@@ -2760,8 +2762,9 @@ $global:VM_Config = {
                         if ($dscStatus.ScriptBlockOutput.RebootRequested) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC requested reboot, but has not rebooted.  Forcing Restart."
                             stop-vm2 -name $currentItem.vmName
-                            start-sleep -Seconds 30
+                            start-sleep -Seconds 10
                             start-vm2 -name $currentItem.vmName
+                            Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                             $rebooted = $true
                         }
                     }
@@ -2814,19 +2817,9 @@ $global:VM_Config = {
                                     if ($msg.Contains("ADServerDownException")) {
                                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: ADServerDownException from VM. Restarting the VM" -Warning
                                         Stop-VM2 -name $currentItem.vmName
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Stopped"
-                                        Start-Sleep -Seconds 20
-                                        Start-VM2 -Name $currentItem.vmName
-                                        
-
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 60 seconds to check status."
-
-                                        Start-Sleep -Seconds 50
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Started. Waiting 10 seconds to check status."
-
                                         Start-Sleep -Seconds 10
-                                        $state = Get-VM2 -Name $currentItem.vmName
-                                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "ADServerDownException, VM Current State: $($state.state)"
+                                        Start-VM2 -Name $currentItem.vmName
+                                        Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                         Continue
                                     }
                                     if (-not $failure) {
@@ -2942,14 +2935,9 @@ $global:VM_Config = {
 
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to retrieve job status from VM after $failedHeartbeatThreshold tries. Forcefully restarting the VM" -Warning
                         Stop-VM2 -name $currentItem.vmName
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Stopped"
-                        Start-Sleep -Seconds 20
+                        Start-Sleep -Seconds 10
                         Start-VM2 -Name $currentItem.vmName
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Started"
-
-                        Start-Sleep -Seconds 15
-                        $state = Get-VM2 -Name $currentItem.vmName
-                        Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "Failed to retrieve job status from VM, VM Current State: $($state.state)"
+                        Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
                     }
                     catch {
@@ -3007,9 +2995,9 @@ $global:VM_Config = {
                                 $lcmState = if ($lcmCheck.ScriptBlockFailed) { "unreachable" } else { $lcmCheck.ScriptBlockOutput }
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). LCM state: $lcmState. Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
                                 Stop-VM2 -name $currentItem.vmName
-                                Start-Sleep -Seconds 20
+                                Start-Sleep -Seconds 10
                                 Start-VM2 -Name $currentItem.vmName
-                                Start-Sleep -Seconds 15
+                                Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
                                 $lastStatusChangeTime = [DateTime]::UtcNow
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }

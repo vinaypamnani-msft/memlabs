@@ -1079,7 +1079,7 @@ function Get-ConfigurationData {
                     if (-not $testNet) {
                         Write-Log "[Phase $Phase]: $($dc.NodeName): RDP port not accessible after retries. Attempting soft restart." -Warning
                         Invoke-VmCommand -VmName $dc.NodeName -VmDomainName $deployConfig.vmOptions.domainName -ScriptBlock { Restart-Computer -Force } | Out-Null
-                        Start-Sleep -Seconds 20
+                        Wait-ForHeartbeat -VmName $dc.NodeName | Out-Null
                     }
                 }
             }

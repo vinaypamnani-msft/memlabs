@@ -376,6 +376,66 @@ function Start-VM2 {
         }
     }
 }
+
+function Wait-ForHeartbeat {
+    <#
+    .SYNOPSIS
+        Waits for a VM's heartbeat to reach OkApplicationsHealthy after a start/restart.
+    .DESCRIPTION
+        Polls the VM heartbeat every PollSeconds until it reaches OkApplicationsHealthy
+        or the timeout expires. This prevents PSDirect attempts against a VM that is
+        still booting (which just generates log noise) and—more importantly—prevents
+        subsequent hard-resets from firing before the OS has finished booting, which
+        can trip Windows into the recovery console after 2-3 incomplete boots.
+    .PARAMETER VmName
+        Name of the VM to wait on.
+    .PARAMETER TimeoutSeconds
+        Maximum time to wait. Defaults to 240 (4 minutes).
+    .PARAMETER PollSeconds
+        Interval between heartbeat checks. Defaults to 10.
+    .PARAMETER Stopwatch
+        Optional parent stopwatch for progress display. If supplied, progress is
+        shown via Write-ProgressElapsed; otherwise the function is silent.
+    .PARAMETER Timespan
+        Required when Stopwatch is supplied. The parent timeout timespan.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [int]$TimeoutSeconds = 240,
+        [int]$PollSeconds = 10,
+        [System.Diagnostics.Stopwatch]$Stopwatch,
+        [TimeSpan]$Timespan
+    )
+
+    $hbWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $hbLimit = New-TimeSpan -Seconds $TimeoutSeconds
+    $hbState = "Unknown"
+
+    while ($hbWatch.Elapsed -lt $hbLimit) {
+        # If a parent timeout was supplied, bail if it expired too
+        if ($Stopwatch -and $Stopwatch.Elapsed -ge $Timespan) { break }
+
+        Start-Sleep -Seconds $PollSeconds
+        $vmObj = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+        $hbState = if ($vmObj) { $vmObj.Heartbeat } else { "N/A" }
+
+        if ($Stopwatch -and $Timespan) {
+            try {
+                Write-ProgressElapsed -showTimeout -stopwatch $Stopwatch -timespan $Timespan -text "Waiting for VM heartbeat after restart (heartbeat: $hbState)"
+            } catch {}
+        }
+
+        if ($hbState -eq "OkApplicationsHealthy") {
+            Write-Log "$VmName`: Heartbeat healthy after $([int]$hbWatch.Elapsed.TotalSeconds)s." -Verbose
+            return $true
+        }
+    }
+
+    Write-Log "$VmName`: Heartbeat did not reach OkApplicationsHealthy after $([int]$hbWatch.Elapsed.TotalSeconds)s (last: $hbState). Proceeding anyway." -Warning
+    return $false
+}
+
 function Test-TcpPort {
     # Hard-timeout TCP probe using TcpClient + WaitHandle. Test-NetConnection can hang
     # well past its own timeouts (DNS reverse lookups, ICMP fallbacks, etc.), so avoid it.

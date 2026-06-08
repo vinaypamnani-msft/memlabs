@@ -514,6 +514,7 @@ function Remove-ForestTrust {
                 $forestDomain = $TrustedForest.ForestTrust
                 $domainName = $TrustedForest.domain
                 start-vm2 -Name $DC1.vmName
+                Wait-ForHeartbeat -VmName $DC1.vmName | Out-Null
 
                 $scriptBlockTest = {
                     param(
@@ -567,6 +568,7 @@ function Remove-ForestTrust {
                 Write-Log "Removing Trust on $DC2 for '$otherDomain'" -Activity
 
                 start-vm2 -Name $DC2.vmName
+                Wait-ForHeartbeat -VmName $DC2.vmName | Out-Null
                 $scriptBlock1 = {
                     param(
                         [String]$forestDomain,

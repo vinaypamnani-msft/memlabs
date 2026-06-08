@@ -3954,7 +3954,7 @@ function Wait-ForVm {
                     stop-vm2 -name $vmName -TurnOff | Out-Null
                     start-sleep -seconds 10
                     start-vm2 -name $vmName | Out-Null
-                    start-sleep -seconds 20
+                    Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
                 }
             }
 
@@ -3981,14 +3981,20 @@ function Wait-ForVm {
                     $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding (heartbeat: $hb)"
 
-                    if ($restartCount -lt $maxRestarts -and ($count -ge 3 -or $stopWatch.Elapsed.TotalMinutes -ge 3)) {
+                    # Only hard-reset when heartbeat is NoContact (IC not responding
+                    # at all — VM is likely stuck at boot or crashed).
+                    # OkApplicationsUnknown / OkApplicationsHealthy mean the OS is
+                    # still booting normally; resetting would just delay things.
+                    $heartbeatStuck = ($hb -eq "NoContact" -or $hb -eq "N/A")
+                    if ($restartCount -lt $maxRestarts -and $heartbeatStuck -and ($count -ge 10 -or $stopWatch.Elapsed.TotalMinutes -ge 3)) {
                         $restartCount++
                         Write-Log "$VmName`: Not responding after $count polls (heartbeat: $hb). Hard-resetting VM (attempt $restartCount/$maxRestarts)." -Warning
                         Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Hard-resetting VM (attempt $restartCount/$maxRestarts)"
                         stop-vm2 -name $vmName -TurnOff | Out-Null
                         start-sleep -seconds 10
                         start-vm2 -name $vmName | Out-Null
-                        start-sleep -seconds 20
+                        Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
+                        $count = 0
                     }
                 }
             }
