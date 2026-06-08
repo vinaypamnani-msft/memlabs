@@ -2444,27 +2444,32 @@ $global:VM_Config = {
                         $targetNodes = $mofFiles | ForEach-Object { $_.BaseName }
                         "WinRM pre-flight: checking $($targetNodes.Count) nodes in parallel: $($targetNodes -join ', ')" | Out-File $log -Append
 
-                        # DC self-check: verify this DC can authenticate to itself before
-                        # testing remote nodes.  If the DC's own Kerberos/DNS isn't ready,
-                        # every remote Test-WSMan will fail and we'd wrongly declare ALL
-                        # nodes unreachable, triggering a pointless mass reboot.
+                        # DNS readiness check: the DC's DNS service must be running
+                        # before we can test WinRM on remote nodes.  Without DNS,
+                        # Kerberos fails and every Test-WSMan returns the misleading
+                        # "credentials with no-authentication" error.  Ping still
+                        # works (NetBIOS/LLMNR), masking the real cause.
+                        # Wait up to ~60s for DNS to resolve at least one target node.
                         $dcReady = $false
-                        for ($sc = 1; $sc -le 3; $sc++) {
+                        $testNode = $targetNodes[0]
+                        for ($dnsAttempt = 1; $dnsAttempt -le 6; $dnsAttempt++) {
                             try {
-                                $null = Test-WSMan -ComputerName $env:COMPUTERNAME -Credential $creds -ErrorAction Stop
-                                "WinRM pre-flight: DC self-check OK (attempt $sc)" | Out-File $log -Append
+                                $null = Resolve-DnsName -Name $testNode -Type A -DnsOnly -ErrorAction Stop
+                                "WinRM pre-flight: DNS ready -- resolved $testNode (attempt $dnsAttempt)" | Out-File $log -Append
                                 $dcReady = $true
                                 break
                             }
                             catch {
-                                "WinRM pre-flight: DC self-check FAILED (attempt $sc/3): $_" | Out-File $log -Append
-                                if ($sc -lt 3) { Start-Sleep -Seconds 10 }
+                                "WinRM pre-flight: DNS not ready (attempt $dnsAttempt/6): $_" | Out-File $log -Append
+                                if ($dnsAttempt -lt 6) { Start-Sleep -Seconds 10 }
                             }
                         }
                         if (-not $dcReady) {
-                            "WinRM pre-flight: DC cannot authenticate to itself -- skipping remote node checks. DC services not ready yet; self-recovery on each node will handle DSC start." | Out-File $log -Append
-                            # Do NOT write preflight-failed.txt -- this is a DC problem, not a node problem.
-                            # Nodes' self-recovery will kick in after 3 min with no DSC status.
+                            "WinRM pre-flight: DNS still not ready after 60s -- skipping remote node checks. Start-DscConfiguration will attempt the push; per-node self-recovery handles failures." | Out-File $log -Append
+                            # Do NOT write preflight-failed.txt -- this is a DC-side DNS
+                            # problem, not individual node failures.  Avoids triggering
+                            # the host-side mass reboot for a problem that rebooting VMs
+                            # cannot fix.
                         }
 
                         $maxRetries = 6   # up to ~1 min total (6 x 10s)
