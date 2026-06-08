@@ -12,7 +12,18 @@ function Start-Maintenance {
     if ($DeployConfig) {
         Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
-        $vmsNeedingMaintenance = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden } | Sort-Object vmName
+        # Filter out VMs already at the latest fix version (e.g. re-running Phase 10
+        # after a partial kill). Read each VM's note to get the current watermark.
+        $vmsNeedingMaintenance = @()
+        foreach ($vm in ($allVMs | Sort-Object vmName)) {
+            $note = Get-VMNote -VMName $vm.vmName
+            if ($note -and $note.memLabsVersion -ge $Common.LatestHotfixVersion) {
+                Write-Log "$($vm.vmName): already at version $($note.memLabsVersion), skipping." -Verbose
+            }
+            else {
+                $vmsNeedingMaintenance += $vm
+            }
+        }
         $applyNewOnly = $true
     }
     else {
