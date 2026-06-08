@@ -1682,8 +1682,10 @@ $global:VM_Config = {
                         if ($existing) {
                             # Ensure DHCP stays disabled even on idempotent rerun
                             Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
-                            # Ensure DNS registration is off even on rerun
-                            Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                            # Ensure DNS registration is impossible even on rerun:
+                            # no DNS servers + no suffix + registration flag off
+                            Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                            Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses @() -ErrorAction SilentlyContinue
                             return "${info}Already configured"
                         }
 
@@ -1695,8 +1697,10 @@ $global:VM_Config = {
                         # Disable DHCP on this interface so it can't reclaim the address
                         Set-NetIPInterface -InterfaceIndex $idx -Dhcp Disabled -ErrorAction SilentlyContinue
 
-                        # Disable DNS registration — heartbeat IPs must not appear in DNS
-                        Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                        # Make DNS registration impossible — heartbeat IPs must not appear in DNS.
+                        # Three layers: flag off + no DNS servers + no suffix.
+                        Set-DnsClient -InterfaceIndex $idx -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                        Set-DnsClientServerAddress -InterfaceIndex $idx -ServerAddresses @() -ErrorAction SilentlyContinue
 
                         # Assign static IP — no gateway, no DNS (heartbeat only)
                         New-NetIPAddress -InterfaceIndex $idx -IPAddress $targetIP -PrefixLength 24 | Out-Null

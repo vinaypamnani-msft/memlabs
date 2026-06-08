@@ -44,42 +44,44 @@ if (-not $SiteCode) {
 
 # Provider — retry connection since the provider may still be initializing
 # (InstallProvider.ps1 may have just finished installing a remote provider).
-$providerConnected = $false
-$providerMaxRetries = 6
-for ($provAttempt = 1; $provAttempt -le $providerMaxRetries; $provAttempt++) {
-    try {
-        $smsProvider = Get-SMSProvider -SiteCode $SiteCode
-        if (-not $smsProvider.FQDN) {
-            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Get-SMSProvider returned no FQDN"
-            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
-            continue
+# Reusable provider connection function — called for initial connect and
+# retry after transient WMI/provider failures during push.
+function Connect-CMProvider {
+    param([string]$SiteCode, [int]$MaxRetries = 6, [int]$DelaySec = 30, [string]$Tag = "[PushClients]")
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            $prov = Get-SMSProvider -SiteCode $SiteCode
+            if (-not $prov.FQDN) {
+                Write-DscStatus "$Tag Attempt $attempt/$MaxRetries`: Get-SMSProvider returned no FQDN"
+                if ($attempt -lt $MaxRetries) { Start-Sleep -Seconds $DelaySec }
+                continue
+            }
+            $worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($prov.FQDN)
+            if (-not $worked) {
+                Write-DscStatus "$Tag Attempt $attempt/$MaxRetries`: Set-CMSiteProvider returned false"
+                if ($attempt -lt $MaxRetries) { Start-Sleep -Seconds $DelaySec }
+                continue
+            }
+            Set-Location "$($SiteCode):\"
+            if ((Get-Location).Drive.Name -ne $SiteCode) {
+                Write-DscStatus "$Tag Attempt $attempt/$MaxRetries`: Set-Location to $SiteCode`: failed"
+                if ($attempt -lt $MaxRetries) { Start-Sleep -Seconds $DelaySec }
+                continue
+            }
+            return $true
         }
-
-        $worked = Set-CMSiteProvider -SiteCode $SiteCode -ProviderFQDN $($smsProvider.FQDN)
-        if (-not $worked) {
-            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Set-CMSiteProvider returned false"
-            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
-            continue
+        catch {
+            Write-DscStatus "$Tag Attempt $attempt/$MaxRetries`: Provider connection failed: $_"
+            if ($attempt -lt $MaxRetries) { Start-Sleep -Seconds $DelaySec }
         }
-
-        Set-Location "$($SiteCode):\"
-        if ((Get-Location).Drive.Name -ne $SiteCode) {
-            Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Set-Location to $SiteCode`: failed"
-            if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
-            continue
-        }
-
-        $providerConnected = $true
-        break
     }
-    catch {
-        Write-DscStatus "[PushClients] Attempt $provAttempt/$providerMaxRetries`: Provider connection failed: $_"
-        if ($provAttempt -lt $providerMaxRetries) { Start-Sleep -Seconds 30 }
-    }
+    return $false
 }
 
+$providerConnected = Connect-CMProvider -SiteCode $SiteCode
+
 if (-not $providerConnected) {
-    Write-DscStatus "[PushClients] Failed to connect to CM provider after $providerMaxRetries attempts. Skipping client push." -Warning
+    Write-DscStatus "[PushClients] Failed to connect to CM provider. Skipping client push." -Warning
     return
 }
 
@@ -259,18 +261,31 @@ if (-not $pushClients) {
     return
 }
 
-# Wait for collection to populate
-
+# Wait for collection to populate — single query instead of per-client unfiltered
+# Get-CMDevice calls which can exhaust provider connections.
 $ClientNameList = $ClientNames.split(",")
 $AnyClientFound = $false
+$CollectionName = "All Systems"
+$pushMaxAttempts = 2
+
+for ($pushAttempt = 1; $pushAttempt -le $pushMaxAttempts; $pushAttempt++) {
+
+Write-DscStatus "[ClientPush] Pre-check: querying '$CollectionName' for existing clients... (attempt $pushAttempt/$pushMaxAttempts)"
+try {
+    $allDevices = @(Get-CMDevice -CollectionName $CollectionName -ErrorAction Stop)
+    Write-DscStatus "[ClientPush] Pre-check: '$CollectionName' returned $($allDevices.Count) device(s)"
+} catch {
+    Write-DscStatus "[ClientPush] Pre-check: Get-CMDevice failed: $($_.Exception.Message). Proceeding with empty list."
+    $allDevices = @()
+}
+
 foreach ($clientName in $ClientNameList) {
-    try {
-        $isClient = (Get-CMDevice | Where-Object { $_.Name -eq $clientName -or $_Name -like "$($clientName).*" }).IsClient
-    } catch { $isClient = $false }
+    $isClient = ($allDevices | Where-Object { ($_.Name -eq $clientName -or $_.Name -like "$($clientName).*") -and $_.IsClient }).Count -gt 0
     if ($isClient) {
+        Write-DscStatus "[ClientPush] Pre-check: $clientName already has CM client installed"
         $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
         $AnyClientFound = $true
-    }    
+    }
 }
 
 # If all clients already have the agent installed, skip the rest
@@ -282,7 +297,6 @@ if ($ClientNameList.Count -eq 0) {
     return
 }
 
-$CollectionName = "All Systems"
 if ($ClientNames) {
     Write-DscStatus "Waiting for $($ClientNameList -join ',') to appear in '$CollectionName'"
 }
@@ -295,10 +309,22 @@ else {
 }
 
 try {
-$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+Write-DscStatus "[ClientPush] Querying '$CollectionName' collection..."
+$machinelist = (get-cmdevice -CollectionName $CollectionName -ErrorAction Stop).Name
+Write-DscStatus "[ClientPush] '$CollectionName' has $($machinelist.Count) device(s): $($machinelist -join ',')"
 
-$PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
-$PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+# In a hierarchy Get-CMPackage returns packages from every site; filter to
+# this site so $PackageID is a single string (not an array) and
+# Get-CMDistributionStatus works correctly.
+Write-DscStatus "[ClientPush] Checking client package distribution (SiteCode=$SiteCode)..."
+$PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Where-Object { $_.PackageID -like "$SiteCode*" } | Select-Object -First 1).PackageID
+if (-not $PackageID) {
+    # Fallback: pick any package if site-code filter missed
+    $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Select-Object -First 1).PackageID
+}
+Write-DscStatus "[ClientPush] Client Package ID: $PackageID"
+$PackageSuccess = if ($PackageID) { (Get-CMDistributionStatus -Id $PackageID -ErrorAction SilentlyContinue).NumberSuccess } else { $null }
+Write-DscStatus "[ClientPush] Package distribution success count: $PackageSuccess"
 if ($PackageSuccess -eq 0) {
     Start-Sleep -Seconds 5
     if (-not $AnyClientFound) {
@@ -313,9 +339,10 @@ if ($PackageSuccess -eq 0) {
             Update-CMDistributionPoint -PackageName "Configuration Manager Client Package"
         }
         Write-DscStatus "Waiting for Client Package to appear on any DP. $failcount / 20"
-        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package').PackageID
+        $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Where-Object { $_.PackageID -like "$SiteCode*" } | Select-Object -First 1).PackageID
+        if (-not $PackageID) { $PackageID = (Get-CMPackage -Fast -Name 'Configuration Manager Client Package' | Select-Object -First 1).PackageID }
         Start-Sleep -Seconds 40
-        $PackageSuccess = (Get-CMDistributionStatus -Id $PackageID).NumberSuccess
+        $PackageSuccess = if ($PackageID) { (Get-CMDistributionStatus -Id $PackageID -ErrorAction SilentlyContinue).NumberSuccess } else { 0 }
         $success = $PackageSuccess -ge 1
 
         if ($failCount -ge 20) {
@@ -327,17 +354,22 @@ if ($PackageSuccess -eq 0) {
     Invoke-CMSystemDiscovery
     Invoke-CMDeviceCollectionUpdate -Name $CollectionName
 }
-$installedmachinelist = (get-cmdevice -CollectionName $CollectionName) | Where-Object {$_.IsClient} | Select-Object Name
-$machinelist = (get-cmdevice -CollectionName $CollectionName).Name
+$installedmachinelist = @(get-cmdevice -CollectionName $CollectionName -ErrorAction Stop | Where-Object {$_.IsClient} | Select-Object -ExpandProperty Name)
+$machinelist = @(get-cmdevice -CollectionName $CollectionName -ErrorAction Stop).Name
+Write-DscStatus "[ClientPush] Already installed: $($installedmachinelist -join ','). Discovered: $($machinelist -join ',')"
+$clientIndex = 0
 foreach ($client in $ClientNameList) {
+    $clientIndex++
 
     if ([string]::IsNullOrWhiteSpace($client)) {
         continue
     }
     if ($installedmachinelist -contains $client) {
+        Write-DscStatus "[ClientPush] ($clientIndex/$($ClientNameList.Count)) $client already installed, skipping"
         continue
     }
-    
+
+    Write-DscStatus "[ClientPush] ($clientIndex/$($ClientNameList.Count)) Testing SMB to $client..."
     $testClient = Test-NetConnection -ComputerName $client -CommonTCPPort SMB -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
     if (-not $testClient.TcpTestSucceeded) {
         # Don't wait for client to appear in collection if it's not online
@@ -397,8 +429,25 @@ foreach ($client in $ClientNameList) {
 }
 } # end try
 catch {
-    Write-DscStatus "[ClientPush] Client push failed: $_" -Warning
+    Write-DscStatus "[ClientPush] Client push failed (attempt $pushAttempt/$pushMaxAttempts): $_" -Warning
+    if ($pushAttempt -lt $pushMaxAttempts) {
+        Write-DscStatus "[ClientPush] Reconnecting to CM provider and retrying..."
+        Set-Location $env:SystemDrive
+        Start-Sleep -Seconds 30
+        $reconnected = Connect-CMProvider -SiteCode $SiteCode -MaxRetries 4 -DelaySec 30 -Tag "[ClientPush-Reconnect]"
+        if (-not $reconnected) {
+            Write-DscStatus "[ClientPush] Provider reconnect failed. Giving up." -Warning
+            break
+        }
+        Write-DscStatus "[ClientPush] Provider reconnected. Retrying push operation..."
+        continue
+    }
 }
+
+# If we get here without catching, the push succeeded — break out of the retry loop
+break
+
+} # end pushAttempt loop
 
 
 # Update actions file

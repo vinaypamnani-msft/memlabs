@@ -595,6 +595,8 @@ $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 Write-DscStatus "Complete!"
 
+# PushClients first so auto-push has maximum time to install the agent on
+# all targets while EnableBLM configures policies and collections.
 if ($ThisVM.role -ne "CAS") {
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
@@ -608,7 +610,9 @@ if ($ThisVM.role -ne "CAS") {
     Write-DscStatus "Complete!"
 }
 
-# Run EnableBLM AFTER PushClients so newly pushed clients are discoverable
+# EnableBLM only needs AD-discovered devices (not pushed clients) for its
+# collection query rules, so it is safe to run after PushClients kicks off
+# auto-push. If PushClients fails, EnableBLM still runs.
 if ($CurrentRole -eq "Primary") {
     Write-DscStatus "Running EnableBLM.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "EnableBLM.ps1"
@@ -619,11 +623,10 @@ if ($CurrentRole -eq "Primary") {
     catch {
         Write-DscStatus "EnableBLM.ps1 failed: $_" -Warning
     }
-    # MUST re-assert Complete! -- EnableBLM's final status ("BitLocker Management
-    # configuration complete") overwrites the earlier Complete! marker written
-    # after PushClients. The orchestrator in Common.ScriptBlocks.ps1 polls for
-    # exact match "Complete!" / "Setting up ConfigMgr. Status: Complete!" and
-    # will otherwise hang on Phase 8 long after the work is done.
+    # MUST re-assert Complete! -- EnableBLM's final status overwrites the
+    # earlier Complete! marker. The orchestrator in Common.ScriptBlocks.ps1
+    # polls for exact match "Complete!" / "Setting up ConfigMgr. Status:
+    # Complete!" and will otherwise hang on Phase 8 long after the work is done.
     Write-DscStatus "Complete!"
 }
 

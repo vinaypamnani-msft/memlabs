@@ -947,14 +947,22 @@ function Test-SQLAOFunctionality {
                     }
                 }
 
-                # Heartbeat NIC: DNS registration must be disabled
+                # Heartbeat NIC: DNS registration must be impossible (no servers, no suffix, flag off)
                 foreach ($hb in $heartbeatAdapters) {
                     $dnsClient = Get-DnsClient -InterfaceIndex $hb.InterfaceIndex -ErrorAction SilentlyContinue
-                    if ($dnsClient.RegisterThisConnectionsAddress) {
-                        $results.Details.Add("WARN: Heartbeat adapter '$($hb.Name)' has DNS registration enabled")
+                    $dnsServers = (Get-DnsClientServerAddress -InterfaceIndex $hb.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+                    $problems = @()
+                    if ($dnsClient.RegisterThisConnectionsAddress) { $problems += 'RegisterThisConnectionsAddress=true' }
+                    if ($dnsClient.ConnectionSpecificSuffix)        { $problems += "Suffix='$($dnsClient.ConnectionSpecificSuffix)'" }
+                    if ($dnsServers -and $dnsServers.Count -gt 0)   { $problems += "DnsServers=$($dnsServers -join ',')" }
+
+                    if ($problems.Count -gt 0) {
+                        $results.Details.Add("REMEDIATE: Heartbeat adapter '$($hb.Name)' can register in DNS: $($problems -join '; ')")
+                        Set-DnsClient -InterfaceIndex $hb.InterfaceIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                        Set-DnsClientServerAddress -InterfaceIndex $hb.InterfaceIndex -ServerAddresses @() -ErrorAction SilentlyContinue
                     }
                     else {
-                        $results.Details.Add("OK: Heartbeat adapter '$($hb.Name)' DNS registration disabled")
+                        $results.Details.Add("OK: Heartbeat adapter '$($hb.Name)' cannot register in DNS")
                     }
 
                     # No default gateway on heartbeat NIC
@@ -1023,8 +1031,54 @@ function Test-SQLAOFunctionality {
                 $dnsRecords = @(Resolve-DnsName -Name $hostname -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
                 $staleRecords = @($dnsRecords | Where-Object { $_.IPAddress -like "${clusterSubnet}*" })
                 if ($staleRecords.Count -gt 0) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: Hostname '$hostname' has DNS record(s) on heartbeat subnet: $($staleRecords.IPAddress -join ', ')")
+                    # Attempt remediation: disable DNS reg on heartbeat/virtual adapters,
+                    # remove stale A records, and recheck. The cluster service recreates
+                    # virtual adapters with default DNS settings on every boot, so stale
+                    # records can reappear after any reboot between Phase 5 and Phase 11.
+                    $results.Details.Add("REMEDIATE: Found heartbeat DNS records ($($staleRecords.IPAddress -join ', ')), attempting cleanup")
+                    try {
+                        # Disable DNS registration on all non-domain adapters (physical + virtual)
+                        foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+                            $ifaceIPs = (Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+                            $isDomain = $ifaceIPs | Where-Object { $_ -notlike "${clusterSubnet}*" -and $_ -ne '127.0.0.1' -and $_ -notlike '169.254.*' }
+                            $isCluster = $ifaceIPs | Where-Object { $_ -like "${clusterSubnet}*" }
+                            $isClusterName = $iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*'
+                            if ($isCluster -or ($isClusterName -and -not $isDomain)) {
+                                Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                            }
+                        }
+                        # Remove stale A records from DNS
+                        $domain = (Get-CimInstance Win32_ComputerSystem).Domain
+                        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                            Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+                        if ($dnsServer -and $domain) {
+                            $serverRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                            foreach ($rec in $serverRecords) {
+                                $ip = $rec.RecordData.IPv4Address.IPAddressToString
+                                if ($ip -like "${clusterSubnet}*") {
+                                    Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
+                                    $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
+                                }
+                            }
+                        }
+                        & ipconfig /registerdns 2>&1 | Out-Null
+                        Clear-DnsClientCache -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        # Recheck
+                        $dnsRecords2 = @(Resolve-DnsName -Name $hostname -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
+                        $staleRecords2 = @($dnsRecords2 | Where-Object { $_.IPAddress -like "${clusterSubnet}*" })
+                        if ($staleRecords2.Count -gt 0) {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Hostname '$hostname' still has DNS record(s) on heartbeat subnet after remediation: $($staleRecords2.IPAddress -join ', ')")
+                        }
+                        else {
+                            $results.Details.Add("OK: Hostname '$hostname' heartbeat DNS records cleaned up successfully")
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: Hostname '$hostname' has DNS record(s) on heartbeat subnet: $($staleRecords.IPAddress -join ', ') (remediation failed: $($_.Exception.Message))")
+                    }
                 }
                 else {
                     $results.Details.Add("OK: Hostname '$hostname' has no stale heartbeat DNS records")

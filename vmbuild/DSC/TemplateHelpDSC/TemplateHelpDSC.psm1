@@ -6449,8 +6449,14 @@ class DisableClusterNicDnsRegistration {
         }
 
         foreach ($adapter in $clusterAdapters) {
-            Write-Status "Disabling DNS registration on adapter '$($adapter.Name)' ($_subnet*)"
-            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ErrorAction Stop
+            Write-Status "Stripping DNS capability from heartbeat adapter '$($adapter.Name)' ($_subnet*)"
+            # Three-layer prevention: even if one setting is reset by the cluster
+            # service on failover/reboot, the other two make registration impossible.
+            #  1. RegisterThisConnectionsAddress = $false  (preference flag)
+            #  2. No DNS servers  (nowhere to send the update)
+            #  3. No DNS suffix   (no zone to register in)
+            Set-DnsClient -InterfaceIndex $adapter.InterfaceIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction Stop
+            Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses @() -ErrorAction SilentlyContinue
 
             # Set higher metric so the domain NIC is always preferred for outbound traffic.
             Set-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -InterfaceMetric 20 -ErrorAction SilentlyContinue
@@ -6496,6 +6502,27 @@ class DisableClusterNicDnsRegistration {
                 catch {
                     Write-Verbose "Could not rename adapter '$($adapter.Name)': $_"
                 }
+            }
+        }
+
+        # Disable DNS registration on cluster virtual adapters that don't appear
+        # in Get-NetAdapter (e.g. Microsoft Failover Cluster Virtual Adapter,
+        # isatap tunnel adapters).  These are recreated with default settings
+        # (RegisterThisConnectionsAddress = $true) every time the cluster service
+        # starts, so they silently re-register the heartbeat IP in DNS.
+        foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
+            # Skip adapters already handled above via Get-NetAdapter
+            $already = $clusterAdapters + $domainAdapters | Where-Object { $_.InterfaceIndex -eq $iface.ifIndex }
+            if ($already) { continue }
+
+            $ifaceIPs = (Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+            $isClusterSubnet = $ifaceIPs | Where-Object { $_ -like "${_subnet}*" }
+            $isClusterName = $iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*'
+
+            if ($isClusterSubnet -or $isClusterName) {
+                Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                Write-Status "Stripped DNS capability from virtual adapter '$($iface.InterfaceAlias)' (ifIndex $($iface.ifIndex))"
             }
         }
 
