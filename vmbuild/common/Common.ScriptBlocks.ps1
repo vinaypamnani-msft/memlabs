@@ -3471,7 +3471,10 @@ $global:VM_Config = {
         # while other VMs are still finishing their phase. Getting the reboot
         # out of the way early means the next phase doesn't have to wait for
         # Stop/Start + Wait-ForVM before it can begin DSC.
-        if ($complete) {
+        # Skip for Phases 8-11: these complete while work is still running
+        # inside the VM (ScriptWorkflow, validation, etc.). Rebooting now
+        # would kill that work mid-flight.
+        if ($complete -and $Phase -lt 8) {
             try {
                 $reboot = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Post-phase reboot check" -SuppressLog
                 if ($reboot.ScriptBlockOutput -eq $true) {
