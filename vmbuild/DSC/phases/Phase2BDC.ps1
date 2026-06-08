@@ -342,6 +342,41 @@
             Status    = "Configuring DNS forwarders"
         }
 
+        # After promotion + reboot the DNS Server WMI provider can take a
+        # few minutes to become responsive.  DnsServerForwarder will hang
+        # indefinitely if we call it before the provider is ready, so poll
+        # with Get-DnsServerForwarder first.
+        Script WaitForDnsServer {
+            DependsOn  = "[WriteStatus]ConfigureDnsForwarders"
+            GetScript  = { return @{ Result = (Get-Date).ToString() } }
+            TestScript = {
+                try {
+                    $null = Get-DnsServerForwarder -ErrorAction Stop
+                    return $true
+                }
+                catch { return $false }
+            }
+            SetScript  = {
+                $waited = 0
+                $ready  = $false
+                while ($waited -lt 300) {
+                    try {
+                        $null = Get-DnsServerForwarder -ErrorAction Stop
+                        $ready = $true
+                        break
+                    }
+                    catch {
+                        Write-Verbose "DNS Server not ready yet ($waited s)..."
+                        Start-Sleep -Seconds 10
+                        $waited += 10
+                    }
+                }
+                if (-not $ready) {
+                    Write-Verbose "DNS Server still not responsive after $waited s - proceeding anyway"
+                }
+            }
+        }
+
         # DNS forwarders (matching the PDC's configuration)
         $DNSForwarderIPs = @('1.1.1.1', '8.8.8.8', '9.9.9.9')
         if ($deployConfig.DNSForwarders) {
@@ -349,7 +384,7 @@
         }
 
         DnsServerForwarder DnsServerForwarder {
-            DependsOn        = "[WriteStatus]ConfigureDnsForwarders"
+            DependsOn        = "[Script]WaitForDnsServer"
             IsSingleInstance = 'Yes'
             IPAddresses      = $DNSForwarderIPs
             UseRootHint      = $true
