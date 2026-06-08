@@ -233,8 +233,10 @@ function Start-VMMaintenance {
         return $false
     }
 
-    # This should never happen, unless Get-List provides outdated version, so check again with current VMNote object
-    if ($vmVersion -ge $latestFixVersion -and -not $ApplyNewOnly.IsPresent) {
+    # Fast-path: skip if VM is already at the latest fix version.
+    # With per-fix tracking this is safe for both new and existing VMs —
+    # the watermark only reaches $latestFixVersion after all fixes complete.
+    if ($vmVersion -ge $latestFixVersion) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM Version ($vmVersion) is up-to-date."
         return $true
     }
