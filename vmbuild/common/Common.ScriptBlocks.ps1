@@ -2531,7 +2531,7 @@ $global:VM_Config = {
                     }
 
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
-                    Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
+                    $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
 
                     $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
                     $job = get-job -name $currentItem.vmName
@@ -2539,17 +2539,19 @@ $global:VM_Config = {
                     
                     # Wait 30 seconds for job to start. If the job has not been started, or has not completed, then log an error
                     if ($job.State -ne "Running") {
-                        $job | Out-File $log -Append
-                        $data = Receive-Job -name $currentItem.vmName
+                        "Job detail: Name=$($job.Name) State=$($job.State) HasErrors=$($job.HasMoreData)" | Out-File $log -Append
+                        $data = Receive-Job -name $currentItem.vmName 2>&1
+                        $dataStr = ($data | Out-String).Trim()
                         if ($wait.State -eq "Completed") {
-                            $data | Out-File $log -Append
+                            "Receive-Job output: $dataStr" | Out-File $log -Append
                         }
                         else {
-                            $data | Out-File $log -Append
-                            if ($data -is [String]) {
-                                Write-Error $data
-                            }
-                            return $data
+                            "Receive-Job output (job not running): $dataStr" | Out-File $log -Append
+                            $childErrors = ($job.ChildJobs | ForEach-Object { $_.Error } | Out-String).Trim()
+                            if ($childErrors) { "ChildJob errors: $childErrors" | Out-File $log -Append }
+                            $errMsg = if ($dataStr) { $dataStr } elseif ($childErrors) { $childErrors } else { "Job State: $($job.State), no output" }
+                            Write-Error $errMsg
+                            return $errMsg
                         }
                     }
 
