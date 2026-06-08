@@ -2460,8 +2460,55 @@ $global:VM_Config = {
                             }
                             $unreachable = $stillDown
                         }
+
+                        # Remediate any nodes still unreachable after basic retries
                         if ($unreachable.Count -gt 0) {
-                            "WinRM pre-flight: STILL UNREACHABLE after $maxRetries rounds: $($unreachable -join ', ') -- DSC push will likely fail for these nodes" | Out-File $log -Append
+                            "WinRM pre-flight: Diagnosing $($unreachable.Count) unreachable nodes" | Out-File $log -Append
+                            foreach ($node in [string[]]$unreachable) {
+                                # 1. DNS check -- is the name resolvable?
+                                try {
+                                    $dns = Resolve-DnsName -Name $node -Type A -DnsOnly -ErrorAction Stop
+                                    "WinRM pre-flight: $node DNS OK -> $($dns.IPAddress -join ', ')" | Out-File $log -Append
+                                }
+                                catch {
+                                    "WinRM pre-flight: $node DNS FAILED: $_ -- attempting ipconfig /registerdns via sc.exe" | Out-File $log -Append
+                                }
+
+                                # 2. Ping check -- is the node network-reachable?
+                                $pingOk = Test-Connection -ComputerName $node -Count 2 -Quiet -ErrorAction SilentlyContinue
+                                "WinRM pre-flight: $node ping $(if ($pingOk) { 'OK' } else { 'FAILED' })" | Out-File $log -Append
+
+                                # 3. Try restarting WinRM via RPC (sc.exe uses named pipes, not WinRM)
+                                if ($pingOk) {
+                                    "WinRM pre-flight: $node attempting WinRM service restart via sc.exe" | Out-File $log -Append
+                                    $scStop = sc.exe \\$node stop WinRM 2>&1
+                                    Start-Sleep -Seconds 3
+                                    $scStart = sc.exe \\$node start WinRM 2>&1
+                                    "WinRM pre-flight: $node sc.exe stop: $scStop" | Out-File $log -Append
+                                    "WinRM pre-flight: $node sc.exe start: $scStart" | Out-File $log -Append
+                                    Start-Sleep -Seconds 5
+
+                                    # Final check after remediation
+                                    try {
+                                        $null = Test-WSMan -ComputerName $node -Credential $creds -ErrorAction Stop
+                                        "WinRM pre-flight: $node NOW REACHABLE after WinRM restart" | Out-File $log -Append
+                                        $unreachable.Remove($node) | Out-Null
+                                    }
+                                    catch {
+                                        "WinRM pre-flight: $node still unreachable after WinRM restart: $_" | Out-File $log -Append
+                                    }
+                                }
+                            }
+                        }
+
+                        # Write unreachable nodes to a file so the host can reboot them
+                        $preflightFile = 'C:\staging\DSC\WinRM-preflight-failed.txt'
+                        if ($unreachable.Count -gt 0) {
+                            "WinRM pre-flight: STILL UNREACHABLE: $($unreachable -join ', ') -- writing to $preflightFile for host-side reboot" | Out-File $log -Append
+                            $unreachable -join "`n" | Set-Content -Path $preflightFile -Force -Encoding ASCII
+                        }
+                        else {
+                            Remove-Item -Path $preflightFile -Force -ErrorAction SilentlyContinue
                         }
                     }
 
@@ -2679,6 +2726,34 @@ $global:VM_Config = {
             }
             Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
+        }
+
+        # Host-side reboot: if the DC's pre-flight found unreachable nodes, restart them now
+        # so they come up clean before the self-recovery mechanism triggers.
+        if ($multiNodeDsc -and $currentItem.role -eq "DC") {
+            $preflightResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
+                $f = 'C:\staging\DSC\WinRM-preflight-failed.txt'
+                if (Test-Path $f) { (Get-Content $f -Raw).Trim() } else { '' }
+            } -DisplayName "DSC: Check pre-flight failures"
+            $failedNodes = if ($preflightResult.ScriptBlockOutput -and -not $preflightResult.ScriptBlockFailed) {
+                ($preflightResult.ScriptBlockOutput).Split("`n", [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            } else { @() }
+            if ($failedNodes.Count -gt 0) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Host-side reboot for $($failedNodes.Count) WinRM-unreachable nodes: $($failedNodes -join ', ')" -Warning -OutputStream
+                foreach ($failedNode in $failedNodes) {
+                    $vm = Get-VM -Name $failedNode -ErrorAction SilentlyContinue
+                    if ($vm) {
+                        Write-Log "[Phase $Phase]: ${failedNode}: Restarting to recover WinRM" -Warning
+                        Stop-VM2 -Name $failedNode
+                        Start-Sleep -Seconds 5
+                        Start-VM2 -Name $failedNode
+                        Wait-ForHeartbeat -VmName $failedNode | Out-Null
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: ${failedNode}: VM not found on this host, skipping reboot" -Warning
+                    }
+                }
+            }
         }
 
         # =============================================================
