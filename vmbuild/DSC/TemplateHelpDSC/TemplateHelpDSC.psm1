@@ -2713,6 +2713,15 @@ class ChangeSqlInstancePort {
         #    return $true
         #}
 
+        # Always ensure the firewall rule exists, even when the port is already correct.
+        # Without this, a default MSSQLSERVER on 1433 passes the port check, Set() is
+        # skipped, and the firewall rule inside Set() never runs.
+        $fwRule = Get-NetFirewallRule -DisplayName 'SQL over TCP Inbound (Named Instance)' -ErrorAction SilentlyContinue
+        if (-not $fwRule) {
+            Write-Verbose "[ChangeSqlInstancePort]: Firewall rule missing for port $_SQLInstancePort"
+            return $false
+        }
+
         try {
             # Load the assemblies
             Write-Verbose "[ChangeSqlInstancePort]: Testing port for $_SQLInstanceName"
@@ -3467,6 +3476,8 @@ class OpenFirewallPortForSCCM {
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1433' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1433 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 2433' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 2433 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'SQL over TCP  Inbound 1500' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1500 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL HADR Endpoint Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5022 -Group "For SQL Server"
+            New-NetFirewallRule -DisplayName 'SQL Browser Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol UDP -LocalPort 1434 -Group "For SQL Server"
             New-NetFirewallRule -DisplayName 'WMI' -Program "%systemroot%\system32\svchost.exe" -Service "winmgmt" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort Domain -Group "For SQL Server WMI"
             New-NetFirewallRule -DisplayName 'DCOM' -Program "%systemroot%\system32\svchost.exe" -Service "rpcss" -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 135 -Group "For SQL Server DCOM"
             New-NetFirewallRule -DisplayName 'SMB Provider Inbound' -Profile Any -Direction Inbound -Action Allow -Protocol TCP -LocalPort 445 -Group "For SQL Server"

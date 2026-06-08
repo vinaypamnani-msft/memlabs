@@ -37,6 +37,9 @@
     if ($ThisVM.role -eq "SiteSystem") {
         $firewallRoles += @("Management Point", "Distribution Point", "Software Update Point", "Reporting Services Point")
     }
+    if ($ThisVM.sqlVersion -and ("SQL Server" -notin $firewallRoles)) {
+        $firewallRoles += "SQL Server"
+    }
 
     # Domain creds
     [System.Management.Automation.PSCredential]$DomainCreds = New-Object System.Management.Automation.PSCredential ("${DomainName}\$($Admincreds.UserName)", $Admincreds.Password)
