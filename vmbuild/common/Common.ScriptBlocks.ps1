@@ -2766,6 +2766,77 @@ $global:VM_Config = {
                         Start-Sleep -Seconds 5
                         Start-VM2 -Name $failedNode
                         Wait-ForHeartbeat -VmName $failedNode | Out-Null
+
+                        # Immediately trigger DSC on the rebooted node instead of
+                        # waiting 3 min for the self-recovery timer in the monitoring loop.
+                        Write-Log "[Phase $Phase]: ${failedNode}: Triggering local DSC compile+start after reboot" -Warning -OutputStream
+                        $dscKickResult = Invoke-VmCommand -VmName $failedNode -VmDomainName $domainName -TimeoutSeconds 300 -ScriptBlock {
+                            param($DscFolder)
+                            $log = "C:\staging\DSC\DSC_Init.log"
+                            $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+                            "`r`n=====`r`nDSC_HostKick: $time`r`n=====" | Out-File $log -Append -Force
+
+                            $lcm = Get-DscLocalConfigurationManager
+                            if ($lcm.LCMState -ne 'Idle') {
+                                "LCM is $($lcm.LCMState), skipping -- DSC already running" | Out-File $log -Append
+                                return "LCM_$($lcm.LCMState)"
+                            }
+
+                            $Phase = $using:Phase
+                            $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
+                            $dscRole = "Phase$Phase"
+                            $dscConfigScript = "C:\staging\DSC\$DscFolder\$dscRole.ps1"
+                            $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                            $deployConfigPath = 'C:\staging\DSC\deployConfig.json'
+
+                            if (-not (Test-Path $dscConfigScript)) {
+                                "Script not found: $dscConfigScript" | Out-File $log -Append
+                                return "SCRIPT_NOT_FOUND"
+                            }
+
+                            $netbiosName = $deployConfig.vmOptions.domainNetBiosName
+                            $user = "$netbiosName\$($using:Common.LocalAdmin.UserName)"
+                            $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+
+                            $nodeName = $env:COMPUTERNAME
+                            $thisVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $nodeName }
+                            $cd = @{
+                                AllNodes = @(
+                                    @{ NodeName = '*'; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
+                                    @{ NodeName = $nodeName; Role = if ($thisVm) { $thisVm.Role } else { 'DomainMember' } }
+                                )
+                            }
+
+                            $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
+                            . "$dscConfigScript"
+
+                            "Compiling $dscRole for $nodeName (Role: $($cd.AllNodes[1].Role))" | Out-File $log -Append
+                            try {
+                                & "$dscRole" -DeployConfigPath $deployConfigPath -AdminCreds $creds -ConfigurationData $cd -OutputPath $dscConfigPath
+                            }
+                            catch {
+                                "Compilation failed: $_" | Out-File $log -Append
+                                return "COMPILE_FAILED"
+                            }
+
+                            $mofPath = Join-Path $dscConfigPath "$nodeName.mof"
+                            if (-not (Test-Path $mofPath)) {
+                                "MOF not found: $mofPath" | Out-File $log -Append
+                                return "MOF_NOT_FOUND"
+                            }
+
+                            Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
+                            "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
+                            Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
+                            return "STARTED"
+                        } -ArgumentList $DscFolder -DisplayName "DSC: Host-kick $failedNode"
+                        $kickOutput = if ($dscKickResult.ScriptBlockOutput) { $dscKickResult.ScriptBlockOutput } else { "no output" }
+                        if ($dscKickResult.ScriptBlockFailed) {
+                            Write-Log "[Phase $Phase]: ${failedNode}: Host-kick DSC failed: $kickOutput (self-recovery will retry)" -Warning
+                        }
+                        else {
+                            Write-Log "[Phase $Phase]: ${failedNode}: Host-kick DSC: $kickOutput" -OutputStream
+                        }
                     }
                     else {
                         Write-Log "[Phase $Phase]: ${failedNode}: VM not found on this host, skipping reboot" -Warning
