@@ -4301,7 +4301,8 @@ function Test-CMSiteWideFunctionality {
     # which may not match Apps.json's AppName field at all.
     #
     # Only verify when the deployment opted in to pre-populating objects
-    # AND when running against a Primary site (CAS doesn't run perfloading).
+    # AND when running against a Primary site (CAS runs perfloading but
+    # skips apps/packages/OSD — those are Primary-only content).
     #
     # cmOptions resolved per-VM ($ThisVM.cmOptions falling back to
     # $deployConfig.cmOptions) to match perfloading's own resolution -- a
@@ -4328,8 +4329,10 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner)
         $usePki = ($usePkiInner -eq 'True')
+        $prePop = ($prePopInner -eq 'True')
+        $isPrimary = ($vmRole -eq 'Primary')
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -4498,12 +4501,125 @@ function Test-CMSiteWideFunctionality {
             $results.Details.Add("WARN: Client push component query failed: $($_.Exception.Message)")
         }
 
+        # --- Perfloading object checks (only when PrePopulateObjects is enabled) ---
+        if ($prePop) {
+
+        # 6. Boot images — should exist; on Primary check distribution + command support
+        try {
+            $bootImgs = @(Get-WmiObject -Namespace $ns -Class SMS_BootImagePackage -ErrorAction Stop)
+            if ($bootImgs.Count -ge 1) {
+                $results.Details.Add("OK: $($bootImgs.Count) boot image(s) found")
+                if ($isPrimary) {
+                    foreach ($bi in $bootImgs) {
+                        $biName = $bi.Name
+                        $cmdSupport = [bool]$bi.EnableLabShell
+                        if (-not $cmdSupport) {
+                            $results.Details.Add("WARN: Boot image '$biName' does not have command support enabled")
+                        }
+                        # Check distribution — query SMS_PackageStatusDistPointsSummarizer
+                        try {
+                            $dpStatus = @(Get-WmiObject -Namespace $ns -Class SMS_PackageStatusDistPointsSummarizer `
+                                -Filter "PackageID='$($bi.PackageID)' AND State=0" -ErrorAction Stop)
+                            if ($dpStatus.Count -ge 1) {
+                                $results.Details.Add("OK: Boot image '$biName' distributed to $($dpStatus.Count) DP(s)")
+                            }
+                            else {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("WARN: Could not query distribution status for boot image '$biName': $($_.Exception.Message)")
+                        }
+                    }
+                }
+            }
+            else {
+                $results.Details.Add("WARN: No boot images found")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: SMS_BootImagePackage query failed: $($_.Exception.Message)")
+        }
+
+        # 7. Task sequences (Primary only) — MEMLABS-* should exist
+        if ($isPrimary) {
+            try {
+                $tsList = @(Get-WmiObject -Namespace $ns -Class SMS_TaskSequencePackage `
+                    -Filter "Name LIKE 'MEMLABS-%'" -ErrorAction Stop)
+                if ($tsList.Count -ge 1) {
+                    $results.Details.Add("OK: $($tsList.Count) MEMLABS task sequence(s) found")
+                }
+                else {
+                    $results.Details.Add("WARN: No MEMLABS-* task sequences found")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: SMS_TaskSequencePackage query failed: $($_.Exception.Message)")
+            }
+        }
+
+        # 8. Collections — MEMLABS-* device collections should exist
+        try {
+            $cols = @(Get-WmiObject -Namespace $ns -Class SMS_Collection `
+                -Filter "Name LIKE 'MEMLABS-%' AND CollectionType=2" -ErrorAction Stop)
+            if ($cols.Count -ge 5) {
+                $results.Details.Add("OK: $($cols.Count) MEMLABS device collection(s) found")
+            }
+            elseif ($cols.Count -ge 1) {
+                $results.Details.Add("WARN: Only $($cols.Count) MEMLABS device collection(s) found (expected 20+)")
+            }
+            else {
+                $results.Details.Add("WARN: No MEMLABS-* device collections found")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: SMS_Collection query failed: $($_.Exception.Message)")
+        }
+
+        # 9. Packages (Primary only) — MEMLABS-* should exist
+        if ($isPrimary -and $expectedApps -and $expectedApps.Count -gt 0) {
+            try {
+                $pkgs = @(Get-WmiObject -Namespace $ns -Class SMS_Package `
+                    -Filter "Name LIKE 'MEMLABS-%'" -ErrorAction Stop)
+                if ($pkgs.Count -ge 1) {
+                    $results.Details.Add("OK: $($pkgs.Count) MEMLABS package(s) found")
+                }
+                else {
+                    $results.Details.Add("WARN: No MEMLABS-* packages found")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: SMS_Package query failed: $($_.Exception.Message)")
+            }
+        }
+
+        # 10. Scripts — MEMLABS-* should exist
+        try {
+            $scripts = @(Get-WmiObject -Namespace $ns -Class SMS_Scripts `
+                -Filter "ScriptName LIKE 'MEMLABS-%'" -ErrorAction Stop)
+            if ($scripts.Count -ge 5) {
+                $results.Details.Add("OK: $($scripts.Count) MEMLABS script(s) imported")
+            }
+            elseif ($scripts.Count -ge 1) {
+                $results.Details.Add("WARN: Only $($scripts.Count) MEMLABS script(s) found (expected 50+)")
+            }
+            else {
+                $results.Details.Add("WARN: No MEMLABS-* scripts found")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: SMS_Scripts query failed: $($_.Exception.Message)")
+        }
+
+        } # end prePop checks
+
         return $results
     }
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
