@@ -310,20 +310,19 @@
             Status    = "Promoting to Domain Controller (this takes 10-20 minutes)"
         }
 
-        ADDomainController 'DomainControllerAllProperties' {
+        PromoteDomainController 'DomainControllerAllProperties' {
             DomainName                    = $DomainName
             Credential                    = $DomainCreds
             SafeModeAdministratorPassword = $DomainCreds
             DatabasePath                  = 'C:\Windows\NTDS'
             LogPath                       = 'C:\Windows\Logs'
             SysvolPath                    = 'C:\Windows\SYSVOL'
-            #SiteName                      = 'Europe'
             IsGlobalCatalog               = $true
             InstallDns                    = $true
             DependsOn                     = "[WriteStatus]PromoteDC"
         }
 
-        $nextDepend = '[ADDomainController]DomainControllerAllProperties'
+        $nextDepend = '[PromoteDomainController]DomainControllerAllProperties'
 
         # Now that DNS server role is installed (InstallDns=$true above),
         # point DNS at self first for the local AD-integrated zones, with

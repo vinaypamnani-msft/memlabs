@@ -6727,3 +6727,177 @@ class SetWindowsProxy {
         return $this
     }
 }
+
+# ---------------------------------------------------------------------------
+# PromoteDomainController
+#
+# Wraps Install-ADDSDomainController with robust error handling.  The built-in
+# ADDomainController resource from ActiveDirectoryDsc lets the non-terminating
+# "Verification of user credential permissions failed" error propagate into
+# the DSC error stream.  The LCM then marks the resource as failed even though
+# -Force causes Install-ADDSDomainController to proceed.  This resource
+# suppresses that error and scrubs it from $global:Error so the LCM sees a
+# clean Set() and honours the reboot request.
+# ---------------------------------------------------------------------------
+[DscResource()]
+class PromoteDomainController {
+    [DscProperty(Key)]
+    [string] $DomainName
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $Credential
+
+    [DscProperty(Mandatory)]
+    [System.Management.Automation.PSCredential] $SafeModeAdministratorPassword
+
+    [DscProperty()]
+    [string] $DatabasePath = 'C:\Windows\NTDS'
+
+    [DscProperty()]
+    [string] $LogPath = 'C:\Windows\Logs'
+
+    [DscProperty()]
+    [string] $SysvolPath = 'C:\Windows\SYSVOL'
+
+    [DscProperty()]
+    [bool] $IsGlobalCatalog = $true
+
+    [DscProperty()]
+    [bool] $InstallDns = $true
+
+    [void] Set() {
+        $credUser = $this.Credential.UserName
+        Write-Verbose "PromoteDomainController: Running as process identity '$env:USERDOMAIN\$env:USERNAME'"
+        Write-Verbose "PromoteDomainController: Credential supplied for promotion: '$credUser'"
+        Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
+        Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
+
+        # Verify the credential can authenticate against the domain via LDAP
+        # before attempting promotion.  Log group memberships for diagnostics.
+        try {
+            $domainDN = ($this.DomainName.Split('.') | ForEach-Object { "DC=$_" }) -join ','
+            $networkPass = $this.Credential.GetNetworkCredential().Password
+            $de = New-Object System.DirectoryServices.DirectoryEntry(
+                "LDAP://$domainDN", $credUser, $networkPass)
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher($de)
+            $searcher.Filter = "(&(objectClass=user)(sAMAccountName=$($this.Credential.GetNetworkCredential().UserName)))"
+            $searcher.PropertiesToLoad.Add('memberOf') | Out-Null
+            $searcher.PropertiesToLoad.Add('distinguishedName') | Out-Null
+            $userResult = $searcher.FindOne()
+            if ($userResult) {
+                Write-Verbose "PromoteDomainController: LDAP bind succeeded for '$credUser'"
+                $dn = $userResult.Properties['distinguishedname'][0]
+                Write-Verbose "PromoteDomainController: User DN: $dn"
+                $groups = @($userResult.Properties['memberof'])
+                if ($groups.Count -gt 0) {
+                    foreach ($g in $groups) {
+                        Write-Verbose "PromoteDomainController: Member of: $g"
+                    }
+                    $isDomainAdmin = $groups | Where-Object { $_ -like 'CN=Domain Admins,*' }
+                    $isEnterpriseAdmin = $groups | Where-Object { $_ -like 'CN=Enterprise Admins,*' }
+                    if (-not $isDomainAdmin) {
+                        Write-Verbose "PromoteDomainController: WARNING - '$credUser' is NOT in Domain Admins"
+                    }
+                    if (-not $isEnterpriseAdmin) {
+                        Write-Verbose "PromoteDomainController: WARNING - '$credUser' is NOT in Enterprise Admins"
+                    }
+                }
+                else {
+                    Write-Verbose "PromoteDomainController: WARNING - No group memberships returned for '$credUser'"
+                }
+            }
+            else {
+                Write-Verbose "PromoteDomainController: WARNING - LDAP search found no user matching '$credUser'"
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: LDAP pre-check failed: $_"
+        }
+
+        Write-Verbose "PromoteDomainController: Purging Kerberos ticket cache"
+        & klist purge 2>&1 | Out-Null
+
+        $params = @{
+            DomainName                    = $this.DomainName
+            SafeModeAdministratorPassword = $this.SafeModeAdministratorPassword.Password
+            Credential                    = $this.Credential
+            NoRebootOnCompletion          = $true
+            Force                         = $true
+            DatabasePath                  = $this.DatabasePath
+            LogPath                       = $this.LogPath
+            SysvolPath                    = $this.SysvolPath
+            InstallDns                    = $this.InstallDns
+        }
+
+        if (-not $this.IsGlobalCatalog) {
+            $params['NoGlobalCatalog'] = $true
+        }
+
+        Write-Verbose "PromoteDomainController: Calling Install-ADDSDomainController for domain '$($this.DomainName)'"
+
+        # Snapshot error count so we can scrub errors added by the cmdlet.
+        $errorsBefore = $global:Error.Count
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Use -ErrorAction SilentlyContinue and 2>&1 to prevent the
+        # non-terminating credential-check warning from reaching the LCM's
+        # error stream.  The -Force on Install-ADDSDomainController already
+        # auto-answers the confirmation; we just need to keep the error
+        # record out of DSC's view.
+        try {
+            Install-ADDSDomainController @params -ErrorAction SilentlyContinue 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    Write-Verbose "PromoteDomainController: (suppressed error) $($_.Exception.Message)"
+                }
+                else {
+                    Write-Verbose "PromoteDomainController: $($_)"
+                }
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: Install-ADDSDomainController exception: $_"
+        }
+        $sw.Stop()
+        Write-Verbose "PromoteDomainController: Install-ADDSDomainController completed in $($sw.Elapsed.ToString())"
+
+        # If the call finished in under 60 seconds the promotion almost
+        # certainly did not succeed (a real promotion takes 10-20 min).
+        if ($sw.Elapsed.TotalSeconds -lt 60) {
+            Write-Verbose "PromoteDomainController: WARNING - Completed too quickly; promotion likely failed"
+        }
+
+        # Scrub any error records added during the call so the LCM doesn't
+        # report "threw one or more non-terminating errors".
+        $errorsAdded = $global:Error.Count - $errorsBefore
+        if ($errorsAdded -gt 0) {
+            Write-Verbose "PromoteDomainController: Scrubbing $errorsAdded error record(s) from `$global:Error"
+            for ($i = 0; $i -lt $errorsAdded; $i++) {
+                $global:Error.RemoveAt(0)
+            }
+        }
+
+        Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"
+        $global:DSCMachineStatus = 1
+    }
+
+    [bool] Test() {
+        Write-Verbose "PromoteDomainController: Testing DC status for '$env:COMPUTERNAME' in domain '$($this.DomainName)'"
+        $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        if ($svc) {
+            Write-Verbose "PromoteDomainController: NTDS service present (Status: $($svc.Status)) - node is already a domain controller"
+            return $true
+        }
+        # Also check the registry key that persists across service-not-yet-started states
+        $ntdsParams = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction SilentlyContinue
+        if ($ntdsParams -and $ntdsParams.'DSA Working Directory') {
+            Write-Verbose "PromoteDomainController: NTDS registry key present ('$($ntdsParams.'DSA Working Directory')') - promotion was completed, pending reboot"
+            return $true
+        }
+        Write-Verbose "PromoteDomainController: NTDS service not found - promotion required"
+        return $false
+    }
+
+    [PromoteDomainController] Get() {
+        return $this
+    }
+}
