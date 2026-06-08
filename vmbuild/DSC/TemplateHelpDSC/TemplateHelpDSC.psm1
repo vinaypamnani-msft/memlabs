@@ -1,4 +1,4 @@
-﻿enum Ensure {
+enum Ensure {
     Absent
     Present
 }
@@ -6810,22 +6810,32 @@ class PromoteDomainController {
         Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
         Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
 
-        # Check if a previous promotion created ntds.dit.  The NTDS *service*
-        # is created by Install-WindowsFeature and exists before any promotion,
-        # so we can't use it as the indicator.
-        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        # Check if a previous promotion succeeded by looking for the Netlogon
+        # SysVol registry key (same check the ADDomain resource uses).  This
+        # key is only written after a fully successful promotion — not by
+        # Install-WindowsFeature and not by a partial/failed promotion.
+        $previousPromotion = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $previousPromotion = $true
+            }
+        }
+        catch {}
+
         $existingSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
         $svcStatus = if ($existingSvc) { $existingSvc.Status } else { 'N/A' }
-        Write-Verbose "PromoteDomainController: NTDS service status: $svcStatus, ntds.dit exists: $(Test-Path $ditPath)"
+        Write-Verbose "PromoteDomainController: NTDS service status: $svcStatus, previous promotion: $previousPromotion"
 
         if ($existingSvc -and $existingSvc.Status -eq 'Running') {
             Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
             return
         }
 
-        if (Test-Path $ditPath) {
-            # ntds.dit exists — a previous promotion ran.  Try to start NTDS.
-            Write-Verbose "PromoteDomainController: ntds.dit found - previous promotion exists. Attempting to start NTDS."
+        if ($previousPromotion) {
+            # Promotion succeeded previously but NTDS isn't running.  Try to start it.
+            Write-Verbose "PromoteDomainController: Previous promotion detected. Attempting to start NTDS."
             try {
                 Start-Service -Name 'NTDS' -ErrorAction Stop
                 $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
@@ -6833,11 +6843,17 @@ class PromoteDomainController {
                 return
             }
             catch {
-                Write-Verbose "PromoteDomainController: Could not start NTDS: $_"
+                Write-Verbose "PromoteDomainController: Could not start NTDS: $_ - requesting reboot"
+                $global:DSCMachineStatus = 1
+                return
             }
+        }
 
-            # NTDS won't start — partial/corrupt promotion.  Force-remove it.
-            Write-Verbose "PromoteDomainController: Detected failed promotion - force-removing DC role"
+        # No previous successful promotion.  Check for stale ntds.dit from a
+        # partial/failed attempt and clean it up before re-promoting.
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        if (Test-Path $ditPath) {
+            Write-Verbose "PromoteDomainController: Stale ntds.dit found without SysVol - force-removing failed promotion"
             $errorsBefore = $global:Error.Count
             try {
                 $dsrmPass = $this.SafeModeAdministratorPassword.Password
@@ -6851,7 +6867,6 @@ class PromoteDomainController {
             catch {
                 Write-Verbose "PromoteDomainController: Force-removal exception: $_"
             }
-            # Scrub errors from the removal
             $errorsAdded = $global:Error.Count - $errorsBefore
             if ($errorsAdded -gt 0) {
                 for ($i = 0; $i -lt $errorsAdded; $i++) {
@@ -6859,16 +6874,15 @@ class PromoteDomainController {
                 }
             }
 
-            # If ntds.dit is still there, need reboot before re-promoting.
             if (Test-Path $ditPath) {
-                Write-Verbose "PromoteDomainController: ntds.dit still present after force-removal - requesting reboot before re-promote"
+                Write-Verbose "PromoteDomainController: ntds.dit still present after force-removal - requesting reboot"
                 $global:DSCMachineStatus = 1
                 return
             }
-            Write-Verbose "PromoteDomainController: Force-removal complete - proceeding to re-promote"
+            Write-Verbose "PromoteDomainController: Force-removal complete - proceeding to fresh promotion"
         }
         else {
-            Write-Verbose "PromoteDomainController: No previous promotion detected (ntds.dit absent) - fresh promotion"
+            Write-Verbose "PromoteDomainController: No previous promotion detected - fresh promotion"
         }
 
         # Verify the credential can authenticate against the domain via LDAP
@@ -6974,16 +6988,22 @@ class PromoteDomainController {
                 $global:Error.RemoveAt(0)
             }
         }
-        # Verify the promotion created the AD database.
+        # Verify the promotion succeeded by checking the Netlogon SysVol key.
+        $promotionVerified = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $promotionVerified = $true
+            }
+        }
+        catch {}
         $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
-        if (Test-Path $ditPath) {
-            Write-Verbose "PromoteDomainController: ntds.dit created at '$ditPath' - promotion succeeded"
-        }
-        else {
-            Write-Verbose "PromoteDomainController: WARNING - ntds.dit does NOT exist at '$ditPath' after Install-ADDSDomainController; promotion failed"
-        }
         $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-        Write-Verbose "PromoteDomainController: Post-install NTDS service status: $(if ($postSvc) { $postSvc.Status } else { 'not found' })"
+        Write-Verbose "PromoteDomainController: Post-install - SysVol verified: $promotionVerified, ntds.dit exists: $(Test-Path $ditPath), NTDS: $(if ($postSvc) { $postSvc.Status } else { 'not found' })"
+        if (-not $promotionVerified) {
+            Write-Verbose "PromoteDomainController: WARNING - Netlogon SysVol key not present after Install-ADDSDomainController; promotion may have failed"
+        }
 
         Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"
         $global:DSCMachineStatus = 1
@@ -6992,26 +7012,41 @@ class PromoteDomainController {
     [bool] Test() {
         Write-Verbose "PromoteDomainController: Testing DC status for '$env:COMPUTERNAME' in domain '$($this.DomainName)'"
 
-        # The NTDS *service* is created by Install-WindowsFeature AD-Domain-Services
-        # (before any promotion), so its existence alone means nothing.
-        # Check whether NTDS is actually Running — that's the only state that
-        # proves the node is a fully promoted and functional domain controller.
-        $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-        if ($svc -and $svc.Status -eq 'Running') {
-            Write-Verbose "PromoteDomainController: NTDS service is Running - node is a fully promoted domain controller"
-            return $true
+        # Use the same check as the ADDomain resource from ActiveDirectoryDsc:
+        # the Netlogon SysVol registry key is only written after a fully
+        # successful DC promotion.  Install-WindowsFeature AD-Domain-Services
+        # does NOT create it, so this reliably distinguishes 'role installed'
+        # from 'actually promoted'.
+        $promotionComplete = $false
+        try {
+            $nlSysvol = Get-ItemPropertyValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'SysVol' -ErrorAction Stop
+            $domainSysVol = Join-Path $nlSysvol $this.DomainName
+            if (Test-Path $domainSysVol) {
+                $promotionComplete = $true
+                Write-Verbose "PromoteDomainController: Netlogon SysVol path '$domainSysVol' exists"
+            }
+            else {
+                Write-Verbose "PromoteDomainController: Netlogon SysVol registry set but domain path '$domainSysVol' missing"
+            }
+        }
+        catch {
+            Write-Verbose "PromoteDomainController: Netlogon SysVol registry key not present - not promoted"
         }
 
-        # ntds.dit is created by Install-ADDSDomainController.  If it exists
-        # the promotion ran but NTDS hasn't started yet (needs reboot or start).
-        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
-        if (Test-Path $ditPath) {
-            Write-Verbose "PromoteDomainController: ntds.dit found at '$ditPath' but NTDS is not running (Status: $(if ($svc) { $svc.Status } else { 'N/A' })) - needs start or reboot"
+        if (-not $promotionComplete) {
+            Write-Verbose "PromoteDomainController: Promotion not complete - Set() required"
             return $false
         }
 
-        $svcStatus = if ($svc) { "present (Status: $($svc.Status)) - AD DS role installed but not promoted" } else { 'not found' }
-        Write-Verbose "PromoteDomainController: ntds.dit not found; NTDS service $svcStatus - promotion required"
+        # Promotion completed.  Return true only if NTDS is Running so that
+        # downstream resources (DNS forwarders etc.) have a working AD.
+        $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Verbose "PromoteDomainController: NTDS is Running - fully promoted and operational"
+            return $true
+        }
+
+        Write-Verbose "PromoteDomainController: Promotion complete but NTDS is $(if ($svc) { $svc.Status } else { 'not found' }) - needs start or reboot"
         return $false
     }
 
@@ -7019,3 +7054,5 @@ class PromoteDomainController {
         return $this
     }
 }
+
+
