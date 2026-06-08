@@ -1,4 +1,4 @@
-enum Ensure {
+﻿enum Ensure {
     Absent
     Present
 }
@@ -272,7 +272,7 @@ class InstallADK {
             $proc = Start-Process -FilePath $exe -ArgumentList $full -Wait -PassThru -NoNewWindow
             $code = $proc.ExitCode
             Write-Status ("ADK {0}: adksetup exit code: {1} (0x{2:x})" -f $label, $code, $code)
-            # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — install succeeded, reboot needed.
+            # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED -- install succeeded, reboot needed.
             # Don't enter the diagnostics/dead-link-probe path for 3010.
             if ($code -ne 0 -and $code -ne 3010) {
                 $errLines = @()
@@ -1606,7 +1606,7 @@ class WaitForExtendSchemaFile {
         # Force AD Replication (job-based with timeout; repadmin can hang if a
         # DC's NTDS is still initializing, e.g. BDC just promoted).
         # Omit the DN argument so /AdeP walks ALL partitions (Domain,
-        # Configuration, AND Schema) — schema extension targets
+        # Configuration, AND Schema) -- schema extension targets
         # CN=Schema,CN=Configuration,... which is a separate NC from
         # the domain DN.
         $domainControllers = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
@@ -1650,7 +1650,7 @@ class WaitForExtendSchemaFile {
                 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
                 $schemaAdminsSID = (Get-ADGroup "Schema Admins" -ErrorAction Stop).SID
                 if ($currentUser.Groups -notcontains $schemaAdminsSID) {
-                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins — extadsch.exe will likely fail. Ensure PsDscRunAsCredential is set to a domain admin account."
+                    Write-Status "WARNING: Current identity '$($currentUser.Name)' is not in Schema Admins -- extadsch.exe will likely fail. Ensure PsDscRunAsCredential is set to a domain admin account."
                 }
                 else {
                     Write-Status "Schema Admin membership confirmed for '$($currentUser.Name)'"
@@ -1701,7 +1701,7 @@ class WaitForExtendSchemaFile {
                     while ($sw.Elapsed.TotalSeconds -lt 60) {
                         Start-Sleep -Seconds 10
                         $chk = & repadmin /replsummary 2>&1
-                        # Look for error/fail indicators — more reliable than
+                        # Look for error/fail indicators -- more reliable than
                         # parsing error codes, since replsummary format varies by OS.
                         # Exclude header lines ("Source DSA ... largest delta  fails/total %  error"
                         # and the matching Destination DSA header) which contain the
@@ -1744,14 +1744,14 @@ class WaitForExtendSchemaFile {
                     Write-Status "Schema extension failed (attempt $attempt): $($failLines -join ' | ')"
                 }
                 else {
-                    # extadsch.exe ran but didn't produce a log — likely a
+                    # extadsch.exe ran but didn't produce a log -- likely a
                     # permissions or working-directory issue, not a schema
                     # problem.  Note: extadsch.exe writes diagnostics to
                     # C:\ExtADSch.log, not stdout, so console capture is
                     # usually empty.  A missing log typically means a
                     # filesystem ACL or working-directory problem on C:\.
                     $consoleOut = if ($extOutput) { ($extOutput | Select-Object -First 5) -join ' | ' } else { '(no output)' }
-                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log at $logFile — check C:\ filesystem permissions. Console: $consoleOut"
+                    Write-Status "Schema extension (attempt $attempt): extadsch.exe produced no log at $logFile -- check C:\ filesystem permissions. Console: $consoleOut"
                 }
 
                 if ($attempt -lt $maxAttempts) {
@@ -1759,7 +1759,7 @@ class WaitForExtendSchemaFile {
                     Write-Status "Retrying schema extension in ${delay}s..."
                     Start-Sleep -Seconds $delay
 
-                    # Force replication before retry — omit DN so all partitions
+                    # Force replication before retry -- omit DN so all partitions
                     # (including Schema NC) are synced
                     $dcList = Get-ADDomainController -Filter * -ErrorAction SilentlyContinue
                     if ($dcList.Count -gt 1) {
@@ -1949,7 +1949,7 @@ class DelegateControl {
             Write-Verbose "Result $result"
             Write-Verbose "dsacls.exe exit code: $dsaclsExitCode"
 
-            # Error 1332 = "No Sid Found" — the computer account hasn't
+            # Error 1332 = "No Sid Found" -- the computer account hasn't
             # replicated to this DC yet. Force AD replication once, then
             # try targeting the PDC emulator directly.
             if ($dsaclsExitCode -eq 1332 -and -not $forcedReplication) {
@@ -2922,7 +2922,7 @@ class RegisterTaskScheduler {
 
         $Task = New-ScheduledTask -Action $Action -Description $TaskDescription -Principal $Principal
 
-        # Register with retry — domain trust failures are transient (AD replication lag
+        # Register with retry -- domain trust failures are transient (AD replication lag
         # can cause "trust relationship failed" for 10-20 min in large deployments)
         $registered = $false
         $maxRegAttempts = 40  # 40 × 30s = 20 min max wait
@@ -3999,7 +3999,7 @@ class WaitForClusterAccess {
             $results.Add("Ping:ERR($($_.Exception.Message))")
         }
 
-        # TCP 135 (RPC endpoint mapper — used by Get-Cluster)
+        # TCP 135 (RPC endpoint mapper -- used by Get-Cluster)
         try {
             $tcp135 = Test-NetConnection -ComputerName $ip -Port 135 -WarningAction SilentlyContinue -ErrorAction Stop
             $results.Add("TCP135:$(if ($tcp135.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
@@ -4008,7 +4008,7 @@ class WaitForClusterAccess {
             $results.Add("TCP135:ERR")
         }
 
-        # TCP 445 (SMB — used for cluster admin shares)
+        # TCP 445 (SMB -- used for cluster admin shares)
         try {
             $tcp445 = Test-NetConnection -ComputerName $ip -Port 445 -WarningAction SilentlyContinue -ErrorAction Stop
             $results.Add("TCP445:$(if ($tcp445.TcpTestSucceeded) { 'OK' } else { 'CLOSED' })")
@@ -4051,7 +4051,7 @@ class WaitForClusterAccess {
         }
         catch {
             $nameErr = $_.Exception.Message
-            # Try via IP — if this works, it's a name-based access issue
+            # Try via IP -- if this works, it's a name-based access issue
             # (Cluster Name resource offline or CNO not accessible by name)
             $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
             if ($_ClusterIP) {
@@ -4077,10 +4077,10 @@ class WaitForClusterAccess {
 
                     if ($nameResOnline) {
                         # Cluster Name resource is Online but Get-Cluster by name
-                        # still failed — force DNS re-registration and retry once
+                        # still failed -- force DNS re-registration and retry once
                         # by name. xCluster and other resources connect by name,
                         # so we can't accept IP-only access.
-                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online — forcing DNS update and retrying by name"
+                        Write-Status "Get-Cluster by name failed but by IP $_ClusterIP succeeded; Cluster Name resource is Online -- forcing DNS update and retrying by name"
                         try {
                             $nameRes2 = Get-ClusterResource -Cluster $_ClusterIP -ErrorAction Stop |
                                 Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' -and $_.ResourceType -eq 'Network Name' }
@@ -4100,12 +4100,12 @@ class WaitForClusterAccess {
                             $this.LastError = $null
                             return $true
                         } catch {
-                            $this.LastError = "Get-Cluster by name still fails after DNS update ($($_.Exception.Message)); IP $_ClusterIP works, Cluster Name Online — will retry"
+                            $this.LastError = "Get-Cluster by name still fails after DNS update ($($_.Exception.Message)); IP $_ClusterIP works, Cluster Name Online -- will retry"
                             return $false
                         }
                     }
 
-                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED — Cluster Name resource not Online"
+                    $this.LastError = "Get-Cluster by name FAILED ($nameErr) but by IP $_ClusterIP SUCCEEDED -- Cluster Name resource not Online"
                     return $false
                 }
                 catch {
@@ -4128,7 +4128,7 @@ class WaitForClusterAccess {
             if ($localCluster.Name -eq $name) {
                 $actions.Add("Local cluster found")
 
-                # Check all resources in the Cluster Group — the "Cluster Name" and
+                # Check all resources in the Cluster Group -- the "Cluster Name" and
                 # "Cluster IP Address" resources must be Online for remote access.
                 $clusterGroup = Get-ClusterGroup -Name "Cluster Group" -ErrorAction Stop
                 $groupState = $clusterGroup.State
@@ -4216,7 +4216,7 @@ class WaitForClusterAccess {
             Write-Verbose "Not on a cluster node or local cluster not named '$name': $_"
             $actions.Add("LocalCheck: $_")
 
-            # Not on a cluster node — try connecting remotely via IP to fix Cluster Name resource.
+            # Not on a cluster node -- try connecting remotely via IP to fix Cluster Name resource.
             # This is the typical path for ClusterNode2 which hasn't joined the cluster yet.
             $_ClusterIP = $this.StripCidr($this.ClusterIPAddress)
             if ($_ClusterIP) {
@@ -4445,7 +4445,7 @@ class WaitForClusterAccess {
             Write-Verbose "Cluster '$_ClusterName' is accessible by name."
             return $true
         }
-        Write-Verbose "Cluster '$_ClusterName' is not accessible by name ($($this.LastError)) — will attempt DNS repair."
+        Write-Verbose "Cluster '$_ClusterName' is not accessible by name ($($this.LastError)) -- will attempt DNS repair."
         return $false
     }
 
@@ -4465,7 +4465,7 @@ class WaitForClusterAccess {
 # Impersonation helpers (matching FailoverClusterDsc pattern).
 # LogonUser with LOGON32_LOGON_NEW_CREDENTIALS (type 9) creates a token that
 # uses the supplied credentials for network access while keeping the local
-# identity — this solves the Kerberos double-hop without needing WinRM loopback.
+# identity -- this solves the Kerberos double-hop without needing WinRM loopback.
 function Get-ImpersonateLib {
     if ($script:ImpersonateLib) {
         return $script:ImpersonateLib
@@ -4575,11 +4575,11 @@ class JoinClusterByIP {
                 Write-Status "Successfully created cluster '$_ClusterName'"
             }
             else {
-                # Check for existing node in Down state — must remove before re-adding
+                # Check for existing node in Down state -- must remove before re-adding
                 try {
                     $existingNode = Get-ClusterNode -Cluster $_ClusterIP -Name $_NodeName -ErrorAction SilentlyContinue -Verbose:$false
                     if ($existingNode -and $existingNode.State -eq 'Down') {
-                        Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' — removing before re-add"
+                        Write-Status "Node '$_NodeName' is in Down state in cluster '$_ClusterName' -- removing before re-add"
                         Remove-ClusterNode -Name $_NodeName -Cluster $_ClusterIP -Force -ErrorAction Stop -Verbose:$false
                         Write-Status "Removed downed node '$_NodeName' from cluster '$_ClusterName'"
                     }
@@ -4627,8 +4627,8 @@ class JoinClusterByIP {
                     Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' (State: $($node.State))"
                     return $true
                 }
-                # Down state — return $false so Set can remove and re-add
-                Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' but state is '$($node.State)' — will remove and re-add"
+                # Down state -- return $false so Set can remove and re-add
+                Write-Verbose "Node '$_NodeName' is a member of cluster '$_ClusterName' but state is '$($node.State)' -- will remove and re-add"
                 return $false
             }
         }
@@ -4708,7 +4708,7 @@ class ClusterRemoveUnwantedIPs {
                 }
             }
             # Only clean IPs from the "Cluster Group" (the cluster's own identity).
-            # Do NOT touch IP resources in AG listener groups — those belong to
+            # Do NOT touch IP resources in AG listener groups -- those belong to
             # the availability group and use domain-subnet IPs by design.
             $clusterGroupResources = $Cluster | Where-Object { $_.OwnerGroup.Name -eq 'Cluster Group' }
             $ipParams = $clusterGroupResources | Where-Object { $_.ResourceType -eq "IP Address" } | Get-ClusterParameter -Name "Address" | Select-Object ClusterObject, Value
@@ -5406,7 +5406,7 @@ class InstallPBIRS {
                 $pbirsProc = Start-Process -FilePath $pbirsSetup -ArgumentList $PBIRSargs -Wait -PassThru
                 $pbirsExit = $pbirsProc.ExitCode
                 Write-Status ("PBIRS bootstrapper exit code: $pbirsExit (0x{0:x})" -f $pbirsExit)
-                # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED — install succeeded, reboot needed.
+                # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED -- install succeeded, reboot needed.
                 # Treat it the same as exit 0 for the path-verification check.
                 $pbirsOk = ($pbirsExit -eq 0 -or $pbirsExit -eq 3010)
                 if ($pbirsOk -and (Test-Path -LiteralPath $verifyPbirs)) {
@@ -5421,9 +5421,9 @@ class InstallPBIRS {
                 if ($pbirsOk) {
                     # 3010 without SSRS folder: bootstrapper saw a pending reboot (likely from
                     # a prior uninstall or VC++ redist) and returned immediately without
-                    # installing anything. Retrying won't help — need to reboot first.
+                    # installing anything. Retrying won't help -- need to reboot first.
                     if ($pbirsExit -eq 3010) {
-                        Write-Status "PBIRS returned 3010 but SSRS folder missing — pending reboot blocking install. Requesting reboot."
+                        Write-Status "PBIRS returned 3010 but SSRS folder missing -- pending reboot blocking install. Requesting reboot."
                         $needsReboot = $true
                         break
                     }
@@ -5436,7 +5436,7 @@ class InstallPBIRS {
                     }
                 }
                 if ($pbirsAttempt -lt $pbirsMaxAttempts) {
-                    # Exit 87 (ERROR_INVALID_PARAMETER) is often transient — file lock,
+                    # Exit 87 (ERROR_INVALID_PARAMETER) is often transient -- file lock,
                     # bootstrapper collision, etc. Sleep and retry before resorting to
                     # uninstall which can leave a pending 3010 that poisons the next attempt.
                     if ($pbirsExit -eq 87) {
@@ -5451,7 +5451,7 @@ class InstallPBIRS {
                         $unExit = $unProc.ExitCode
                         Write-Status ("PBIRS /uninstall returned $unExit.")
                         # If the uninstall itself needs a reboot, retrying the install is
-                        # futile — the bootstrapper will return 3010 without doing real work.
+                        # futile -- the bootstrapper will return 3010 without doing real work.
                         if ($unExit -eq 3010) {
                             Write-Status "Uninstall requires reboot (3010). Requesting reboot; install will resume after."
                             $needsReboot = $true
@@ -5465,7 +5465,7 @@ class InstallPBIRS {
             }
             if (-not (Test-Path -LiteralPath $verifyPbirs)) {
                 if ($needsReboot) {
-                    # Don't throw — let Set() exit normally so DSC processes the reboot
+                    # Don't throw -- let Set() exit normally so DSC processes the reboot
                     # signal. After reboot, Test() will return false (config file still
                     # missing) and LCM will call Set() again for a clean install.
                     Write-Status "PBIRS not yet installed; reboot pending. LCM will re-run Set() after reboot."
@@ -6481,7 +6481,7 @@ class DisableClusterNicDnsRegistration {
             # Disable IPv6 on the cluster NIC to prevent AAAA record registration.
             Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
 
-            # Remove default gateway from cluster NIC — heartbeat NICs should never
+            # Remove default gateway from cluster NIC -- heartbeat NICs should never
             # route externally. DHCP may have handed one out before the scope was fixed.
             $gateway = Get-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
             if ($gateway) {
@@ -6603,7 +6603,7 @@ class DisableClusterNicDnsRegistration {
     }
 
     [bool] Test() {
-        # Always return false — Set() is idempotent and performs its own checks
+        # Always return false -- Set() is idempotent and performs its own checks
         # before modifying anything. Avoids PS 5.1 class-method output-stream
         # leak where Resolve-DnsName emits a VerboseRecord to stdout (stream 1),
         # which DSC collects alongside the boolean and rejects with:
@@ -6812,7 +6812,7 @@ class PromoteDomainController {
 
         # Check if a previous promotion succeeded by looking for the Netlogon
         # SysVol registry key (same check the ADDomain resource uses).  This
-        # key is only written after a fully successful promotion — not by
+        # key is only written after a fully successful promotion -- not by
         # Install-WindowsFeature and not by a partial/failed promotion.
         $previousPromotion = $false
         try {
