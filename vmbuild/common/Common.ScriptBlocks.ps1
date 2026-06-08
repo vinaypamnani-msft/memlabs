@@ -2718,11 +2718,15 @@ $global:VM_Config = {
                 $dscStatusPolls++
 
                 # Self-recovery: if the DC was supposed to push DSC to this
-                # node but nothing arrived after 3 minutes, compile and start
-                # DSC locally.  This handles transient WinRM failures during
-                # the DC's multi-node Start-DscConfiguration push.
-                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted -and $stopWatch.Elapsed.TotalMinutes -gt 3) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after 3 min -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
+                # node but nothing arrived, compile and start DSC locally.
+                # This handles transient WinRM/DNS failures during the DC's
+                # multi-node Start-DscConfiguration push.
+                # Base timeout: 3 min.  Add 20s per VM beyond 10 to give
+                # the DC time to push to large labs sequentially.
+                $nodeCount = @($ConfigurationData.AllNodes | Where-Object { $_.NodeName -ne '*' }).Count
+                $recoveryMinutes = 3 + [Math]::Max(0, ($nodeCount - 10) * 20 / 60)
+                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted -and $stopWatch.Elapsed.TotalMinutes -gt $recoveryMinutes) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
                     $DSC_RecoverLocal = {
                         param($DscFolder)
                         $log = "C:\staging\DSC\DSC_Init.log"
