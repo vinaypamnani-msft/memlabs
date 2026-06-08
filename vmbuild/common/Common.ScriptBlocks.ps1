@@ -2437,29 +2437,31 @@ $global:VM_Config = {
                     get-job  | Stop-Job | out-null
                     get-job  | Remove-Job | out-null
 
-                    # Pre-flight: verify WinRM on every target node before pushing
+                    # Pre-flight: verify WinRM on every target node in parallel before pushing
                     $mofFiles = Get-ChildItem -Path $dscConfigPath -Filter '*.mof' |
                         Where-Object { $_.BaseName -ne $env:COMPUTERNAME -and $_.BaseName -ne 'localhost' }
                     if ($mofFiles) {
-                        $maxRetries = 12   # up to ~2 min per node (12 x 10s)
-                        foreach ($mof in $mofFiles) {
-                            $targetNode = $mof.BaseName
-                            $reachable = $false
-                            for ($r = 1; $r -le $maxRetries; $r++) {
+                        $targetNodes = $mofFiles | ForEach-Object { $_.BaseName }
+                        "WinRM pre-flight: checking $($targetNodes.Count) nodes: $($targetNodes -join ', ')" | Out-File $log -Append
+                        $maxRetries = 12   # up to ~2 min total (12 x 10s)
+                        $unreachable = [System.Collections.Generic.List[string]]::new($targetNodes)
+                        for ($r = 1; $r -le $maxRetries -and $unreachable.Count -gt 0; $r++) {
+                            if ($r -gt 1) { Start-Sleep -Seconds 10 }
+                            $stillDown = [System.Collections.Generic.List[string]]::new()
+                            foreach ($node in $unreachable) {
                                 try {
-                                    $null = Test-WSMan -ComputerName $targetNode -Credential $creds -ErrorAction Stop
-                                    "WinRM pre-flight: $targetNode reachable (attempt $r)" | Out-File $log -Append
-                                    $reachable = $true
-                                    break
+                                    $null = Test-WSMan -ComputerName $node -Credential $creds -ErrorAction Stop
+                                    "WinRM pre-flight: $node reachable (attempt $r)" | Out-File $log -Append
                                 }
                                 catch {
-                                    "WinRM pre-flight: $targetNode unreachable (attempt $r/$maxRetries): $_" | Out-File $log -Append
-                                    if ($r -lt $maxRetries) { Start-Sleep -Seconds 10 }
+                                    "WinRM pre-flight: $node unreachable (attempt $r/$maxRetries): $_" | Out-File $log -Append
+                                    $stillDown.Add($node)
                                 }
                             }
-                            if (-not $reachable) {
-                                "WinRM pre-flight: $targetNode STILL UNREACHABLE after $maxRetries attempts -- DSC push will likely fail for this node" | Out-File $log -Append
-                            }
+                            $unreachable = $stillDown
+                        }
+                        if ($unreachable.Count -gt 0) {
+                            "WinRM pre-flight: STILL UNREACHABLE after $maxRetries rounds: $($unreachable -join ', ') -- DSC push will likely fail for these nodes" | Out-File $log -Append
                         }
                     }
 
