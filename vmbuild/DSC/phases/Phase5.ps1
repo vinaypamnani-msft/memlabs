@@ -50,20 +50,39 @@
             }
             $nextDepend = "[File]ClusterBackup$i"
 
+            $_groupName = $primaryVM.thisParams.SQLAO.GroupName
+
             WriteStatus "WaitForDC$($primaryVM.vmName)" {
-                Status    = "Waiting for DC to Complete [ADGroup]SQLAOGroup$($primaryVM.vmName)"
+                Status    = "Waiting for AD group '$_groupName' to be created by DC"
                 DependsOn = $nextDepend
             }
 
-            WaitForAny "DCComplete$($primaryVM.vmName)" {
-                ResourceName     = "[ADGroup]SQLAOGroup$($primaryVM.vmName)"
-                NodeName         = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
-                RetryIntervalSec = 5
-                RetryCount       = 400
-                DependsOn        = $nextDepend
+            Script "WaitForADGroup$($primaryVM.vmName)" {
+                SetScript = {
+                    $groupName = $using:_groupName
+                    for ($i = 1; $i -le 400; $i++) {
+                        try {
+                            $null = Get-ADGroup -Identity $groupName -ErrorAction Stop
+                            Write-Verbose "AD group '$groupName' found on attempt $i"
+                            return
+                        } catch {}
+                        Start-Sleep -Seconds 5
+                    }
+                    throw "AD group '$groupName' not found after 400 retries (33 min)"
+                }
+                TestScript = {
+                    try {
+                        $null = Get-ADGroup -Identity $using:_groupName -ErrorAction Stop
+                        return $true
+                    } catch {
+                        return $false
+                    }
+                }
+                GetScript  = { @{ Result = "N/A" } }
                 PsDscRunAsCredential = $Admincreds
+                DependsOn            = $nextDepend
             }
-            $nextDepend = "[WaitForAny]DCComplete$($primaryVM.vmName)"
+            $nextDepend = "[Script]WaitForADGroup$($primaryVM.vmName)"
 
             File "ClusterWitness$i" {
                 DestinationPath = $primaryVM.thisParams.SQLAO.WitnessLocalPath
@@ -736,21 +755,39 @@
         }
         $nextDepend = '[DisableClusterNicDnsRegistration]PreClusterNicConfig'
 
+        $_groupName = $Node1VM.thisParams.SQLAO.GroupName
+
         WriteStatus WaitForDC {
-            Status    = "Waiting for $DC to Complete [ADGroup]SQLAOGroup$node1"
+            Status    = "Waiting for AD group '$_groupName' to be created by DC"
             DependsOn = $nextDepend
         }
 
-        WaitForAny DCComplete {
-           # ResourceName     = "[ADGroup]SQLAOGroup$node1"
-           ResourceName     = "[ADGroup]SQLAOGroup$node1"
-            NodeName         = $DC
-            RetryIntervalSec = 5
-            RetryCount       = 300
-            DependsOn        = $nextDepend
+        Script WaitForADGroup {
+            SetScript = {
+                $groupName = $using:_groupName
+                for ($i = 1; $i -le 300; $i++) {
+                    try {
+                        $null = Get-ADGroup -Identity $groupName -ErrorAction Stop
+                        Write-Verbose "AD group '$groupName' found on attempt $i"
+                        return
+                    } catch {}
+                    Start-Sleep -Seconds 5
+                }
+                throw "AD group '$groupName' not found after 300 retries (25 min)"
+            }
+            TestScript = {
+                try {
+                    $null = Get-ADGroup -Identity $using:_groupName -ErrorAction Stop
+                    return $true
+                } catch {
+                    return $false
+                }
+            }
+            GetScript  = { @{ Result = "N/A" } }
             PsDscRunAsCredential = $Admincreds
+            DependsOn            = $nextDepend
         }
-        $nextDepend = "[WaitForAny]DCComplete"
+        $nextDepend = "[Script]WaitForADGroup"
 
         WriteStatus WaitCluster {
             Status    = "Waiting for Cluster '$($Node1VM.ClusterName)' to become active"
