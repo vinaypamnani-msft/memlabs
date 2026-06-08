@@ -6810,21 +6810,22 @@ class PromoteDomainController {
         Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
         Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
 
-        # If NTDS service exists but isn't running, the promotion either
-        # completed successfully (needs reboot) or partially failed (stale
-        # state).  Try to start it; if that works we're done.  If not,
-        # force-remove the partial promotion and fall through to re-promote.
+        # Check if a previous promotion created ntds.dit.  The NTDS *service*
+        # is created by Install-WindowsFeature and exists before any promotion,
+        # so we can't use it as the indicator.
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
         $existingSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-        if ($existingSvc) {
-            Write-Verbose "PromoteDomainController: NTDS service already exists (Status: $($existingSvc.Status))"
-            if ($existingSvc.Status -eq 'Running') {
-                Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
-                return
-            }
+        $svcStatus = if ($existingSvc) { $existingSvc.Status } else { 'N/A' }
+        Write-Verbose "PromoteDomainController: NTDS service status: $svcStatus, ntds.dit exists: $(Test-Path $ditPath)"
 
-            # Try starting it first — if the promotion was genuinely complete
-            # this will bring NTDS online without a reboot.
-            Write-Verbose "PromoteDomainController: NTDS is not running - attempting to start it"
+        if ($existingSvc -and $existingSvc.Status -eq 'Running') {
+            Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
+            return
+        }
+
+        if (Test-Path $ditPath) {
+            # ntds.dit exists — a previous promotion ran.  Try to start NTDS.
+            Write-Verbose "PromoteDomainController: ntds.dit found - previous promotion exists. Attempting to start NTDS."
             try {
                 Start-Service -Name 'NTDS' -ErrorAction Stop
                 $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
@@ -6835,9 +6836,8 @@ class PromoteDomainController {
                 Write-Verbose "PromoteDomainController: Could not start NTDS: $_"
             }
 
-            # NTDS exists but won't start — this is a partial/failed promotion.
-            # Force-remove it so we can re-promote cleanly.
-            Write-Verbose "PromoteDomainController: Detected partial promotion - force-removing DC role"
+            # NTDS won't start — partial/corrupt promotion.  Force-remove it.
+            Write-Verbose "PromoteDomainController: Detected failed promotion - force-removing DC role"
             $errorsBefore = $global:Error.Count
             try {
                 $dsrmPass = $this.SafeModeAdministratorPassword.Password
@@ -6859,14 +6859,16 @@ class PromoteDomainController {
                 }
             }
 
-            # If removal requested a reboot, honour it before re-promoting.
-            $svcAfterRemoval = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-            if ($svcAfterRemoval) {
-                Write-Verbose "PromoteDomainController: NTDS still present after force-removal - requesting reboot before re-promote"
+            # If ntds.dit is still there, need reboot before re-promoting.
+            if (Test-Path $ditPath) {
+                Write-Verbose "PromoteDomainController: ntds.dit still present after force-removal - requesting reboot before re-promote"
                 $global:DSCMachineStatus = 1
                 return
             }
             Write-Verbose "PromoteDomainController: Force-removal complete - proceeding to re-promote"
+        }
+        else {
+            Write-Verbose "PromoteDomainController: No previous promotion detected (ntds.dit absent) - fresh promotion"
         }
 
         # Verify the credential can authenticate against the domain via LDAP
@@ -6972,14 +6974,16 @@ class PromoteDomainController {
                 $global:Error.RemoveAt(0)
             }
         }
-        # Verify the promotion created the NTDS service.
-        $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-        if ($postSvc) {
-            Write-Verbose "PromoteDomainController: NTDS service created (Status: $($postSvc.Status)) - promotion succeeded"
+        # Verify the promotion created the AD database.
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        if (Test-Path $ditPath) {
+            Write-Verbose "PromoteDomainController: ntds.dit created at '$ditPath' - promotion succeeded"
         }
         else {
-            Write-Verbose "PromoteDomainController: WARNING - NTDS service does NOT exist after Install-ADDSDomainController; promotion failed"
+            Write-Verbose "PromoteDomainController: WARNING - ntds.dit does NOT exist at '$ditPath' after Install-ADDSDomainController; promotion failed"
         }
+        $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        Write-Verbose "PromoteDomainController: Post-install NTDS service status: $(if ($postSvc) { $postSvc.Status } else { 'not found' })"
 
         Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"
         $global:DSCMachineStatus = 1
@@ -6987,22 +6991,27 @@ class PromoteDomainController {
 
     [bool] Test() {
         Write-Verbose "PromoteDomainController: Testing DC status for '$env:COMPUTERNAME' in domain '$($this.DomainName)'"
+
+        # The NTDS *service* is created by Install-WindowsFeature AD-Domain-Services
+        # (before any promotion), so its existence alone means nothing.
+        # Check whether NTDS is actually Running — that's the only state that
+        # proves the node is a fully promoted and functional domain controller.
         $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -eq 'Running') {
             Write-Verbose "PromoteDomainController: NTDS service is Running - node is a fully promoted domain controller"
             return $true
         }
-        if ($svc) {
-            Write-Verbose "PromoteDomainController: NTDS service present but Status=$($svc.Status) - needs start or reboot"
+
+        # ntds.dit is created by Install-ADDSDomainController.  If it exists
+        # the promotion ran but NTDS hasn't started yet (needs reboot or start).
+        $ditPath = Join-Path $this.DatabasePath 'ntds.dit'
+        if (Test-Path $ditPath) {
+            Write-Verbose "PromoteDomainController: ntds.dit found at '$ditPath' but NTDS is not running (Status: $(if ($svc) { $svc.Status } else { 'N/A' })) - needs start or reboot"
             return $false
         }
-        # Check registry in case service object isn't visible yet
-        $ntdsParams = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction SilentlyContinue
-        if ($ntdsParams -and $ntdsParams.'DSA Working Directory') {
-            Write-Verbose "PromoteDomainController: NTDS registry key present but service not running - needs reboot"
-            return $false
-        }
-        Write-Verbose "PromoteDomainController: NTDS service not found - promotion required"
+
+        $svcStatus = if ($svc) { "present (Status: $($svc.Status)) - AD DS role installed but not promoted" } else { 'not found' }
+        Write-Verbose "PromoteDomainController: ntds.dit not found; NTDS service $svcStatus - promotion required"
         return $false
     }
 
