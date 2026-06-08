@@ -6810,29 +6810,63 @@ class PromoteDomainController {
         Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
         Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
 
-        # If NTDS service exists but isn't running, the promotion already
-        # happened on a previous DSC pass but the machine hasn't rebooted
-        # (or NTDS hasn't started).  Don't re-run Install-ADDSDomainController;
-        # just request a reboot so NTDS can start.
+        # If NTDS service exists but isn't running, the promotion either
+        # completed successfully (needs reboot) or partially failed (stale
+        # state).  Try to start it; if that works we're done.  If not,
+        # force-remove the partial promotion and fall through to re-promote.
         $existingSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
         if ($existingSvc) {
-            Write-Verbose "PromoteDomainController: NTDS service already exists (Status: $($existingSvc.Status)) - promotion was completed previously"
-            if ($existingSvc.Status -ne 'Running') {
-                Write-Verbose "PromoteDomainController: NTDS is not running - attempting to start it"
-                try {
-                    Start-Service -Name 'NTDS' -ErrorAction Stop
-                    $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
-                    Write-Verbose "PromoteDomainController: NTDS started successfully"
-                    return
-                }
-                catch {
-                    Write-Verbose "PromoteDomainController: Could not start NTDS ($_) - requesting reboot"
-                    $global:DSCMachineStatus = 1
-                    return
+            Write-Verbose "PromoteDomainController: NTDS service already exists (Status: $($existingSvc.Status))"
+            if ($existingSvc.Status -eq 'Running') {
+                Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
+                return
+            }
+
+            # Try starting it first — if the promotion was genuinely complete
+            # this will bring NTDS online without a reboot.
+            Write-Verbose "PromoteDomainController: NTDS is not running - attempting to start it"
+            try {
+                Start-Service -Name 'NTDS' -ErrorAction Stop
+                $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
+                Write-Verbose "PromoteDomainController: NTDS started successfully"
+                return
+            }
+            catch {
+                Write-Verbose "PromoteDomainController: Could not start NTDS: $_"
+            }
+
+            # NTDS exists but won't start — this is a partial/failed promotion.
+            # Force-remove it so we can re-promote cleanly.
+            Write-Verbose "PromoteDomainController: Detected partial promotion - force-removing DC role"
+            $errorsBefore = $global:Error.Count
+            try {
+                $dsrmPass = $this.SafeModeAdministratorPassword.Password
+                Uninstall-ADDSDomainController -ForceRemoval -Force `
+                    -LocalAdministratorPassword $dsrmPass `
+                    -DemoteOperationMasterRole:$true `
+                    -ErrorAction SilentlyContinue 2>&1 | ForEach-Object {
+                    Write-Verbose "PromoteDomainController: (force-remove) $_"
                 }
             }
-            Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
-            return
+            catch {
+                Write-Verbose "PromoteDomainController: Force-removal exception: $_"
+            }
+            # Scrub errors from the removal
+            $errorsAdded = $global:Error.Count - $errorsBefore
+            if ($errorsAdded -gt 0) {
+                for ($i = 0; $i -lt $errorsAdded; $i++) {
+                    $global:Error.RemoveAt(0)
+                }
+            }
+
+            # If removal requested a reboot, honour it before re-promoting.
+            $svcAfterRemoval = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+            if ($svcAfterRemoval) {
+                Write-Verbose "PromoteDomainController: NTDS still present after force-removal - requesting reboot before re-promote"
+                $global:DSCMachineStatus = 1
+                return
+            }
+            Write-Verbose "PromoteDomainController: Force-removal complete - proceeding to re-promote"
         }
 
         # Verify the credential can authenticate against the domain via LDAP
@@ -6937,6 +6971,14 @@ class PromoteDomainController {
             for ($i = 0; $i -lt $errorsAdded; $i++) {
                 $global:Error.RemoveAt(0)
             }
+        }
+        # Verify the promotion created the NTDS service.
+        $postSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        if ($postSvc) {
+            Write-Verbose "PromoteDomainController: NTDS service created (Status: $($postSvc.Status)) - promotion succeeded"
+        }
+        else {
+            Write-Verbose "PromoteDomainController: WARNING - NTDS service does NOT exist after Install-ADDSDomainController; promotion failed"
         }
 
         Write-Verbose "PromoteDomainController: Requesting reboot to complete promotion"
