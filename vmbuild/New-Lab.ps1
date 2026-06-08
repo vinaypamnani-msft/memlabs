@@ -1200,10 +1200,25 @@ finally {
         Write-Host -NoNewline "."
     }
 
-    # Force-remove any jobs still running (stuck in blocking I/O)
+    # Force-remove any jobs still running (stuck in blocking I/O).
+    # Remove-Job -Force can itself hang when the child process is wedged in
+    # a kernel-level PSDirect/WMI call. Kill child pwsh.exe processes first
+    # so the job infrastructure can release cleanly.
     $stuckJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
-    foreach ($job in $stuckJobs) {
-        if (-not $enableVerbose) {
+    if ($stuckJobs.Count -gt 0 -and -not $enableVerbose) {
+        try {
+            # Start-Job spawns child pwsh.exe with "-s -NoLogo" under our PID.
+            # Kill them all — terminals are parented by Windows Terminal, not us.
+            $childProcs = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+                          Where-Object { $_.CommandLine -match '-s\s+-NoLogo' }
+            foreach ($proc in $childProcs) {
+                Write-Log "Killing stuck job child process PID $($proc.ProcessId)" -LogOnly
+                Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch { }
+        Start-Sleep -Milliseconds 500
+        foreach ($job in $stuckJobs) {
             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
             Write-Host -NoNewline "."
         }
