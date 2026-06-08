@@ -2709,10 +2709,88 @@ $global:VM_Config = {
         $dscFails = 0
         $dscStatusPolls = 0
         [int]$failCount = 0
+        $dscRecoveryAttempted = $false
         try {
             do {
 
                 $dscStatusPolls++
+
+                # Self-recovery: if the DC was supposed to push DSC to this
+                # node but nothing arrived after 3 minutes, compile and start
+                # DSC locally.  This handles transient WinRM failures during
+                # the DC's multi-node Start-DscConfiguration push.
+                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted -and $stopWatch.Elapsed.TotalMinutes -gt 3) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after 3 min -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
+                    $DSC_RecoverLocal = {
+                        param($DscFolder)
+                        $log = "C:\staging\DSC\DSC_Init.log"
+                        $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
+                        "`r`n=====`r`nDSC_RecoverLocal: $time`r`n=====" | Out-File $log -Append -Force
+
+                        $lcm = Get-DscLocalConfigurationManager
+                        if ($lcm.LCMState -ne 'Idle') {
+                            "LCM is $($lcm.LCMState), skipping" | Out-File $log -Append
+                            return "LCM_$($lcm.LCMState)"
+                        }
+
+                        $Phase = $using:Phase
+                        $deployConfig = Get-Content 'C:\staging\DSC\deployConfig.json' -Force | ConvertFrom-Json
+                        $dscRole = "Phase$Phase"
+                        $dscConfigScript = "C:\staging\DSC\$DscFolder\$dscRole.ps1"
+                        $dscConfigPath = "C:\staging\DSC\$DscFolder\DSCConfiguration"
+                        $deployConfigPath = 'C:\staging\DSC\deployConfig.json'
+
+                        if (-not (Test-Path $dscConfigScript)) {
+                            "Script not found: $dscConfigScript" | Out-File $log -Append
+                            return "SCRIPT_NOT_FOUND"
+                        }
+
+                        $netbiosName = $deployConfig.vmOptions.domainNetBiosName
+                        $user = "$netbiosName\$($using:Common.LocalAdmin.UserName)"
+                        $creds = New-Object System.Management.Automation.PSCredential ($user, $using:Common.LocalAdmin.Password)
+
+                        $nodeName = $env:COMPUTERNAME
+                        $thisVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $nodeName }
+                        $cd = @{
+                            AllNodes = @(
+                                @{ NodeName = '*'; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
+                                @{ NodeName = $nodeName; Role = if ($thisVm) { $thisVm.Role } else { 'DomainMember' } }
+                            )
+                        }
+
+                        $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\system32\WindowsPowerShell\v1.0\Modules"
+                        . "$dscConfigScript"
+
+                        "Compiling $dscRole for $nodeName (Role: $($cd.AllNodes[1].Role))" | Out-File $log -Append
+                        try {
+                            & "$dscRole" -DeployConfigPath $deployConfigPath -AdminCreds $creds -ConfigurationData $cd -OutputPath $dscConfigPath
+                        }
+                        catch {
+                            "Compilation failed: $_" | Out-File $log -Append
+                            return "COMPILE_FAILED"
+                        }
+
+                        $mofPath = Join-Path $dscConfigPath "$nodeName.mof"
+                        if (-not (Test-Path $mofPath)) {
+                            "MOF not found: $mofPath" | Out-File $log -Append
+                            return "MOF_NOT_FOUND"
+                        }
+
+                        Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
+                        "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
+                        Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
+                        return "STARTED"
+                    }
+                    $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -TimeoutSeconds 300
+                    $recoveryOutput = if ($recoveryResult.ScriptBlockOutput) { $recoveryResult.ScriptBlockOutput } else { "no output" }
+                    if ($recoveryResult.ScriptBlockFailed) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery failed: $recoveryOutput" -Warning
+                    }
+                    else {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery: $recoveryOutput" -Warning -OutputStream
+                    }
+                    $dscRecoveryAttempted = $true
+                }
 
                 if ($dscStatusPolls -ge 10) {
                     $failure = $false
