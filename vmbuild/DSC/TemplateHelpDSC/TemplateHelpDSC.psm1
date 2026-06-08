@@ -6810,6 +6810,31 @@ class PromoteDomainController {
         Write-Verbose "PromoteDomainController: Target domain: '$($this.DomainName)'"
         Write-Verbose "PromoteDomainController: Computer name: '$env:COMPUTERNAME'"
 
+        # If NTDS service exists but isn't running, the promotion already
+        # happened on a previous DSC pass but the machine hasn't rebooted
+        # (or NTDS hasn't started).  Don't re-run Install-ADDSDomainController;
+        # just request a reboot so NTDS can start.
+        $existingSvc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
+        if ($existingSvc) {
+            Write-Verbose "PromoteDomainController: NTDS service already exists (Status: $($existingSvc.Status)) - promotion was completed previously"
+            if ($existingSvc.Status -ne 'Running') {
+                Write-Verbose "PromoteDomainController: NTDS is not running - attempting to start it"
+                try {
+                    Start-Service -Name 'NTDS' -ErrorAction Stop
+                    $existingSvc.WaitForStatus('Running', [TimeSpan]::FromSeconds(120))
+                    Write-Verbose "PromoteDomainController: NTDS started successfully"
+                    return
+                }
+                catch {
+                    Write-Verbose "PromoteDomainController: Could not start NTDS ($_) - requesting reboot"
+                    $global:DSCMachineStatus = 1
+                    return
+                }
+            }
+            Write-Verbose "PromoteDomainController: NTDS is already running - nothing to do"
+            return
+        }
+
         # Verify the credential can authenticate against the domain via LDAP
         # before attempting promotion.  Log group memberships for diagnostics.
         try {
@@ -6921,15 +6946,19 @@ class PromoteDomainController {
     [bool] Test() {
         Write-Verbose "PromoteDomainController: Testing DC status for '$env:COMPUTERNAME' in domain '$($this.DomainName)'"
         $svc = Get-Service -Name 'NTDS' -ErrorAction SilentlyContinue
-        if ($svc) {
-            Write-Verbose "PromoteDomainController: NTDS service present (Status: $($svc.Status)) - node is already a domain controller"
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Verbose "PromoteDomainController: NTDS service is Running - node is a fully promoted domain controller"
             return $true
         }
-        # Also check the registry key that persists across service-not-yet-started states
+        if ($svc) {
+            Write-Verbose "PromoteDomainController: NTDS service present but Status=$($svc.Status) - needs start or reboot"
+            return $false
+        }
+        # Check registry in case service object isn't visible yet
         $ntdsParams = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction SilentlyContinue
         if ($ntdsParams -and $ntdsParams.'DSA Working Directory') {
-            Write-Verbose "PromoteDomainController: NTDS registry key present ('$($ntdsParams.'DSA Working Directory')') - promotion was completed, pending reboot"
-            return $true
+            Write-Verbose "PromoteDomainController: NTDS registry key present but service not running - needs reboot"
+            return $false
         }
         Write-Verbose "PromoteDomainController: NTDS service not found - promotion required"
         return $false
