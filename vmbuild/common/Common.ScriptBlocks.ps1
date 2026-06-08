@@ -2444,7 +2444,7 @@ $global:VM_Config = {
                         $targetNodes = $mofFiles | ForEach-Object { $_.BaseName }
                         "WinRM pre-flight: checking $($targetNodes.Count) nodes in parallel: $($targetNodes -join ', ')" | Out-File $log -Append
                         $maxRetries = 6   # up to ~1 min total (6 x 10s)
-                        $unreachable = [System.Collections.Generic.List[string]]::new($targetNodes)
+                        $unreachable = [System.Collections.Generic.List[string]]::new([string[]]@($targetNodes))
 
                         for ($r = 1; $r -le $maxRetries -and $unreachable.Count -gt 0; $r++) {
                             if ($r -gt 1) { Start-Sleep -Seconds 10 }
