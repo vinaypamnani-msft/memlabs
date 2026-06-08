@@ -1197,8 +1197,13 @@ function Get-VMFixes {
     # Migration: seed appliedFixes from watermark for existing VMs
     # that were maintained before per-fix tracking was introduced.
     # Runs once per VM — subsequent calls see appliedFixes populated.
+    #
+    # Only for existing VMs ($NewVM = $false). For new VMs, the
+    # watermark may be partial from a killed Phase 10 — fixes from
+    # different batch groups (RunAsAccount) might not have actually
+    # run even though the watermark passed their version.
     # ================================================================
-    if (-not $ReturnDummyList.IsPresent -and $vmNote -and $vmNote.memLabsVersion -and
+    if (-not $NewVM -and -not $ReturnDummyList.IsPresent -and $vmNote -and $vmNote.memLabsVersion -and
         (-not ($vmNote.PSObject.Properties.Name -contains 'appliedFixes') -or -not $vmNote.appliedFixes)) {
         $migratedFixes = @{}
         foreach ($vmFix in $fixesToPerform) {
