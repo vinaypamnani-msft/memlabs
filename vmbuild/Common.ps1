@@ -2858,7 +2858,11 @@ function Set-VMNote {
         [Parameter(Mandatory = $false)]
         [switch]$forceVersionUpdate,
         [Parameter(Mandatory = $false)]
-        [bool]$force
+        [bool]$force,
+        [Parameter(Mandatory = $false)]
+        [string]$FixApplied,
+        [Parameter(Mandatory = $false)]
+        [string]$FixAppliedVersion
     )
 
     if (-not $vmNote) {
@@ -2880,6 +2884,18 @@ function Set-VMNote {
     if ($vmVersion -and ($vmNote.memLabsVersion -lt $vmVersion -or $forceVersionUpdate.IsPresent)) {
         $vmNote | Add-Member -MemberType NoteProperty -Name "memLabsVersion" -Value $vmVersion -Force
         $vmVersionUpdated = $true
+    }
+
+    # Per-fix tracking: record individual fix application in appliedFixes dictionary
+    if ($FixApplied) {
+        $appliedFixes = @{}
+        if ($vmNote.PSObject.Properties.Name -contains 'appliedFixes' -and $vmNote.appliedFixes) {
+            foreach ($prop in $vmNote.appliedFixes.PSObject.Properties) {
+                $appliedFixes[$prop.Name] = $prop.Value
+            }
+        }
+        $appliedFixes[$FixApplied] = $FixAppliedVersion
+        $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$appliedFixes) -Force
     }
 
     $vmNote | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force

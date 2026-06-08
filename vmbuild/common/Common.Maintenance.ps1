@@ -426,8 +426,8 @@ function Start-VMFixesBatched {
     # Stamp non-applicable fixes immediately (host-side, no remote call needed)
     $applicableFixes = @()
     foreach ($vmFix in $VMFixes) {
-        if ($vmNote.memLabsVersion -ge $vmFix.FixVersion -and -not $ApplyNewOnly.IsPresent) {
-            # Already applied
+        if (Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion) {
+            # Already applied (per-fix tracking)
             continue
         }
         if (-not $vmFix.AppliesToThisVM) {
@@ -636,7 +636,7 @@ function Start-VMFixesBatched {
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
-                Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion
+                Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion -FixApplied $matchingFix.FixName -FixAppliedVersion $matchingFix.FixVersion
                 $return.AppliedCount++
             }
             else {
@@ -690,7 +690,7 @@ function Start-VMFix {
     $fixName = $vmFix.FixName
     $fixVersion = $vmFix.FixVersion
     write-log -LogOnly "Applying Fix $fixName $fixVersion to $vmName"
-    if ($vmNote.memLabsVersion -ge $fixVersion -and -not $ApplyNewOnly.IsPresent) {
+    if (Test-VMFixApplied -VMNote $vmNote -FixName $fixName -FixVersion $fixVersion) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) has been applied already."
         $return.Success = $true
         return $return
@@ -824,7 +824,7 @@ function Start-VMFix {
     }
     else {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
-        Set-VMNote -vmName $VMName -vmVersion $fixVersion
+        Set-VMNote -vmName $VMName -vmVersion $fixVersion -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         $return.Applied = $true
     }
@@ -1033,6 +1033,33 @@ function Get-VMFixTranscript {
     }
 }
 
+function Test-VMFixApplied {
+    <#
+    .SYNOPSIS
+        Checks whether a specific fix has already been applied to a VM by
+        inspecting the per-fix tracking dictionary in the VM notes.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $VMNote,
+        [Parameter(Mandatory = $true)]
+        [string] $FixName,
+        [Parameter(Mandatory = $true)]
+        [string] $FixVersion
+    )
+
+    if (-not $VMNote -or
+        -not ($VMNote.PSObject.Properties.Name -contains 'appliedFixes') -or
+        -not $VMNote.appliedFixes) {
+        return $false
+    }
+    if (-not ($VMNote.appliedFixes.PSObject.Properties.Name -contains $FixName)) {
+        return $false
+    }
+    return ($VMNote.appliedFixes.$FixName -ge $FixVersion)
+}
+
 function Get-VMFixes {
     [CmdletBinding()]
     param (
@@ -1066,6 +1093,26 @@ function Get-VMFixes {
         Write-Log "Get-VMFixes: Fixes directory not found at $fixesDir" -Warning
     }
 
+    # ================================================================
+    # Migration: seed appliedFixes from watermark for existing VMs
+    # that were maintained before per-fix tracking was introduced.
+    # Runs once per VM — subsequent calls see appliedFixes populated.
+    # ================================================================
+    if (-not $ReturnDummyList.IsPresent -and $vmNote -and $vmNote.memLabsVersion -and
+        (-not ($vmNote.PSObject.Properties.Name -contains 'appliedFixes') -or -not $vmNote.appliedFixes)) {
+        $migratedFixes = @{}
+        foreach ($vmFix in $fixesToPerform) {
+            if ($vmNote.memLabsVersion -ge $vmFix.FixVersion) {
+                $migratedFixes[$vmFix.FixName] = [string]$vmFix.FixVersion
+            }
+        }
+        if ($migratedFixes.Count -gt 0) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$migratedFixes) -Force
+            Set-VMNote -vmName $VMName -vmNote $vmNote
+            Write-Log "$VMName`: Migrated per-fix tracking from watermark version $($vmNote.memLabsVersion). Seeded $($migratedFixes.Count) fixes." -LogOnly
+        }
+    }
+
     # ========================
     # Determine applicability
     # ========================
@@ -1091,10 +1138,9 @@ function Get-VMFixes {
             }
         }
 
-        if (-not $newVM) {
-            if ($vmNote.memLabsVersion -ge $vmFix.FixVersion) {
-                $applicable = $false
-            }
+        # Per-fix tracking: skip fixes already applied (works for both new and existing VMs)
+        if ($applicable -and $vmNote -and (Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion)) {
+            $applicable = $false
         }
 
         $vmfix | Add-Member -MemberType NoteProperty -Name AppliesToThisVM -Value $applicable -force
