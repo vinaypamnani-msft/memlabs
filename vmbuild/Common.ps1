@@ -4921,6 +4921,36 @@ function Copy-ToolToVM {
         }
     }
 
+    # --- Add maintenance fix InjectFiles/InjectTools so they ride with the
+    #     tools bundle. Phase 10 skips the redundant PSDirect copy when the
+    #     files already exist on the VM. ---
+    try {
+        $maintPaths = Get-MaintenanceInjectPaths
+        foreach ($file in $maintPaths.Files) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+            if (Test-Path $sourcePath) {
+                $zipEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$file"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "staging\$file"
+                }
+            }
+        }
+        foreach ($toolFolder in $maintPaths.Tools) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+            if (Test-Path $sourcePath) {
+                $zipEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$toolFolder"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "tools\$toolFolder"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "$vmName`: Could not add maintenance fix files to tools bundle: $_" -LogOnly
+    }
+
     if ($zipEntries.Count -eq 0) {
         Write-Log "$vmName`: No tools to inject." -Verbose
         return $true

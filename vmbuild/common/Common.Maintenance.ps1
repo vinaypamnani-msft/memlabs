@@ -455,18 +455,47 @@ function Start-VMFixesBatched {
     if ($allInjectFiles -or $allInjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain
+
+            # Probe which files/tools already exist on the VM (pre-staged by Phase 2 tools bundle)
+            $probeTargets = @()
+            foreach ($file in $allInjectFiles) { $probeTargets += "C:\staging\$file" }
+            foreach ($toolFolder in $allInjectTools) { $probeTargets += "C:\tools\$toolFolder" }
+            $existingPaths = @()
+            if ($probeTargets.Count -gt 0) {
+                try {
+                    $existingPaths = @(Invoke-Command -Session $ps -ScriptBlock {
+                        param($paths)
+                        $paths | Where-Object { Test-Path $_ }
+                    } -ArgumentList (,$probeTargets) -ErrorAction Stop)
+                }
+                catch {
+                    Write-Log "$VMName`: Could not probe existing paths; will copy all. $_" -LogOnly
+                }
+            }
+
             foreach ($file in $allInjectFiles) {
-                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
                 $targetPathInVM = "C:\staging\$file"
+                if ($targetPathInVM -in $existingPaths) {
+                    Write-Log "$VMName`: $file already present on VM, skipping copy." -LogOnly
+                    continue
+                }
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..."
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $allInjectTools) {
+                $targetPathInVM = "C:\tools\$toolFolder"
+                if ($targetPathInVM -in $existingPaths) {
+                    Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
+                    continue
+                }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    $targetPathInVM = "C:\tools\$toolFolder"
                     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
-                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                    $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $VMDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
+                    if ($copyResult -eq $false) {
+                        throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
+                    }
                 }
             }
         }
@@ -754,18 +783,47 @@ function Start-VMFix {
     if ($vmFix.InjectFiles -or $vmFix.InjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
+
+            # Probe which files/tools already exist on the VM (pre-staged by Phase 2 tools bundle)
+            $probeTargets = @()
+            foreach ($file in $vmFix.InjectFiles) { $probeTargets += "C:\staging\$file" }
+            foreach ($toolFolder in $vmFix.InjectTools) { $probeTargets += "C:\tools\$toolFolder" }
+            $existingPaths = @()
+            if ($probeTargets.Count -gt 0) {
+                try {
+                    $existingPaths = @(Invoke-Command -Session $ps -ScriptBlock {
+                        param($paths)
+                        $paths | Where-Object { Test-Path $_ }
+                    } -ArgumentList (,$probeTargets) -ErrorAction Stop)
+                }
+                catch {
+                    Write-Log "$VMName`: Could not probe existing paths; will copy all. $_" -LogOnly
+                }
+            }
+
             foreach ($file in $vmFix.InjectFiles) {
-                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
                 $targetPathInVM = "C:\staging\$file"
+                if ($targetPathInVM -in $existingPaths) {
+                    Write-Log "$VMName`: $file already present on VM, skipping copy." -LogOnly
+                    continue
+                }
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $vmFix.InjectTools) {
+                $targetPathInVM = "C:\tools\$toolFolder"
+                if ($targetPathInVM -in $existingPaths) {
+                    Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
+                    continue
+                }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    $targetPathInVM = "C:\tools\$toolFolder"
                     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
-                    Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Recurse -Force -ErrorAction Stop
+                    $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $vmDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
+                    if ($copyResult -eq $false) {
+                        throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
+                    }
                 }
             }
         }
@@ -1030,6 +1088,35 @@ function Get-VMFixTranscript {
     }
     catch {
         Write-Log "$VMName`: Failed to pull transcript for [$FixName]: $_" -LogOnly -Warning
+    }
+}
+
+function Get-MaintenanceInjectPaths {
+    <#
+    .SYNOPSIS
+        Scans all Fix*.ps1 files and returns the unique InjectFiles and
+        InjectTools declared across every fix. Used by Copy-ToolToVM to
+        pre-stage maintenance files during Phase 2 so Phase 10 can skip
+        the redundant (and potentially stalling) PSDirect copy.
+    #>
+    $fixesDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'Fixes'
+    $injectFiles = @()
+    $injectTools = @()
+    if (Test-Path $fixesDir) {
+        $fixesToPerform = @()
+        # Dummy variables so fix scripts can dot-source without errors
+        $vmNote = $null; $dc = $null; $NewVM = $true
+        Get-ChildItem -Path $fixesDir -Filter 'Fix*.ps1' -File | ForEach-Object {
+            . $_.FullName
+        }
+        foreach ($fix in $fixesToPerform) {
+            if ($fix.InjectFiles) { $injectFiles += $fix.InjectFiles }
+            if ($fix.InjectTools) { $injectTools += $fix.InjectTools }
+        }
+    }
+    [PSCustomObject]@{
+        Files = @($injectFiles | Select-Object -Unique)
+        Tools = @($injectTools | Select-Object -Unique)
     }
 }
 
