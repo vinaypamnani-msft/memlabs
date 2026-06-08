@@ -121,8 +121,7 @@ $global:Phase11Job = {
                 Remove-Item (Join-Path $desktop 'Read DSC Log.lnk') -Force -ErrorAction SilentlyContinue
                 Remove-Item (Join-Path $desktop 'DSC ConfigurationStatus.lnk') -Force -ErrorAction SilentlyContinue
                 # Re-enable Windows Update services disabled in Phase 1.
-                # NoAutoUpdate policy keeps auto-update off; services just
-                # need to be startable for WSUS/ConfigMgr-initiated updates.
+                # Services need to be startable for WSUS/ConfigMgr-initiated updates.
                 foreach ($svc in @('UsoSvc', 'wuauserv')) {
                     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($s -and $s.StartType -eq 'Disabled') {
@@ -130,6 +129,63 @@ $global:Phase11Job = {
                     }
                 }
             } -DisplayName "Phase11: Remove DSC shortcuts" -SuppressLog
+
+            # --- Revert Windows Update lockdown set during Phase 2 ---
+            # Only touch settings we own (WsusSetByMemLabs marker present).
+            $useFakeWSUS = [bool]$currentItem.useFakeWSUSServer
+            $revert_WindowsUpdateLockdown = {
+                param([int]$UseFakeWSUS)
+                $mlPath = "HKLM:\SOFTWARE\MemLabs"
+                $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+                $auPath = "$wuPath\AU"
+
+                # Check our ownership marker
+                $marker = Get-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
+                if (-not $marker -or $marker.WsusSetByMemLabs -ne 1) {
+                    return "Skipped: not set by MemLabs"
+                }
+
+                $isReal = 0
+                $realMarker = Get-ItemProperty -Path $mlPath -Name "WsusIsReal" -ErrorAction SilentlyContinue
+                if ($realMarker) { $isReal = $realMarker.WsusIsReal }
+
+                # Always remove blocking keys (deploy is done)
+                Remove-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $auPath -Name "NoAutoUpdate" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $auPath -Name "AUOptions" -Force -ErrorAction SilentlyContinue
+
+                if ($isReal -eq 1 -or $UseFakeWSUS -eq 1) {
+                    # Real WSUS or user-chosen fake WSUS: keep WUServer/WUStatusServer/UseWUServer
+                    $action = if ($isReal -eq 1) { "Kept real WSUS" } else { "Kept fake WSUS (user choice)" }
+                }
+                else {
+                    # Fake localhost that we set as fallback — remove everything
+                    Remove-ItemProperty -Path $wuPath -Name "WUServer" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $wuPath -Name "WUStatusServer" -Force -ErrorAction SilentlyContinue
+                    Remove-ItemProperty -Path $auPath -Name "UseWUServer" -Force -ErrorAction SilentlyContinue
+                    $action = "Removed all WU policy (no WSUS)"
+                }
+
+                # Clean up MemLabs markers
+                Remove-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -Force -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $mlPath -Name "WsusIsReal" -Force -ErrorAction SilentlyContinue
+                # Remove MemLabs key if empty
+                $remaining = Get-ItemProperty -Path $mlPath -ErrorAction SilentlyContinue
+                if ($remaining) {
+                    $props = $remaining.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }
+                    if (-not $props) { Remove-Item -Path $mlPath -Force -ErrorAction SilentlyContinue }
+                }
+
+                return $action
+            }
+
+            $useFakeInt = if ($useFakeWSUS) { 1 } else { 0 }
+            $revertResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $revert_WindowsUpdateLockdown -ArgumentList @($useFakeInt) -DisplayName "Phase11: Revert WU lockdown" -SuppressLog
+            if ($revertResult.ScriptBlockOutput) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): WU lockdown revert: $($revertResult.ScriptBlockOutput)" -LogOnly
+            }
+
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Functional validation PASSED for $($currentItem.role)." -OutputStream -Success
         }
         else {
@@ -873,7 +929,7 @@ $global:VM_Create = {
             # and trigger pending reboots before Phase 2 gets a chance to run.
             # Disable the services rather than registry-only — UsoSvc on newer
             # OS ignores NoAutoUpdate and restarts wuauserv on its own.
-            # Phase 2 sets the full policy (NoAutoUpdate / fake WSUS per config).
+            # Phase 2 sets the full policy (WSUS server + blocking keys per config).
             try {
                 foreach ($svc in @('wuauserv', 'UsoSvc')) {
                     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -882,6 +938,15 @@ $global:VM_Create = {
                         Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
                     }
                 }
+                # Set blocking registry keys as defense-in-depth. Even if a
+                # component (e.g. ccmsetup) re-enables the services later,
+                # these policies prevent WU from reaching the internet.
+                $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+                $auPath = "$wuPath\AU"
+                New-Item -Path $auPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $auPath -Name "NoAutoUpdate" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
             } catch { $warnings += "Disable Windows Update services: $_" }
 
             [PSCustomObject]@{ Warnings = $warnings }
@@ -3244,26 +3309,67 @@ $global:VM_Config = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_StickyKeys -DisplayName "Disable StickyKeys"
 
-            $disable_AutomaticUpdates = {
-                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Type Dword -Value 1 -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "AUOptions" -Type Dword -Value 2 -Force
+            # --- Windows Update lockdown + WSUS pre-configuration ---
+            # Determine the correct WSUS server for this VM (real SUP, standalone WSUS, or fake localhost).
+            # Skip if WSUS is already configured externally (check for our marker first to handle deploy restarts).
+            $check_ExternalWsus = {
+                $markerPath = "HKLM:\SOFTWARE\MemLabs"
+                $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+                $marker = Get-ItemProperty -Path $markerPath -Name "WsusSetByMemLabs" -ErrorAction SilentlyContinue
+                if ($marker -and $marker.WsusSetByMemLabs -eq 1) {
+                    return "OwnedByMemLabs"
+                }
+                $existing = Get-ItemProperty -Path $wuPath -Name "WUServer" -ErrorAction SilentlyContinue
+                if ($existing -and $existing.WUServer) {
+                    return "External"
+                }
+                return "NotSet"
             }
 
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+            $wsusCheckResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $check_ExternalWsus -DisplayName "Check existing WSUS config" -SuppressLog
+            $wsusState = if ($wsusCheckResult.ScriptBlockOutput) { $wsusCheckResult.ScriptBlockOutput } else { "NotSet" }
 
-            $disable_AutomaticUpdatesFakeWSUS = {
-                New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUServer" -Type String -Value "http://localhost" -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "WUStatusServer" -Type String -Value "http://localhost" -Force
-                New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "UseWUServer" -Type Dword -Value 1 -Force
-            }
-
-            if ($currentItem.useFakeWSUSServer) {
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdatesFakeWSUS -DisplayName "Use Fake WSUS Server"
+            if ($wsusState -eq "External") {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS already configured externally, skipping WU lockdown"
             }
             else {
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $disable_AutomaticUpdates -DisplayName "Disable Automatic Updates"
+                # Resolve the WSUS URL for this VM
+                $wsusInfo = Get-LabWsusUrl -DeployConfig $deployConfig -CurrentItem $currentItem
+                $wsusUrl = $wsusInfo.WsusUrl
+                $isRealWsus = $wsusInfo.IsRealWsus
+                $wsusLabel = if ($isRealWsus) { "real SUP ($wsusUrl)" } else { "fake ($wsusUrl)" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuring WU lockdown with $wsusLabel"
+
+                $configure_WindowsUpdate = {
+                    param($WsusUrl, [int]$IsReal)
+                    $wuPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+                    $auPath = "$wuPath\AU"
+                    $mlPath = "HKLM:\SOFTWARE\MemLabs"
+
+                    # Create registry paths
+                    New-Item -Path $auPath -Force | Out-Null
+                    New-Item -Path $mlPath -Force | Out-Null
+
+                    # Blocking keys — prevent all WU internet access
+                    New-ItemProperty -Path $wuPath -Name "DoNotConnectToWindowsUpdateInternetLocations" -PropertyType DWord -Value 1 -Force | Out-Null
+                    New-ItemProperty -Path $wuPath -Name "DisableWindowsUpdateAccess" -PropertyType DWord -Value 1 -Force | Out-Null
+
+                    # WSUS server redirection
+                    New-ItemProperty -Path $wuPath -Name "WUServer" -PropertyType String -Value $WsusUrl -Force | Out-Null
+                    New-ItemProperty -Path $wuPath -Name "WUStatusServer" -PropertyType String -Value $WsusUrl -Force | Out-Null
+
+                    # AU policy
+                    New-ItemProperty -Path $auPath -Name "UseWUServer" -PropertyType DWord -Value 1 -Force | Out-Null
+                    New-ItemProperty -Path $auPath -Name "NoAutoUpdate" -PropertyType DWord -Value 1 -Force | Out-Null
+                    New-ItemProperty -Path $auPath -Name "AUOptions" -PropertyType DWord -Value 2 -Force | Out-Null
+
+                    # MemLabs markers for Phase 11 cleanup
+                    New-ItemProperty -Path $mlPath -Name "WsusSetByMemLabs" -PropertyType DWord -Value 1 -Force | Out-Null
+                    New-ItemProperty -Path $mlPath -Name "WsusIsReal" -PropertyType DWord -Value $IsReal -Force | Out-Null
+                }
+
+                $isRealInt = if ($isRealWsus) { 1 } else { 0 }
+                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $configure_WindowsUpdate -ArgumentList @($wsusUrl, $isRealInt) -DisplayName "Configure WU lockdown + WSUS ($wsusLabel)"
             }
 
             # Per-VM proxy client config. Runs inside this VM's Phase 2 job so

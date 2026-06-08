@@ -1767,6 +1767,78 @@ function Get-SqlServerForSiteCode {
     }
 }
 
+function Get-LabWsusUrl {
+    <#
+    .SYNOPSIS
+    Determine the WSUS server URL for a VM based on deployment config.
+    Mirrors the client-push network-affinity logic from Common.GenConfig.ps1.
+    Returns [PSCustomObject]@{ WsusUrl = string; IsRealWsus = bool }
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $DeployConfig,
+        [Parameter(Mandatory = $true)]
+        [object] $CurrentItem
+    )
+
+    $domainName = $DeployConfig.vmOptions.domainName
+    $allVMs = $DeployConfig.virtualMachines
+
+    # Determine protocol/port from PKI setting
+    $usePKI = [bool]$DeployConfig.cmOptions.UsePKI
+    $protocol = if ($usePKI) { "https" } else { "http" }
+    $port = if ($usePKI) { 8531 } else { 8530 }
+
+    # --- Step 1: Will this VM get a ConfigMgr client? (mirrors Common.GenConfig.ps1 ~L1396)
+    $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+    $getsClient = $CurrentItem.role -in $pushableRoles -and $CurrentItem.pushClient -ne $false
+
+    if ($getsClient) {
+        # Find the Primary that would push to this VM (same network or child Secondary's network)
+        $primaries = @($allVMs | Where-Object { $_.role -eq 'Primary' })
+        $matchedPrimary = $null
+        foreach ($pri in $primaries) {
+            # Direct network match
+            if ($pri.network -eq $CurrentItem.network) {
+                $matchedPrimary = $pri
+                break
+            }
+            # Check child Secondaries' networks
+            $childSecondaries = @($allVMs | Where-Object { $_.role -eq 'Secondary' -and $_.parentSiteCode -eq $pri.siteCode })
+            foreach ($sec in $childSecondaries) {
+                if ($sec.network -eq $CurrentItem.network) {
+                    $matchedPrimary = $pri
+                    break
+                }
+            }
+            if ($matchedPrimary) { break }
+        }
+
+        if ($matchedPrimary) {
+            # Find a SUP for this Primary's siteCode (skip CAS — upstream only)
+            $supVM = $allVMs | Where-Object {
+                $_.installSUP -eq $true -and $_.siteCode -eq $matchedPrimary.siteCode
+            } | Select-Object -First 1
+
+            if ($supVM) {
+                $fqdn = "$($supVM.vmName).$domainName"
+                return [PSCustomObject]@{ WsusUrl = "${protocol}://${fqdn}:${port}"; IsRealWsus = $true }
+            }
+        }
+    }
+
+    # --- Step 2: No client or no SUP found — check for standalone WSUS
+    $standaloneWsus = $allVMs | Where-Object { $_.role -eq 'WSUS' } | Select-Object -First 1
+    if ($standaloneWsus) {
+        $fqdn = "$($standaloneWsus.vmName).$domainName"
+        return [PSCustomObject]@{ WsusUrl = "${protocol}://${fqdn}:${port}"; IsRealWsus = $true }
+    }
+
+    # --- Step 3: Fallback — fake WSUS
+    return [PSCustomObject]@{ WsusUrl = "http://localhost"; IsRealWsus = $false }
+}
+
 function get-RoleForSitecode {
     [CmdletBinding()]
     param (

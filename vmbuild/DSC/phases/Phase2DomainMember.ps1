@@ -93,8 +93,12 @@
                 return ($val -and $val.NoAutoUpdate -eq 1)
             }
             SetScript  = {
-                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | Out-Null
-                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                $wuPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+                $auPath = "$wuPath\AU"
+                New-Item -Path $auPath -Force | Out-Null
+                New-ItemProperty -Path $auPath -Name 'NoAutoUpdate' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DoNotConnectToWindowsUpdateInternetLocations' -PropertyType DWord -Value 1 -Force | Out-Null
+                New-ItemProperty -Path $wuPath -Name 'DisableWindowsUpdateAccess' -PropertyType DWord -Value 1 -Force | Out-Null
                 Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
             }
         }
