@@ -564,7 +564,7 @@ else {
     }
 }
 
-if ($TopLevelSiteServer) {
+if ($CurrentRole -eq "Primary" -or $TopLevelSiteServer) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
     Set-Location $LogPath

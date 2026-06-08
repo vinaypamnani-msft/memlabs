@@ -40,6 +40,7 @@ else {
     $DomainFullName = $deployConfig.parameters.domainName
     $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
     # $ThisMachineName / $ThisVM / $cmo already resolved above (before PrePopulateObjects gate).
+    $CurrentRole = $ThisVM.role
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
@@ -113,8 +114,8 @@ else {
     Write-DscStatus "$Tag Enabling Site features"
     Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
 
-    #Applications and packages
-
+    #Applications and packages — Primary only (content sources are local)
+    if ($CurrentRole -ne "CAS") {
 
     $apps = $deployconfig.Tools | where-object { $_.Appinstall -eq $True }
     $apps | ForEach-Object {
@@ -131,52 +132,55 @@ else {
         Write-DscStatus "$Tag Successfully created Hardlink under c:\apps for the application $($_.Name)"
 
         #creating an application
-        $appname = "MEMLABS-" + "$($_.Name)" 
-        Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
-        New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
-        #remove an application
-        #Remove-CMApplication -Name "MEMLABS-*" -Force
+        $appname = "MEMLABS-" + "$($_.Name)"
 
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
-        #create a deployment for each application (tim help on pulling the site server name)
-        Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
+        if (Get-CMApplication -Name "$appname" -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Application '$appname' already exists, skipping"
+        }
+        else {
+            Write-DscStatus "$Tag Creating an MEMLABS application for $($_.Name) as App model"
+            New-CMApplication -Name "$appname" -Description $($_.Description) -Publisher $($_.Publisher) -SoftwareVersion $($_.SoftwareVersion) -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully created an MEMLABS application for $($_.Name) as App model"
 
-        Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
-        #distribute the content to All DPs
-        Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
+            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as App model"
+            Add-CMMSiDeploymentType -ApplicationName "$appname" -DeploymentTypeName $($_.AppMsi) -ContentLocation "\\$ThisMachineName\c$\Apps\$($_.Name)\$($_.AppMsi)" -Comment "$($_.Name) MSI deployment type" -Force -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully an MEMLABS application deployment for $($_.Name) as App model"
 
-        Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
-        #deploy apps to all systems
-        New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
+            Write-DscStatus "$Tag Distributing MEMLABS application $($_.Name) to all DPs"
+            Start-CMContentDistribution -ApplicationName "$appname" -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully distributed MEMLABS application $($_.Name) to all DPs"
 
-        Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
-        # Create the Package
-        $Package = New-CMPackage -Name "MEMLABS-$($_.Name)" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
-        Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
-        #Remove a package
-        #Remove-CMPackage -Id "CS100023" -Force
+            Write-DscStatus "$Tag Deploying MEMLABS application $($_.Name) to all Systems as available deployment"
+            New-CMApplicationDeployment -ApplicationName "$appname" -CollectionName "All Systems" -DeployAction Install -DeployPurpose Available -UserNotification DisplayAll -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag successfully deployed MEMLABS application $($_.Name) to all Systems as available deployment"
+        }
 
-        Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
-        $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
-        # Create a Program for the Package
-        New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
-        Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
+        $pkgName = "MEMLABS-$($_.Name)"
 
-        Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
-        #Distribute all packages to ALL DPs group
-        Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
+        if (Get-CMPackage -Name "$pkgName" -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Package '$pkgName' already exists, skipping"
+        }
+        else {
+            Write-DscStatus "$Tag Creating an MEMLABS application deployment for $($_.Name) as Package model"
+            $Package = New-CMPackage -Name "$pkgName" -Path "\\$ThisMachineName\c$\Apps\$($_.Name)" -Description "Package for $($_.Description)"
+            Write-DscStatus "$Tag Successfully created a MEMLABS application deployment for $($_.Name) as Package model"
 
-        Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
-        #Deploy all packages to all systems
-        New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
-        Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
+            Write-DscStatus "$Tag Creating an MEMLABS package deployment for $($_.Name) as Package model"
+            $CommandLine = "msiexec.exe /i $($_.AppMsi) /qn"
+            New-CMProgram -PackageId $Package.PackageID -StandardProgramName $($_.AppMsi) -CommandLine $CommandLine 
+            Write-DscStatus "$Tag Successfully created a MEMLABS package deployment for $($_.Name) as Package model"
+
+            Write-DscStatus "$Tag Distributing MEMLABS package $($_.Name) to all DPs"
+            Start-CMContentDistribution -PackageId $Package.PackageID -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Successfully distributed MEMLABS package $($_.Name) to all DPs"
+
+            Write-DscStatus "$Tag Deploying MEMLABS package $($_.Name) to all Systems as available deployment"
+            New-CMPackageDeployment -StandardProgram -PackageId $Package.PackageID -ProgramName $($_.AppMsi) -CollectionName "All Systems" -DeployPurpose Available
+            Write-DscStatus "$Tag successfully deployed MEMLABS package $($_.Name) to all Systems as available deployment"
+        }
     }
 
+    } # end Primary-only apps/packages block
 
     ## Changing the auto-approval setting on Hierarchy settings
 
@@ -249,12 +253,14 @@ else {
             #check if script already exists or else create it
             if (-not (Get-CMScript -ScriptName $ScriptName -Fast)) {
                 $script = New-CMScript -ScriptName "$ScriptName" -ScriptText $ScriptContent -Fast
-                Write-DscStatus "$Tag Successfully imported: $ScriptName"
-                # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
-                Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved" 
-
-                ##for testing if you want to remove all the scripts
-                #Remove-CMScript -ForceWildcardHandling -ScriptName * -Force
+                if ($script -and $script.ScriptGuid) {
+                    Write-DscStatus "$Tag Successfully imported: $ScriptName"
+                    # Approve the script by Guid, this is not working as it requires a diff author or the checkmark to be removed (set-cmheirarchysettings doesn't have that feature yet) Tim help needed here
+                    Approve-CMScript -ScriptGuid $script.ScriptGuid -Comment "MEMLABS auto approved"
+                }
+                else {
+                    Write-DscStatus "$Tag Imported $ScriptName but New-CMScript returned no ScriptGuid — skipping auto-approve"
+                }
             }
         }
         catch {
@@ -263,7 +269,8 @@ else {
     }
 
 
-    ## Task sequences 
+    ## Task sequences — Primary only (boot images, OSD content, local shares)
+    if ($CurrentRole -ne "CAS") {
 
     #custom domain name in winPE
     Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
@@ -540,6 +547,8 @@ else {
         Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
 
     }
+
+    } # end Primary-only TS/OSD block
 
     ### CI and baselines 
 
@@ -1269,7 +1278,8 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             "office"   = "MEMLABS-ADR-O365patching"
         }
 
-        # Define the folder path and share name
+        # Define the folder path and share name — Primary only (local shares)
+        if ($CurrentRole -ne "CAS") {
         $folderPath1 = "$DriveLetter\updatePkgs"
         $shareName1 = "updatePkgs"
 
@@ -1404,6 +1414,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             Invoke-FullSync
         }
 
+        } # end Primary-only update packages/ADR block
     }
 
     $collection = Get-CMCollection -Name "All Unknown Computers"
