@@ -2442,53 +2442,71 @@ $global:VM_Config = {
                         Where-Object { $_.BaseName -ne $env:COMPUTERNAME -and $_.BaseName -ne 'localhost' }
                     if ($mofFiles) {
                         $targetNodes = $mofFiles | ForEach-Object { $_.BaseName }
-                        "WinRM pre-flight: checking $($targetNodes.Count) nodes: $($targetNodes -join ', ')" | Out-File $log -Append
-                        $maxRetries = 12   # up to ~2 min total (12 x 10s)
+                        "WinRM pre-flight: checking $($targetNodes.Count) nodes in parallel: $($targetNodes -join ', ')" | Out-File $log -Append
+                        $maxRetries = 6   # up to ~1 min total (6 x 10s)
                         $unreachable = [System.Collections.Generic.List[string]]::new($targetNodes)
+
                         for ($r = 1; $r -le $maxRetries -and $unreachable.Count -gt 0; $r++) {
                             if ($r -gt 1) { Start-Sleep -Seconds 10 }
+                            # Fan out Test-WSMan as parallel jobs
+                            $jobs = @{}
+                            foreach ($node in $unreachable) {
+                                $jobs[$node] = Start-Job -ScriptBlock {
+                                    param($ComputerName, $Credential)
+                                    Test-WSMan -ComputerName $ComputerName -Credential $Credential -ErrorAction Stop
+                                } -ArgumentList $node, $creds
+                            }
+                            # Wait for all jobs (15s timeout covers WinRM connect timeout)
+                            $null = Wait-Job -Job $jobs.Values -Timeout 15
                             $stillDown = [System.Collections.Generic.List[string]]::new()
                             foreach ($node in $unreachable) {
-                                try {
-                                    $null = Test-WSMan -ComputerName $node -Credential $creds -ErrorAction Stop
-                                    "WinRM pre-flight: $node reachable (attempt $r)" | Out-File $log -Append
+                                $job = $jobs[$node]
+                                if ($job.State -eq 'Completed') {
+                                    try {
+                                        $null = Receive-Job -Job $job -ErrorAction Stop
+                                        "WinRM pre-flight: $node reachable (round $r)" | Out-File $log -Append
+                                    }
+                                    catch {
+                                        "WinRM pre-flight: $node job error (round $r/$maxRetries): $_" | Out-File $log -Append
+                                        $stillDown.Add($node)
+                                    }
                                 }
-                                catch {
-                                    "WinRM pre-flight: $node unreachable (attempt $r/$maxRetries): $_" | Out-File $log -Append
+                                else {
+                                    "WinRM pre-flight: $node timed out (round $r/$maxRetries)" | Out-File $log -Append
                                     $stillDown.Add($node)
                                 }
+                                Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
                             }
                             $unreachable = $stillDown
                         }
 
-                        # Remediate any nodes still unreachable after basic retries
+                        # Remediate any nodes still unreachable after retries
                         if ($unreachable.Count -gt 0) {
                             "WinRM pre-flight: Diagnosing $($unreachable.Count) unreachable nodes" | Out-File $log -Append
                             foreach ($node in [string[]]$unreachable) {
-                                # 1. DNS check -- is the name resolvable?
+                                # 1. DNS check
                                 try {
                                     $dns = Resolve-DnsName -Name $node -Type A -DnsOnly -ErrorAction Stop
                                     "WinRM pre-flight: $node DNS OK -> $($dns.IPAddress -join ', ')" | Out-File $log -Append
                                 }
                                 catch {
-                                    "WinRM pre-flight: $node DNS FAILED: $_ -- attempting ipconfig /registerdns via sc.exe" | Out-File $log -Append
+                                    "WinRM pre-flight: $node DNS FAILED: $_" | Out-File $log -Append
                                 }
 
-                                # 2. Ping check -- is the node network-reachable?
+                                # 2. Ping check
                                 $pingOk = Test-Connection -ComputerName $node -Count 2 -Quiet -ErrorAction SilentlyContinue
                                 "WinRM pre-flight: $node ping $(if ($pingOk) { 'OK' } else { 'FAILED' })" | Out-File $log -Append
 
-                                # 3. Try restarting WinRM via RPC (sc.exe uses named pipes, not WinRM)
+                                # 3. Restart WinRM via RPC (sc.exe uses named pipes, not WinRM)
                                 if ($pingOk) {
-                                    "WinRM pre-flight: $node attempting WinRM service restart via sc.exe" | Out-File $log -Append
+                                    "WinRM pre-flight: $node restarting WinRM via sc.exe" | Out-File $log -Append
                                     $scStop = sc.exe \\$node stop WinRM 2>&1
                                     Start-Sleep -Seconds 3
                                     $scStart = sc.exe \\$node start WinRM 2>&1
-                                    "WinRM pre-flight: $node sc.exe stop: $scStop" | Out-File $log -Append
-                                    "WinRM pre-flight: $node sc.exe start: $scStart" | Out-File $log -Append
+                                    "WinRM pre-flight: $node sc stop: $scStop" | Out-File $log -Append
+                                    "WinRM pre-flight: $node sc start: $scStart" | Out-File $log -Append
                                     Start-Sleep -Seconds 5
 
-                                    # Final check after remediation
                                     try {
                                         $null = Test-WSMan -ComputerName $node -Credential $creds -ErrorAction Stop
                                         "WinRM pre-flight: $node NOW REACHABLE after WinRM restart" | Out-File $log -Append
