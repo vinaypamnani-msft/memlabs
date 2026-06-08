@@ -2443,8 +2443,32 @@ $global:VM_Config = {
                     if ($mofFiles) {
                         $targetNodes = $mofFiles | ForEach-Object { $_.BaseName }
                         "WinRM pre-flight: checking $($targetNodes.Count) nodes in parallel: $($targetNodes -join ', ')" | Out-File $log -Append
+
+                        # DC self-check: verify this DC can authenticate to itself before
+                        # testing remote nodes.  If the DC's own Kerberos/DNS isn't ready,
+                        # every remote Test-WSMan will fail and we'd wrongly declare ALL
+                        # nodes unreachable, triggering a pointless mass reboot.
+                        $dcReady = $false
+                        for ($sc = 1; $sc -le 3; $sc++) {
+                            try {
+                                $null = Test-WSMan -ComputerName $env:COMPUTERNAME -Credential $creds -ErrorAction Stop
+                                "WinRM pre-flight: DC self-check OK (attempt $sc)" | Out-File $log -Append
+                                $dcReady = $true
+                                break
+                            }
+                            catch {
+                                "WinRM pre-flight: DC self-check FAILED (attempt $sc/3): $_" | Out-File $log -Append
+                                if ($sc -lt 3) { Start-Sleep -Seconds 10 }
+                            }
+                        }
+                        if (-not $dcReady) {
+                            "WinRM pre-flight: DC cannot authenticate to itself -- skipping remote node checks. DC services not ready yet; self-recovery on each node will handle DSC start." | Out-File $log -Append
+                            # Do NOT write preflight-failed.txt -- this is a DC problem, not a node problem.
+                            # Nodes' self-recovery will kick in after 3 min with no DSC status.
+                        }
+
                         $maxRetries = 6   # up to ~1 min total (6 x 10s)
-                        $unreachable = [System.Collections.Generic.List[string]]::new([string[]]@($targetNodes))
+                        $unreachable = if ($dcReady) { [System.Collections.Generic.List[string]]::new([string[]]@($targetNodes)) } else { [System.Collections.Generic.List[string]]::new() }
 
                         for ($r = 1; $r -le $maxRetries -and $unreachable.Count -gt 0; $r++) {
                             if ($r -gt 1) { Start-Sleep -Seconds 10 }
@@ -2763,6 +2787,17 @@ $global:VM_Config = {
                 ($preflightResult.ScriptBlockOutput).Split("`n", [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
             } else { @() }
             if ($failedNodes.Count -gt 0) {
+                # Sanity check: if nearly all nodes are "unreachable", the problem is
+                # almost certainly on the DC side (Kerberos/DNS not ready), not the
+                # individual VMs.  Rebooting every VM is counterproductive -- skip it
+                # and let the per-node self-recovery handle DSC start instead.
+                $totalNonDcVMs = @($deployConfig.virtualMachines | Where-Object { $_.role -ne 'DC' -and $_.role -ne 'Proxy' -and $_.intOnly -ne $true }).Count
+                if ($totalNonDcVMs -gt 0 -and $failedNodes.Count -ge [Math]::Ceiling($totalNonDcVMs * 0.75)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): $($failedNodes.Count)/$totalNonDcVMs nodes unreachable -- this is likely a DC-side issue (Kerberos/DNS not ready). Skipping mass reboot; per-node self-recovery will handle DSC start." -Warning -OutputStream
+                    $failedNodes = @()  # clear so we skip the foreach below
+                }
+            }
+            if ($failedNodes.Count -gt 0) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Host-side reboot for $($failedNodes.Count) WinRM-unreachable nodes: $($failedNodes -join ', ')" -Warning -OutputStream
                 foreach ($failedNode in $failedNodes) {
                     $vm = Get-VM -Name $failedNode -ErrorAction SilentlyContinue
@@ -2977,7 +3012,7 @@ $global:VM_Config = {
 
                         Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue
                         "Starting DSC locally from $dscConfigPath" | Out-File $log -Append
-                        Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
+                        $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose
                         return "STARTED"
                     }
                     $recoveryResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_RecoverLocal -ArgumentList $DscFolder -DisplayName "DSC: Local Recovery" -TimeoutSeconds 300
