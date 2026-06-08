@@ -2751,7 +2751,11 @@ $global:VM_Config = {
         if ($multiNodeDsc -and $currentItem.role -eq "DC") {
             $preflightResult = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
                 $f = 'C:\staging\DSC\WinRM-preflight-failed.txt'
-                if (Test-Path $f) { (Get-Content $f -Raw).Trim() } else { '' }
+                if (Test-Path $f) {
+                    $content = (Get-Content $f -Raw).Trim()
+                    Remove-Item $f -Force -ErrorAction SilentlyContinue
+                    $content
+                } else { '' }
             } -DisplayName "DSC: Check pre-flight failures"
             $failedNodes = if ($preflightResult.ScriptBlockOutput -and -not $preflightResult.ScriptBlockFailed) {
                 ($preflightResult.ScriptBlockOutput).Split("`n", [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
