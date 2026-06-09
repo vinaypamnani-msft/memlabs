@@ -2677,6 +2677,43 @@ function Update-VMFromHyperV {
 
 }
 
+function Save-VMListDiskCache {
+    if ($Common.InJob) { return }
+    if (-not $global:vm_List -or $global:vm_List.Count -eq 0) { return }
+    try {
+        $cachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
+        @($global:vm_List) | Export-Clixml -Path $cachePath -Force -Depth 10
+        Write-Log "Save-VMListDiskCache: Wrote $($global:vm_List.Count) VMs to disk cache." -LogOnly
+    }
+    catch {
+        Write-Log "Save-VMListDiskCache: Failed to write disk cache. $_" -LogOnly
+    }
+}
+
+function Read-VMListDiskCache {
+    param([int]$MaxAgeMinutes = 10)
+    try {
+        $cachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
+        if (-not (Test-Path $cachePath)) { return $null }
+
+        $cacheAge = ((Get-Date) - (Get-Item $cachePath).LastWriteTime).TotalMinutes
+        if ($cacheAge -gt $MaxAgeMinutes) {
+            Write-Log "Read-VMListDiskCache: Disk cache is $([int]$cacheAge) min old (max $MaxAgeMinutes). Skipping." -LogOnly
+            return $null
+        }
+
+        $cached = @(Import-Clixml -Path $cachePath)
+        if ($cached.Count -eq 0) { return $null }
+
+        Write-Log "Read-VMListDiskCache: Loaded $($cached.Count) VMs from disk cache ($([int]$cacheAge) min old)." -LogOnly
+        return $cached
+    }
+    catch {
+        Write-Log "Read-VMListDiskCache: Failed to read disk cache. $_" -LogOnly
+        return $null
+    }
+}
+
 $global:vm_List = $null
 $global:vm_List_LastUpdate = $null
 function Get-List {
@@ -2720,6 +2757,11 @@ function Get-List {
             $global:vm_List_LastUpdate = $null
             $global:TestConfigFastCache = $null
             $global:VMStringCache = $null
+            # Remove disk cache so stale data is not reloaded
+            try {
+                $diskCachePath = Join-Path $Common.CachePath "vm-list-cache.clixml"
+                if (Test-Path $diskCachePath) { Remove-Item $diskCachePath -Force -ErrorAction SilentlyContinue }
+            } catch {}
             return
         }
 
@@ -2738,6 +2780,20 @@ function Get-List {
         if ($ResetCache.IsPresent) {
             $global:vm_List = $null
             $global:vm_List_LastUpdate = $null
+        }
+
+        # Seed from disk cache if in-memory list is empty. This lets job
+        # workers (Start-Job) skip the expensive Get-VM + Get-VMFromHyperV
+        # full-build loop. The subsequent SmartUpdate block will do a
+        # lightweight Get-VM + Update-VMFromHyperV refresh to pick up
+        # current State values.
+        if (-not $global:vm_List) {
+            $diskCached = Read-VMListDiskCache
+            if ($diskCached) {
+                $global:vm_List = $diskCached
+                # Leave vm_List_LastUpdate null so SmartUpdate forces a
+                # refresh pass (cheap: just Get-VM + Update-VMFromHyperV).
+            }
         }
 
         if ($doSmartUpdate) {
@@ -2802,6 +2858,7 @@ function Get-List {
                 }
                 $global:vm_List_LastUpdate = Get-Date
                 $global:vm_List_Dirty = $false
+                Save-VMListDiskCache
                 } # else (throttle)
             }
         }
@@ -2831,6 +2888,7 @@ function Get-List {
 
                     $global:vm_List = $return
                     $global:vm_List_LastUpdate = Get-Date
+                    Save-VMListDiskCache
                 }
             }
             finally {
