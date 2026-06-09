@@ -207,13 +207,10 @@ function Start-Phase {
         # in deployConfig (VM Notes not yet written on first-run cases).
         Set-VmProxyEnforcementForConfig -deployConfig $deployConfig | Out-Null
         # NOTE: Cross-lab reconciliation (Set-VmProxyEnforcementForAllLabs)
-        # used to run here, but Phase 2 is too early -- parallel deploys in
-        # other domains may be mid-flight with stale VM Notes, so the global
-        # subnet union read from Get-NetworkList can be incomplete and we'd
-        # potentially re-stamp other labs with a too-narrow allow-list.
-        # Reconcile now runs from New-Lab.ps1 after Phase 11 succeeds, when
-        # this deploy's own VMs are fully built + verified and their subnets
-        # are visible in the cache.
+        # runs from New-Lab.ps1 after Phase 11 succeeds, to clear stale ACLs
+        # from VMs whose useProxy was flipped off. The ACL set itself is
+        # fixed (RFC 1918 allow + deny public ports), so no subnet-union
+        # timing concerns exist.
 
         # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
         # site-server desktops. No-op when no Proxy VM is in this config.

@@ -1205,44 +1205,52 @@ function Set-VmProxyEnforcement {
 
     .DESCRIPTION
         Adds extended ACLs on the VM's network adapter that allow ALL traffic
-        to/from any known memlabs lab subnet (so AD, SMB, CM, SQL, and
-        inter-domain hierarchy traffic stay native), then deny outbound
-        TCP 80/443 and DNS (UDP+TCP 53) to anything else. Net effect: free
-        movement inside the lab, but any attempt to reach the public
-        Internet on web or DNS ports is blocked -- forcing HTTP/HTTPS
-        through the Squid proxy.
+        to/from any RFC 1918 private address (10/8, 172.16/12, 192.168/16),
+        then deny outbound TCP 80/443, UDP 443 (QUIC), and DNS (UDP+TCP 53)
+        to anything else. Net effect: free movement to any private IP
+        (intra-lab AD, SMB, SQL, CM, cross-domain hierarchies), but any
+        attempt to reach PUBLIC Internet IPs on web or DNS ports is blocked
+        -- forcing HTTP/HTTPS through the Squid proxy.
+
+        Because the allow rules cover all private space, the ACL set is
+        identical for every VM on the host. No per-subnet computation or
+        cross-lab reconciliation is needed.
 
         Idempotent: removes any prior memlabs proxy ACLs (weight band
         5000-5099) before re-adding.
 
     .PARAMETER VmName
         The Windows VM whose vNIC ACLs are being managed.
-
-    .PARAMETER LabSubnets
-        Array of /24 subnet base addresses (e.g. "192.168.1.0") covering
-        every memlabs network the VM is allowed to reach freely. Typically
-        produced by combining this deployConfig's vmOptions.network with
-        the output of Get-NetworkList so cross-domain hierarchies still
-        work.
     #>
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory = $true)] [string]$VmName,
-        [Parameter(Mandatory = $true)] [string[]]$LabSubnets
+        [Parameter(Mandatory = $true)] [string]$VmName
     )
 
-    # Normalize -> "x.y.z.0/24", dedupe.
-    $cidrs = @($LabSubnets |
-        Where-Object { $_ } |
-        ForEach-Object {
-            $s = $_.Trim()
-            if ($s -match '/\d+$') { $s } else { "$s/24" }
-        } |
-        Select-Object -Unique)
+    # Fixed RFC 1918 ranges -- covers every possible lab subnet without
+    # needing to enumerate them. Only public-IP traffic hits the deny rules.
+    $cidrs = @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
 
-    if (-not $cidrs -or $cidrs.Count -eq 0) {
-        Write-Log "[Proxy] $VmName`: No lab subnets provided; skipping enforcement (would be wide-open deny)" -Warning
-        return $false
+    # Fast-path: if existing ACLs already match the desired state, skip the
+    # expensive clear+re-add cycle (~11 WMI calls saved per VM).
+    try {
+        $existingAcls = @(Get-VMNetworkAdapterExtendedAcl -VMName $VmName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Weight -ge $global:MemLabsProxyAclWeightMin -and $_.Weight -le $global:MemLabsProxyAclWeightMax })
+        $expectedTotal = ($cidrs.Count * 2) + 5   # 2 allow (in+out) per range + 5 deny rules = 11
+        if ($existingAcls.Count -eq $expectedTotal) {
+            $existingAllowCidrs = @($existingAcls |
+                Where-Object { $_.Action -eq 'Allow' } |
+                ForEach-Object { $_.RemoteIPAddress } |
+                Sort-Object -Unique)
+            $desiredCidrs = @($cidrs | Sort-Object)
+            if (($existingAllowCidrs -join ',') -eq ($desiredCidrs -join ',')) {
+                Write-Log "[Proxy] $VmName`: ACLs already current; skipping" -Verbose
+                return $true
+            }
+        }
+    }
+    catch {
+        # If we can't read ACLs, fall through to the full clear+re-add path.
     }
 
     Clear-VmProxyEnforcement -VmName $VmName
@@ -1273,27 +1281,19 @@ function Set-VmProxyEnforcement {
     }
 
     try {
-        # --- High-priority ALLOW rules (weight band 5090-5099) ---
-        # Allow all traffic both directions to/from any known lab subnet.
-        # Catches intra-subnet AD/SMB/SQL/CM, cross-subnet hierarchy traffic
-        # (CAS<->Primary across separate networks), and the Linux proxy +
-        # DCs which always live in one of these subnets.
+        # --- High-priority ALLOW rules (weights 5093-5099) ---
+        # Allow all traffic both directions to/from any RFC 1918 private IP.
+        # This covers every memlabs lab subnet regardless of how many labs
+        # or subnets exist on the host (no per-subnet enumeration needed).
+        # Intra-lab AD/SMB/SQL/CM and cross-domain hierarchy traffic all
+        # stay native. Only public-IP traffic on the denied ports is blocked.
         #
-        # Each (subnet, direction) gets a unique weight: Hyper-V's
+        # Each (range, direction) gets a unique weight: Hyper-V's
         # extended-ACL identity is (Direction + Weight + Protocol) and does
-        # NOT include RemoteIPAddress, so multiple Allow rules sharing
-        # Direction+Weight+Protocol collide -- only the first lands and the
-        # rest are silently dropped (would block cross-subnet traffic).
-        # Band 5020-5099 keeps us inside the 5000-5099 cleanup window
-        # (deny rules occupy 5000-5003); 80 slots = 40 (subnet, direction)
-        # pairs = 40 subnets per direction. Memlabs host-wide subnet union
-        # is rarely more than a handful, so warn well before we'd overflow.
-        $maxSubnets = 40
-        if ($cidrs.Count -gt $maxSubnets) {
-            Write-Log "[Proxy] $VmName`: $($cidrs.Count) lab subnets exceeds cap ($maxSubnets); only first $maxSubnets will be allowed" -Warning
-        }
+        # NOT include RemoteIPAddress, so rules sharing
+        # Direction+Weight+Protocol collide.
         $w = 5099
-        foreach ($cidr in ($cidrs | Select-Object -First $maxSubnets)) {
+        foreach ($cidr in $cidrs) {
             & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Outbound'; RemoteIPAddress = $cidr; Weight = $w }
             & $addAcl @{ VMName = $VmName; Action = 'Allow'; Direction = 'Inbound';  RemoteIPAddress = $cidr; Weight = $w - 1 }
             $w -= 2
@@ -1327,7 +1327,7 @@ function Set-VmProxyEnforcement {
         & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'UDP'; Weight = 5001 }
         & $addAcl @{ VMName = $VmName; Action = 'Deny'; Direction = 'Outbound'; RemotePort = 53; Protocol = 'TCP'; Weight = 5000 }
 
-        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (lab subnets: $($cidrs -join ', '))"
+        Write-Log "[Proxy] $VmName`: Enforcement ACLs applied (allow all RFC 1918 private, deny public 80/443/53)"
         return $true
     }
     catch {
@@ -1343,11 +1343,8 @@ function Set-VmProxyEnforcementForConfig {
         configuration.
 
     .DESCRIPTION
-        Mirrors Set-WindowsClientProxyForConfig: enumerates the deployConfig,
-        filters via Test-VmUsesProxy, builds a union of every known memlabs
-        lab subnet (this deploy's vmOptions.network + every VM's .network +
-        Get-NetworkList for cross-domain hierarchies), then calls
-        Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
+        Enumerates the deployConfig, filters via Test-VmUsesProxy, then
+        calls Set-VmProxyEnforcement per VM. No-op when no Proxy VM or no
         opted-in clients exist.
     #>
     [CmdletBinding()]
@@ -1372,67 +1369,12 @@ function Set-VmProxyEnforcementForConfig {
         return $false
     }
 
-    # Union all known lab subnets so inter-domain hierarchy traffic isn't blocked.
-    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
-    if ($deployConfig.vmOptions.network) { [void]$subnetSet.Add($deployConfig.vmOptions.network) }
-    foreach ($vm in $deployConfig.virtualMachines) {
-        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
-    }
-    try {
-        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
-        foreach ($n in $allKnown) { if ($n) { [void]$subnetSet.Add($n) } }
-    }
-    catch {
-        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with config-only subnet set" -Warning
-    }
-    $labSubnets = @($subnetSet)
-    Write-Log "[Proxy] Lab subnets allowed past enforcement: $($labSubnets -join ', ')"
-
     $ok = $true
     foreach ($vm in $clients) {
-        $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+        $r = Set-VmProxyEnforcement -VmName $vm.vmName
         if (-not $r) { $ok = $false }
     }
     return $ok
-}
-
-function Get-VmProxyEnforcementSubnets {
-    <#
-    .SYNOPSIS
-        Build the global union of every memlabs lab subnet currently known
-        to the host, normalized for use as Set-VmProxyEnforcement -LabSubnets.
-
-    .DESCRIPTION
-        Combines Get-NetworkList (every lab's subnet stored in cached VM
-        metadata) with optional extras from an in-flight deployConfig
-        (vmOptions.network + any per-VM .network overrides) so that the
-        very deploy that's invoking us can also feed its brand-new subnets
-        into the union before those subnets show up in Get-NetworkList.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $false)] [object]$deployConfig
-    )
-
-    $set = New-Object System.Collections.Generic.HashSet[string]
-    try {
-        $allKnown = Get-NetworkList | Select-Object -ExpandProperty Network -ErrorAction Stop
-        foreach ($n in $allKnown) { if ($n) { [void]$set.Add($n) } }
-    }
-    catch {
-        Write-Log "[Proxy] Get-NetworkList failed: $_ -- continuing with deploy-only subnet set" -Warning
-    }
-    if ($deployConfig) {
-        if ($deployConfig.vmOptions -and $deployConfig.vmOptions.network) {
-            [void]$set.Add($deployConfig.vmOptions.network)
-        }
-        if ($deployConfig.virtualMachines) {
-            foreach ($vm in $deployConfig.virtualMachines) {
-                if ($vm.network) { [void]$set.Add($vm.network) }
-            }
-        }
-    }
-    return @($set)
 }
 
 function Set-VmProxyEnforcementForAllLabs {
@@ -1442,46 +1384,25 @@ function Set-VmProxyEnforcementForAllLabs {
         on the host, not just the VMs in the current deployConfig.
 
     .DESCRIPTION
-        Adding a new domain / new subnet / new lab on a host that already
-        hosts other proxy-enforced labs changes the "allowed lab subnet"
-        union. The per-deploy Set-VmProxyEnforcementForConfig only touches
-        VMs in the new deployConfig, so VMs in OTHER labs keep ACLs frozen
-        at their original deploy time and would deny traffic to the new
-        subnet (which the user almost certainly wants to permit, e.g. for
-        a freshly added second hierarchy). Similarly when a lab is removed,
-        the surviving labs keep stale allow rules for the gone subnet.
+        Enumerates every memlabs VM on the host via Get-List -Type VM.
+        For each VM with useProxy=true in its VM Note (Windows, not
+        role-excluded) -> stamps the fixed RFC 1918 allow + deny ACL set.
+        For each opted-out VM that still has stale ACLs in the memlabs
+        weight band (5000-5099) -> clears them.
 
-        This function:
-          1. Builds the current global subnet union (Get-NetworkList +
-             optional in-flight deployConfig extras).
-          2. Enumerates every memlabs VM on the host via Get-List -Type VM.
-          3. For each VM with useProxy=true in its VM Note (Windows, not
-             role-excluded) -> re-stamps ACLs against the global union.
-          4. For each opted-out VM that still has stale ACLs in the
-             memlabs weight band (5000-5099) -> clears them.
+        Because the allow rules cover all RFC 1918 private space, the ACL
+        set is identical for every VM and never needs per-subnet
+        computation or cross-lab reconciliation.
 
         Safe to call repeatedly; per-VM failures are logged and never
         abort the sweep.
-
-    .PARAMETER deployConfig
-        Optional. If supplied, its subnets are folded into the union so
-        the current deploy's brand-new networks are honored before
-        Get-NetworkList sees them.
 
     .PARAMETER WhatIf
         Standard PowerShell switch; reports the intended actions without
         touching any ACLs.
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
-    param (
-        [Parameter(Mandatory = $false)] [object]$deployConfig
-    )
-
-    $labSubnets = Get-VmProxyEnforcementSubnets -deployConfig $deployConfig
-    if (-not $labSubnets -or $labSubnets.Count -eq 0) {
-        Write-Log "[Proxy] Reconcile: no lab subnets known; skipping (would be wide-open deny)" -Warning
-        return $false
-    }
+    param ()
 
     try {
         $allVms = @(Get-List -Type VM)
@@ -1495,26 +1416,6 @@ function Set-VmProxyEnforcementForAllLabs {
         Write-Log "[Proxy] Reconcile: no memlabs VMs found on host; nothing to do"
         return $true
     }
-
-    # Cache-race guard: fold every enumerated VM's own subnet into the union
-    # BEFORE we start stamping. Get-NetworkList reads cached VM Notes; if a
-    # parallel deploy in another domain is mid-flight (Notes not yet written,
-    # or our cache is stale), Get-NetworkList can return a partial view that
-    # OMITS that domain's subnet. Without this guard we'd then re-stamp the
-    # other domain's VMs with an allow-list missing their OWN subnet,
-    # blocking their intra-lab AD / SQL / SMB / CM traffic the moment we
-    # finished applying ACLs.
-    #
-    # The Get-List -Type VM call above iterates the same VM objects we're
-    # about to touch, so any subnet we could harm by omission is right
-    # here for us to add.
-    $subnetSet = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($s in $labSubnets) { if ($s) { [void]$subnetSet.Add($s) } }
-    foreach ($vm in $allVms) {
-        if ($vm.network) { [void]$subnetSet.Add($vm.network) }
-    }
-    $labSubnets = @($subnetSet)
-    Write-Log "[Proxy] Reconcile: lab subnet union = $($labSubnets -join ', ')"
 
     # Hard-exclude roles (mirrors Test-VmUsesProxy). Linux Proxy VM excluded
     # via the Proxy role itself; other Linux VMs are not Windows-NAT'd so
@@ -1537,18 +1438,8 @@ function Set-VmProxyEnforcementForAllLabs {
 
         try {
             if ($optedIn) {
-                # Safety net: never stamp a VM whose own subnet isn't in the
-                # final allow list -- doing so would deny its intra-lab AD /
-                # SQL / SMB traffic. Should never fire after the union-fold
-                # guard above, but is cheap insurance against a regression
-                # or a VM with a missing/blank .network property.
-                if ($vm.network -and ($labSubnets -notcontains $vm.network)) {
-                    Write-Log "[Proxy] Reconcile: $($vm.vmName): own subnet '$($vm.network)' not in union ($($labSubnets -join ', ')); refusing to stamp (would break intra-lab traffic)" -Warning
-                    $failed++
-                    continue
-                }
                 if ($PSCmdlet.ShouldProcess($vm.vmName, "Apply proxy enforcement ACLs")) {
-                    $r = Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets $labSubnets
+                    $r = Set-VmProxyEnforcement -VmName $vm.vmName
                     if ($r) { $applied++ } else { $failed++ }
                 }
             }

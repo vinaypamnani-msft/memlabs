@@ -964,20 +964,10 @@ try {
                         Write-Log "[Phase 11] Skipping snapshot merge (-NoSnapshot was specified)" -LogOnly
                     }
 
-                    # Cross-lab proxy ACL reconciliation. Runs here (post-
-                    # Phase 11 success) rather than in Phase 2 because:
-                    #   - This deploy's VMs are now fully built, verified,
-                    #     and their subnets/useProxy values are populated
-                    #     in Get-NetworkList cache.
-                    #   - Parallel deploys in other domains may have been
-                    #     mid-flight during our Phase 2, which made the
-                    #     global subnet union unreliable.
-                    # Per-VM safety net inside Set-VmProxyEnforcementForAllLabs
-                    # refuses to stamp any VM whose own subnet isn't in the
-                    # final union, so even with concurrent labs we never
-                    # shrink a VM's allow-list below its own subnet.
+                    # Cross-lab proxy ACL reconciliation. Uses fixed RFC 1918
+                    # allow ranges so no subnet-union computation is needed.
                     try {
-                        Set-VmProxyEnforcementForAllLabs -deployConfig $deployConfig | Out-Null
+                        Set-VmProxyEnforcementForAllLabs | Out-Null
                     }
                     catch {
                         Write-Log "[Phase 11] Proxy cross-lab reconcile failed (non-fatal): $_" -Warning
@@ -1095,7 +1085,7 @@ try {
                         Write-Log "[Proxy] Enabling proxy on existing VM $($vm.vmName) -> $proxyFqdn`:3128"
                         Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
                             -ProxyFqdn $proxyFqdn -BypassNetwork $deployConfig.vmOptions.network
-                        Set-VmProxyEnforcement -VmName $vm.vmName -LabSubnets (Get-VmProxyEnforcementSubnets -deployConfig $deployConfig)
+                        Set-VmProxyEnforcement -VmName $vm.vmName
                     }
                     else {
                         Write-Log "[Proxy] $($vm.vmName): useProxy=true but no Proxy VM found; skipping" -Warning
