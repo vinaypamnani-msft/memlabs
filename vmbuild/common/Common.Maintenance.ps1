@@ -436,20 +436,26 @@ function Start-VMFixesBatched {
 
     $vmNote = Get-VMNote -VMName $VMName
 
-    # Stamp non-applicable fixes immediately (host-side, no remote call needed)
+    # Classify each fix and build a status table
     $applicableFixes = @()
+    $statusLines = @()
     foreach ($vmFix in $VMFixes) {
-        if (Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion) {
-            # Already applied (per-fix tracking)
+        $applied = Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion
+        if ($applied) {
+            $statusLines += "  {0,-25} {1,-12} Applied" -f $vmFix.FixName, $vmFix.FixVersion
             continue
         }
         if (-not $vmFix.AppliesToThisVM) {
+            $statusLines += "  {0,-25} {1,-12} N/A" -f $vmFix.FixName, $vmFix.FixVersion
             Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion
             continue
         }
+        $statusLines += "  {0,-25} {1,-12} PENDING" -f $vmFix.FixName, $vmFix.FixVersion
         $return.ApplicableCount++
         $applicableFixes += $vmFix
     }
+    Write-Log "$VMName`: Fix status ($($applicableFixes.Count) pending, $($VMFixes.Count) total):" -LogOnly
+    foreach ($line in $statusLines) { Write-Log "$VMName`: $line" -LogOnly }
 
     if ($applicableFixes.Count -eq 0) {
         $return.Success = $true
