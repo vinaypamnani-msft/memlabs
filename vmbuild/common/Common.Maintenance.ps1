@@ -1247,7 +1247,22 @@ function Get-VMFixes {
     }
     else {
         $vmNote = Get-VMNote -VMName $VMName
-        $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain }
+        if ($Common.InJob) {
+            # In job workers, skip Get-List (triggers expensive Get-VM + Get-VMNetworkAdapter
+            # bulk warmup that serializes on vmms.exe across all parallel workers).
+            # Find the DC by name convention: all VMs share a prefix, DC is always PREFIX-DC.
+            # Only Fix-CMFullAdmin uses $dc.vmName.
+            $dc = $null
+            $vmNameStr = [string]$VMName
+            $dashIdx = $vmNameStr.IndexOf('-')
+            if ($dashIdx -gt 0) {
+                $dcName = $vmNameStr.Substring(0, $dashIdx + 1) + "DC"
+                $dc = [PSCustomObject]@{ vmName = $dcName; role = "DC"; domain = $vmNote.domain }
+            }
+        }
+        else {
+            $dc = Get-List -Type VM | Where-Object { $_.role -eq "DC" -and $_.domain -eq $vmNote.domain }
+        }
     }
 
     $fixesToPerform = @()
