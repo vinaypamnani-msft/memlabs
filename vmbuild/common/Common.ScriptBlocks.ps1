@@ -1397,8 +1397,21 @@ $global:VM_Config = {
                     return
                 }
             }
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
-            return
+            # Last-resort failsafe: reboot the VM and give it 5 minutes before
+            # failing the entire phase.  Even when channel-broken detection
+            # didn't trigger (auth errors, unknown failures, etc.), a hard
+            # reboot may clear a transient PSDirect or OS-level problem.
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Wait-ForVm timed out. Attempting last-resort reboot before failing." -Warning -OutputStream
+            stop-vm2 -Name $currentItem.vmName -TurnOff
+            Start-Sleep -seconds 10
+            start-vm2 -Name $currentItem.vmName
+            Start-Sleep -seconds 20
+            $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $domainName -TimeoutMinutes 5 -SkipDiskTest
+            if (-not $connected) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable after last-resort reboot. Exiting." -Failure -OutputStream
+                return
+            }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): VM responded after last-resort reboot." -Success -OutputStream
         }
 
         Write-Progress2 $Activity -Status "Establishing a session with the VM" -percentcomplete 2 -force

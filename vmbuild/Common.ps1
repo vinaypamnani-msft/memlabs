@@ -3941,6 +3941,8 @@ function Wait-ForVm {
         $count = 0
         [int]$restartCount = 0
         [int]$maxRestarts = 2
+        [int]$channelBrokenCount = 0
+        [bool]$psdirectRebootDone = $false
         do {
             $count++
             if ($count -gt 1) {
@@ -3968,6 +3970,7 @@ function Wait-ForVm {
             $out = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SessionMaxRetries 1 -ScriptBlock { Test-Path $using:PathToVerify } -SuppressLog
             $ready = $true -eq $out.ScriptBlockOutput
             if ($ready) {
+                $channelBrokenCount = 0
                 Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding"
             }
             elseif ($count -gt 1) {
@@ -3975,6 +3978,7 @@ function Wait-ForVm {
                 $readytest = $true -eq $outtest.ScriptBlockOutput
 
                 if ($readytest) {
+                    $channelBrokenCount = 0
                     Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is responding. Waiting for $PathToVerify to exist."
                 }
                 else {
@@ -3982,7 +3986,14 @@ function Wait-ForVm {
                     # Check heartbeat to decide whether to hard-restart.
                     $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
                     $hb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
-                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding (heartbeat: $hb)"
+
+                    # Detect channel-broken from the actual session diagnostics.
+                    # Either call timing out or returning a VMBus error is evidence
+                    # the PSDirect channel is hung — distinct from auth failures.
+                    $channelBrokenNow = ($out.ChannelBroken -or $outtest.ChannelBroken)
+                    $hbText = "heartbeat: $hb"
+                    if ($channelBrokenNow) { $hbText += ", channel broken" }
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "VM is not responding ($hbText)"
 
                     # Only hard-reset when heartbeat is NoContact (IC not responding
                     # at all — VM is likely stuck at boot or crashed).
@@ -3998,6 +4009,31 @@ function Wait-ForVm {
                         start-vm2 -name $vmName | Out-Null
                         Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
                         $count = 0
+                        $channelBrokenCount = 0
+                    }
+                    elseif (-not $heartbeatStuck -and $channelBrokenNow -and -not $psdirectRebootDone) {
+                        # Heartbeat is healthy but PSDirect channel is broken
+                        # (sessions timed out or returned VMBus errors like
+                        # "socket target process has ended").  This is distinct
+                        # from auth failures where the channel works fine.
+                        # Require 3 consecutive channel-broken results + 3 min
+                        # elapsed to avoid false positives from transient timeouts.
+                        $channelBrokenCount++
+                        if ($channelBrokenCount -ge 3 -and $stopWatch.Elapsed.TotalMinutes -ge 3) {
+                            $psdirectRebootDone = $true
+                            Write-Log "$VmName`: PSDirect channel broken after $channelBrokenCount consecutive failures despite healthy heartbeat ($hb). Rebooting VM to recover VMBus." -Warning
+                            Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "Rebooting VM — PSDirect channel broken with healthy heartbeat"
+                            stop-vm2 -name $vmName -TurnOff | Out-Null
+                            start-sleep -seconds 10
+                            start-vm2 -name $vmName | Out-Null
+                            Wait-ForHeartbeat -VmName $VmName -Stopwatch $stopWatch -Timespan $timeSpan | Out-Null
+                            $count = 0
+                        }
+                    }
+                    elseif (-not $heartbeatStuck -and -not $channelBrokenNow) {
+                        # Session failed with a normal error (auth, etc.) — not a
+                        # channel problem.  Reset the channel-broken counter.
+                        $channelBrokenCount = 0
                     }
                 }
             }
@@ -4086,6 +4122,7 @@ function Invoke-VmCommand {
             ScriptBlockFailed = $false
             ScriptBlockOutput	= $null
             ErrorDetails      = $null
+            ChannelBroken     = $false
         }
 
         # Prepare args
@@ -4099,13 +4136,14 @@ function Invoke-VmCommand {
 
         # Get VM Session
         $ps = $null
+        $sessionDiag = @{ ChannelBroken = $false }
         $localOnlySession = $SkipDomainFallback.IsPresent
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag
         }
 
         if (-not $ps) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag
         }
 
         if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
@@ -4115,10 +4153,13 @@ function Invoke-VmCommand {
             if (-not $adminName) {
                 $adminName = "admin"
             }
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -Diagnostics $sessionDiag
         }
 
         $failed = ($null -eq $ps)
+        if ($failed) {
+            $return.ChannelBroken = [bool]$sessionDiag.ChannelBroken
+        }
 
         # Run script block inside VM
         if (-not $failed) {
@@ -4272,7 +4313,8 @@ $global:ps_lastGoodCred = @{}
 # not accept -SessionOption (which carries OpenTimeout), so there is
 # no native way to prevent an indefinite hang when PSDirect is broken
 # inside the guest (e.g. during BDC promotion).
-# Returns the PSSession on success, $null on timeout or failure.
+# Returns @{ Session; TimedOut; ErrorMessage } so callers can
+# distinguish channel-broken (timeout / VMBus error) from auth errors.
 function New-PSSessionWithTimeout {
     param(
         [string]$Name,
@@ -4280,6 +4322,10 @@ function New-PSSessionWithTimeout {
         [pscredential]$Credential,
         [int]$TimeoutSec = 30
     )
+
+    # Return a diagnostic hashtable so callers can distinguish
+    # timeout (channel hung) from auth/connection errors.
+    $result = @{ Session = $null; TimedOut = $false; ErrorMessage = $null }
 
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
@@ -4302,30 +4348,30 @@ function New-PSSessionWithTimeout {
         # runspace and PowerShell instance are leaked until the async stop
         # completes or the process exits — acceptable vs. hanging forever.
         try { $psi.BeginStop($null, $null) } catch {}
-        return $null
+        $result.TimedOut = $true
+        return $result
     }
 
-    $session = $null
     try {
-        $session = $psi.EndInvoke($async) | Select-Object -First 1
+        $result.Session = $psi.EndInvoke($async) | Select-Object -First 1
     }
     catch {
-        # Connection failed (bad creds, VM not ready, etc.)
+        $result.ErrorMessage = "$_"
     }
 
     $psi.Dispose()
 
-    if ($session) {
+    if ($result.Session) {
         # Keep the runspace alive — closing it can destroy the PSSession
         # whose transport was established through it.  Attach it to the
         # session so it can be cleaned up when the session is evicted.
-        $session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
+        $result.Session | Add-Member -NotePropertyName '_OwnerRunspace' -NotePropertyValue $rs -Force
     }
     else {
         $rs.Close()
         $rs.Dispose()
     }
-    return $session
+    return $result
 }
 
 # Dispose a PSSession and its owner runspace (if created by
@@ -4356,7 +4402,9 @@ function Get-VmSession {
         [Parameter(Mandatory = $false, HelpMessage = "Max retry attempts (default 3). Reduce for tight polling loops.")]
         [int]$MaxRetries = 3,
         [Parameter(Mandatory = $false, HelpMessage = "Only try local/primary credentials. Skip domain-lookup fallback.")]
-        [switch]$LocalOnly
+        [switch]$LocalOnly,
+        [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken = true when PSDirect timed out or returned a VMBus error.")]
+        [hashtable]$Diagnostics
     )
 
 
@@ -4482,6 +4530,7 @@ function Get-VmSession {
     }
 
     $failCount = 0
+    [bool]$sawChannelBroken = $false
     while ($true) {
         $ps = $null
         $failCount++
@@ -4507,13 +4556,24 @@ function Get-VmSession {
             $triedNames += $entry.Username
             $creds = New-Object System.Management.Automation.PSCredential ($entry.Username, $Common.LocalAdmin.Password)
             Write-Log "$VmName`: Trying credential '$($entry.Username)' (tag=$($entry.Tag))." -Verbose
-            $ps = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+            $connectResult = New-PSSessionWithTimeout -Name $VmName -VMId $vm.vmID -Credential $creds
+            $ps = $connectResult.Session
             if ($ps -and $ps.Availability -eq "Available") {
                 $cacheKey = $entry.CacheKey
                 $global:ps_lastGoodCred[$VmName] = $entry.Tag
                 Write-Log "$VmName`: Created session using $($entry.Username). CacheKey [$cacheKey]" -Success -Verbose
                 $global:ps_cache[$cacheKey] = $ps
                 return $ps
+            }
+            # Detect channel-broken indicators: timeout means VMBus is hung;
+            # "socket target process has ended" / "background process reported
+            # an error" mean the guest-side PSDirect host crashed.
+            # Auth errors (access denied, logon failure) are NOT channel-broken.
+            if ($connectResult.TimedOut) {
+                $sawChannelBroken = $true
+            }
+            elseif ($connectResult.ErrorMessage -match 'socket target process has ended|background process reported an error') {
+                $sawChannelBroken = $true
             }
             Remove-VmSession $ps
         }
@@ -4525,6 +4585,10 @@ function Get-VmSession {
         else {
             Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose
         }
+    }
+    # Populate diagnostics for the caller so it knows WHY we failed
+    if ($Diagnostics -and $sawChannelBroken) {
+        $Diagnostics.ChannelBroken = $true
     }
     Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
 }
