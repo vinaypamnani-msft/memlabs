@@ -40,15 +40,26 @@ function Start-Maintenance {
 
     # Pre-filter: skip VMs where every fix is already recorded in appliedFixes.
     # This avoids starting a job/thread for VMs that have nothing to do.
+    # Bulk-read all VM notes in a single Get-VM call (one CIM round-trip)
+    # instead of per-VM Get-VMNote calls that serialize on vmms.exe.
     $allFixDefs = Get-VMFixes -ReturnDummyList
     $relevantFixes = if ($applyNewOnly) {
         $allFixDefs | Where-Object { $_.AppliesToNew -eq $true }
     } else {
         $allFixDefs | Where-Object { $_.AppliesToExisting -eq $true }
     }
+    $vmNoteCache = @{}
+    try {
+        foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+            if ($hvm.Notes -like "*lastUpdate*") {
+                try { $vmNoteCache[$hvm.Name] = $hvm.Notes | ConvertFrom-Json } catch {}
+            }
+        }
+    } catch {}
+
     $countUpToDate = 0
     $vmsNeedingMaintenance = @($vmsNeedingMaintenance | Where-Object {
-        $note = Get-VMNote -VMName $_.vmName
+        $note = $vmNoteCache[$_.vmName]
         if ($note -and $note.appliedFixes) {
             $missing = $false
             foreach ($fix in $relevantFixes) {
