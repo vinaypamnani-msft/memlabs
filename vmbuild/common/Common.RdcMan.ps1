@@ -91,9 +91,8 @@ function Save-RdcManSettingsFile {
         $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
         $modified = $true
     }
-    $groupSortNode = $settings.SelectSingleNode('GroupSortOrder')
-    if ($groupSortNode) {
-        [void]$settings.RemoveChild($groupSortNode)
+    if ($settings.GroupSortOrder -ne "NoSort") {
+        $settings.GroupSortOrder = "NoSort"
         $modified = $true
     }
 

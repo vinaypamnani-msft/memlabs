@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<Settings programVersion="2.83">
+<Settings programVersion="3.12">
   <AutoSaveFiles>False</AutoSaveFiles>
   <AutoSaveInterval>0</AutoSaveInterval>
   <BuiltInGroups>
@@ -108,6 +108,7 @@
   </FilesToOpen>
   <FocusOnClick>False</FocusOnClick>
   <FullScreenWindowIsTopMost>False</FullScreenWindowIsTopMost>
+  <GroupSortOrder>NoSort</GroupSortOrder>
   <HideMainMenu>False</HideMainMenu>
   <HotKeyAltEsc>Insert</HotKeyAltEsc>
   <HotKeyAltShiftTab>Next</HotKeyAltShiftTab>
