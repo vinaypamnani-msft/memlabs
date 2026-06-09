@@ -61,6 +61,7 @@ function Start-Maintenance {
     $vmsNeedingMaintenance = @($vmsNeedingMaintenance | Where-Object {
         $note = $vmNoteCache[$_.vmName]
         if ($note -and $note.appliedFixes) {
+            # Per-fix tracking: skip if every relevant fix is already recorded
             $missing = $false
             foreach ($fix in $relevantFixes) {
                 if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
@@ -73,6 +74,26 @@ function Start-Maintenance {
                 $countUpToDate++
                 return $false
             }
+        }
+        elseif ($note -and
+                ($note.PSObject.Properties.Name -notcontains 'appliedFixes') -and
+                $note.memLabsVersion -and
+                $note.memLabsVersion -ge $Common.LatestHotfixVersion) {
+            # Transitional: VM managed by old watermark system (no appliedFixes
+            # property). Watermark is at or past the latest fix, so seed all fix
+            # versions into appliedFixes and skip. This is a one-time migration;
+            # subsequent runs use the per-fix check above.
+            $seeded = @{}
+            foreach ($fix in $allFixDefs) {
+                $seeded[$fix.FixName] = [string]$fix.FixVersion
+            }
+            $note | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$seeded) -Force
+            $note | Add-Member -MemberType NoteProperty -Name "lastUpdate" -Value (Get-Date -format "MM/dd/yyyy HH:mm") -Force
+            $json = ($note | ConvertTo-Json) -replace "`r`n","" -replace "    "," " -replace "  "," "
+            try { Set-VM -Name $_.vmName -Notes $json -ErrorAction SilentlyContinue } catch {}
+            Write-Log "$($_.vmName): Seeded appliedFixes from watermark ($($note.memLabsVersion)), skipping." -Verbose
+            $countUpToDate++
+            return $false
         }
         return $true
     })
