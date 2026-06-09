@@ -28,7 +28,7 @@
     "OfflineRootCAVM": "OLIVE"
   },
   "cmOptions": {
-    "version": "2603",
+    "version": "2509",
     "install": true,
     "pushClientToDomainMembers": true,
     "EVALVersion": false,
