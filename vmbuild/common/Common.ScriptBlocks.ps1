@@ -2521,7 +2521,19 @@ $global:VM_Config = {
                     $wait = Wait-Job -Timeout 30 -name $currentItem.vmName
                     $job = get-job -name $currentItem.vmName
                     "Job.State $($job.State)" | Out-File $log -Append
-                    
+
+                    # Log per-node child job status for diagnostics.
+                    # Even when the overall job is Running, individual
+                    # node pushes may have already failed (WinRM timeout,
+                    # CIM session error, etc.) - capture that early.
+                    foreach ($cj in $job.ChildJobs) {
+                        $cjMsg = "  ChildJob $($cj.Location): $($cj.State)"
+                        if ($cj.Error.Count -gt 0) {
+                            $cjMsg += " | Errors: $(($cj.Error | ForEach-Object { $_.ToString() }) -join '; ')"
+                        }
+                        $cjMsg | Out-File $log -Append
+                    }
+
                     # Wait 30 seconds for job to start. If the job has not been started, or has not completed, then log an error
                     if ($job.State -ne "Running") {
                         "Job detail: Name=$($job.Name) State=$($job.State) HasErrors=$($job.HasMoreData)" | Out-File $log -Append
@@ -2835,10 +2847,26 @@ $global:VM_Config = {
 
                         $nodeName = $env:COMPUTERNAME
                         $thisVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $nodeName }
+
+                        # Map VM role to the DSC Node-block role the phase config expects.
+                        # Get-Phase*ConfigurationData does this mapping when the DC pushes;
+                        # the local recovery must match.
+                        $nodeRole = if ($thisVm) { $thisVm.Role } else { 'DomainMember' }
+                        if ($nodeRole -eq 'SQLAO') {
+                            if ($Phase -eq 5) {
+                                # Phase 5 splits SQLAO into ClusterNode1 (has OtherNode) / ClusterNode2
+                                $nodeRole = if ($thisVm.OtherNode) { 'ClusterNode1' } else { 'ClusterNode2' }
+                            }
+                            else {
+                                # Phases 8/9 treat SQLAO as SqlServer
+                                $nodeRole = 'SqlServer'
+                            }
+                        }
+
                         $cd = @{
                             AllNodes = @(
                                 @{ NodeName = '*'; PSDscAllowDomainUser = $true; PSDscAllowPlainTextPassword = $true }
-                                @{ NodeName = $nodeName; Role = if ($thisVm) { $thisVm.Role } else { 'DomainMember' } }
+                                @{ NodeName = $nodeName; Role = $nodeRole }
                             )
                         }
 
