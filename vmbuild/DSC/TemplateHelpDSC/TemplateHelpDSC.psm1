@@ -6481,6 +6481,13 @@ class DisableClusterNicDnsRegistration {
             # Disable IPv6 on the cluster NIC to prevent AAAA record registration.
             Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue
 
+            # Disable LLTD (Link-Layer Topology Discovery) on the cluster NIC.
+            # The responder (ms_rspndr) lets the heartbeat subnet appear in
+            # network topology maps; the mapper (ms_lltdio) probes for peers.
+            # Neither serves any purpose on a private cluster heartbeat network.
+            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_lltdio -ErrorAction SilentlyContinue
+            Disable-NetAdapterBinding -InterfaceAlias $adapter.Name -ComponentID ms_rspndr -ErrorAction SilentlyContinue
+
             # Remove default gateway from cluster NIC -- heartbeat NICs should never
             # route externally. DHCP may have handed one out before the scope was fixed.
             $gateway = Get-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue
@@ -6533,6 +6540,8 @@ class DisableClusterNicDnsRegistration {
             if ($isClusterSubnet -or $isClusterName) {
                 Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
                 Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
+                Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID ms_lltdio -ErrorAction SilentlyContinue
+                Disable-NetAdapterBinding -InterfaceAlias $iface.InterfaceAlias -ComponentID ms_rspndr -ErrorAction SilentlyContinue
                 Write-Status "Stripped DNS capability from virtual adapter '$($iface.InterfaceAlias)' (ifIndex $($iface.ifIndex))"
             }
         }

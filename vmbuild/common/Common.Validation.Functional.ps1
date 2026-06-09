@@ -1073,50 +1073,57 @@ function Test-SQLAOFunctionality {
                     }
                 }
 
-                # Hostname must not resolve to heartbeat subnet (breaks remote connectivity)
+                # Hostname must not have A records pointing to the heartbeat subnet.
+                # Query the DNS server directly via Get-DnsServerResourceRecord
+                # instead of Resolve-DnsName.  Resolve-DnsName on a short name
+                # falls through to LLMNR, which returns ALL local IPs (including
+                # the heartbeat IP) even when the DNS server has no stale records.
                 $hostname = $env:COMPUTERNAME
-                $dnsRecords = @(Resolve-DnsName -Name $hostname -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
-                $staleRecords = @($dnsRecords | Where-Object { $_.IPAddress -like "${clusterSubnet}*" })
+                $domain = (Get-CimInstance Win32_ComputerSystem).Domain
+                $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+                $staleRecords = @()
+                if ($dnsServer -and $domain) {
+                    $allARecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                    $staleRecords = @($allARecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
+                }
                 if ($staleRecords.Count -gt 0) {
+                    $staleIPs = @($staleRecords | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     # Attempt remediation: disable DNS reg on heartbeat/virtual adapters,
                     # remove stale A records, and recheck. The cluster service recreates
                     # virtual adapters with default DNS settings on every boot, so stale
                     # records can reappear after any reboot between Phase 5 and Phase 11.
-                    $results.Details.Add("REMEDIATE: Found heartbeat DNS records ($($staleRecords.IPAddress -join ', ')), attempting cleanup")
+                    $results.Details.Add("REMEDIATE: Found heartbeat DNS A records ($($staleIPs -join ', ')), attempting cleanup")
                     try {
-                        # Disable DNS registration on all non-domain adapters (physical + virtual)
+                        # Three-layer prevention on all non-domain adapters (physical + virtual):
+                        #  1. RegisterThisConnectionsAddress = $false  (preference flag)
+                        #  2. No DNS servers  (nowhere to send the update)
+                        #  3. No DNS suffix   (no zone to register in)
+                        # The cluster service recreates virtual adapters with default
+                        # settings on every boot, so all three layers are needed.
                         foreach ($iface in (Get-NetIPInterface -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
                             $ifaceIPs = (Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
                             $isDomain = $ifaceIPs | Where-Object { $_ -notlike "${clusterSubnet}*" -and $_ -ne '127.0.0.1' -and $_ -notlike '169.254.*' }
                             $isCluster = $ifaceIPs | Where-Object { $_ -like "${clusterSubnet}*" }
                             $isClusterName = $iface.InterfaceAlias -like '*Cluster*' -or $iface.InterfaceAlias -like '*isatap*'
                             if ($isCluster -or ($isClusterName -and -not $isDomain)) {
-                                Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ErrorAction SilentlyContinue
+                                Set-DnsClient -InterfaceIndex $iface.ifIndex -RegisterThisConnectionsAddress $false -ConnectionSpecificSuffix '' -ErrorAction SilentlyContinue
+                                Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ServerAddresses @() -ErrorAction SilentlyContinue
                             }
                         }
-                        # Remove stale A records from DNS
-                        $domain = (Get-CimInstance Win32_ComputerSystem).Domain
-                        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                            Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
-                        if ($dnsServer -and $domain) {
-                            $serverRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
-                            foreach ($rec in $serverRecords) {
-                                $ip = $rec.RecordData.IPv4Address.IPAddressToString
-                                if ($ip -like "${clusterSubnet}*") {
-                                    Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
-                                    $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
-                                }
-                            }
+                        # Remove stale A records from DNS server
+                        foreach ($rec in $staleRecords) {
+                            $ip = $rec.RecordData.IPv4Address.IPAddressToString
+                            Remove-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -RecordData $ip -ComputerName $dnsServer -Force -ErrorAction SilentlyContinue
+                            $results.Details.Add("REMEDIATE: Removed stale A record $hostname -> $ip")
                         }
-                        & ipconfig /registerdns 2>&1 | Out-Null
-                        Clear-DnsClientCache -ErrorAction SilentlyContinue
-                        Start-Sleep -Seconds 5
-                        # Recheck
-                        $dnsRecords2 = @(Resolve-DnsName -Name $hostname -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
-                        $staleRecords2 = @($dnsRecords2 | Where-Object { $_.IPAddress -like "${clusterSubnet}*" })
+                        # Recheck the DNS server directly (no LLMNR ambiguity)
+                        $recheckRecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                        $staleRecords2 = @($recheckRecords | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -like "${clusterSubnet}*" })
                         if ($staleRecords2.Count -gt 0) {
+                            $staleIPs2 = @($staleRecords2 | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Hostname '$hostname' still has DNS record(s) on heartbeat subnet after remediation: $($staleRecords2.IPAddress -join ', ')")
+                            $results.Details.Add("FAIL: Hostname '$hostname' still has DNS A record(s) on heartbeat subnet after remediation: $($staleIPs2 -join ', ')")
                         }
                         else {
                             $results.Details.Add("OK: Hostname '$hostname' heartbeat DNS records cleaned up successfully")
@@ -1124,7 +1131,7 @@ function Test-SQLAOFunctionality {
                     }
                     catch {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: Hostname '$hostname' has DNS record(s) on heartbeat subnet: $($staleRecords.IPAddress -join ', ') (remediation failed: $($_.Exception.Message))")
+                        $results.Details.Add("FAIL: Hostname '$hostname' has DNS A record(s) on heartbeat subnet: $($staleIPs -join ', ') (remediation failed: $($_.Exception.Message))")
                     }
                 }
                 else {
