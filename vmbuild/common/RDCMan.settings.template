@@ -82,6 +82,8 @@
         <redirectPorts>False</redirectPorts>
         <redirectSmartCards>False</redirectSmartCards>
         <redirectPnpDevices>False</redirectPnpDevices>
+        <redirectWebAuthn>False</redirectWebAuthn>
+        <redirectLocation>False</redirectLocation>
       </localResources>
       <displaySettings>
         <liveThumbnailUpdates>True</liveThumbnailUpdates>
@@ -90,9 +92,14 @@
         <thumbnailScale>1</thumbnailScale>
         <smartSizeDockedWindows>Scale</smartSizeDockedWindows>
         <smartSizeUndockedWindows>Scale</smartSizeUndockedWindows>
+        <dpiScaling>AsHost</dpiScaling>
       </displaySettings>
       <securitySettings>
         <authentication>None</authentication>
+        <enableCredSspSupport>True</enableCredSspSupport>
+        <enableRdsAadAuth>False</enableRdsAadAuth>
+        <restrictedAdmin>False</restrictedAdmin>
+        <remoteGuard>False</remoteGuard>
       </securitySettings>
       <encryptionSettings>
         <encryptionMethod>LogonCredentials</encryptionMethod>
@@ -122,17 +129,17 @@
   <LastUpdateCheckTimeUtc>2012-06-01 00:00:00Z</LastUpdateCheckTimeUtc>
   <LockWindowSize>False</LockWindowSize>
   <PanningAcceleration>1</PanningAcceleration>
-  <PerformanceFlags>0</PerformanceFlags>
+  <PerformanceFlags>128</PerformanceFlags>
   <PersistentBitmapCaching>True</PersistentBitmapCaching>
   <PluginSettings>
     <plugins />
   </PluginSettings>
   <ReconnectOnStartup>True</ReconnectOnStartup>
-  <ServerSortOrder>ByName</ServerSortOrder>
+  <ServerSortOrder>ByStatus</ServerSortOrder>
   <ServerTreeAutoHidePopUpDelay>0</ServerTreeAutoHidePopUpDelay>
   <ServerTreeLocation>Left</ServerTreeLocation>
   <ServerTreeVisibility>Dock</ServerTreeVisibility>
-  <ServerTreeWidth>263</ServerTreeWidth>
+  <ServerTreeWidth>405</ServerTreeWidth>
   <ShowConnectedGroup>False</ShowConnectedGroup>
   <ShowFavoritesGroup>False</ShowFavoritesGroup>
   <ShowRecentlyUsedGroup>False</ShowRecentlyUsedGroup>
@@ -141,7 +148,7 @@
   <ThumbnailSize>160 x 120</ThumbnailSize>
   <ThumbnailSizeIsInPixels>True</ThumbnailSizeIsInPixels>
   <UseMultipleMonitors>False</UseMultipleMonitors>
-  <WindowIsMaximized>False</WindowIsMaximized>
+  <WindowIsMaximized>True</WindowIsMaximized>
   <WindowPosition>200, 200</WindowPosition>
   <WindowSize>1273 x 823</WindowSize>
 </Settings>

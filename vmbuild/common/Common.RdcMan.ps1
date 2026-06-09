@@ -91,6 +91,46 @@ function Save-RdcManSettingsFile {
         $settings.DefaultGroupSettings.defaultSettings.securitySettings.authentication = "None"
         $modified = $true
     }
+
+    # Ensure v3.12 securitySettings children exist (old templates omitted these)
+    $secNode = $settings.DefaultGroupSettings.defaultSettings.securitySettings
+    $v312SecDefaults = @{
+        enableCredSspSupport = "True"
+        enableRdsAadAuth    = "False"
+        restrictedAdmin     = "False"
+        remoteGuard         = "False"
+    }
+    foreach ($name in $v312SecDefaults.Keys) {
+        if ($null -eq $secNode.SelectSingleNode($name)) {
+            $elem = $file.CreateElement($name)
+            $elem.InnerText = $v312SecDefaults[$name]
+            [void]$secNode.AppendChild($elem)
+            $modified = $true
+        }
+    }
+
+    # Ensure v3.12 localResources children exist
+    $lrNode = $settings.DefaultGroupSettings.defaultSettings.localResources
+    if ($lrNode) {
+        foreach ($name in @("redirectWebAuthn", "redirectLocation")) {
+            if ($null -eq $lrNode.SelectSingleNode($name)) {
+                $elem = $file.CreateElement($name)
+                $elem.InnerText = "False"
+                [void]$lrNode.AppendChild($elem)
+                $modified = $true
+            }
+        }
+    }
+
+    # Ensure v3.12 displaySettings/dpiScaling exists
+    $dsNode = $settings.DefaultGroupSettings.defaultSettings.displaySettings
+    if ($dsNode -and $null -eq $dsNode.SelectSingleNode("dpiScaling")) {
+        $elem = $file.CreateElement("dpiScaling")
+        $elem.InnerText = "AsHost"
+        [void]$dsNode.AppendChild($elem)
+        $modified = $true
+    }
+
     if ($settings.GroupSortOrder -ne "NoSort") {
         $settings.GroupSortOrder = "NoSort"
         $modified = $true
