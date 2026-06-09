@@ -57,6 +57,23 @@ function Test-VmFunctionality {
     # Determine which test function(s) to call based on role and installed features.
     $testsPassed = $true
 
+    # Check VM responsiveness before attempting PSDirect-based tests.
+    # Skip for VMs that don't use PSDirect (Linux uses SSH, StandaloneRootCA
+    # may be off, OSDClient is filtered by the dispatcher).
+    $vmIsLinux = Test-VmIsLinux -Vm $CurrentItem
+    if (-not $vmIsLinux -and $role -ne 'StandaloneRootCA') {
+        if (-not (Test-VmResponsive -VmName $VMName -TimeoutSeconds 15)) {
+            Write-Log "[Phase $Phase] $VMName [$role]: VM is not responsive, rebooting to recover PSDirect..." -Warning
+            $rebooted = Restart-UnresponsiveVm -VmName $VMName -MaxRetries 1 -WaitTimeSeconds 120
+            if (-not $rebooted) {
+                Write-Log "[Phase $Phase] $VMName [$role]: VM did not recover after reboot — skipping functional validation" -Failure -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: FAIL - VM unresponsive after reboot"; Level = 'Failure' })
+                return $false
+            }
+            Write-Log "[Phase $Phase] $VMName [$role]: VM recovered after reboot, proceeding with validation" -LogOnly
+        }
+    }
+
     # Ensure all SQL services on this VM are running before role-specific tests.
     # If any Automatic-start SQL engine service is stopped, try to start it.
     $hasLocalSql = ($CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) -or
@@ -229,7 +246,6 @@ function Test-VmFunctionality {
     #   - Linux VMs (Proxy, LinuxServer, LinuxClient): no Windows profiles
     #   - StandaloneRootCA: offline (powered off) after setup, stays off long-term
     #   - WorkgroupMember/InternetClient: not domain-joined with the admin account
-    $vmIsLinux = Test-VmIsLinux -Vm $CurrentItem
     if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA', 'WorkgroupMember', 'InternetClient')) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Pre-creating domain admin profile"
         $testsPassed = Test-UserProfilePreCreation -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
@@ -1775,8 +1791,8 @@ function Test-CMSiteFunctionality {
     # ReplicationLinkStatus enum: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
     $childSites = @($DeployConfig.virtualMachines | Where-Object { $_.parentSiteCode -eq $siteCode })
     if ($passed -and $childSites.Count -gt 0) {
-        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying DRS replication links"
-        Write-Log "[Phase $Phase] $VMName [$roleLabel]: Checking DRS replication links to $($childSites.Count) child site(s)" -LogOnly
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying child site visibility and DRS replication"
+        Write-Log "[Phase $Phase] $VMName [$roleLabel]: Checking child site visibility and DRS replication links to $($childSites.Count) child site(s)" -LogOnly
 
         $childSiteCodes = @($childSites | ForEach-Object { $_.siteCode } | Select-Object -Unique)
 
@@ -1789,6 +1805,35 @@ function Test-CMSiteFunctionality {
             $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
 
             foreach ($childSC in $childCodes) {
+                # --- Child site visibility via SMS_Site ---
+                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_Site -Filter `"SiteCode = '$childSC'`"")
+                $maxSiteAttempts = 10
+                $siteRetryDelay = 30
+                $siteFound = $false
+                for ($siteAttempt = 1; $siteAttempt -le $maxSiteAttempts; $siteAttempt++) {
+                    try {
+                        $childSite = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_Site `
+                            -Filter "SiteCode = '$childSC'" -ErrorAction Stop
+                        if ($childSite) {
+                            $results.Details.Add("OK: Child site '$childSC' visible in parent '$parentSC' (attempt $siteAttempt)")
+                            $siteFound = $true
+                            break
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("INFO: SMS_Site query attempt $siteAttempt failed: $($_.Exception.Message)")
+                    }
+                    if ($siteAttempt -lt $maxSiteAttempts) {
+                        $results.Details.Add("INFO: Child site '$childSC' not yet visible (attempt $siteAttempt/$maxSiteAttempts), retrying in ${siteRetryDelay}s...")
+                        Start-Sleep -Seconds $siteRetryDelay
+                    }
+                }
+                if (-not $siteFound) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: Child site '$childSC' not found in parent '$parentSC' after $maxSiteAttempts attempts")
+                }
+
+                # --- DRS replication link ---
                 $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_ReplicationLinkSummary -Filter `"Site2 = '$childSC'`"")
                 try {
                     $link = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_ReplicationLinkSummary `
@@ -1825,10 +1870,10 @@ function Test-CMSiteFunctionality {
 
         $drsResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $drsScriptBlock -ArgumentList $siteCode, $childSiteCodes `
-            -DisplayName "Phase11-DRS-Test" -SuppressLog `
-            -AsJob -TimeoutSeconds 300
+            -DisplayName "Phase11-ChildSites-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 600
 
-        $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "DRS ($siteCode)" -Result $drsResult
+        $drsPassed = Format-TestResult -VMName $VMName -RoleLabel "ChildSites ($siteCode)" -Result $drsResult
         if (-not $drsPassed) { $passed = $false }
     }
 
@@ -2156,59 +2201,7 @@ function Test-SecondaryFunctionality {
         -ScriptBlock $scriptBlock -ArgumentList $sqlInstanceName, $secSiteCode `
         -DisplayName "Phase11-Secondary-Test" -SuppressLog
 
-    $localOk = Format-TestResult -VMName $VMName -RoleLabel 'Secondary' -Result $result
-    if (-not $localOk) { return $false }
-
-    # Verify from parent Primary that this secondary site is attached
-    $parentSiteCode = $CurrentItem.parentSiteCode
-    if ($parentSiteCode) {
-        $parentVM = $DeployConfig.virtualMachines | Where-Object {
-            $_.siteCode -eq $parentSiteCode -and $_.role -in @('Primary', 'CAS')
-        } | Select-Object -First 1
-        if ($parentVM) {
-            Write-Log "[Phase $Phase] $VMName [Secondary]: Verifying site '$secSiteCode' visible from parent '$($parentVM.vmName)'" -LogOnly
-
-            $parentScript = {
-                param($parentSC, $childSC)
-                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$parentSC' -Class SMS_Site -Filter `"SiteCode = '$childSC'`"")
-                $maxAttempts = 10
-                $retryDelay = 30
-                $found = $false
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    try {
-                        $sec = Get-WmiObject -Namespace "root\SMS\site_$parentSC" -Class SMS_Site `
-                            -Filter "SiteCode = '$childSC'" -ErrorAction Stop
-                        if ($sec) {
-                            $results.Details.Add("OK: Secondary site '$childSC' found in parent site '$parentSC' (attempt $attempt)")
-                            $found = $true
-                            break
-                        }
-                    }
-                    catch {
-                        $results.Details.Add("INFO: Query attempt $attempt failed: $($_.Exception.Message)")
-                    }
-                    if ($attempt -lt $maxAttempts) {
-                        $results.Details.Add("INFO: Secondary site '$childSC' not yet visible in parent (attempt $attempt/$maxAttempts), retrying in ${retryDelay}s...")
-                        Start-Sleep -Seconds $retryDelay
-                    }
-                }
-                if (-not $found) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: Secondary site '$childSC' not found in parent site '$parentSC' after $maxAttempts attempts")
-                }
-                return $results
-            }
-
-            $parentResult = Invoke-VmCommand -VmName $parentVM.vmName -VmDomainName $domain `
-                -ScriptBlock $parentScript -ArgumentList $parentSiteCode, $secSiteCode `
-                -DisplayName "Phase11-Secondary-Parent-Test" -SuppressLog
-
-            return (Format-TestResult -VMName $VMName -RoleLabel 'Secondary-Parent' -Result $parentResult)
-        }
-    }
-
-    return $true
+    return (Format-TestResult -VMName $VMName -RoleLabel 'Secondary' -Result $result)
 }
 
 function Test-SiteSystemFunctionality {
