@@ -38,7 +38,9 @@ function Test-VmFunctionality {
         [object]$CurrentItem,
 
         [Parameter(Mandatory)]
-        [object]$DeployConfig
+        [object]$DeployConfig,
+
+        [switch]$IsRetry
     )
 
     $role = $CurrentItem.role
@@ -56,23 +58,7 @@ function Test-VmFunctionality {
 
     # Determine which test function(s) to call based on role and installed features.
     $testsPassed = $true
-
-    # Check VM responsiveness before attempting PSDirect-based tests.
-    # Skip for VMs that don't use PSDirect (Linux uses SSH, StandaloneRootCA
-    # may be off, OSDClient is filtered by the dispatcher).
     $vmIsLinux = Test-VmIsLinux -Vm $CurrentItem
-    if (-not $vmIsLinux -and $role -ne 'StandaloneRootCA') {
-        if (-not (Test-VmResponsive -VmName $VMName -TimeoutSeconds 15)) {
-            Write-Log "[Phase $Phase] $VMName [$role]: VM is not responsive, rebooting to recover PSDirect..." -Warning
-            $rebooted = Restart-UnresponsiveVm -VmName $VMName -MaxRetries 1 -WaitTimeSeconds 120
-            if (-not $rebooted) {
-                Write-Log "[Phase $Phase] $VMName [$role]: VM did not recover after reboot — skipping functional validation" -Failure -LogOnly
-                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: FAIL - VM unresponsive after reboot"; Level = 'Failure' })
-                return $false
-            }
-            Write-Log "[Phase $Phase] $VMName [$role]: VM recovered after reboot, proceeding with validation" -LogOnly
-        }
-    }
 
     # Ensure all SQL services on this VM are running before role-specific tests.
     # If any Automatic-start SQL engine service is stopped, try to start it.
@@ -281,6 +267,39 @@ function Test-VmFunctionality {
     }
 
     Write-Progress2 -Activity $validationActivity -Completed
+
+    # If tests failed on a Windows VM, check whether PSDirect itself is broken.
+    # The PSDirect target process inside the guest can crash while heartbeat/
+    # ping/RDP all remain healthy. A quick smoke test distinguishes "real test
+    # failure" from "PSDirect broken". If broken, reboot the VM and retry all
+    # tests once. This avoids running a smoke test on every VM upfront.
+    if (-not $testsPassed -and -not $IsRetry -and -not $vmIsLinux -and $role -ne 'StandaloneRootCA') {
+        $smokeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock { $env:COMPUTERNAME } -DisplayName "Phase11-PSDirect-SmokeTest" `
+            -SuppressLog -SessionMaxRetries 3
+        if (-not $smokeResult -or $smokeResult.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase] $VMName [$role]: Tests failed and PSDirect is broken — rebooting VM to recover..." -Warning
+            $rebooted = Restart-UnresponsiveVm -VmName $VMName -MaxRetries 1 -WaitTimeSeconds 120
+            if ($rebooted) {
+                # Verify PSDirect works after reboot
+                $smokeResult2 = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+                    -ScriptBlock { $env:COMPUTERNAME } -DisplayName "Phase11-PSDirect-PostReboot" `
+                    -SuppressLog -SessionMaxRetries 5
+                if ($smokeResult2 -and -not $smokeResult2.ScriptBlockFailed) {
+                    Write-Log "[Phase $Phase] $VMName [$role]: PSDirect recovered after reboot — retrying all tests" -Warning
+                    # Clear output buffer and re-run all tests
+                    $script:Phase11OutputBuffer = [System.Collections.Generic.List[hashtable]]::new()
+                    $testsPassed = Test-VmFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry
+                } else {
+                    Write-Log "[Phase $Phase] $VMName [$role]: PSDirect still broken after reboot" -Failure -LogOnly
+                    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: FAIL - PSDirect broken after reboot"; Level = 'Failure' })
+                }
+            } else {
+                Write-Log "[Phase $Phase] $VMName [$role]: VM did not recover after reboot" -Failure -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$role]: FAIL - VM unresponsive after reboot"; Level = 'Failure' })
+            }
+        }
+    }
 
     return $testsPassed
 }
@@ -1877,6 +1896,75 @@ function Test-CMSiteFunctionality {
         if (-not $drsPassed) { $passed = $false }
     }
 
+    # Verify remote site system roles (DPs) are registered in WMI.
+    # Runs locally on the site server — no cross-VM PSDirect needed.
+    # The SiteSystem VMs only run local checks (SMB share, WDS service).
+    $remoteSiteSystems = @($DeployConfig.virtualMachines | Where-Object {
+        $_.role -eq 'SiteSystem' -and $_.siteCode -eq $siteCode -and $_.installDP
+    })
+    if ($passed -and $remoteSiteSystems.Count -gt 0) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying remote DP registration"
+        $dpVmNames = @($remoteSiteSystems | ForEach-Object { $_.vmName })
+        Write-Log "[Phase $Phase] $VMName [$roleLabel]: Checking DP registration for $($dpVmNames.Count) remote site system(s): $($dpVmNames -join ', ')" -LogOnly
+
+        $dpRegScript = {
+            param($sc, $dpNames)
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+            foreach ($dpName in $dpNames) {
+                $wmiFilter = "ServerName LIKE '%$dpName%'"
+                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"$wmiFilter`"")
+                $maxAttempts = 5
+                $retryDelay = 20
+                $found = $false
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    try {
+                        $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
+                            -Filter $wmiFilter -ErrorAction Stop
+                        if ($dp) {
+                            $results.Details.Add("OK: DP '$dpName' found in site '$sc' (attempt $attempt)")
+                            $found = $true
+                            break
+                        }
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: DP '$dpName' not yet visible")
+                        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
+                    }
+                    catch {
+                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
+                        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
+                    }
+                }
+                if (-not $found) {
+                    # Fallback: check SMS_SystemResourceList for DP role registration
+                    try {
+                        $role = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
+                            -Filter "RoleName='SMS Distribution Point' AND ServerName LIKE '%$dpName%'" -ErrorAction Stop |
+                            Select-Object -First 1
+                        if ($role) {
+                            $results.Details.Add("OK: DP role registered for '$dpName' (SMS_SystemResourceList)")
+                            $found = $true
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("  SMS_SystemResourceList fallback for '$dpName' failed: $($_.Exception.Message)")
+                    }
+                }
+                if (-not $found) {
+                    $results.Details.Add("WARN: DP '$dpName' not yet visible in site '$sc' (install may still be propagating)")
+                }
+            }
+            return $results
+        }
+
+        $dpRegResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $dpRegScript -ArgumentList $siteCode, $dpVmNames `
+            -DisplayName "Phase11-DPRegistration-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
+
+        $dpRegPassed = Format-TestResult -VMName $VMName -RoleLabel "DPReg ($siteCode)" -Result $dpRegResult
+        if (-not $dpRegPassed) { $passed = $false }
+    }
+
     return $passed
 }
 
@@ -2331,126 +2419,46 @@ function Test-SiteSystemFunctionality {
         }
     }
 
-    # Test DP: verify from the parent Primary that the DP is recognized
+    # Test DP: local checks only. DP WMI registration (SMS_DistributionPointInfo)
+    # is verified by the site server's own Phase 11 job in Test-CMSiteFunctionality,
+    # avoiding cross-VM PSDirect calls that fail when the Primary is unresponsive.
     if ($CurrentItem.installDP) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying Distribution Point"
-        $siteCode = $CurrentItem.siteCode
-        $parentVM = $DeployConfig.virtualMachines | Where-Object {
-            $_.siteCode -eq $siteCode -and $_.role -in @('Primary', 'CAS')
-        } | Select-Object -First 1
+        Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
+        $localDpScript = {
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        if ($parentVM) {
-            Write-Log "[Phase $Phase] $VMName [DP]: Verifying DP status from '$($parentVM.vmName)' (site $siteCode)" -LogOnly
-
-            $dpScript = {
-                param($sc, $dpVmName, $dpFqdn)
-                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-
-                # DP registration in WMI can lag behind the actual install --
-                # SMS_DistributionPointInfo isn't populated until the DP
-                # finishes installing and the site control file replicates.
-                # On a fresh deploy this can take several minutes; absence
-                # at Phase 11 time isn't strictly a failure.
-                $maxAttempts = 5
-                $retryDelay = 20
-                $wmiFilter = "ServerName LIKE '%$dpVmName%'"
-                $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_DistributionPointInfo -Filter `"$wmiFilter`" (max $maxAttempts attempts)")
-
-                $found = $false
-                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-                    try {
-                        $dp = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_DistributionPointInfo `
-                            -Filter $wmiFilter -ErrorAction Stop
-                        if ($dp) {
-                            $results.Details.Add("OK: DP '$dpVmName' found in site '$sc' (attempt $attempt)")
-                            $found = $true
-                            break
-                        }
-                        else {
-                            $results.Details.Add("  Attempt $attempt/${maxAttempts}: DP not yet visible in WMI")
-                            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
-                        }
-                    }
-                    catch {
-                        $results.Details.Add("  Attempt $attempt/${maxAttempts}: WMI query failed: $($_.Exception.Message)")
-                        if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds $retryDelay }
-                    }
-                }
-                if (-not $found) {
-                    # Fall back to site system role check -- if the server is
-                    # registered as a DP role on the site, the install succeeded
-                    # even if SMS_DistributionPointInfo hasn't populated yet.
-                    try {
-                        $role = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SystemResourceList `
-                            -Filter "RoleName='SMS Distribution Point' AND ServerName LIKE '%$dpVmName%'" -ErrorAction Stop |
-                            Select-Object -First 1
-                        if ($role) {
-                            $results.Details.Add("OK: DP role registered for '$dpVmName' (SMS_SystemResourceList) -- SMS_DistributionPointInfo not yet populated")
-                            $found = $true
-                        }
-                    }
-                    catch {
-                        $results.Details.Add("  SMS_SystemResourceList fallback failed: $($_.Exception.Message)")
-                    }
-                }
-                if (-not $found) {
-                    # Downgrade to WARN: DP install can complete asynchronously
-                    # and Phase 11 just missed the visibility window. The DP
-                    # role itself is verified by local content/share checks.
-                    $results.Details.Add("WARN: DP '$dpVmName' not yet visible in site '$sc' WMI after $maxAttempts attempts (install may still be propagating)")
-                }
-                return $results
+            $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
+            $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
+            if (-not $share) {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing -- content library not initialized")
+            }
+            else {
+                $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
             }
 
-            $dpResult = Invoke-VmCommand -VmName $parentVM.vmName -VmDomainName $domain `
-                -ScriptBlock $dpScript -ArgumentList $siteCode, $VMName, "$VMName.$domain" `
-                -DisplayName "Phase11-DP-Test" -SuppressLog
-
-            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $dpResult)) {
-                $allPassed = $false
+            # WDS service for PXE -- optional. memlabs DPs may be created
+            # with -EnablePxe or with NoWDS PXE, and PXE config can be
+            # toggled per-DP. Absence is informational only.
+            $results.Details.Add("CMD: Get-Service -Name 'WDSServer'")
+            $wds = Get-Service -Name 'WDSServer' -ErrorAction SilentlyContinue
+            if (-not $wds) {
+                $results.Details.Add("INFO: WDSServer service not installed (PXE not enabled, or NoWDS PXE in use)")
+            }
+            elseif ($wds.Status -ne 'Running') {
+                $results.Details.Add("INFO: WDSServer is $($wds.Status) (PXE may be intentionally disabled on this DP)")
+            }
+            else {
+                $results.Details.Add("OK: WDSServer is Running (PXE active)")
             }
 
-            # Local DP probes: SMS_DP$ share + WDS (PXE always-on per ScriptFunctions)
-            Write-Progress2 -PercentComplete 0 -Activity "$VMName [SiteSystem]" -Status "Verifying DP local content + PXE"
-            Write-Log "[Phase $Phase] $VMName [DP]: Local content + PXE checks" -LogOnly
-            $localDpScript = {
-                $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-
-                $results.Details.Add("CMD: Get-SmbShare -Name 'SMS_DP`$'")
-                $share = Get-SmbShare -Name 'SMS_DP$' -ErrorAction SilentlyContinue
-                if (-not $share) {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: SMB share 'SMS_DP`$' missing -- content library not initialized")
-                }
-                else {
-                    $results.Details.Add("OK: SMB share 'SMS_DP`$' exposes '$($share.Path)'")
-                }
-
-                # WDS service for PXE -- optional. memlabs DPs may be created
-                # with -EnablePxe or with NoWDS PXE, and PXE config can be
-                # toggled per-DP. Absence is informational only.
-                $results.Details.Add("CMD: Get-Service -Name 'WDSServer'")
-                $wds = Get-Service -Name 'WDSServer' -ErrorAction SilentlyContinue
-                if (-not $wds) {
-                    $results.Details.Add("INFO: WDSServer service not installed (PXE not enabled, or NoWDS PXE in use)")
-                }
-                elseif ($wds.Status -ne 'Running') {
-                    $results.Details.Add("INFO: WDSServer is $($wds.Status) (PXE may be intentionally disabled on this DP)")
-                }
-                else {
-                    $results.Details.Add("OK: WDSServer is Running (PXE active)")
-                }
-
-                return $results
-            }
-            $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-                -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog
-            if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DPLocal' -Result $localDpResult)) {
-                $allPassed = $false
-            }
+            return $results
         }
-        else {
-            Write-Log "[Phase $Phase] $VMName [DP]: Cannot find parent site server for site '$siteCode'; skipping DP verification" -Warning
+        $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog
+        if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
+            $allPassed = $false
         }
     }
 
