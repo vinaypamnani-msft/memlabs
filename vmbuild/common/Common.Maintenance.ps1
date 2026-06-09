@@ -37,9 +37,38 @@ function Start-Maintenance {
         -not ($_.operatingSystem -like "Ubuntu*" -or $_.operatingSystem -like "Debian*" -or $_.operatingSystem -like "Linux*") -and
         -not ($_.deployedOS -like "Ubuntu*" -or $_.deployedOS -like "Debian*" -or $_.deployedOS -like "Linux*")
     }
+
+    # Pre-filter: skip VMs where every fix is already recorded in appliedFixes.
+    # This avoids starting a job/thread for VMs that have nothing to do.
+    $allFixDefs = Get-VMFixes -ReturnDummyList
+    $relevantFixes = if ($applyNewOnly) {
+        $allFixDefs | Where-Object { $_.AppliesToNew -eq $true }
+    } else {
+        $allFixDefs | Where-Object { $_.AppliesToExisting -eq $true }
+    }
+    $countUpToDate = 0
+    $vmsNeedingMaintenance = @($vmsNeedingMaintenance | Where-Object {
+        $note = Get-VMNote -VMName $_.vmName
+        if ($note -and $note.appliedFixes) {
+            $missing = $false
+            foreach ($fix in $relevantFixes) {
+                if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
+                    $missing = $true
+                    break
+                }
+            }
+            if (-not $missing) {
+                Write-Log "$($_.vmName): All fixes recorded, skipping." -Verbose
+                $countUpToDate++
+                return $false
+            }
+        }
+        return $true
+    })
+
     $newVmsNeedingMaintenance = @()
     foreach ($vm in $vmsNeedingMaintenance) {
-        Write-Log -Verbose "VM Name: $($vm.vmName) Version: $($vm.memLabsVersion)"
+        Write-Log -Verbose "VM Name: $($vm.vmName)"
         $mutexName = $vm.vmName
 
         try {
@@ -61,7 +90,7 @@ function Start-Maintenance {
         }
     }
     $vmCount = ($newVmsNeedingMaintenance | Measure-Object).Count
-    $countNotNeeded = $allVMs.Count - $vmCount
+    $countNotNeeded = $countUpToDate
 
     $text = "Performing maintenance"
     $maintenanceDoNotStart = $false
