@@ -12,24 +12,13 @@ function Start-Maintenance {
     if ($DeployConfig) {
         Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
-        # Filter out VMs already at the latest fix version (e.g. re-running Phase 10
-        # after a partial kill). Read each VM's note to get the current watermark.
-        $vmsNeedingMaintenance = @()
-        foreach ($vm in ($allVMs | Sort-Object vmName)) {
-            $note = Get-VMNote -VMName $vm.vmName
-            if ($note -and $note.memLabsVersion -ge $Common.LatestHotfixVersion) {
-                Write-Log "$($vm.vmName): already at version $($note.memLabsVersion), skipping." -Verbose
-            }
-            else {
-                $vmsNeedingMaintenance += $vm
-            }
-        }
+        $vmsNeedingMaintenance = @($allVMs | Sort-Object vmName)
         $applyNewOnly = $true
     }
     else {
         Write-log -verbose "Start-Maintenance called without DeployConfig"
         $allVMs = Get-List -Type VM | Where-Object { $_.vmBuild -eq $true -and $_.inProgress -ne $true }
-        $vmsNeedingMaintenance = $allVMs | Where-Object { -not $_.memLabsVersion -or $_.memLabsVersion -lt $Common.LatestHotfixVersion } | Sort-Object vmName
+        $vmsNeedingMaintenance = @($allVMs | Sort-Object vmName)
     }
 
     Write-Log -Verbose "Latest Hotfix Version: $($Common.LatestHotfixVersion)"
@@ -234,9 +223,7 @@ function Start-VMMaintenance {
     }
 
     $global:MaintenanceActivity = $VMName
-    $latestFixVersion = $Common.LatestHotfixVersion
     $inProgress = if ($vmNoteObject.inProgress) { $true } else { $false }
-    $vmVersion = $vmNoteObject.memLabsVersion
 
     # This should never happen, since parent filters these out. Leaving just-in-case.
     if ($inProgress) {
@@ -244,19 +231,11 @@ function Start-VMMaintenance {
         return $false
     }
 
-    # Fast-path: skip if VM is already at the latest fix version.
-    # With per-fix tracking this is safe for both new and existing VMs —
-    # the watermark only reaches $latestFixVersion after all fixes complete.
-    if ($vmVersion -ge $latestFixVersion) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "VM Version ($vmVersion) is up-to-date."
-        return $true
-    }
-
     if ($ApplyNewOnly.IsPresent) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Newly deployed VM is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..."
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM (version $vmVersion) is NOT up-to-date. Required Hotfix Version is $latestFixVersion. Performing maintenance..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance..."
     }
 
     if ($ApplyNewOnly.IsPresent) {
@@ -270,7 +249,6 @@ function Start-VMMaintenance {
 
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
-        Set-VMNote -vmName $VMName -vmVersion ([string]$latestFixVersion) -forceVersionUpdate
 
         # If a user is logged in, start any AtLogOn scheduled tasks directly
         # so they run immediately instead of waiting for the next logon cycle.
@@ -378,8 +356,6 @@ function Start-VMFixes {
             $success = $status.Success
             if ($status.Applied) { $fixesAppliedCount++ }
             if (-not $success) {
-                $resetVersion = [int]($vmFix.FixVersion) - 1
-                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
                 break
             }
         }
@@ -449,7 +425,7 @@ function Start-VMFixesBatched {
         }
         if ($isNA) {
             $statusLines += "  {0,-25} {1,-12} N/A" -f $vmFix.FixName, $vmFix.FixVersion
-            Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion -FixApplied $vmFix.FixName -FixAppliedVersion $vmFix.FixVersion
+            Set-VMNote -VMName $VMName -FixApplied $vmFix.FixName -FixAppliedVersion $vmFix.FixVersion
             continue
         }
         $statusLines += "  {0,-25} {1,-12} PENDING" -f $vmFix.FixName, $vmFix.FixVersion
@@ -686,13 +662,11 @@ function Start-VMFixesBatched {
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
-                Set-VMNote -vmName $VMName -vmVersion $matchingFix.FixVersion -FixApplied $matchingFix.FixName -FixAppliedVersion $matchingFix.FixVersion
+                Set-VMNote -vmName $VMName -FixApplied $matchingFix.FixName -FixAppliedVersion $matchingFix.FixVersion
                 $return.AppliedCount++
             }
             else {
                 Write-Log "$VMName`: Fix '$fixDisplayName' ($($matchingFix.FixVersion)) failed in batch." -Warning
-                $resetVersion = [int]($matchingFix.FixVersion) - 1
-                Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
                 return $return
             }
         }
@@ -703,8 +677,6 @@ function Start-VMFixesBatched {
             Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
             # Pull transcript for the fix that we suspect crashed mid-execution
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
-            $resetVersion = [int]($failedFix.FixVersion) - 1
-            Set-VMNote -vmName $VMName -vmVersion ([string]$resetVersion) -forceVersionUpdate
             return $return
         }
     }
@@ -748,7 +720,7 @@ function Start-VMFix {
 
     if (-not $vmFix.AppliesToThisVM) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is not applicable."
-        Set-VMNote -VMName $vmName -vmVersion $fixVersion -FixApplied $fixName -FixAppliedVersion $fixVersion
+        Set-VMNote -VMName $vmName -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         return $return
     }
@@ -902,8 +874,8 @@ function Start-VMFix {
         $return.Success = $false
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied. Updating version to $fixVersion."
-        Set-VMNote -vmName $VMName -vmVersion $fixVersion -FixApplied $fixName -FixAppliedVersion $fixVersion
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied."
+        Set-VMNote -vmName $VMName -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         $return.Applied = $true
     }
@@ -1199,31 +1171,6 @@ function Get-VMFixes {
     }
     else {
         Write-Log "Get-VMFixes: Fixes directory not found at $fixesDir" -Warning
-    }
-
-    # ================================================================
-    # Migration: seed appliedFixes from watermark for existing VMs
-    # that were maintained before per-fix tracking was introduced.
-    # Runs once per VM — subsequent calls see appliedFixes populated.
-    #
-    # Only for existing VMs ($NewVM = $false). For new VMs, the
-    # watermark may be partial from a killed Phase 10 — fixes from
-    # different batch groups (RunAsAccount) might not have actually
-    # run even though the watermark passed their version.
-    # ================================================================
-    if (-not $NewVM -and -not $ReturnDummyList.IsPresent -and $vmNote -and $vmNote.memLabsVersion -and
-        (-not ($vmNote.PSObject.Properties.Name -contains 'appliedFixes') -or -not $vmNote.appliedFixes)) {
-        $migratedFixes = @{}
-        foreach ($vmFix in $fixesToPerform) {
-            if ($vmNote.memLabsVersion -ge $vmFix.FixVersion) {
-                $migratedFixes[$vmFix.FixName] = [string]$vmFix.FixVersion
-            }
-        }
-        if ($migratedFixes.Count -gt 0) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$migratedFixes) -Force
-            Set-VMNote -vmName $VMName -vmNote $vmNote
-            Write-Log "$VMName`: Migrated per-fix tracking from watermark version $($vmNote.memLabsVersion). Seeded $($migratedFixes.Count) fixes." -LogOnly
-        }
     }
 
     # ========================
