@@ -1730,7 +1730,16 @@ function Test-CMSiteFunctionality {
                     if ($attempt -lt $componentCheckAttempts) { Start-Sleep -Seconds $componentRetryDelay }
                     continue
                 }
-                $checkable = @($allComponents | Where-Object { $_.ComponentName -notin $ignoredComponents })
+                $checkable = @($allComponents | Where-Object {
+                    $cn = $_.ComponentName
+                    # Use prefix match: some component names include the server
+                    # name as a suffix (e.g. SMS_SITE_SQL_BACKUP_ZZ-BIGMAC)
+                    $dominated = $false
+                    foreach ($ign in $ignoredComponents) {
+                        if ($cn -eq $ign -or $cn -like "${ign}_*") { $dominated = $true; break }
+                    }
+                    -not $dominated
+                })
                 $ignoredCount = $allComponents.Count - $checkable.Count
 
                 # Check each component's live state. Deduplicate by ComponentName
@@ -4438,7 +4447,12 @@ function Test-CMSiteWideFunctionality {
             # hasn't republished after EnableHTTPS set IISSSLState=63, the AD object
             # still has the pre-HTTPS value and ccmsetup will fail with
             # CCM_E_NO_CLIENT_PKI_CERT.
-            try {
+            # Skip for CAS: the CAS MP is inter-site only; clients never bootstrap
+            # from a CAS MP, so there's no AD-published mSSMSManagementPoint for it.
+            if ($vmRole -eq 'CAS') {
+                $results.Details.Add("INFO: Skipping MP AD object check (CAS MPs do not publish to AD for client bootstrap)")
+            }
+            else { try {
                 $searchBase = "CN=System Management,CN=System," + ([ADSI]"LDAP://RootDSE").defaultNamingContext
                 $mpObj = Get-ADObject -Filter "objectClass -eq 'mSSMSManagementPoint' -and mSSMSSiteCode -eq '$sc'" `
                     -SearchBase $searchBase -Properties mSSMSCapabilities -ErrorAction Stop | Select-Object -First 1
@@ -4470,7 +4484,7 @@ function Test-CMSiteWideFunctionality {
             }
             catch {
                 $results.Details.Add("WARN: AD OperationalXml query failed: $($_.Exception.Message)")
-            }
+            } }  # end if not CAS
         }
 
         # 4. Apps enabled via deployConfig.Tools[Appinstall=true] must be present
