@@ -454,6 +454,7 @@ function Start-VMFixesBatched {
 
     # Classify each fix and build a status table
     $applicableFixes = @()
+    $naFixes = @()
     $statusLines = @()
     foreach ($vmFix in $VMFixes) {
         $applied = Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion
@@ -465,7 +466,7 @@ function Start-VMFixesBatched {
         }
         if ($isNA) {
             $statusLines += "  {0,-25} {1,-12} N/A" -f $vmFix.FixName, $vmFix.FixVersion
-            Set-VMNote -VMName $VMName -FixApplied $vmFix.FixName -FixAppliedVersion $vmFix.FixVersion
+            $naFixes += $vmFix
             continue
         }
         $statusLines += "  {0,-25} {1,-12} PENDING" -f $vmFix.FixName, $vmFix.FixVersion
@@ -473,6 +474,12 @@ function Start-VMFixesBatched {
         $applicableFixes += $vmFix
     }
     Write-Log "$VMName`: Fix status ($($applicableFixes.Count) pending, $($VMFixes.Count) total):" -LogOnly
+    foreach ($line in $statusLines) { Write-Log "$VMName`: $line" -LogOnly }
+
+    # Batch-stamp all N/A fixes in one CIM write instead of per-fix Set-VMNote calls
+    if ($naFixes.Count -gt 0) {
+        $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $naFixes
+    }
     foreach ($line in $statusLines) { Write-Log "$VMName`: $line" -LogOnly }
 
     if ($applicableFixes.Count -eq 0) {
@@ -678,6 +685,7 @@ function Start-VMFixesBatched {
         }
 
         $accountForTranscript = if ($key -eq "__default__") { $null } else { $key }
+        $groupApplied = @()
 
         foreach ($r in $results) {
             $matchingFix = $groupFixes | Where-Object { $_.FixName -eq $r.Name -or $_.FixName -eq $r.FixName } | Select-Object -First 1
@@ -702,11 +710,15 @@ function Start-VMFixesBatched {
 
             if ($r.Success) {
                 Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
-                Set-VMNote -vmName $VMName -FixApplied $matchingFix.FixName -FixAppliedVersion $matchingFix.FixVersion
+                $groupApplied += $matchingFix
                 $return.AppliedCount++
             }
             else {
                 Write-Log "$VMName`: Fix '$fixDisplayName' ($($matchingFix.FixVersion)) failed in batch." -Warning
+                # Stamp fixes that succeeded before the failure
+                if ($groupApplied.Count -gt 0) {
+                    $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
+                }
                 return $return
             }
         }
@@ -717,7 +729,16 @@ function Start-VMFixesBatched {
             Write-Log "$VMName`: Batch stopped before fix '$($failedFix.FixName)'. Possible crash in scriptblock." -Warning
             # Pull transcript for the fix that we suspect crashed mid-execution
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $failedFix.FixName -VMDomainAccount $accountForTranscript
+            # Stamp fixes that succeeded before the crash
+            if ($groupApplied.Count -gt 0) {
+                $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
+            }
             return $return
+        }
+
+        # Batch-stamp all successful fixes from this group in one CIM write
+        if ($groupApplied.Count -gt 0) {
+            $vmNote = Set-VMNoteFixBatch -VMName $VMName -Fixes $groupApplied
         }
     }
 
@@ -1178,6 +1199,37 @@ function Test-VMFixApplied {
         return $false
     }
     return ($VMNote.appliedFixes.$FixName -ge $FixVersion)
+}
+
+function Set-VMNoteFixBatch {
+    <#
+    .SYNOPSIS
+        Stamps multiple fixes into appliedFixes in a single CIM read+write.
+        Returns the updated VM note object so the caller can reuse it.
+    #>
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string] $VMName,
+        [Parameter(Mandatory = $true)]
+        [object[]] $Fixes
+    )
+
+    $vmNote = Get-VMNote -VMName $VMName
+    if (-not $vmNote) { return $null }
+
+    $appliedFixes = @{}
+    if ($vmNote.PSObject.Properties.Name -contains 'appliedFixes' -and $vmNote.appliedFixes) {
+        foreach ($prop in $vmNote.appliedFixes.PSObject.Properties) {
+            $appliedFixes[$prop.Name] = $prop.Value
+        }
+    }
+    foreach ($fix in $Fixes) {
+        $appliedFixes[$fix.FixName] = [string]$fix.FixVersion
+    }
+    $vmNote | Add-Member -MemberType NoteProperty -Name "appliedFixes" -Value ([PSCustomObject]$appliedFixes) -Force
+    Set-VMNote -vmName $VMName -vmNote $vmNote
+    return $vmNote
 }
 
 function Get-VMFixes {
