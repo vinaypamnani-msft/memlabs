@@ -441,13 +441,15 @@ function Start-VMFixesBatched {
     $statusLines = @()
     foreach ($vmFix in $VMFixes) {
         $applied = Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion
+        $isNA = -not $vmFix.AppliesToThisVM
         if ($applied) {
-            $statusLines += "  {0,-25} {1,-12} Applied" -f $vmFix.FixName, $vmFix.FixVersion
+            $label = if ($isNA) { "N/A" } else { "Applied" }
+            $statusLines += "  {0,-25} {1,-12} $label" -f $vmFix.FixName, $vmFix.FixVersion
             continue
         }
-        if (-not $vmFix.AppliesToThisVM) {
+        if ($isNA) {
             $statusLines += "  {0,-25} {1,-12} N/A" -f $vmFix.FixName, $vmFix.FixVersion
-            Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion
+            Set-VMNote -VMName $VMName -vmVersion $vmFix.FixVersion -FixApplied $vmFix.FixName -FixAppliedVersion $vmFix.FixVersion
             continue
         }
         $statusLines += "  {0,-25} {1,-12} PENDING" -f $vmFix.FixName, $vmFix.FixVersion
@@ -745,8 +747,8 @@ function Start-VMFix {
     }
 
     if (-not $vmFix.AppliesToThisVM) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is not applicable. Updating version to '$fixVersion'"
-        Set-VMNote -VMName $vmName -vmVersion $fixVersion
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is not applicable."
+        Set-VMNote -VMName $vmName -vmVersion $fixVersion -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         return $return
     }
