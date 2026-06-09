@@ -1188,6 +1188,54 @@ WHERE drs.is_local = 1 AND drs.is_suspended = 1
                 }
             }
 
+            # 2c. Check for DISCONNECTED replicas and cycle endpoint to force reconnection
+            $disconnectedQuery = @"
+SELECT ag.name AS GroupName, rs.role_desc, rs.connected_state_desc, rs.is_local
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+WHERE rs.connected_state_desc = 'DISCONNECTED'
+"@
+            $disconnected = @(Invoke-Sqlcmd -Query $disconnectedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+            if ($disconnected.Count -gt 0) {
+                $localDisc = @($disconnected | Where-Object { $_.is_local -eq 1 })
+                $remoteDisc = @($disconnected | Where-Object { $_.is_local -eq 0 })
+                if ($localDisc.Count -gt 0) {
+                    $results.Details.Add("REMEDIATE: Local replica DISCONNECTED, cycling mirroring endpoint")
+                }
+                elseif ($remoteDisc.Count -gt 0) {
+                    $results.Details.Add("REMEDIATE: Remote replica DISCONNECTED, cycling local mirroring endpoint to force re-establish")
+                }
+                foreach ($ep in $endpoints) {
+                    try {
+                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STOPPED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        Start-Sleep -Seconds 5
+                        Invoke-Sqlcmd -Query "ALTER ENDPOINT [$($ep.name)] STATE = STARTED" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: Cycled endpoint '$($ep.name)' (STOPPED -> STARTED)")
+                    }
+                    catch {
+                        $results.Details.Add("WARN: Failed to cycle endpoint '$($ep.name)': $($_.Exception.Message)")
+                    }
+                }
+                # Wait for reconnection to establish
+                Start-Sleep -Seconds 20
+
+                # Re-check for suspended databases after reconnect and resume them
+                $suspended2 = @(Invoke-Sqlcmd -Query $suspendedQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue)
+                if ($suspended2.Count -gt 0) {
+                    foreach ($db2 in $suspended2) {
+                        $results.Details.Add("REMEDIATE: Resuming database '$($db2.database_name)' after endpoint cycle")
+                        try {
+                            Invoke-Sqlcmd -Query "ALTER DATABASE [$($db2.database_name)] SET HADR RESUME" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                            $results.Details.Add("OK: Resumed '$($db2.database_name)'")
+                        }
+                        catch {
+                            $results.Details.Add("WARN: Failed to resume '$($db2.database_name)': $($_.Exception.Message)")
+                        }
+                    }
+                    Start-Sleep -Seconds 10
+                }
+            }
+
             # ==============================================================
             # 3. AG replica health check with retry
             # ==============================================================
@@ -1202,7 +1250,7 @@ JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
 JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
 "@
             $results.Details.Add("CMD: AG health query with replica detail")
-            $maxRetries = 3
+            $maxRetries = 5
             $healthy = $false
             for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
                 $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
@@ -1220,8 +1268,8 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     break
                 }
                 if ($attempt -lt $maxRetries) {
-                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 15s...")
-                    Start-Sleep -Seconds 15
+                    $results.Details.Add("WARN: Attempt $attempt/$maxRetries — $($unhealthy.Count) replica(s) not healthy, waiting 20s...")
+                    Start-Sleep -Seconds 20
                 }
                 else {
                     $results.Passed = $false
@@ -1232,7 +1280,80 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                 }
             }
 
-            # 3b. Collect DB-level sync state for diagnostics if still unhealthy
+            # 3b. If still DISCONNECTED after retries, restart SQL on the appropriate node
+            #
+            # Root cause: both SQLAO nodes started at different times. Each
+            # timed out trying to reach the other and neither retried. The
+            # fix is to restart SQL on the node that is NOT currently running
+            # this validation (the "other" node) so it freshly attempts to
+            # connect while we are already up and listening.  If only the
+            # local replica shows DISCONNECTED, restart locally instead.
+            if (-not $healthy) {
+                $stillDisconnected = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' })
+                $localStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -eq $env:COMPUTERNAME })
+                $remoteStillDisc = @($ag | Where-Object { $_.ConnState -eq 'DISCONNECTED' -and $_.Replica -ne $env:COMPUTERNAME })
+
+                if ($stillDisconnected.Count -gt 0) {
+                    # Determine restart target: prefer restarting the other node
+                    # (we are already up and listening), fall back to local.
+                    $restartTarget = $null
+                    $restartIsRemote = $false
+                    if ($remoteStillDisc.Count -gt 0 -and $otherNode) {
+                        $restartTarget = $otherNode
+                        $restartIsRemote = $true
+                        $results.Details.Add("REMEDIATE: Remote replica '$otherNode' DISCONNECTED — restarting SQL on '$otherNode' (local node is up and listening)")
+                    }
+                    elseif ($localStillDisc.Count -gt 0) {
+                        $restartTarget = $env:COMPUTERNAME
+                        $restartIsRemote = $false
+                        $results.Details.Add("REMEDIATE: Local replica DISCONNECTED — restarting SQL locally")
+                    }
+
+                    if ($restartTarget) {
+                        try {
+                            if ($restartIsRemote) {
+                                Invoke-Command -ComputerName $restartTarget -ScriptBlock {
+                                    Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                                } -ErrorAction Stop
+                            }
+                            else {
+                                Restart-Service MSSQLSERVER -Force -ErrorAction Stop
+                            }
+                            Start-Sleep -Seconds 30
+                            $results.Details.Add("OK: SQL Server on '$restartTarget' restarted, rechecking AG health")
+
+                            # Re-run health check after restart
+                            for ($attempt2 = 1; $attempt2 -le 5; $attempt2++) {
+                                $ag = @(Invoke-Sqlcmd -Query $healthQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop)
+                                $unhealthy2 = @($ag | Where-Object { $_.Health -ne 'HEALTHY' })
+                                if ($unhealthy2.Count -eq 0) {
+                                    $healthy = $true
+                                    $results.Passed = $true
+                                    foreach ($r in $ag) {
+                                        $results.Details.Add("OK: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                                    }
+                                    break
+                                }
+                                if ($attempt2 -lt 5) {
+                                    $results.Details.Add("WARN: Post-restart attempt $attempt2/5 — $($unhealthy2.Count) replica(s) not healthy, waiting 20s...")
+                                    Start-Sleep -Seconds 20
+                                }
+                                else {
+                                    foreach ($r in $ag) {
+                                        $level = if ($r.Health -ne 'HEALTHY') { 'FAIL' } else { 'OK' }
+                                        $results.Details.Add("${level}: AG '$($r.GroupName)' replica '$($r.Replica)' ($($r.Role)) — $($r.ConnState), $($r.Health)")
+                                    }
+                                }
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("WARN: Failed to restart SQL Server on '$restartTarget': $($_.Exception.Message)")
+                        }
+                    }
+                }
+            }
+
+            # 3c. Collect DB-level sync state for diagnostics if still unhealthy
             if (-not $healthy) {
                 $dbStateQuery = @"
 SELECT adb.database_name, drs.synchronization_state_desc, drs.synchronization_health_desc,
