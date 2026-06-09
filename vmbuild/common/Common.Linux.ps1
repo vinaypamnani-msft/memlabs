@@ -1,4 +1,4 @@
-# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.Linux.ps1
 # Building blocks for Linux (Ubuntu) VMs in memlabs.
 #
@@ -2156,6 +2156,145 @@ function Set-LinuxVmsDcDns {
     $allOk = $true
     foreach ($vm in $linuxVms) {
         $cmd = "/usr/local/sbin/memlabs-set-dns $dcIp $domain"
+
+        # --- SSH readiness gate --------------------------------------------
+        # Phase 1 confirmed SSH, but sshd may have crashed or the VM may
+        # have rebooted during the Phase 2 DSC window (Linux VMs idle for
+        # 10-20 min while Windows DSC runs). Check heartbeat + tcp/22
+        # before burning through the DNS retries; if unreachable, restart
+        # the VM once.
+        #
+        # Timeout: 3 min base + 20s per VM above 10 (matches the scaling
+        # pattern used for DSC self-recovery and Wait-LinuxVmReady).
+        $vmCount = $linuxVms.Count + @($DeployConfig.virtualMachines | Where-Object { -not (Test-VmIsLinux -Vm $_) -and -not $_.hidden }).Count
+        $probeTimeoutSec = 180
+        if ($vmCount -gt 10) { $probeTimeoutSec += ($vmCount - 10) * 20 }
+
+        # Quick heartbeat + uptime check: if Hyper-V integration services
+        # report no heartbeat the guest OS is down (crashed / stuck at
+        # GRUB). Skip straight to restart rather than polling tcp/22 for
+        # minutes.  Also capture uptime: a VM with OkApplicationsUnknown
+        # heartbeat but >10 min uptime is stuck in boot (hv_utils loaded
+        # but sshd never started). In that case a restart is the only fix;
+        # extra TCP wait would just burn time.
+        $heartbeatHealthy = $false
+        $needsRestart = $false
+        $vmUptimeSec = 0
+        try {
+            $vmState = Get-VM -Name $vm.vmName -ErrorAction Stop
+            $vmUptimeSec = [int]$vmState.Uptime.TotalSeconds
+            if ($vmState.Heartbeat -in 'OkApplicationsHealthy', 'OkApplicationsUnknown') {
+                $heartbeatHealthy = $true
+                if ($vmUptimeSec -gt 600) {
+                    # sshd normally starts within 2-3 min. If the VM has been
+                    # up >10 min it's stuck (systemd hung, cloud-init deadlock,
+                    # etc.). Use a short 30s probe to confirm, then restart.
+                    Write-Log "[Linux DNS] $($vm.vmName): heartbeat=$($vmState.Heartbeat) but uptime=${vmUptimeSec}s (>10 min) -- likely stuck boot" -Warning
+                }
+            }
+            elseif ($vmState.Heartbeat) {
+                Write-Log "[Linux DNS] $($vm.vmName): heartbeat=$($vmState.Heartbeat) state=$($vmState.State) uptime=${vmUptimeSec}s -- guest not healthy, will restart" -Warning
+                $needsRestart = $true
+            }
+            else {
+                Write-Log "[Linux DNS] $($vm.vmName): no heartbeat reported, state=$($vmState.State) uptime=${vmUptimeSec}s -- will restart" -Warning
+                $needsRestart = $true
+            }
+        }
+        catch {}
+
+        $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
+        if ($vmIpPre -and -not $needsRestart) {
+            $tcpUp = $false
+            # If heartbeat is OK but VM has been up >10 min, sshd should
+            # have started long ago. Quick 30s confirmation probe, then
+            # restart. Otherwise use the full scaled timeout.
+            $effectiveProbe = if ($heartbeatHealthy -and $vmUptimeSec -gt 600) { 30 } else { $probeTimeoutSec }
+            $probeEnd = (Get-Date).AddSeconds($effectiveProbe)
+            while (-not $tcpUp -and (Get-Date) -lt $probeEnd) {
+                try {
+                    $tc = [System.Net.Sockets.TcpClient]::new()
+                    $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                    if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                        $tc.EndConnect($iar) | Out-Null
+                        $tcpUp = $tc.Connected
+                    }
+                    $tc.Close()
+                }
+                catch { }
+                if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+            }
+            if (-not $tcpUp) {
+                if ($heartbeatHealthy -and $vmUptimeSec -le 600) {
+                    # Guest recently booted, OS alive (heartbeat OK) but sshd
+                    # isn't listening yet. Give it 3 more minutes -- sshd may
+                    # be waiting on cloud-init, dpkg lock, or entropy. Don't
+                    # restart a recently-booted healthy VM; that resets
+                    # boot progress.
+                    Write-Log "[Linux DNS] $($vm.vmName): tcp/22 not open after ${effectiveProbe}s but heartbeat healthy (uptime ${vmUptimeSec}s) -- waiting 3 more min for sshd" -Warning
+                    $extendEnd = (Get-Date).AddSeconds(180)
+                    while (-not $tcpUp -and (Get-Date) -lt $extendEnd) {
+                        try {
+                            $tc = [System.Net.Sockets.TcpClient]::new()
+                            $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                            if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                                $tc.EndConnect($iar) | Out-Null
+                                $tcpUp = $tc.Connected
+                            }
+                            $tc.Close()
+                        }
+                        catch { }
+                        if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+                    }
+                }
+                if (-not $tcpUp) {
+                    $needsRestart = $true
+                }
+            }
+        }
+        elseif (-not $vmIpPre -and -not $needsRestart) {
+            # No IP reported yet -- VM may be stuck pre-network.
+            $needsRestart = $true
+        }
+
+        if ($needsRestart) {
+            $reason = if (-not $vmIpPre) { 'no IP reported' } else { "tcp/22 not reachable at $vmIpPre (uptime ${vmUptimeSec}s)" }
+            Write-Log "[Linux DNS] $($vm.vmName): $reason. Restarting VM..." -Warning
+            Stop-VM -Name $vm.vmName -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+            Start-VM -Name $vm.vmName -ErrorAction SilentlyContinue
+            $tcpUp = $false
+            $restartEnd = (Get-Date).AddSeconds(180)
+            while (-not $tcpUp -and (Get-Date) -lt $restartEnd) {
+                $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
+                if ($vmIpPre) {
+                    try {
+                        $tc = [System.Net.Sockets.TcpClient]::new()
+                        $iar = $tc.BeginConnect($vmIpPre, 22, $null, $null)
+                        if ($iar.AsyncWaitHandle.WaitOne(3000, $false)) {
+                            $tc.EndConnect($iar) | Out-Null
+                            $tcpUp = $tc.Connected
+                        }
+                        $tc.Close()
+                    }
+                    catch { }
+                }
+                if (-not $tcpUp) { Start-Sleep -Seconds 10 }
+            }
+            if (-not $tcpUp) {
+                Write-Log "[Linux DNS] $($vm.vmName): SSH still unreachable after restart. Skipping DNS flip." -Warning
+                $allOk = $false
+                # Still attempt DNS registration from the DC side (A record)
+                # even though we can't configure the VM itself.
+                $vmIpFallback = Get-LinuxVmIPAddress -VmName $vm.vmName
+                if ($vmIpFallback) {
+                    $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIpFallback
+                }
+                continue
+            }
+            Write-Log "[Linux DNS] $($vm.vmName): SSH recovered after restart ($vmIpPre)" -LogOnly
+        }
+        # --- End SSH readiness gate ---------------------------------------
 
         # Invoke-LinuxVmCommand has its own 3-attempt SSH retry (10s/20s
         # backoff), but during Phase 2 the Linux VM may simply not have

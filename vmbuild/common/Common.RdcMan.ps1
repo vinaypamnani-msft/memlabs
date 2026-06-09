@@ -580,12 +580,9 @@ function New-RDCManFileFromHyperV {
             if (Test-VmIsLinux -Vm $vm) {
                 $rdpOn = ($vm.PSObject.Properties.Name -contains 'enableRDP') -and [bool]$vm.enableRDP
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
-                if (-not ($rdpOn -or $isLinuxClient)) {
-                    Write-Verbose "Skipping Linux VM $($vm.VmName) (enableRDP not set)"
-                    continue
-                }
-                # Linux VM with xrdp enabled (or LinuxClient which has xrdp baked in).
-                # Use IP since Ubuntu doesn't respond to LLMNR.
+                $hasRdp = $rdpOn -or $isLinuxClient
+
+                # Resolve IP (Ubuntu doesn't respond to LLMNR)
                 $linuxIp = $vm.LastKnownIP
                 if ([string]::IsNullOrWhiteSpace($linuxIp)) {
                     try {
@@ -594,8 +591,15 @@ function New-RDCManFileFromHyperV {
                     } catch {}
                 }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
-                $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+
+                # Build display name
+                if ($hasRdp) {
+                    $linuxDisplay = "$($vm.VmName) [Linux RDP] (vmbuildadmin)"
+                } else {
+                    $linuxDisplay = "$($vm.VmName) [Linux SSH] (vmbuildadmin)"
+                }
                 if ($vm.SiteCode) { $linuxDisplay += " ($($vm.SiteCode))" }
+
                 $cLinux = [PsCustomObject]@{}
                 foreach ($item in $vm | Get-Member -MemberType NoteProperty | Where-Object { $null -ne $vm."$($_.Name)" }) {
                     $cLinux | Add-Member -MemberType NoteProperty -Name "$($item.Name)" -Value $($vm."$($item.Name)") -Force
@@ -611,8 +615,18 @@ function New-RDCManFileFromHyperV {
                     $catGroups["Linux"] = $findGroup.SelectNodes('group') | Where-Object { $_.properties.name -eq "Linux" } | Select-Object -Last 1
                 }
 
+                # Remove legacy SSH subgroup (servers are now flat under Linux)
+                $legacySsh = $catGroups["Linux"].SelectNodes('group') | Where-Object { $_.properties.name -eq "SSH" } | Select-Object -First 1
+                if ($legacySsh) {
+                    [void]$catGroups["Linux"].RemoveChild($legacySsh)
+                    $shouldSave = $true
+                }
+
+                # RDP-capable and SSH-only VMs both go directly under Linux
+                $linuxTarget = $catGroups["Linux"]
+
                 if ((Add-RDCManServerToGroup -ServerName $linuxName -DisplayName $linuxDisplay `
-                        -targetGroup $catGroups["Linux"] -groupfromtemplate $groupFromTemplate -existing $existing `
+                        -targetGroup $linuxTarget -groupfromtemplate $groupFromTemplate -existing $existing `
                         -comment $linuxComment -ForceOverwrite:$true `
                         -domain '' -username 'vmbuildadmin') -eq $True) {
                     $shouldSave = $true
