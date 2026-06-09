@@ -1305,11 +1305,6 @@ function Get-VMFixes {
             }
         }
 
-        # Per-fix tracking: skip fixes already applied (works for both new and existing VMs)
-        if ($applicable -and $vmNote -and (Test-VMFixApplied -VMNote $vmNote -FixName $vmFix.FixName -FixVersion $vmFix.FixVersion)) {
-            $applicable = $false
-        }
-
         $vmfix | Add-Member -MemberType NoteProperty -Name AppliesToThisVM -Value $applicable -force
 
         # Filter out null's'
