@@ -1712,15 +1712,19 @@ function Test-CMSiteFunctionality {
             'SMS_WINNT_SERVER_DISCOVERY_AGENT'
             'SMS_NETWORK_DISCOVERY'
         )
-        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter TallyInterval='0001128000100008'")
+        $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter ""TallyInterval='0001128000100008' AND SiteCode='$sc'""")
         $componentCheckAttempts = 3
         $componentRetryDelay = 30
         $unhealthyCount = 999
         $unhealthyDetails = @()
         for ($attempt = 1; $attempt -le $componentCheckAttempts; $attempt++) {
             try {
+                # Filter by SiteCode so each site only validates its own components.
+                # Without this, the CAS sees components from child Primaries and
+                # Secondaries — a Secondary still installing its MP taints the CAS
+                # check even though the Secondary has its own Phase 11 validation.
                 $allComponents = @(Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_ComponentSummarizer `
-                    -Filter "TallyInterval='0001128000100008'" -ErrorAction Stop)
+                    -Filter "TallyInterval='0001128000100008' AND SiteCode='$sc'" -ErrorAction Stop)
                 if ($allComponents.Count -eq 0) {
                     $results.Details.Add("  Attempt $attempt/${componentCheckAttempts}: SMS_ComponentSummarizer returned 0 rows (site still initializing)")
                     if ($attempt -lt $componentCheckAttempts) { Start-Sleep -Seconds $componentRetryDelay }
@@ -1730,7 +1734,8 @@ function Test-CMSiteFunctionality {
                 $ignoredCount = $allComponents.Count - $checkable.Count
 
                 # Check each component's live state. Deduplicate by ComponentName
-                # (CAS sees entries from multiple servers) — take worst state per name.
+                # (a site may have components on remote site systems) — take worst
+                # state per name.
                 $byName = @{}
                 foreach ($comp in $checkable) {
                     $name = $comp.ComponentName
