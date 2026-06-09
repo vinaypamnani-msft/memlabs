@@ -2848,6 +2848,7 @@ function Set-VMNote {
     param (
         [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
         [Parameter(Mandatory = $true, ParameterSetName = "VMVersion")]
+        [Parameter(Mandatory = $true, ParameterSetName = "FixOnly")]
         [string]$vmName,
         [Parameter(Mandatory = $true, ParameterSetName = "VMNote")]
         [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
@@ -2859,7 +2860,9 @@ function Set-VMNote {
         [switch]$forceVersionUpdate,
         [Parameter(Mandatory = $false)]
         [bool]$force,
-        [Parameter(Mandatory = $false)]
+        [Parameter(Mandatory = $true, ParameterSetName = "FixOnly")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMNote")]
+        [Parameter(Mandatory = $false, ParameterSetName = "VMVersion")]
         [string]$FixApplied,
         [Parameter(Mandatory = $false)]
         [string]$FixAppliedVersion
