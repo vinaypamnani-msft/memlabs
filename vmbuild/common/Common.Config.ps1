@@ -2198,12 +2198,13 @@ function Invoke-VMNetworkBulkWarmup {
     if ($global:Common.NetCache) { return }  # Already warm
 
     # Try to hydrate from on-disk cache files written by a previous run.
-    # If every file is less than 30 minutes old, skip the expensive WMI call.
+    # Switch names rarely change, so use a long TTL (24 hours).
+    # The per-VM Get-VMNetworkCached already uses 30 days.
     $cachePath = $global:Common.CachePath
     if ($cachePath) {
         $diskFiles = @(Get-ChildItem -Path $cachePath -Filter "*.network.json" -ErrorAction SilentlyContinue)
         if ($diskFiles.Count -gt 0) {
-            $cutoff = (Get-Date).AddMinutes(-30)
+            $cutoff = (Get-Date).AddHours(-24)
             $allFresh = $true
             $loaded = @{}
             foreach ($f in $diskFiles) {
@@ -2225,7 +2226,17 @@ function Invoke-VMNetworkBulkWarmup {
     Write-Log "Invoke-VMNetworkBulkWarmup: fetching all VM network adapters in one call..." -LogOnly
     $global:Common.NetCache = @{}
     try {
-        $allAdapters = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue
+        # Run as a job with a timeout so a hung WMI subsystem doesn't block startup indefinitely.
+        $job = Start-Job -ScriptBlock { Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue }
+        $completed = $job | Wait-Job -Timeout 30
+        if (-not $completed) {
+            Write-Log "Invoke-VMNetworkBulkWarmup: WMI call timed out after 30s. Skipping." -Warning -LogOnly
+            $job | Stop-Job
+            $job | Remove-Job -Force
+            return
+        }
+        $allAdapters = $job | Receive-Job
+        $job | Remove-Job -Force
         $now = Get-Date -Format "MM/dd/yyyy HH:mm"
         $cachePath = $global:Common.CachePath
         foreach ($adapter in $allAdapters) {
