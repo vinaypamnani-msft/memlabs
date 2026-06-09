@@ -2515,6 +2515,43 @@ $global:VM_Config = {
                     get-job  | Stop-Job | out-null
                     get-job  | Remove-Job | out-null
 
+                    # Pre-flight: verify WinRM connectivity to each target node.
+                    # Start-DscConfiguration pushes MOFs via CIM/WinRM. If a node
+                    # is unreachable, the push silently fails for that node. Test
+                    # each one upfront so failures are logged with diagnostics.
+                    $mofFiles = Get-ChildItem -Path $dscConfigPath -Filter '*.mof' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.BaseName -ne $env:COMPUTERNAME }
+                    $unreachable = @()
+                    foreach ($mof in $mofFiles) {
+                        $targetNode = $mof.BaseName
+                        $wsmanOk = $false
+                        try {
+                            $ws = Test-WSMan -ComputerName $targetNode -Credential $creds -Authentication Default -ErrorAction Stop
+                            if ($ws) { $wsmanOk = $true }
+                        } catch {}
+
+                        if ($wsmanOk) {
+                            "  WinRM pre-check: $targetNode OK" | Out-File $log -Append
+                        } else {
+                            "  WinRM pre-check: $targetNode UNREACHABLE" | Out-File $log -Append
+                            $unreachable += $targetNode
+                            # Attempt remediation: enable WinRM via WMI (out-of-band)
+                            try {
+                                $wmiFix = Invoke-WmiMethod -ComputerName $targetNode -Credential $creds `
+                                    -Class Win32_Process -Name Create `
+                                    -ArgumentList 'powershell.exe -NoProfile -Command "Enable-PSRemoting -Force -SkipNetworkProfileCheck; Set-NetFirewallRule -Name WINRM-HTTP-In-TCP -Enabled True -ErrorAction SilentlyContinue"' `
+                                    -ErrorAction Stop
+                                "  WinRM remediation via WMI on ${targetNode}: ReturnValue=$($wmiFix.ReturnValue)" | Out-File $log -Append
+                                Start-Sleep -Seconds 5
+                            } catch {
+                                "  WinRM remediation via WMI on ${targetNode}: FAILED $_" | Out-File $log -Append
+                            }
+                        }
+                    }
+                    if ($unreachable.Count -gt 0) {
+                        "WARNING: $($unreachable.Count) node(s) unreachable via WinRM: $($unreachable -join ', ')" | Out-File $log -Append
+                    }
+
                     "Start-DscConfiguration for $dscConfigPath with $user credentials" | Out-File $log -Append
                     $null = Start-DscConfiguration -Path $dscConfigPath -Force -Verbose -ErrorAction Stop -Credential $creds -JobName $currentItem.vmName
 
