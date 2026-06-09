@@ -124,8 +124,13 @@ if ($blmCollection) {
         $existingRule = Get-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -ErrorAction SilentlyContinue
         if (-not $existingRule) {
             $query = "SELECT * FROM SMS_R_System WHERE Name = '$vmResourceName'"
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -QueryExpression $query
-            Write-DscStatus "$Tag Added query rule '$ruleName' to $blmCollectionName"
+            try {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionId $blmCollection.CollectionID -RuleName $ruleName -QueryExpression $query -ErrorAction Stop
+                Write-DscStatus "$Tag Added query rule '$ruleName' to $blmCollectionName"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to add query rule '$ruleName': $($_.Exception.Message)"
+            }
         }
         else {
             Write-DscStatus "$Tag Query rule '$ruleName' already exists in $blmCollectionName"
@@ -137,7 +142,9 @@ if ($blmCollection) {
     # query rules can match them. PushClients may have already done this,
     # but DDR processing can lag.
     try { Invoke-CMSystemDiscovery } catch {}
-    Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
+    try { Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID -ErrorAction Stop } catch {
+        Write-DscStatus "$Tag WARNING: Invoke-CMCollectionUpdate failed: $($_.Exception.Message)"
+    }
     Write-DscStatus "$Tag Triggered AD system discovery + collection evaluation for $blmCollectionName"
 
     # Wait for evaluation to complete - members must be visible for deployment to work
@@ -146,7 +153,18 @@ if ($blmCollection) {
     $evalDelay = 10
     for ($i = 1; $i -le $evalRetries; $i++) {
         Start-Sleep -Seconds $evalDelay
-        $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction SilentlyContinue)
+        # Get-CMCollectionMember queries SMS_CM_RES_COLL_<ID> which maps to a SQL
+        # view that ConfigMgr creates asynchronously after New-CMDeviceCollection.
+        # Until the view exists, the SMS Provider throws a terminating WMI error
+        # ("Invalid object name '_RES_COLL_xxx'") that -ErrorAction cannot suppress.
+        # Catch it and treat as 0 members -- the view will appear on a later attempt.
+        try {
+            $members = @(Get-CMCollectionMember -CollectionId $blmCollection.CollectionID -ErrorAction Stop)
+        }
+        catch {
+            Write-DscStatus "$Tag Collection member query failed (attempt $i/$evalRetries, view may not exist yet): $($_.Exception.Message)"
+            $members = @()
+        }
         $expectedNames = @($blmVMs | ForEach-Object { $_.vmName })
         $found = @($members | Where-Object { $_.Name -in $expectedNames })
         if ($found.Count -ge $expectedNames.Count) {
@@ -155,7 +173,9 @@ if ($blmCollection) {
         }
         if ($i -lt $evalRetries) {
             Write-DscStatus "$Tag Waiting for collection evaluation ($i/$evalRetries): $($found.Count)/$($expectedNames.Count) expected BLM clients visible..."
-            Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID
+            try { Invoke-CMCollectionUpdate -CollectionId $blmCollection.CollectionID -ErrorAction Stop } catch {
+                Write-DscStatus "$Tag WARNING: Invoke-CMCollectionUpdate retry failed: $($_.Exception.Message)"
+            }
         }
         else {
             $missing = $expectedNames | Where-Object { $_ -notin $members.Name }

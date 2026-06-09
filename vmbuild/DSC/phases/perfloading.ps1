@@ -1164,25 +1164,27 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         $Query = $Collection.Query
     
         if (-not (Get-CMDeviceCollection -Name $CollectionName)) {
-            # Create the device collection
-            $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
+            try {
+                # Create the device collection
+                $NewCollection = New-CMDeviceCollection -Name $CollectionName -LimitingCollectionName "All Systems" -Comment "Collection for $CollectionName"
 
-            Write-DscStatus "$Tag Created collection: $CollectionName"
+                Write-DscStatus "$Tag Created collection: $CollectionName"
 
-            # Add a query rule to the collection
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
+                # Add a query rule to the collection
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionName $CollectionName -QueryExpression $Query -RuleName "$CollectionName Rule" -ErrorAction Stop
     
-            Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
+                Write-DscStatus "$Tag Created collection query: $CollectionName Rule"
 
-            # Force collection membership evaluation so members appear immediately
-            Invoke-CMCollectionUpdate -CollectionId $NewCollection.CollectionID
+                # Force collection membership evaluation so members appear immediately
+                Invoke-CMCollectionUpdate -CollectionId $NewCollection.CollectionID -ErrorAction Stop
 
-            Write-DscStatus "$Tag Created collection Folder MEMLABS under device collections"
+                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID -ErrorAction Stop
 
-            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $NewCollection.CollectionID
-
-            Write-DscStatus "$Tag Moved collection under the folder MEMLABS"
-
+                Write-DscStatus "$Tag Moved collection '$CollectionName' under the folder MEMLABS"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
+            }
         }
     }
 
