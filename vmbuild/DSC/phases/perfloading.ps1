@@ -45,7 +45,7 @@ else {
     # hierarchy cannot run hierarchy-level cmdlets (site features, default
     # client settings, custom client setting creation/deployment).
     $isTopLevel = ($CurrentRole -eq 'CAS') -or (-not $ThisVM.parentSiteCode)
-    $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
+    $DCVM = ($deployConfig.virtualMachines | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
     # Read Site Code from registry
@@ -84,9 +84,9 @@ else {
 
     #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
     $DPGroupName = "ALL DPS"
-    $checkDP = Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name 
+    $existingDPGroups = @(Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name)
 
-    if ($DPGroupName -eq $checkDP) {
+    if ($DPGroupName -in $existingDPGroups) {
 
         Write-DscStatus "$Tag DP group: $DPGroupName already exists"
 
@@ -332,7 +332,9 @@ else {
     }
 
     # Create the share with read access for "Everyone"
-    New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    if (-not (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue)) {
+        New-SmbShare -Name $shareName -Path $folderPath -FullAccess @("Administrators", "Everyone")
+    }
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
@@ -349,20 +351,30 @@ else {
     else {
 
     #get OS upgrade package 
-    New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
-    New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
-    Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
+    try {
+        New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
+        New-CMOperatingSystemInstaller -Name "Windows 10 upgrade" -Path "\\$ThisMachineName\OSD\Windows 10 22h2" -Version 10.0.19041 
+        Write-DscStatus "$Tag Windows 10 and 11 OS upgrade packages created"
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Failed to create OS upgrade packages: $_"
+    }
 
     #get OS package
-    if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
-    if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
-
-    Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
+    try {
+        if (!(Get-CMOperatingSystemImage -Name "windows 11")) { New-CMOperatingSystemImage -Name "Windows 11" -Path "\\$ThisMachineName\OSD\Windows 11 24h2\sources\install.wim" -Version 10.0.26100 }
+        if (!(Get-CMOperatingSystemImage -Name "windows 10")) { New-CMOperatingSystemImage -Name "Windows 10" -Path "\\$ThisMachineName\OSD\Windows 10 22h2\sources\install.wim" -Version 10.0.19041 }
+        Write-DscStatus "$Tag Windows 10 and 11 OS packages created"
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Failed to create OS image packages: $_"
+    }
 
     # Get all Task Sequences with names starting with the specified prefix
     $taskSequences = Get-CMTaskSequence | Where-Object { $_.Name -like "MEMLABS-*" }
 
     if (!$taskSequences) {
+    try {
 
         # Define variables for TS
         #$TaskSequenceName = "Windows 11 In-Place Upgrade Task Sequence"
@@ -387,8 +399,8 @@ else {
         }
         #distribute the OS packages and upgrade packages 
         Start-CMContentDistribution -PackageId $UserStateMigrationToolPackageId -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS"
-        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS"
+        Start-CMContentDistribution -OperatingSystemImageIds @($win11OSimagepackageID, $win10OSimagepackageID) -DistributionPointGroupName  "ALL DPS" -ErrorAction SilentlyContinue
+        Start-CMContentDistribution -OperatingSystemInstallerIds @($win11UpgradePackageID, $win10UpgradePackageID) -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
         Write-DscStatus "$Tag Successfully distributed for OS Image and upgrade packages"
      
 
@@ -555,18 +567,27 @@ else {
                 Write-DscStatus "Skipping $($ts.Name) already deployed to $($unknownCollection.Name)"
             }
             else {
-                Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
+                try {
+                    Write-DscStatus "Deploying Task Sequence: $($ts.Name)"
 
-                New-CMTaskSequenceDeployment `
-                    -TaskSequencePackageId $ts.PackageID `
-                    -CollectionId $unknownCollection.CollectionID `
-                    -DeployPurpose Available `
-                    -MakeAvailableTo ClientsMediaAndPxe
+                    New-CMTaskSequenceDeployment `
+                        -TaskSequencePackageId $ts.PackageID `
+                        -CollectionId $unknownCollection.CollectionID `
+                        -DeployPurpose Available `
+                        -MakeAvailableTo ClientsMediaAndPxe
+                }
+                catch {
+                    Write-DscStatus "$Tag WARNING: Failed to deploy TS '$($ts.Name)': $_"
+                }
             }
 
         }
 
 
+    }
+    catch {
+        Write-DscStatus "$Tag WARNING: Failed to create task sequences: $_"
+    }
     }
     else {
 
@@ -581,47 +602,56 @@ else {
     ### CI and baselines 
 
     #expand archive for importing cab files
-    Expand-Archive -Path "C:\tools\baselines.zip" -DestinationPath "C:\tools\" -Force
-
-    # Define the path to the CAB files
+    $baselinesZip = "C:\tools\baselines.zip"
     $baselineFolder = "C:\tools\baselines"
 
+    if (Test-Path $baselinesZip) {
+        Expand-Archive -Path $baselinesZip -DestinationPath "C:\tools\" -Force
+    }
+    else {
+        Write-DscStatus "$Tag WARNING: baselines.zip not found at $baselinesZip — skipping CI/baseline import"
+    }
+
     # Get all .cab files in the folder
+    if (Test-Path $baselineFolder) {
     $ConfigNames = Get-ChildItem -Path $baselineFolder -Filter "*.cab"
 
     ForEach ($ConfigName in $ConfigNames) {
 
-
         $baselinename = [System.IO.Path]::GetFileNameWithoutExtension($ConfigName.Name)
 
         if (!(Get-CMBaseline -Fast -Name $baselinename)) {
-
-            # Create a configuration item (we are importing the cab files directly here)
-            $filename = $baselineFolder + "\" + $ConfigName.Name
-            Write-DscStatus "$Tag Importing cab from $filename location"
-            Import-CMConfigurationItem -FileName $filename -Force
-            Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
+            try {
+                # Create a configuration item (we are importing the cab files directly here)
+                $filename = $baselineFolder + "\" + $ConfigName.Name
+                Write-DscStatus "$Tag Importing cab from $filename location"
+                Import-CMConfigurationItem -FileName $filename -Force
+                Write-DscStatus "$Tag Successfully created Configuration Item for $baselinename"
     
-            # Create the configuration baseline
-            New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
-            Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
+                # Create the configuration baseline
+                New-CMBaseline -Name $baselinename -Description "MEMLABS auto imported" 
+                Write-DscStatus "$Tag Successfully created Configuration Baseline for $baselinename"
 
-            # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
-            $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
-            Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
-            Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
+                # Link the configuration item to the configuration baseline (we are using the same name for CI and baseline so using the same name here)
+                $ciinfo = Get-CMConfigurationItem -Name $baselinename -Fast
+                Set-CMBaseline -Name $baselinename -AddOSConfigurationItem $ciinfo.CI_ID 
+                Write-DscStatus "$Tag Successfully linked CI and CB for $baselinename"
 
-            # Deploy the configuration baseline to a collection
-            Write-DscStatus "$Tag Deploying baseline $baselinename to All Systems..."
-            New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
-            Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
-
+                # Deploy the configuration baseline to a collection
+                Write-DscStatus "$Tag Deploying baseline $baselinename to All Systems..."
+                New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
+                Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to import/deploy baseline '$baselinename': $($_.Exception.Message)"
+            }
         }
         else {
             Write-DscStatus "Baseline $baselinename are already in place"
 
         }
     }
+    } # end if baselineFolder exists
 
     #we have to make powershell bypass for the baselines to work as expected
     # Custom client settings — top-level site only (replicate to child sites)
@@ -1221,10 +1251,14 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
     #install Endpoint protection role in hierarchy to support defender updates
     if (!(Get-CMEndpointProtectionPoint -AllSite)) {
-    
-        # this is needed for defender updates and management
-        Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
-        Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
+        try {
+            # this is needed for defender updates and management
+            Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
+            Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to install Endpoint Protection Point: $_"
+        }
     }
 
     # Client settings — top-level site only (replicate to child sites)
@@ -1332,7 +1366,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
 
         # Create the share with read access for "Everyone"
-        New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
+        if (-not (Get-SmbShare -Name $shareName1 -ErrorAction SilentlyContinue)) {
+            New-SmbShare -Name $shareName1 -Path $folderPath1 -FullAccess @("Administrators", "Everyone")
+        }
 
         Write-DscStatus "$Tag $shareName1 share successfully shared with Administrators"
 
@@ -1455,7 +1491,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
     $collection = Get-CMCollection -Name "All Unknown Computers"
     if ($Collection -and $Collection.CollectionID) {
-        Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID
+        try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
     }    
 
     # Create the flag file
