@@ -4798,18 +4798,10 @@ function Install-Tools {
             Write-Log "$vmName`: Failed to get a session with the VM." -Failure
             return $false
         }
-        if (-not $Force) {
-            $out = Invoke-VmCommand -VmName $vm.vmName -AsJob -VmDomainName $vm.domain -SuppressLog -ScriptBlock { Test-Path -Path "C:\Tools\Fix-PostInstall.ps1" -ErrorAction SilentlyContinue }
-        }
-        if (-not ($Force -or $out.ScriptBlockOutput -ne $true)) {
-            # Tools already present and -Force not specified: nothing to do, this is success.
-            Write-Log "$vmName`: Tools already present (Fix-PostInstall.ps1 exists). Skipping inject." -Verbose
-            return $true
-        }
-        if ($Force -or $out.ScriptBlockOutput -ne $true) {
-            $i = 0
-            $ToolList = @()
-            foreach ($tool in $Common.AzureFileList.Tools) {
+
+        $i = 0
+        $ToolList = @()
+        foreach ($tool in $Common.AzureFileList.Tools) {
 
                 $i++
                 if ($TotalCount -gt 0) {
@@ -4870,7 +4862,7 @@ function Install-Tools {
             if ($vm.operatingSystem -like "*2016*") {
                 $fast = $false
             }
-            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast
+            $worked = Copy-ToolToVM -Tool $ToolList -VMName $vm.vmName -WhatIf:$WhatIf -Fast:$fast -Force:$Force
             if (-not $worked) {
                 $success = $false
                 Write-Progress2 "Injecting tools" -Status "Failed to Inject at least one tool to $VmName" -Log
@@ -4892,7 +4884,6 @@ function Install-Tools {
                 Write-Progress2 "Injecting tools" -Status "All Tools copied to $VmName, but at least 1 has failed." -Log -Completed
                 return $false
             }
-        }
 
     }
     Write-Log -Verbose "Injecting Tools $($ToolName -join ",") to Virtual Machines $($allVMs.vmName -join ",")"
@@ -4936,7 +4927,9 @@ function Copy-ToolToVM {
         [Parameter(Mandatory = $false, HelpMessage = "Dry Run.")]
         [switch]$WhatIf,
         [Parameter(Mandatory = $false, HelpMessage = "Fast.. Might hang.")]
-        [switch]$Fast
+        [switch]$Fast,
+        [Parameter(Mandatory = $false, HelpMessage = "Force copy even if hash matches.")]
+        [switch]$Force
     )
 
     $vm = Get-List -Type VM -SmartUpdate | Where-Object { $_.vmName -eq $VMName }
@@ -5056,6 +5049,32 @@ function Copy-ToolToVM {
     }
 
     $zipSizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+
+    # --- Compute MD5 of the bundle and compare with the VM's cached hash ---
+    $bundleHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
+    $vmHashPath = "C:\Tools\Tools.MD5"
+    $skipCopy = $false
+
+    if (-not $WhatIf -and -not $Force) {
+        $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+            if (Test-Path $using:vmHashPath) {
+                return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+            }
+            return $null
+        }
+        if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $bundleHash) {
+            Write-Log "$vmName`: Tools bundle hash matches ($bundleHash). Skipping copy." -Success
+            $skipCopy = $true
+        }
+    }
+
+    if ($skipCopy) {
+        # Cleanup host temp files
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $true
+    }
+
     Write-Log "$vmName`: Copying tools bundle (${zipSizeMB} MB, $($zipEntries.Count) tools) to VM..."
     Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${zipSizeMB} MB) to $VMName" -Log
 
@@ -5086,8 +5105,18 @@ function Copy-ToolToVM {
             }
         }
 
+        # Write the bundle hash to the VM so subsequent runs can skip
+        if ($success -and -not $WhatIf) {
+            $writeHash = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+                $using:bundleHash | Set-Content -Path $using:vmHashPath -Force -ErrorAction SilentlyContinue
+            }
+            if ($writeHash.ScriptBlockFailed) {
+                Write-Log "$vmName`: Could not write Tools.MD5 hash file. Next run will re-copy." -LogOnly
+            }
+        }
+
         if ($success) {
-            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle." -Success
+            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle. Hash: $bundleHash" -Success
         }
     }
     catch {
