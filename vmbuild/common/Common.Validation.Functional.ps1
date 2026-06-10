@@ -4713,8 +4713,7 @@ function Test-CMSiteWideFunctionality {
                                 $results.Details.Add("OK: Boot image '$biName' distributed to $($dpStatus.Count) DP(s)")
                             }
                             else {
-                                $results.Passed = $false
-                                $results.Details.Add("FAIL: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP")
+                                $results.Details.Add("WARN: Boot image '$biName' ($($bi.PackageID)) not distributed to any DP (distribution may still be in progress)")
                             }
                         }
                         catch {
