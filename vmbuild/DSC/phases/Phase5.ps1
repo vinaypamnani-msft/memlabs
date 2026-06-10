@@ -664,59 +664,92 @@
                 catch { return $false }
             }
             SetScript  = {
-                # Listener DNS A record missing on one or more DCs — register
-                # on the primary DC and force replication to all others.
+                # Listener DNS A record missing on one or more DCs.
+                # Retry with escalating recovery until ALL DCs have the record.
+                # Phase 5 must not proceed without listener DNS — Phase 8
+                # setup.exe will fail with 'untrusted domain' if FQDN
+                # resolution is missing.
                 $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
                 if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
+                $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
+                $listenerName = $using:listenerNameForDns
+                $listenerIP   = $using:listenerIpForDns
+                $zoneName     = $using:DomainName
+                $primaryDC    = $using:dcForDns
+                $maxAttempts  = 5
+                $registered   = $false
 
-                # Register the A record on the primary DC.
-                Add-DnsServerResourceRecordA -ZoneName $using:DomainName -Name $using:listenerNameForDns `
-                    -IPv4Address $using:listenerIpForDns -ComputerName $using:dcForDns -ErrorAction Stop
-                Write-Verbose "Registered DNS A record: $($using:listenerNameForDns) -> $($using:listenerIpForDns) on DC '$($using:dcForDns)'"
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    Write-Verbose "VerifyListenerDns: attempt $attempt/$maxAttempts"
 
-                # Restart the listener's Network Name resource so the cluster
-                # service picks up the DNS registration for future failovers.
-                $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $using:listenerNameForDns }
-                if ($nnRes) {
-                    $nnRes | Stop-ClusterResource -ErrorAction SilentlyContinue
-                    Start-Sleep -Seconds 2
-                    $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
-                }
+                    # Attempt a) Register the A record on the primary DC (idempotent).
+                    if (-not $registered) {
+                        try {
+                            $existing = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
+                                -RRType A -ComputerName $primaryDC -ErrorAction SilentlyContinue)
+                            if ($existing.Count -eq 0) {
+                                Add-DnsServerResourceRecordA -ZoneName $zoneName -Name $listenerName `
+                                    -IPv4Address $listenerIP -ComputerName $primaryDC -ErrorAction Stop
+                                Write-Verbose "Registered DNS A record: $listenerName -> $listenerIP on DC '$primaryDC'"
+                            }
+                            else {
+                                Write-Verbose "DNS A record already exists on primary DC '$primaryDC'"
+                            }
+                            $registered = $true
+                        }
+                        catch {
+                            Write-Verbose "DNS registration attempt $attempt failed: $($_.Exception.Message)"
+                        }
+                    }
 
-                # Force AD replication so all DCs pick up the new record.
-                # The DNS zone is AD-integrated (ReplicationScope Domain), so
-                # repadmin /syncall propagates the DNS partition.
-                if ($allDCs.Count -gt 1) {
-                    Write-Verbose "Forcing AD replication across $($allDCs.Count) DCs: $($allDCs -join ', ')"
-                    $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
-                    $replJob = Start-Job -ScriptBlock {
-                        param($dcNames)
-                        $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
-                    } -ArgumentList (,$dcShortNames)
-                    $null = Wait-Job $replJob -Timeout 30
-                    if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
-                    Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                    # Attempt b) Bounce the listener's Network Name resource so
+                    # the cluster service re-registers DNS for future failovers.
+                    if ($attempt -le 2) {
+                        $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                            Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $listenerName }
+                        if ($nnRes) {
+                            $nnRes | Stop-ClusterResource -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 2
+                            $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                            Write-Verbose "Bounced cluster Network Name resource for '$listenerName'"
+                        }
+                    }
+
+                    # Attempt c) Force AD replication so all DCs pick up the record.
+                    if ($allDCs.Count -gt 1) {
+                        Write-Verbose "Forcing AD replication across $($allDCs.Count) DCs"
+                        $replJob = Start-Job -ScriptBlock {
+                            param($dcNames)
+                            $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                        } -ArgumentList (,$dcShortNames)
+                        $null = Wait-Job $replJob -Timeout 30
+                        if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
+                        Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                    }
                     Start-Sleep -Seconds 5
-                }
-                else {
-                    Start-Sleep -Seconds 3
-                }
 
-                # Verify the record exists on ALL DCs. If any DC is missing
-                # it, throw so DSC reports the resource as failed.
-                $missingDCs = @()
-                foreach ($dc in $allDCs) {
-                    $verify = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
-                        -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
-                    if ($verify.Count -eq 0) {
-                        $missingDCs += $dc
+                    # Verify the record exists on ALL DCs.
+                    $missingDCs = @()
+                    foreach ($dc in $allDCs) {
+                        $verify = @(Get-DnsServerResourceRecord -ZoneName $zoneName -Name $listenerName `
+                            -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+                        if ($verify.Count -eq 0) {
+                            $missingDCs += $dc
+                        }
+                    }
+                    if ($missingDCs.Count -eq 0) {
+                        Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s) (attempt $attempt)"
+                        return
+                    }
+                    Write-Verbose "Attempt $attempt: record still missing on DC(s): $($missingDCs -join ', ')"
+                    if ($attempt -lt $maxAttempts) {
+                        Start-Sleep -Seconds 10
                     }
                 }
-                if ($missingDCs.Count -gt 0) {
-                    throw "DNS A record for '$($using:listenerNameForDns)' was registered but verification failed — record not found on DC(s): $($missingDCs -join ', ')"
-                }
-                Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s)"
+
+                # All attempts exhausted — throw so DSC reports failure and
+                # Phase 5 does not proceed.
+                throw "DNS A record for '$listenerName' could not be verified on all DCs after $maxAttempts attempts. Missing on: $($missingDCs -join ', '). Phase 5 cannot continue without listener DNS."
             }
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds
