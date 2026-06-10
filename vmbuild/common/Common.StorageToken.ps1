@@ -222,6 +222,7 @@ function Initialize-Storage {
         # only need the local file list and admin credential.
         if ($InJob.IsPresent) {
             Write-Log "Skipped storage network operations, running inside a job." -Verbose
+            $Common.OfflineMode = $true
             $script:fileListName = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
             $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
             if (-not (Update-FileList)) { return $false }
