@@ -644,20 +644,35 @@
         Script VerifyListenerDns {
             GetScript  = { @{ Result = 'N/A' } }
             TestScript = {
-                # Query the DC's DNS records directly — Resolve-DnsName can
+                # Query ALL DCs' DNS records directly — Resolve-DnsName can
                 # return LLMNR results that mask a missing A record.
+                # With multiple DCs (DC + BDC), the record might exist on one
+                # but not the other due to replication lag.
                 try {
-                    $rec = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
-                        -RRType A -ComputerName $using:dcForDns -ErrorAction Stop)
-                    return $rec.Count -gt 0
+                    $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+                    if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
+                    foreach ($dc in $allDCs) {
+                        $rec = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
+                            -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+                        if ($rec.Count -eq 0) {
+                            Write-Verbose "DNS A record for '$($using:listenerNameForDns)' missing on DC '$dc'"
+                            return $false
+                        }
+                    }
+                    return $true
                 }
                 catch { return $false }
             }
             SetScript  = {
-                # Listener DNS A record missing — register it ourselves.
+                # Listener DNS A record missing on one or more DCs — register
+                # on the primary DC and force replication to all others.
+                $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+                if ($allDCs.Count -eq 0) { $allDCs = @($using:dcForDns) }
+
+                # Register the A record on the primary DC.
                 Add-DnsServerResourceRecordA -ZoneName $using:DomainName -Name $using:listenerNameForDns `
                     -IPv4Address $using:listenerIpForDns -ComputerName $using:dcForDns -ErrorAction Stop
-                Write-Verbose "Registered DNS A record: $($using:listenerNameForDns) -> $($using:listenerIpForDns)"
+                Write-Verbose "Registered DNS A record: $($using:listenerNameForDns) -> $($using:listenerIpForDns) on DC '$($using:dcForDns)'"
 
                 # Restart the listener's Network Name resource so the cluster
                 # service picks up the DNS registration for future failovers.
@@ -669,15 +684,39 @@
                     $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
                 }
 
-                # Verify the record actually exists now. If not, throw so DSC
-                # reports the resource as failed instead of silently continuing.
-                Start-Sleep -Seconds 3
-                $verify = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
-                    -RRType A -ComputerName $using:dcForDns -ErrorAction SilentlyContinue)
-                if ($verify.Count -eq 0) {
-                    throw "DNS A record for '$($using:listenerNameForDns)' was registered but verification failed — record not found on DC '$($using:dcForDns)'"
+                # Force AD replication so all DCs pick up the new record.
+                # The DNS zone is AD-integrated (ReplicationScope Domain), so
+                # repadmin /syncall propagates the DNS partition.
+                if ($allDCs.Count -gt 1) {
+                    Write-Verbose "Forcing AD replication across $($allDCs.Count) DCs: $($allDCs -join ', ')"
+                    $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
+                    $replJob = Start-Job -ScriptBlock {
+                        param($dcNames)
+                        $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                    } -ArgumentList (,$dcShortNames)
+                    $null = Wait-Job $replJob -Timeout 30
+                    if ($replJob.State -eq 'Running') { Stop-Job $replJob -ErrorAction SilentlyContinue }
+                    Remove-Job $replJob -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
                 }
-                Write-Verbose "Verified: DNS A record exists on DC '$($using:dcForDns)'"
+                else {
+                    Start-Sleep -Seconds 3
+                }
+
+                # Verify the record exists on ALL DCs. If any DC is missing
+                # it, throw so DSC reports the resource as failed.
+                $missingDCs = @()
+                foreach ($dc in $allDCs) {
+                    $verify = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
+                        -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+                    if ($verify.Count -eq 0) {
+                        $missingDCs += $dc
+                    }
+                }
+                if ($missingDCs.Count -gt 0) {
+                    throw "DNS A record for '$($using:listenerNameForDns)' was registered but verification failed — record not found on DC(s): $($missingDCs -join ', ')"
+                }
+                Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s)"
             }
             DependsOn            = $nextDepend
             PsDscRunAsCredential = $Admincreds

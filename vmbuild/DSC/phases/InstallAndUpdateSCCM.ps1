@@ -718,9 +718,18 @@ CurrentBranch=1
                         if ($shortResolve) { $agIPAddr = $shortResolve.IPAddressToString }
                     }
                     if ($agIPAddr) {
-                        $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
-                        if ($dcName) { $dcName = $dcName.TrimStart('\\') }
-                        if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
+                        # Discover ALL DCs so we can register + replicate
+                        $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+                        $dcName = $null
+                        if ($allDCs.Count -gt 0) {
+                            $dcName = $allDCs[0]
+                        }
+                        else {
+                            $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                            if ($dcName) { $dcName = $dcName.TrimStart('\\') }
+                            if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
+                            $allDCs = @($dcName)
+                        }
                         Write-DscStatus "SQL pre-flight DNS: registering A record '$sqlServerName' -> $agIPAddr on DC '$dcName'"
                         # Use Invoke-Command to run on the DC since this VM
                         # may not have RSAT DNS Server tools installed.
@@ -728,6 +737,18 @@ CurrentBranch=1
                             param($zone, $name, $ip)
                             Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ErrorAction Stop
                         } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr -ErrorAction Stop
+
+                        # Force AD replication so all DCs pick up the record.
+                        # This is critical with BDC — this CAS VM might query
+                        # a different DC than the one we registered on.
+                        if ($allDCs.Count -gt 1) {
+                            Write-DscStatus "SQL pre-flight DNS: forcing AD replication across $($allDCs.Count) DCs"
+                            $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
+                            Invoke-Command -ComputerName $dcName -ScriptBlock {
+                                param($dcNames)
+                                $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                            } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                        }
                         Start-Sleep -Seconds 5
                         Clear-DnsClientCache -ErrorAction SilentlyContinue
                     }
