@@ -629,6 +629,61 @@
 
         $nextDepend = '[ADServicePrincipalName]lspn1', '[ADServicePrincipalName]lspn2', '[ADServicePrincipalName]lspn3', '[ADServicePrincipalName]lspn4'
 
+        # Verify the AG listener's DNS A record exists. The cluster service is
+        # supposed to register it automatically when the listener comes online,
+        # but this fails silently when the domain adapter's DNS registration is
+        # in a transient state (e.g. after DisableClusterNicDnsRegistration
+        # strips DNS from the heartbeat NIC and re-registers only the domain
+        # adapter). When the A record is missing, Phase 8 setup.exe fails with
+        # "untrusted domain" because FQDN resolution is required for Kerberos.
+        $listenerNameForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerName
+        $listenerFqdnForDns  = $thisVM.thisParams.SQLAO.AlwaysOnListenerNameFQDN
+        $listenerIpForDns    = ($thisVM.thisParams.SQLAO.AGIPAddress -split '/')[0]  # strip CIDR if present
+        $dcForDns            = ($AllNodes | Where-Object { $_.Role -eq 'DC' }).NodeName
+
+        Script VerifyListenerDns {
+            GetScript  = { @{ Result = 'N/A' } }
+            TestScript = {
+                # Query the DC's DNS records directly — Resolve-DnsName can
+                # return LLMNR results that mask a missing A record.
+                try {
+                    $rec = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
+                        -RRType A -ComputerName $using:dcForDns -ErrorAction Stop)
+                    return $rec.Count -gt 0
+                }
+                catch { return $false }
+            }
+            SetScript  = {
+                # Listener DNS A record missing — register it ourselves.
+                Add-DnsServerResourceRecordA -ZoneName $using:DomainName -Name $using:listenerNameForDns `
+                    -IPv4Address $using:listenerIpForDns -ComputerName $using:dcForDns -ErrorAction Stop
+                Write-Verbose "Registered DNS A record: $($using:listenerNameForDns) -> $($using:listenerIpForDns)"
+
+                # Restart the listener's Network Name resource so the cluster
+                # service picks up the DNS registration for future failovers.
+                $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $using:listenerNameForDns }
+                if ($nnRes) {
+                    $nnRes | Stop-ClusterResource -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 2
+                    $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                }
+
+                # Verify the record actually exists now. If not, throw so DSC
+                # reports the resource as failed instead of silently continuing.
+                Start-Sleep -Seconds 3
+                $verify = @(Get-DnsServerResourceRecord -ZoneName $using:DomainName -Name $using:listenerNameForDns `
+                    -RRType A -ComputerName $using:dcForDns -ErrorAction SilentlyContinue)
+                if ($verify.Count -eq 0) {
+                    throw "DNS A record for '$($using:listenerNameForDns)' was registered but verification failed — record not found on DC '$($using:dcForDns)'"
+                }
+                Write-Verbose "Verified: DNS A record exists on DC '$($using:dcForDns)'"
+            }
+            DependsOn            = $nextDepend
+            PsDscRunAsCredential = $Admincreds
+        }
+        $nextDepend = '[Script]VerifyListenerDns'
+
         WriteStatus AgListen {
             DependsOn = $nextDepend
             Status    = "Waiting on $node2 to Join the Sql Availability Group Listener"

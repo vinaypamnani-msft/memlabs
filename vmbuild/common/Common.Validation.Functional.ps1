@@ -5334,7 +5334,7 @@ function Test-SQLAOPostPhase5 {
         Write-Log "[Phase $Phase] $VMName [SQLAO]: Running post-Phase-5 validation" -OutputStream
 
         $scriptBlock = {
-            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP)
+            param($listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domainName)
 
             $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -5368,21 +5368,30 @@ function Test-SQLAOPostPhase5 {
                     $results.Details.Add("FAIL: Cluster not found or inaccessible: $($_.Exception.Message)")
                 }
 
-                # 2. Cluster name DNS
+                # 2. Cluster name DNS — query the DC directly to avoid LLMNR
                 if ($clusterName) {
-                    $results.Details.Add("CMD: Resolve-DnsName '$clusterName'")
-                    $clusterDns = @(Resolve-DnsName -Name $clusterName -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
-                    $resolvedIPs = @($clusterDns | Select-Object -ExpandProperty IPAddress)
-                    if ($resolvedIPs.Count -eq 0) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
-                    }
-                    else {
-                        $results.Details.Add("OK: Cluster name '$clusterName' resolves to $($resolvedIPs -join ', ')")
-                        if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                    $dc = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                    if ($dc) { $dc = $dc.TrimStart('\\') }
+                    $dnsZone = if ($domainName) { $domainName } else { [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName }
+                    $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$dnsZone' -Name '$clusterName' -RRType A -ComputerName '$dc'")
+                    try {
+                        $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $clusterName -RRType A -ComputerName $dc -ErrorAction Stop)
+                        $resolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
+                        if ($resolvedIPs.Count -eq 0) {
                             $results.Passed = $false
-                            $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($resolvedIPs -join ', '))")
+                            $results.Details.Add("FAIL: Cluster name '$clusterName' has no A record on DC '$dc'")
                         }
+                        else {
+                            $results.Details.Add("OK: Cluster name '$clusterName' has DNS A record(s): $($resolvedIPs -join ', ')")
+                            if ($clusterIP -and $clusterIP -notin $resolvedIPs) {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Expected cluster IP '$clusterIP' not in DNS (found: $($resolvedIPs -join ', '))")
+                            }
+                        }
+                    }
+                    catch {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: DNS query for cluster name '$clusterName' on DC '$dc' failed: $($_.Exception.Message)")
                     }
                 }
 
@@ -5420,26 +5429,67 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
                     $results.Details.Add("FAIL: AG health query failed: $($_.Exception.Message)")
                 }
 
-                # 4. Listener DNS
+                # 4. Listener DNS — query the DC's DNS records directly.
+                #    Resolve-DnsName can return LLMNR results that mask a missing
+                #    A record. Phase 8 setup.exe needs FQDN for Kerberos.
                 if ($listenerName) {
-                    $results.Details.Add("CMD: Resolve-DnsName '$listenerName'")
+                    # $dc and $dnsZone were set in check #2; reuse if available
+                    if (-not $dc) {
+                        $dc = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                        if ($dc) { $dc = $dc.TrimStart('\\') }
+                    }
+                    if (-not $dnsZone) {
+                        $dnsZone = if ($domainName) { $domainName } else { [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName }
+                    }
+                    $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$dnsZone' -Name '$listenerName' -RRType A -ComputerName '$dc'")
+                    $listenerDnsOk = $false
                     try {
-                        $dns = @(Resolve-DnsName -Name $listenerName -Type A -ErrorAction Stop)
-                        $resolvedIPs = @($dns | Where-Object { $_.QueryType -eq 'A' } | Select-Object -ExpandProperty IPAddress)
+                        $listenerRecs = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName -RRType A -ComputerName $dc -ErrorAction Stop)
+                        $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
                         if ($resolvedIPs.Count -gt 0) {
-                            $results.Details.Add("OK: Listener '$listenerName' resolves to $($resolvedIPs -join ', ')")
+                            $listenerDnsOk = $true
+                            $results.Details.Add("OK: Listener '$listenerName' has DNS A record(s): $($resolvedIPs -join ', ')")
                             if ($agIP -and $agIP -notin $resolvedIPs) {
-                                $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                                $results.Details.Add("WARN: Expected AG IP '$agIP' not in DNS A records")
                             }
                         }
                         else {
-                            $results.Passed = $false
-                            $results.Details.Add("FAIL: Listener '$listenerName' did not resolve to any A records")
+                            $results.Details.Add("FAIL: Listener '$listenerName' has no A record on DC '$dc'")
                         }
                     }
                     catch {
+                        $results.Details.Add("FAIL: DNS query for listener '$listenerName' on DC '$dc' failed: $($_.Exception.Message)")
+                    }
+
+                    # Remediate: if no A record, register it directly on the DC.
+                    if (-not $listenerDnsOk -and $agIP) {
+                        $results.Details.Add("Attempting to register DNS A record: '$listenerName' -> $agIP on DC '$dc'")
+                        try {
+                            if ($dc -and $dnsZone) {
+                                Add-DnsServerResourceRecordA -ZoneName $dnsZone -Name $listenerName `
+                                    -IPv4Address $agIP -ComputerName $dc -ErrorAction Stop
+                                Start-Sleep -Seconds 3
+                                # Verify by querying the DC again (not Resolve-DnsName)
+                                $recheck = @(Get-DnsServerResourceRecord -ZoneName $dnsZone -Name $listenerName `
+                                    -RRType A -ComputerName $dc -ErrorAction SilentlyContinue)
+                                if ($recheck.Count -gt 0) {
+                                    $listenerDnsOk = $true
+                                    $results.Details.Add("OK: DNS A record registered and verified on DC '$dc'")
+                                }
+                                else {
+                                    $results.Details.Add("FAIL: Registered DNS record but verification on DC '$dc' failed")
+                                }
+                            }
+                            else {
+                                $results.Details.Add("FAIL: Could not determine DC or domain name for DNS registration")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("FAIL: DNS registration failed: $($_.Exception.Message)")
+                        }
+                    }
+                    if (-not $listenerDnsOk) {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: DNS resolution for '$listenerName' failed: $($_.Exception.Message)")
                     }
                 }
 
@@ -5487,7 +5537,7 @@ JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
 
         $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
             -ScriptBlock $scriptBlock `
-            -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP `
+            -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $clusterName, $clusterIP, $domain `
             -DisplayName "Phase5-SQLAO-Validate" -SuppressLog
 
         # Process results inline (Format-TestResult hardcodes Phase 11)

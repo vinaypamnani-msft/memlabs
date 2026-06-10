@@ -670,6 +670,106 @@ CurrentBranch=1
     $CMInstallationFile = "$CMDir\SMSSETUP\BIN\X64\Setup.exe"
     $CMFileVersion = Get-Item -Path $CMInstallationFile -ErrorAction SilentlyContinue
 
+    # Pre-flight: verify SQL connectivity using the FQDN with Integrated Auth
+    # before launching setup.exe. Setup.exe uses the FQDN for Kerberos auth
+    # which requires DNS resolution. LLMNR/NetBIOS won't work.
+    #
+    # Known failure mode: SQLAO listener DNS A record missing — the cluster
+    # service was supposed to register it but didn't. We detect this, attempt
+    # to register the record ourselves, and retry the connection.
+    if ($sqlServerName -ne $env:COMPUTERNAME) {
+        $sqlFQDN = "$sqlServerName.$DomainFullName"
+        $sqlTarget = $sqlFQDN
+        if ($sqlPort -and $sqlPort -ne 1433) {
+            $sqlTarget = "$sqlFQDN,$sqlPort"
+        }
+
+        # Step 1: Verify DNS resolves the SQL server FQDN.
+        # If missing (common for SQLAO listeners), attempt self-registration.
+        $dnsOk = $false
+        for ($dnsTry = 1; $dnsTry -le 3; $dnsTry++) {
+            try {
+                $dnsResult = @(Resolve-DnsName -Name $sqlFQDN -Type A -ErrorAction Stop)
+                if ($dnsResult.Count -gt 0) {
+                    $dnsOk = $true
+                    Write-DscStatus "SQL pre-flight DNS: '$sqlFQDN' resolves to $($dnsResult.IPAddress -join ', ')"
+                    break
+                }
+            }
+            catch {
+                Write-DscStatus "SQL pre-flight DNS: attempt $dnsTry/3 — '$sqlFQDN' not resolvable: $($_.Exception.Message)"
+            }
+            if (-not $dnsOk -and $installToAO) {
+                # SQLAO listener: try to register the A record from the listener IP.
+                # The AG config has the listener IP; use it to create the missing record.
+                try {
+                    $agIPAddr = $null
+                    # Try Get-ClusterResource to find the listener IP
+                    $listenerRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $sqlServerName } |
+                        Select-Object -First 1
+                    if ($listenerRes) {
+                        $agIPAddr = ($listenerRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                    }
+                    # Fallback: resolve the short name via NetBIOS/LLMNR
+                    if (-not $agIPAddr) {
+                        $shortResolve = [System.Net.Dns]::GetHostAddresses($sqlServerName) |
+                            Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+                        if ($shortResolve) { $agIPAddr = $shortResolve.IPAddressToString }
+                    }
+                    if ($agIPAddr) {
+                        $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                        if ($dcName) { $dcName = $dcName.TrimStart('\\') }
+                        if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
+                        Write-DscStatus "SQL pre-flight DNS: registering A record '$sqlServerName' -> $agIPAddr on DC '$dcName'"
+                        # Use Invoke-Command to run on the DC since this VM
+                        # may not have RSAT DNS Server tools installed.
+                        Invoke-Command -ComputerName $dcName -ScriptBlock {
+                            param($zone, $name, $ip)
+                            Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ErrorAction Stop
+                        } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr -ErrorAction Stop
+                        Start-Sleep -Seconds 5
+                        Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    }
+                }
+                catch {
+                    Write-DscStatus "SQL pre-flight DNS: could not register A record: $($_.Exception.Message)"
+                }
+            }
+            if ($dnsTry -lt 3) { Start-Sleep -Seconds 10 }
+        }
+        if (-not $dnsOk) {
+            Write-DscStatus "SQL pre-flight DNS: WARNING — '$sqlFQDN' still not resolvable after registration attempts. Proceeding with SQL connection test anyway."
+        }
+
+        # Step 2: Verify SQL connectivity with Integrated Auth using the FQDN.
+        # This matches what setup.exe will use for its prereq check.
+        $sqlPreCheckMax = 12   # 12 attempts x 15s = 3 min
+        $sqlPreCheckOk = $false
+        for ($sqlTry = 1; $sqlTry -le $sqlPreCheckMax; $sqlTry++) {
+            try {
+                $cs = "Data Source=$sqlTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+                $conn.Open()
+                $conn.Close()
+                $sqlPreCheckOk = $true
+                Write-DscStatus "SQL pre-flight: connected to [$sqlTarget] on attempt $sqlTry"
+                break
+            }
+            catch {
+                $sqlPreErr = $_.Exception.Message
+                Write-DscStatus "SQL pre-flight: attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr"
+                if ($sqlTry -lt $sqlPreCheckMax) {
+                    Start-Sleep -Seconds 15
+                }
+            }
+        }
+        if (-not $sqlPreCheckOk) {
+            Write-DscStatus "SQL pre-flight failed after $sqlPreCheckMax attempts to [$sqlTarget]: $sqlPreErr. Cannot start setup.exe." -Failure
+            return
+        }
+    }
+
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
     start-sleep -seconds 2
 
