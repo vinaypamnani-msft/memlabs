@@ -679,20 +679,29 @@ else {
  
         $syncFinished = $syncTimeout = $syncFailed = $false
         $i = 0
- 
-        do {                    
-            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
 
-            if (-not $($syncState.WSUSServerName)) {
-                Write-DscStatus "$Tag SUM Sync: WSUS server not detected yet, waiting 60s..."
+        # Get sync status for this site code. Don't filter on WSUSSourceServer
+        # because hierarchy Primaries sync from the CAS WSUS (not Microsoft Update).
+        $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+
+        if (-not $($syncState.WSUSServerName)) {
+            # WCM may still be registering the SUP. Retry up to 5 times (5 min).
+            for ($w = 1; $w -le 5; $w++) {
+                Write-DscStatus "$Tag SUM Sync: WSUS server not detected yet for site $SiteCode, waiting 60s... (attempt $w of 5)"
                 Start-Sleep -Seconds 60
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.WSUSSourceServer -like "*Microsoft Update*" -and $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-                 if (-not $($syncState.WSUSServerName)) {
-                    Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected. Exiting the sync check."
-                    $syncFailed = $true
-                    return $false
-                 }                 
+                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                if ($syncState.WSUSServerName) { break }
             }
+            if (-not $($syncState.WSUSServerName)) {
+                Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected after 5 attempts. Exiting the sync check."
+                $syncFailed = $true
+                return $false
+            }
+        }
+ 
+        do {
+            # Refresh sync state each iteration
+            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
 
             if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
                 $i++
