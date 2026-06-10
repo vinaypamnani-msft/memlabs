@@ -41,6 +41,10 @@ else {
     $DN = 'DC=' + $DomainFullName.Replace('.', ',DC=')   
     # $ThisMachineName / $ThisVM / $cmo already resolved above (before PrePopulateObjects gate).
     $CurrentRole = $ThisVM.role
+    # Top-level = CAS or standalone Primary (no parent). Child Primaries in a
+    # hierarchy cannot run hierarchy-level cmdlets (site features, default
+    # client settings, custom client setting creation/deployment).
+    $isTopLevel = ($CurrentRole -eq 'CAS') -or (-not $ThisVM.parentSiteCode)
     $DCVM = ($deployConfig.virtualMachine | Where-Object { $_.Role -eq "DC" })
     $DCName = $DCVM.vmName
     $CMInstallDir = $ThisVM.CMInstallDir
@@ -110,9 +114,16 @@ else {
     }
 
 
-    #Enable Site features:
-    Write-DscStatus "$Tag Enabling Site features"
-    Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+    #Enable Site features (hierarchy-level — top-level site only)
+    if ($isTopLevel) {
+        Write-DscStatus "$Tag Enabling Site features"
+        try {
+            Get-CMSiteFeature -Production -Fast | Enable-CMSiteFeature -Force
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to enable site features: $_"
+        }
+    }
 
     #Applications and packages — Primary only (content sources are local)
     if ($CurrentRole -ne "CAS") {
@@ -272,8 +283,15 @@ else {
     ## Task sequences — Primary only (boot images, OSD content, local shares)
     if ($CurrentRole -ne "CAS") {
 
-    #custom domain name in winPE
-    Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+    #custom domain name in winPE (default client setting — top-level only)
+    if ($isTopLevel) {
+        try {
+            Set-CMClientSettingComputerAgent -DefaultSetting -BrandingTitle $DomainFullName
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to set branding title: $_"
+        }
+    }
 
     # Get all boot images
     $BootImages = Get-CMBootImage
@@ -596,6 +614,8 @@ else {
     }
 
     #we have to make powershell bypass for the baselines to work as expected
+    # Custom client settings — top-level site only (replicate to child sites)
+    if ($isTopLevel) {
     $customclientsetting = "MEMLABS-powershellbypass"
  
     if (!(Get-CMClientSetting -Name $customclientsetting)) {
@@ -609,6 +629,7 @@ else {
         New-CMClientSettingDeployment -Name $customclientsetting -CollectionId SMS00001
         Write-DscStatus "$Tag Deployed the client setting to all systems collection"
     }
+    } # end top-level client settings
 
     # Define helper functions for SUP sync (used later)
     function Check-SyncSucceeded {
@@ -1195,7 +1216,9 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         Add-CMEndpointProtectionPoint -ProtectionService AdvancedMembership -SiteCode $SiteCode -SiteSystemServerName $ProviderMachineName
         Write-DscStatus "$Tag Endpoint protection role to support defender patching is installed"
     }
-    
+
+    # Client settings — top-level site only (replicate to child sites)
+    if ($isTopLevel) {
     if (!(Get-CMClientSetting -Name MEMLABS-Defender)) {
         New-CMClientSetting -Name MEMLABS-Defender -Description "Defender execution policy" -Type Device -ErrorAction SilentlyContinue
         Set-CMClientSettingEndpointProtection -Name MEMLABS-Defender -Enable $true -DisableFirstSignatureUpdate $true -ForceRebootHr $true -InstallEndpointProtectionClient $true -OverrideMaintenanceWindow $true -DefenderAgent MdeDownlevel -SuppressReboot $true -PersistInstallation $true 
@@ -1209,6 +1232,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         New-CMClientSettingDeployment -Name MEMLABS-Updates -CollectionId SMS00001
         Write-DscStatus "$Tag Client setting to support O365 patching is enabled"
     }
+    } # end top-level client settings
     
     # Now wait for WSUS sync that was triggered earlier (ran during collection creation)
     if (-not $Sups) {

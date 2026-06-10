@@ -1814,8 +1814,25 @@ function Test-CMSiteFunctionality {
         # cycles (e.g. Started/Offline) which is normal, not a deployment failure.
         # Discovery agents run on a schedule and are Stopped between cycles, so they're
         # excluded entirely.
+        # WSUS/SRS components are conditionally ignored — only when the corresponding
+        # role is NOT installed for this site (checked via C:\staging\DSC\deployConfig.json).
+        $dcfPath = 'C:\staging\DSC\deployConfig.json'
+        $hasSUP = $false
+        $hasRP = $false
+        if (Test-Path $dcfPath) {
+            try {
+                $dcf = Get-Content $dcfPath -Raw | ConvertFrom-Json
+                $hasSUP = [bool]($dcf.virtualMachines | Where-Object {
+                    ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $sc
+                } | Select-Object -First 1)
+                $hasRP = [bool]($dcf.virtualMachines | Where-Object {
+                    $_.InstallRP -and $_.siteCode -eq $sc
+                } | Select-Object -First 1)
+            } catch { }
+        }
         $ignoredComponents = @(
             'SMS_WSUS_CONFIGURATION_MANAGER'        # Until SUP is fully configured
+            'SMS_MIGRATION_MANAGER'                 # Migration not used in lab builds
             'SMS_SITE_SQL_BACKUP'                   # Backup not configured on new sites
             'SMS_SITE_BACKUP'                       # Backup not configured on new sites
             'SMS_SITE_VSS_WRITER'                   # Backup not configured on new sites
@@ -1833,8 +1850,15 @@ function Test-CMSiteFunctionality {
             'SMS_WINNT_SERVER_DISCOVERY_AGENT'
             'SMS_NETWORK_DISCOVERY'
         )
+        if (-not $hasSUP) {
+            $ignoredComponents += 'SMS_WSUS_CONTROL_MANAGER'      # Only when SUP not installed
+            $ignoredComponents += 'SMS_WSUS_SYNC_MANAGER'         # Only when SUP not installed
+        }
+        if (-not $hasRP) {
+            $ignoredComponents += 'SMS_SRS_REPORTING_POINT'        # Only when RP not installed
+        }
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_ComponentSummarizer -Filter ""TallyInterval='0001128000100008' AND SiteCode='$sc'""")
-        $componentCheckAttempts = 3
+        $componentCheckAttempts = 10
         $componentRetryDelay = 30
         $unhealthyCount = 999
         $unhealthyDetails = @()
@@ -1937,14 +1961,15 @@ function Test-CMSiteFunctionality {
 
     $passed = Format-TestResult -VMName $VMName -RoleLabel $roleLabel -Result $result
 
-    # Site-wide tests only run on a top-level site (Primary without parentSiteCode,
-    # or CAS). On a child Primary under a CAS we skip these -- the CAS already owns
-    # the boundaries / discovery / apps, and probing them on the child can fail
-    # while replication is still catching up.
+    # Site-wide tests run on any CAS or Primary. Hierarchy-owned checks
+    # (boundaries, discovery, comms mode) are gated on $isTopLevel inside
+    # the function so child Primaries skip them (DRS replication lag would
+    # cause false failures). Perfloading content checks (apps, collections,
+    # packages, etc.) run on every Primary that has PrePopulateObjects.
     $isTopLevel = (-not $CurrentItem.parentSiteCode) -and ($CurrentItem.role -in @('CAS', 'Primary'))
-    if ($passed -and $isTopLevel) {
+    if ($passed -and ($CurrentItem.role -in @('CAS', 'Primary'))) {
         Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying site-wide settings"
-        $sitePassed = Test-CMSiteWideFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+        $sitePassed = Test-CMSiteWideFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsTopLevel:$isTopLevel
         if (-not $sitePassed) { $passed = $false }
     }
 
@@ -3540,19 +3565,27 @@ function Test-PassiveSiteFunctionality {
         param($sc)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
-        $results.Details.Add("CMD: Get-Service -Name 'SMS_EXECUTIVE'")
-        $svc = Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue
+        # SMS_EXECUTIVE may still be installing/starting after the passive site
+        # install monitoring exits (it returns when the final WMI stage is
+        # reached, not when the service is fully running). Retry for up to 5 min.
+        $results.Details.Add("CMD: Get-Service -Name 'SMS_EXECUTIVE' (with retries)")
+        $svc = $null
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            $svc = Get-Service -Name 'SMS_EXECUTIVE' -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') { break }
+            if ($attempt -lt 10) { Start-Sleep -Seconds 30 }
+        }
         if (-not $svc) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' not found")
+            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' not found after $attempt attempts")
             return $results
         }
         if ($svc.Status -ne 'Running') {
             $results.Passed = $false
-            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' is $($svc.Status)")
+            $results.Details.Add("FAIL: Service 'SMS_EXECUTIVE' is $($svc.Status) after $attempt attempts")
             return $results
         }
-        $results.Details.Add("OK: Service 'SMS_EXECUTIVE' is Running")
+        $results.Details.Add("OK: Service 'SMS_EXECUTIVE' is Running (attempt $attempt)")
 
         # Registry should advertise the same site code as the active partner
         $regSite = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code' -ErrorAction SilentlyContinue
@@ -4411,18 +4444,21 @@ function Test-BitLockerProtection {
 function Test-CMSiteWideFunctionality {
     <#
     .SYNOPSIS
-        Validates site-wide settings on a top-level Primary or CAS:
+        Validates site-wide settings on any Primary or CAS:
         boundary groups, discovery methods, client push, apps, and the
         site comms mode (HTTPS-only vs EnhancedHTTP) based on cmOptions.UsePKI.
     .NOTES
-        Only invoked from Test-CMSiteFunctionality when the VM has no
-        parentSiteCode and role is CAS/Primary.
+        Hierarchy-owned checks (boundaries, discovery, comms mode) only
+        run when -IsTopLevel is set. Perfloading content checks (apps,
+        collections, packages, etc.) run on every Primary with
+        PrePopulateObjects, including child Primaries under a CAS.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$VMName,
         [Parameter(Mandatory)][object]$CurrentItem,
-        [Parameter(Mandatory)][object]$DeployConfig
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [switch]$IsTopLevel
     )
 
     $Phase = 11
@@ -4468,14 +4504,21 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
+        $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
         $ns = "root\SMS\site_$sc"
+
+        # --- Hierarchy-owned checks (only on top-level sites) ---
+        # On a child Primary under a CAS, boundaries/discovery/comms mode
+        # replicate from the CAS; checking them before DRS finishes causes
+        # false failures.
+        if ($topLevel) {
 
         # 1. Boundary groups -- at least the default "Default-Site-Boundary-Group" should exist
         $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_BoundaryGroup")
@@ -4607,6 +4650,8 @@ function Test-CMSiteWideFunctionality {
                 $results.Details.Add("WARN: AD OperationalXml query failed: $($_.Exception.Message)")
             } }  # end if not CAS
         }
+
+        } # end if $topLevel (hierarchy-owned checks)
 
         # 4. Apps enabled via deployConfig.Tools[Appinstall=true] must be present
         #    as SMS_ApplicationLatest objects (created by perfloading.ps1)
@@ -4763,7 +4808,7 @@ function Test-CMSiteWideFunctionality {
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 

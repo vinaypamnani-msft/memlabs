@@ -522,6 +522,30 @@ if ($containsPassive) {
         $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallPassiveSiteServer.ps1"
         Set-Location $LogPath
         Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+
+        # Wait for SMS_EXECUTIVE to start on the passive node before proceeding.
+        # InstallPassiveSiteServer.ps1 exits at SubStageId 917515, but the
+        # SMS_EXECUTIVE service may still be starting on the passive node.
+        $passiveSmsSvc = $null
+        $maxPassiveWait = 10
+        $passiveWaitDelay = 30
+        for ($pw = 1; $pw -le $maxPassiveWait; $pw++) {
+            try {
+                $passiveSmsSvc = Get-Service -ComputerName $containsPassive.vmName -Name 'SMS_EXECUTIVE' -ErrorAction Stop
+                if ($passiveSmsSvc.Status -eq 'Running') {
+                    Write-DscStatus "SMS_EXECUTIVE is Running on $($containsPassive.vmName) (attempt $pw)"
+                    break
+                }
+                Write-DscStatus "SMS_EXECUTIVE on $($containsPassive.vmName): $($passiveSmsSvc.Status) (attempt $pw/$maxPassiveWait)"
+            }
+            catch {
+                Write-DscStatus "SMS_EXECUTIVE not yet reachable on $($containsPassive.vmName): $($_.Exception.Message) (attempt $pw/$maxPassiveWait)"
+            }
+            if ($pw -lt $maxPassiveWait) { Start-Sleep -Seconds $passiveWaitDelay }
+        }
+        if (-not $passiveSmsSvc -or $passiveSmsSvc.Status -ne 'Running') {
+            Write-DscStatus "WARNING: SMS_EXECUTIVE not Running on $($containsPassive.vmName) after $maxPassiveWait attempts" -Warning
+        }
     }
     else {
         Write-DscStatus "ContainsPassive Skipping InstallPassiveSiteServer.ps1 (passive role verified on $($containsPassive.vmName))"
@@ -588,12 +612,14 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
       Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
   }
   
-# Mark ScriptWorkflow completed for DSC to move on.
-$Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
-$Configuration.ScriptWorkflow.Status = "Completed"
-$Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
-$Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
-Write-DscStatus "Complete!"
+# CAS already marked JSON Completed above to unblock DSC phases.
+# Signal Complete! now so the host advances CAS past Phase 8 while
+# PushClients, EnableBLM, etc. continue running in the background.
+# Non-CAS: defer Complete! until after all post-install work finishes
+# so Phase 11 validates a stable, fully-configured site.
+if ($CurrentRole -eq "CAS") {
+    Write-DscStatus "Complete!"
+}
 
 # PushClients first so auto-push has maximum time to install the agent on
 # all targets while EnableBLM configures policies and collections.
@@ -607,7 +633,6 @@ if ($ThisVM.role -ne "CAS") {
     catch {
         Write-DscStatus "PushClients.ps1 failed: $_" -Warning
     }
-    Write-DscStatus "Complete!"
 }
 
 # EnableBLM only needs AD-discovered devices (not pushed clients) for its
@@ -623,11 +648,6 @@ if ($CurrentRole -eq "Primary") {
     catch {
         Write-DscStatus "EnableBLM.ps1 failed: $_" -Warning
     }
-    # MUST re-assert Complete! -- EnableBLM's final status overwrites the
-    # earlier Complete! marker. The orchestrator in Common.ScriptBlocks.ps1
-    # polls for exact match "Complete!" / "Setting up ConfigMgr. Status:
-    # Complete!" and will otherwise hang on Phase 8 long after the work is done.
-    Write-DscStatus "Complete!"
 }
 
 # Reset SMS component status counts on site servers. New installs accumulate
@@ -654,6 +674,88 @@ if ($CurrentRole -in @("Primary", "CAS", "Secondary")) {
     catch {
         Write-DscStatus "WARNING: Failed to reset SMS component status counts: $($_.Exception.Message)"
     }
+}
+
+# Non-CAS: wait for site components to stabilize before signaling completion.
+# After E-HTTP/HTTPS, PushClients, EnableBLM, and component resets, many
+# SMS_EXECUTIVE components are still starting. Polling here prevents Phase 11
+# from failing on "27 components not Started" race conditions.
+if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
+    $stabSiteCode = $ThisVM.siteCode
+    if ($stabSiteCode) {
+        # Same ignore list as Phase 11 (Common.Validation.Functional.ps1)
+        # Conditionally ignore WSUS/SRS components only when those roles
+        # aren't installed for this site (checked via $deployConfig).
+        $hasSUP = $deployConfig.virtualMachines | Where-Object {
+            ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $stabSiteCode
+        } | Select-Object -First 1
+        $hasRP = $deployConfig.virtualMachines | Where-Object {
+            $_.InstallRP -and $_.siteCode -eq $stabSiteCode
+        } | Select-Object -First 1
+        $ignoredComponents = @(
+            'SMS_WSUS_CONFIGURATION_MANAGER'         # Until SUP is fully configured
+            'SMS_MIGRATION_MANAGER'
+            'SMS_SITE_SQL_BACKUP'
+            'SMS_SITE_BACKUP'
+            'SMS_SITE_VSS_WRITER'
+            'SMS_OFFLINE_SERVICING_MANAGER'
+            'CONFIGURATION_MANAGER_UPDATE'
+            'SMS_MP_DEVICE_MANAGER'
+            'SMS_TEM'
+            'SMS_PROVIDERS'
+            'SMS_AD_SYSTEM_DISCOVERY_AGENT'
+            'SMS_AD_SECURITY_GROUP_DISCOVERY_AGENT'
+            'SMS_AD_USER_DISCOVERY_AGENT'
+            'SMS_AD_FOREST_DISCOVERY_MANAGER'
+            'SMS_WINNT_SERVER_DISCOVERY_AGENT'
+            'SMS_NETWORK_DISCOVERY'
+        )
+        if (-not $hasSUP) {
+            $ignoredComponents += 'SMS_WSUS_CONTROL_MANAGER'
+            $ignoredComponents += 'SMS_WSUS_SYNC_MANAGER'
+        }
+        if (-not $hasRP) {
+            $ignoredComponents += 'SMS_SRS_REPORTING_POINT'
+        }
+        $stabMaxAttempts = 10
+        $stabDelay = 30
+        $stabThreshold = 5  # allow up to this many non-Started components
+        Write-DscStatus "Waiting for site components to stabilize (up to $([math]::Round($stabMaxAttempts * $stabDelay / 60)) min)"
+        for ($stabAttempt = 1; $stabAttempt -le $stabMaxAttempts; $stabAttempt++) {
+            try {
+                $ns = "root\sms\site_$stabSiteCode"
+                $allComps = @(Get-WmiObject -Namespace $ns -Class SMS_ComponentSummarizer `
+                    -Filter "TallyInterval='0001128000100008' AND SiteCode='$stabSiteCode'" -ErrorAction Stop)
+                if ($allComps.Count -eq 0) {
+                    Write-DscStatus "  Component stabilization attempt $stabAttempt/$stabMaxAttempts`: no data yet"
+                    if ($stabAttempt -lt $stabMaxAttempts) { Start-Sleep -Seconds $stabDelay }
+                    continue
+                }
+                $checkable = @($allComps | Where-Object { $_.ComponentName -notin $ignoredComponents })
+                $notStarted = @($checkable | Where-Object { $_.State -ne 1 })
+                if ($notStarted.Count -le $stabThreshold) {
+                    Write-DscStatus "Components stabilized: $($checkable.Count - $notStarted.Count)/$($checkable.Count) Started (attempt $stabAttempt)"
+                    break
+                }
+                $names = ($notStarted | Select-Object -First 5 | ForEach-Object { $_.ComponentName }) -join ', '
+                Write-DscStatus "  Attempt $stabAttempt/$stabMaxAttempts`: $($notStarted.Count) components not Started ($names...)" -RetrySeconds $stabDelay
+            }
+            catch {
+                Write-DscStatus "  Component stabilization attempt $stabAttempt failed: $($_.Exception.Message)"
+            }
+            if ($stabAttempt -lt $stabMaxAttempts) { Start-Sleep -Seconds $stabDelay }
+        }
+    }
+}
+
+# Non-CAS: mark completion now that PushClients, EnableBLM, component
+# resets, and component stabilization are done.
+if ($CurrentRole -ne "CAS") {
+    $Configuration = Get-Content -Path $ConfigurationFile | ConvertFrom-Json
+    $Configuration.ScriptWorkflow.Status = "Completed"
+    $Configuration.ScriptWorkflow.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+    $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
+    Write-DscStatus "Complete!"
 }
 
 # Stamp the completion RunId as the very last action. The orchestrator's
