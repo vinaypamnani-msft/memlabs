@@ -685,10 +685,14 @@ CurrentBranch=1
         }
 
         # Step 1: Verify DNS resolves the SQL server FQDN.
-        # If missing (common for SQLAO listeners), attempt self-registration.
+        # If missing (common for SQLAO listeners), escalate through:
+        #   a) Force AD replication (record may exist but not replicated to our DC)
+        #   b) Bounce the cluster Network Name resource (makes cluster re-register DNS)
+        #   c) Register the A record directly on the DC as last resort
         $dnsOk = $false
         for ($dnsTry = 1; $dnsTry -le 3; $dnsTry++) {
             try {
+                Clear-DnsClientCache -ErrorAction SilentlyContinue
                 $dnsResult = @(Resolve-DnsName -Name $sqlFQDN -Type A -ErrorAction Stop)
                 if ($dnsResult.Count -gt 0) {
                     $dnsOk = $true
@@ -700,61 +704,119 @@ CurrentBranch=1
                 Write-DscStatus "SQL pre-flight DNS: attempt $dnsTry/3 — '$sqlFQDN' not resolvable: $($_.Exception.Message)"
             }
             if (-not $dnsOk -and $installToAO) {
-                # SQLAO listener: try to register the A record from the listener IP.
-                # The AG config has the listener IP; use it to create the missing record.
-                try {
-                    $agIPAddr = $null
-                    # Try Get-ClusterResource to find the listener IP
-                    $listenerRes = Get-ClusterResource -ErrorAction SilentlyContinue |
-                        Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $sqlServerName } |
-                        Select-Object -First 1
-                    if ($listenerRes) {
-                        $agIPAddr = ($listenerRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
-                    }
-                    # Fallback: resolve the short name via NetBIOS/LLMNR
-                    if (-not $agIPAddr) {
-                        $shortResolve = [System.Net.Dns]::GetHostAddresses($sqlServerName) |
-                            Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-                        if ($shortResolve) { $agIPAddr = $shortResolve.IPAddressToString }
-                    }
-                    if ($agIPAddr) {
-                        # Discover ALL DCs so we can register + replicate
-                        $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
-                        $dcName = $null
-                        if ($allDCs.Count -gt 0) {
-                            $dcName = $allDCs[0]
-                        }
-                        else {
-                            $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
-                            if ($dcName) { $dcName = $dcName.TrimStart('\\') }
-                            if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
-                            $allDCs = @($dcName)
-                        }
-                        Write-DscStatus "SQL pre-flight DNS: registering A record '$sqlServerName' -> $agIPAddr on DC '$dcName'"
-                        # Use Invoke-Command to run on the DC since this VM
-                        # may not have RSAT DNS Server tools installed.
-                        Invoke-Command -ComputerName $dcName -ScriptBlock {
-                            param($zone, $name, $ip)
-                            Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ErrorAction Stop
-                        } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr -ErrorAction Stop
+                # Discover ALL DCs for replication
+                $allDCs = @(Get-ADDomainController -Filter * -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HostName)
+                $dcName = $null
+                if ($allDCs.Count -gt 0) {
+                    $dcName = $allDCs[0]
+                }
+                else {
+                    $dcName = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History' -Name DCName -ErrorAction SilentlyContinue).DCName
+                    if ($dcName) { $dcName = $dcName.TrimStart('\\') }
+                    if (-not $dcName) { $dcName = (nltest /dsgetdc:$DomainFullName 2>$null | Select-String 'DC: \\\\(.+)' | ForEach-Object { $_.Matches[0].Groups[1].Value }) }
+                    $allDCs = @($dcName)
+                }
+                $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
 
-                        # Force AD replication so all DCs pick up the record.
-                        # This is critical with BDC — this CAS VM might query
-                        # a different DC than the one we registered on.
-                        if ($allDCs.Count -gt 1) {
-                            Write-DscStatus "SQL pre-flight DNS: forcing AD replication across $($allDCs.Count) DCs"
-                            $dcShortNames = @($allDCs | ForEach-Object { ($_ -split '\.')[0] })
-                            Invoke-Command -ComputerName $dcName -ScriptBlock {
-                                param($dcNames)
-                                $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
-                            } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
-                        }
+                # Attempt a) Force AD replication — the record may already exist
+                # on one DC but not yet replicated to the one this VM queries.
+                if ($dnsTry -eq 1) {
+                    Write-DscStatus "SQL pre-flight DNS: forcing AD replication across $($allDCs.Count) DC(s)"
+                    try {
+                        Invoke-Command -ComputerName $dcName -ScriptBlock {
+                            param($dcNames)
+                            $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                        } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
                         Start-Sleep -Seconds 5
                         Clear-DnsClientCache -ErrorAction SilentlyContinue
                     }
+                    catch {
+                        Write-DscStatus "SQL pre-flight DNS: replication attempt failed: $($_.Exception.Message)"
+                    }
                 }
-                catch {
-                    Write-DscStatus "SQL pre-flight DNS: could not register A record: $($_.Exception.Message)"
+
+                # Attempt b) Bounce the listener's cluster Network Name resource
+                # on the SQLAO node — this makes the cluster service re-register
+                # its DNS records. The CAS doesn't have FailoverClusters, so run
+                # via Invoke-Command on the SQLAO node.
+                if ($dnsTry -eq 2 -and $sqlNode1) {
+                    Write-DscStatus "SQL pre-flight DNS: bouncing cluster Network Name for '$sqlServerName' on $sqlNode1"
+                    try {
+                        Invoke-Command -ComputerName $sqlNode1 -ScriptBlock {
+                            param($listenerName)
+                            Import-Module FailoverClusters -ErrorAction SilentlyContinue
+                            $nnRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                                Where-Object { $_.ResourceType -eq 'Network Name' -and $_.OwnerGroup -eq $listenerName }
+                            if ($nnRes) {
+                                $nnRes | Stop-ClusterResource -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 3
+                                $nnRes | Start-ClusterResource -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 5
+                            }
+                        } -ArgumentList $sqlServerName -ErrorAction Stop
+                        # Force replication again after the cluster re-registered
+                        Invoke-Command -ComputerName $dcName -ScriptBlock {
+                            param($dcNames)
+                            $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                        } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                        Start-Sleep -Seconds 5
+                        Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        Write-DscStatus "SQL pre-flight DNS: cluster bounce failed: $($_.Exception.Message)"
+                    }
+                }
+
+                # Attempt c) Register the A record directly as last resort.
+                if ($dnsTry -eq 3) {
+                    try {
+                        $agIPAddr = $null
+                        # Try Get-ClusterResource on the SQLAO node to find the listener IP
+                        if ($sqlNode1) {
+                            $agIPAddr = Invoke-Command -ComputerName $sqlNode1 -ScriptBlock {
+                                param($listenerName)
+                                Import-Module FailoverClusters -ErrorAction SilentlyContinue
+                                $ipRes = Get-ClusterResource -ErrorAction SilentlyContinue |
+                                    Where-Object { $_.ResourceType -eq 'IP Address' -and $_.OwnerGroup -eq $listenerName } |
+                                    Select-Object -First 1
+                                if ($ipRes) {
+                                    return ($ipRes | Get-ClusterParameter -Name Address -ErrorAction SilentlyContinue).Value
+                                }
+                            } -ArgumentList $sqlServerName -ErrorAction SilentlyContinue
+                        }
+                        # Fallback: resolve the short name via NetBIOS/LLMNR
+                        if (-not $agIPAddr) {
+                            $shortResolve = [System.Net.Dns]::GetHostAddresses($sqlServerName) |
+                                Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+                            if ($shortResolve) { $agIPAddr = $shortResolve.IPAddressToString }
+                        }
+                        if ($agIPAddr) {
+                            Write-DscStatus "SQL pre-flight DNS: registering A record '$sqlServerName' -> $agIPAddr on DC '$dcName'"
+                            Invoke-Command -ComputerName $dcName -ScriptBlock {
+                                param($zone, $name, $ip)
+                                # Remove any stale record first, then add fresh
+                                $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction SilentlyContinue
+                                if (-not $existing) {
+                                    Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $ip -ErrorAction Stop
+                                }
+                            } -ArgumentList $DomainFullName, $sqlServerName, $agIPAddr -ErrorAction Stop
+                            # Force replication after registration
+                            if ($allDCs.Count -gt 1) {
+                                Invoke-Command -ComputerName $dcName -ScriptBlock {
+                                    param($dcNames)
+                                    $dcNames | ForEach-Object { repadmin /syncall $_ /AdeP 2>&1 | Out-Null }
+                                } -ArgumentList (,$dcShortNames) -ErrorAction SilentlyContinue
+                            }
+                            Start-Sleep -Seconds 5
+                            Clear-DnsClientCache -ErrorAction SilentlyContinue
+                        }
+                        else {
+                            Write-DscStatus "SQL pre-flight DNS: could not determine listener IP for registration"
+                        }
+                    }
+                    catch {
+                        Write-DscStatus "SQL pre-flight DNS: could not register A record: $($_.Exception.Message)"
+                    }
                 }
             }
             if ($dnsTry -lt 3) { Start-Sleep -Seconds 10 }
