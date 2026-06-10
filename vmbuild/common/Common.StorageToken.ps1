@@ -217,6 +217,18 @@ function Initialize-Storage {
     $VerbosePreference = 'SilentlyContinue'
 
     try {
+        # Skip all network operations if running inside a job.
+        # Jobs don't need to verify SAS tokens over the network - they
+        # only need the local file list and admin credential.
+        if ($InJob.IsPresent) {
+            Write-Log "Skipped storage network operations, running inside a job." -Verbose
+            $script:fileListName = if ($Common.DevBranch) { "_fileList_develop.json" } else { "_fileList.json" }
+            $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
+            if (-not (Update-FileList)) { return $false }
+            if (-not (Get-LocalAdminCredential)) { return $false }
+            return $true
+        }
+
         # Load local config and determine auth mode
         $storageConfigLoaded = Get-StorageConfig
         if (-not $storageConfigLoaded) {
@@ -232,14 +244,6 @@ function Initialize-Storage {
             $script:fileListPath = Join-Path $Common.AzureFilesPath $script:fileListName
             $script:downloadConfigName = $Common.NewestStorageConfigFileName
             $script:downloadConfigPath = Join-Path $Common.ConfigPath $script:downloadConfigName
-        }
-
-        # Skip all network operations if running inside a job
-        if ($InJob.IsPresent) {
-            Write-Log "Skipped updating from azure storage, running inside a job." -Verbose
-            if (-not (Update-FileList)) { return $false }
-            if (-not (Get-LocalAdminCredential)) { return $false }
-            return $true
         }
 
         # Skip Update-StorageConfigFile entirely if storage config failed
