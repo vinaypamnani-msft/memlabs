@@ -342,8 +342,9 @@ function Start-VMMaintenance {
         catch {}
     }
     else {
-        Write-Log "$VMName`: VM maintenance failed. Review VMBuild.log." -Failure
-        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review VMBuild.log." -ToastTag $VMName
+        $domainLog = if ($vmNoteObject.domain) { "VMBuild.$($vmNoteObject.domain).log" } else { "VMBuild.log" }
+        Write-Log "$VMName`: VM maintenance failed. Review $domainLog." -Failure
+        Show-Notification -ToastText "$VMName`: VM maintenance failed. Review $domainLog." -ToastTag $VMName
     }
 
     return $worked

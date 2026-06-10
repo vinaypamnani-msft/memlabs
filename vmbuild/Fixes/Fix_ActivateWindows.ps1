@@ -19,28 +19,34 @@ $Fix_ActivateWindows = {
     }
 
     Write-FixLog "Setting KMS host and installing product key"
-    cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms > $null
+    $skmsOutput = cscript //NoLogo C:\Windows\system32\slmgr.vbs /skms $atkms 2>&1 | Out-String
+    Write-FixLog "slmgr /skms exit=$LASTEXITCODE output: $($skmsOutput.Trim())"
     Start-Sleep -Seconds 2
-    cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key > $null
+    $ipkOutput = cscript //NoLogo C:\Windows\system32\slmgr.vbs /ipk $key 2>&1 | Out-String
+    Write-FixLog "slmgr /ipk exit=$LASTEXITCODE output: $($ipkOutput.Trim())"
     Start-Sleep -Seconds 2
-    cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato > $null
+    $atoOutput = cscript //NoLogo C:\Windows\system32\slmgr.vbs /ato 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
+    Write-FixLog "slmgr /ato exit=$exitCode output: $($atoOutput.Trim())"
     if ($exitCode -eq 0) {
         [pscustomobject]@{ Success = $true; Message = "Activation submitted against $atkms" }
     }
     else {
-        [pscustomobject]@{ Success = $false; Message = "slmgr /ato exited with $exitCode" }
+        [pscustomobject]@{ Success = $false; Message = "slmgr /ato exited with $exitCode. Output: $($atoOutput.Trim())" }
     }
 }
 
-$fixesToPerform += [PSCustomObject]@{
-    FixName           = "Fix_ActivateWindows"
-    FixVersion        = "240713"
-    AppliesToNew      = $true
-    AppliesToExisting = $true
-    AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
-    NotAppliesToRoles = @()
-    DependentVMs      = @()
-    ScriptBlock       = $Fix_ActivateWindows
-    RunAsAccount      = $vmNote.adminName
+# Azure KMS is only reachable from Azure-hosted VMs; skip on home labs.
+if ($Common.IsAzureVM) {
+    $fixesToPerform += [PSCustomObject]@{
+        FixName           = "Fix_ActivateWindows"
+        FixVersion        = "240713"
+        AppliesToNew      = $true
+        AppliesToExisting = $true
+        AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
+        NotAppliesToRoles = @()
+        DependentVMs      = @()
+        ScriptBlock       = $Fix_ActivateWindows
+        RunAsAccount      = $vmNote.adminName
+    }
 }
