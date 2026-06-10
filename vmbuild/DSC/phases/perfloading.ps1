@@ -336,9 +336,17 @@ else {
 
     Write-DscStatus "$Tag $shareName share successfully shared with Administrators"
 
-    # Verify the share was created
-    #Get-SmbShare -Name $shareName
+    # OSD ISOs are copied to the top-level site server only (Phase 1).
+    # On a child Primary under a CAS the OSD folder exists but is empty,
+    # so skip OS-package/task-sequence creation when the media isn't there.
+    $win11OsdPath = Join-Path $folderPath "Windows 11 24h2"
+    $win10OsdPath = Join-Path $folderPath "Windows 10 22h2"
+    $hasOsdMedia = (Test-Path "$win11OsdPath\sources\install.wim") -and (Test-Path "$win10OsdPath\sources\install.wim")
 
+    if (-not $hasOsdMedia) {
+        Write-DscStatus "$Tag OSD media not found in $folderPath — skipping OS packages and task sequences (ISOs only copied to top-level site)"
+    }
+    else {
 
     #get OS upgrade package 
     New-CMOperatingSystemInstaller -Name "Windows 11 upgrade" -Path "\\$ThisMachineName\OSD\Windows 11 24h2" -Version 10.0.26100 
@@ -565,6 +573,8 @@ else {
         Write-DscStatus "$Tag Task sequences were already created, skipping the duplicate creation"
 
     }
+
+    } # end hasOsdMedia
 
     } # end Primary-only TS/OSD block
 

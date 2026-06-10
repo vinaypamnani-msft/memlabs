@@ -1177,13 +1177,9 @@ $global:VM_Create = {
             }
         }
         
-        if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.SiteCode -and $createVM) {
-            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Checking site server" -force
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Checking if this is the Top Level SiteServer to prepopulate objects"
-            $Parent = Get-TopSiteServerForSiteCode -deployConfig $deployConfig -siteCode $currentItem.SiteCode -type Name -SmartUpdate:$false
-
-            # This is the Top Level Site Server
-            if ($Parent -eq $currentItem.vmName) {
+        if ($deployConfig.cmOptions.PrePopulateObjects -and $currentItem.role -eq 'Primary' -and $createVM) {
+            Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying OSD ISOs to Primary" -force
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Primary site server — copying OSD content for perfloading"
 
                 if ($currentItem.cmInstallDir) {
                     $driveLetter = (Split-Path -Path $currentItem.cmInstallDir -Qualifier)
@@ -1257,7 +1253,6 @@ $global:VM_Create = {
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                 }
                 Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed
-            }
         }
 
         if ($createVM) {
