@@ -5016,6 +5016,57 @@ function Copy-ToolToVM {
         return $true
     }
 
+    # --- Compute source fingerprint for cache-based skip logic ---
+    $sourceFingerprint = $null
+    $hostCachePath = Join-Path $Common.TempPath "toolhash-$VMName.json"
+    try {
+        $fingerprintParts = foreach ($entry in $zipEntries | Sort-Object { $_.TargetRelative }) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
+                foreach ($child in $children) {
+                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)|$($child.LastWriteTimeUtc.Ticks)"
+                }
+            }
+            else {
+                "$($entry.TargetRelative)|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
+            }
+        }
+        $fingerprintString = $fingerprintParts -join "`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($fingerprintString))
+        $sourceFingerprint = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+        $stream.Dispose()
+    }
+    catch {
+        Write-Log "$vmName`: Source fingerprint computation failed, will do full rebuild: $_" -LogOnly
+    }
+
+    # --- Fast skip: if source fingerprint matches host cache AND VM hash matches, skip everything ---
+    #     This avoids the expensive staging/zipping when tools haven't changed.
+    if ($sourceFingerprint -and -not $WhatIf -and -not $Force) {
+        try {
+            if (Test-Path $hostCachePath) {
+                $cached = Get-Content $hostCachePath -Raw | ConvertFrom-Json
+                if ($cached.SourceFingerprint -eq $sourceFingerprint) {
+                    $cachedBundleHash = $cached.BundleMD5
+                    $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
+                        if (Test-Path $using:vmHashPath) {
+                            return (Get-Content $using:vmHashPath -ErrorAction SilentlyContinue | Select-Object -First 1)
+                        }
+                        return $null
+                    }
+                    if (-not $hashCheck.ScriptBlockFailed -and $hashCheck.ScriptBlockOutput -eq $cachedBundleHash) {
+                        Write-Log "$vmName`: Tools unchanged (source fingerprint + VM hash match). Skipping." -Success
+                        return $true
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "$vmName`: Cache check failed, falling through to full rebuild: $_" -LogOnly
+        }
+    }
+
     # --- Create a single zip bundle on the host ---
     $zipStagingDir = Join-Path $Common.TempPath "toolzip-$VMName"
     if (Test-Path $zipStagingDir) { Remove-Item $zipStagingDir -Recurse -Force }
@@ -5069,6 +5120,10 @@ function Copy-ToolToVM {
     }
 
     if ($skipCopy) {
+        # Save host cache so next run skips the zip rebuild entirely
+        if ($sourceFingerprint) {
+            @{ SourceFingerprint = $sourceFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+        }
         # Cleanup host temp files
         Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
         Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -5117,6 +5172,10 @@ function Copy-ToolToVM {
 
         if ($success) {
             Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle. Hash: $bundleHash" -Success
+            # Save host cache so next run skips the zip rebuild entirely
+            if ($sourceFingerprint) {
+                @{ SourceFingerprint = $sourceFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
     catch {
