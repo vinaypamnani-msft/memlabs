@@ -879,15 +879,16 @@ else {
         $products += "Microsoft Defender for Endpoint"
         $products = @($products | ForEach-Object { "$_" })
 
-        $missingproducts = $products -notmatch { $_ -notin $productclassifications }
+        $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
 
-        if ($missingproducts) {
+        if ($missingproducts.Count -gt 0) {
             $syncNeeded = $true
-            Write-DscStatus "$Tag SUP products missing - triggering WSUS sync now (will finish later while we create collections)"
+            Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
+            Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
             Invoke-FullSync
         }
         else {
-            Write-DscStatus "$Tag SUP products and classifications are already enabled."
+            Write-DscStatus "$Tag SUP products and classifications are already enabled ($($productclassifications.Count) subscribed)."
         }
     }
 
@@ -1380,7 +1381,20 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             Invoke-FullSync
         }
         else {
-            Write-DscStatus "$Tag Sync failed - ADRs will not be created"
+            # Log sync failure details so we can diagnose without digging through wsyncmgr.log
+            $failState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $stateDetail = "State=$($failState.LastSyncState) ErrorCode=$($failState.LastSyncErrorCode) LastTime=$($failState.LastSyncStateTime) Server=$($failState.WSUSServerName)"
+            Write-DscStatus "$Tag Sync failed ($stateDetail) - ADRs will not be created"
+
+            # Re-check which products are still missing after the failed sync
+            $currentProducts = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
+            $stillMissing = @($products | Where-Object { $_ -notin $currentProducts })
+            if ($stillMissing.Count -gt 0) {
+                Write-DscStatus "$Tag Products still missing ($($stillMissing.Count)): $($stillMissing -join ', ')"
+            }
+            else {
+                Write-DscStatus "$Tag All products are now subscribed despite sync failure — products may have been enabled by a prior sync"
+            }
             Invoke-FullSync
         }
     }
