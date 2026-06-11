@@ -4729,6 +4729,9 @@ function Test-CMSiteWideFunctionality {
                 if ($isPrimary) {
                     foreach ($bi in $bootImgs) {
                         $biName = $bi.Name
+                        # EnableLabShell is a lazy property — not populated by class-level
+                        # WMI queries. Fetch the full instance to get its real value.
+                        try { $bi.Get() } catch {}
                         $cmdSupport = [bool]$bi.EnableLabShell
                         if (-not $cmdSupport) {
                             $results.Details.Add("WARN: Boot image '$biName' does not have command support enabled")
