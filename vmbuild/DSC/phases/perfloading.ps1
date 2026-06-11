@@ -293,8 +293,23 @@ else {
         }
     }
 
-    # Get all boot images
-    $BootImages = Get-CMBootImage
+    # Get all boot images. On a child Primary in a hierarchy, boot images
+    # are replicated from the CAS and may not be available immediately.
+    $BootImages = @(Get-CMBootImage)
+    if ($BootImages.Count -eq 0 -and $ThisVM.parentSiteCode) {
+        Write-DscStatus "$Tag No boot images found yet (child Primary — waiting for CAS replication)"
+        for ($biWait = 1; $biWait -le 12; $biWait++) {
+            Start-Sleep -Seconds 30
+            $BootImages = @(Get-CMBootImage)
+            if ($BootImages.Count -gt 0) {
+                Write-DscStatus "$Tag Boot images appeared after ${biWait} wait(s)"
+                break
+            }
+        }
+    }
+    if ($BootImages.Count -eq 0) {
+        Write-DscStatus "$Tag WARNING: No boot images found — skipping boot image configuration"
+    }
 
     # Loop through each boot image: enable command support, then distribute
     foreach ($BootImage in $BootImages) {
