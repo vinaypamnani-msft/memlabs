@@ -296,18 +296,27 @@ else {
     # Get all boot images
     $BootImages = Get-CMBootImage
 
-    # Loop through each boot image and distribute it
+    # Loop through each boot image: enable command support, then distribute
     foreach ($BootImage in $BootImages) {
+        $biName = $BootImage.Name
+        $packageId = $BootImage.PackageID
+
+        # Enable Command Support (F8 debug shell in WinPE)
         try {
-            # Enable Command Support for the boot image
-            $BootImage | Set-CMBootImage -EnableCommandSupport $true
-            $packageId = $BootImage.PackageID
-            # Distribute the boot image
-            Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"        
-            Write-DscStatus "$Tag Successfully started distribution for boot image: $($BootImage.Name)"
+            Set-CMBootImage -Id $packageId -EnableCommandSupport $true
+            Write-DscStatus "$Tag Enabled command support for boot image: $biName ($packageId)"
         }
         catch {
-            Write-DscStatus "$Tag Failed to start distribution for boot image: $($BootImage.Name). Error: $_"
+            Write-DscStatus "$Tag WARNING: Failed to enable command support for boot image: $biName ($packageId). Error: $_"
+        }
+
+        # Distribute the boot image
+        try {
+            Start-CMContentDistribution -BootImageId $packageId -DistributionPointGroupName "ALL DPS"
+            Write-DscStatus "$Tag Successfully started distribution for boot image: $biName ($packageId)"
+        }
+        catch {
+            Write-DscStatus "$Tag Failed to start distribution for boot image: $biName ($packageId). Error: $_"
         }
     }
 
