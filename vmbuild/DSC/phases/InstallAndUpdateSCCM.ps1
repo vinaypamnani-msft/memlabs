@@ -950,6 +950,79 @@ CurrentBranch=1
 
     Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
 
+    # Check if setup.exe failed the prerequisite check. If so, rename the
+    # log, re-run the SQL pre-flight (Kerberos may have settled since our
+    # first check), and re-launch setup.exe once. A second prereq failure
+    # falls through to the normal failure path.
+    if (Test-Path 'C:\ConfigMgrSetup.log') {
+        $prereqFail = Get-Content 'C:\ConfigMgrSetup.log' -Tail 10 -ErrorAction SilentlyContinue |
+            Select-String "Prereq check didn't pass" | Select-Object -First 1
+        if ($prereqFail) {
+            Write-DscStatus "setup.exe failed prerequisite check on first attempt. Renaming log and retrying after SQL pre-flight..."
+            $failLogName = "C:\ConfigMgrSetup_prereqfail_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            try { Rename-Item -Path 'C:\ConfigMgrSetup.log' -NewName (Split-Path $failLogName -Leaf) -Force }
+            catch { Write-DscStatus "Warning: could not rename prereq-failed log: $($_.Exception.Message)" }
+
+            # Re-run SQL pre-flight (Steps 2-3) before second attempt
+            if ($sqlServerName -ne $env:COMPUTERNAME) {
+                # Step 2 retry: ODBC connectivity
+                $sqlPreCheckOk = $false
+                $sqlPreCheckCs = $null
+                for ($sqlTry = 1; $sqlTry -le 20; $sqlTry++) {
+                    $odbcCs1 = "Driver={SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+                    try {
+                        $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs1
+                        $odbcConn.Open(); $odbcConn.Close()
+                        $sqlPreCheckOk = $true; $sqlPreCheckCs = $odbcCs1
+                        Write-DscStatus "Prereq retry: ODBC connected on attempt $sqlTry (Driver={SQL Server})"
+                        break
+                    } catch { $sqlPreErr1 = $_.Exception.Message }
+                    $odbcCs2 = "Driver={ODBC Driver 18 for SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=no"
+                    try {
+                        $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs2
+                        $odbcConn.Open(); $odbcConn.Close()
+                        $sqlPreCheckOk = $true; $sqlPreCheckCs = $odbcCs2
+                        Write-DscStatus "Prereq retry: ODBC connected on attempt $sqlTry (Driver={ODBC Driver 18}, secure)"
+                        break
+                    } catch {}
+                    Write-DscStatus "Prereq retry: ODBC attempt $sqlTry/20 to [$sqlTarget] failed: $sqlPreErr1"
+                    if ($sqlTry -lt 20) { Start-Sleep -Seconds 15 }
+                }
+                if (-not $sqlPreCheckOk) {
+                    Write-DscStatus "Prereq retry: ODBC still failing after 20 attempts. Cannot retry setup.exe." -Failure
+                    return
+                }
+
+                # Step 3 retry: Kerberos auth check
+                $authScheme = $null
+                for ($authTry = 1; $authTry -le 20; $authTry++) {
+                    try {
+                        $authConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
+                        $authConn.Open()
+                        $authCmd = $authConn.CreateCommand()
+                        $authCmd.CommandText = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+                        $authScheme = $authCmd.ExecuteScalar()
+                        $authConn.Close()
+                    } catch { $authScheme = $null }
+                    if ($authScheme -eq 'KERBEROS') {
+                        Write-DscStatus "Prereq retry: auth_scheme = KERBEROS on attempt $authTry — good"
+                        break
+                    }
+                    if ($authTry -eq 1) {
+                        Write-DscStatus "Prereq retry: auth_scheme = $authScheme, waiting up to 5 min for Kerberos..."
+                    }
+                    if ($authTry -lt 20) { Start-Sleep -Seconds 15 }
+                }
+                if ($authScheme -and $authScheme -ne 'KERBEROS') {
+                    Write-DscStatus "Prereq retry: WARNING — auth_scheme still $authScheme after 20 attempts"
+                }
+            }
+
+            Write-DscStatus "Re-launching setup.exe (attempt 2)"
+            Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+        }
+    }
+
     Write-DscStatus "Installation finished [$($CMFileVersion.VersionInfo.FileVersion)]."
 
     # Write action completed

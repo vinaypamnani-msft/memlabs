@@ -2818,6 +2818,8 @@ $global:VM_Config = {
         $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
         [int]$failedHeartbeats = 0
         [int]$failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
+        [int]$prereqFailCount = 0  # Track prereq failures; guest retries once before host bails
+        $prereqFailSeen = $false   # Debounce: true while the prereq-failed log is still present
 
         $noStatus = $true
         $lastStatusChangeTime = [DateTime]::UtcNow
@@ -3319,7 +3321,34 @@ $global:VM_Config = {
                     }
                     if ($cmLogCheck.ScriptBlockOutput.Line) {
                         $failEntry = $cmLogCheck.ScriptBlockOutput.Line
-                        $bailEarly = $true
+                        # On first prereq failure, the guest script renames the log
+                        # and retries setup.exe. Don't bail until the second occurrence.
+                        # Use $prereqFailSeen to avoid counting the same log file twice
+                        # across multiple poll cycles before the guest renames it.
+                        $isPrereq = $failEntry -match "Prereq check didn't pass"
+                        if ($isPrereq) {
+                            if (-not $prereqFailSeen) {
+                                $prereqFailSeen = $true
+                                $prereqFailCount++
+                                if ($prereqFailCount -le 1) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Prereq check failed (attempt $prereqFailCount). Guest will rename log and retry setup.exe — continuing to monitor." -Warning -OutputStream
+                                }
+                                else {
+                                    $bailEarly = $true
+                                }
+                            }
+                            # else: same prereq log still present from first failure, guest hasn't renamed yet — skip
+                        }
+                        else {
+                            $bailEarly = $true
+                        }
+                    }
+                    else {
+                        # Log absent or no error found — if we were tracking a prereq
+                        # failure, the guest has renamed the log and is retrying.
+                        if ($prereqFailSeen) {
+                            $prereqFailSeen = $false
+                        }
                     }
 
                     if ($bailEarly) {
