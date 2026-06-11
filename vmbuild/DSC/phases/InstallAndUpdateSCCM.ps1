@@ -690,6 +690,7 @@ CurrentBranch=1
         #   b) Bounce the cluster Network Name resource (makes cluster re-register DNS)
         #   c) Register the A record directly on the DC as last resort
         $dnsOk = $false
+        $clusterBounced = $false
         for ($dnsTry = 1; $dnsTry -le 3; $dnsTry++) {
             try {
                 Clear-DnsClientCache -ErrorAction SilentlyContinue
@@ -754,6 +755,7 @@ CurrentBranch=1
                                 Start-Sleep -Seconds 5
                             }
                         } -ArgumentList $sqlServerName -ErrorAction Stop
+                        $clusterBounced = $true
                         # Force replication again after the cluster re-registered
                         Invoke-Command -ComputerName $dcName -ScriptBlock {
                             param($dcNames)
@@ -856,8 +858,17 @@ CurrentBranch=1
         # back to NTLM when Kerberos isn't ready, but ODBC's Trusted_Connection
         # requires real Kerberos for SQLAO listeners. If ODBC fails here,
         # setup.exe would fail with error 18452 ("untrusted domain").
+        #
+        # If we bounced the cluster Network Name during DNS recovery, Kerberos
+        # SPNs and tickets need 10-15 min to settle. Use a longer retry window.
         if ($installToAO) {
-            $odbcPreCheckMax = 12   # 12 attempts x 15s = 3 min
+            if ($clusterBounced) {
+                $odbcPreCheckMax = 60   # 60 attempts x 15s = 15 min (cluster settling)
+                Write-DscStatus "SQL pre-flight: cluster was bounced during DNS recovery, using extended ODBC retry window (15 min)"
+            }
+            else {
+                $odbcPreCheckMax = 12   # 12 attempts x 15s = 3 min
+            }
             $odbcPreCheckOk = $false
             for ($odbcTry = 1; $odbcTry -le $odbcPreCheckMax; $odbcTry++) {
                 try {
