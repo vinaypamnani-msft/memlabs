@@ -825,8 +825,7 @@ CurrentBranch=1
             Write-DscStatus "SQL pre-flight DNS: WARNING — '$sqlFQDN' still not resolvable after registration attempts. Proceeding with SQL connection test anyway."
         }
 
-        # Step 2: Verify SQL connectivity with Integrated Auth using the FQDN.
-        # This matches what setup.exe will use for its prereq check.
+        # Step 2: Verify SQL connectivity using SqlClient with Integrated Auth.
         $sqlPreCheckMax = 12   # 12 attempts x 15s = 3 min
         $sqlPreCheckOk = $false
         for ($sqlTry = 1; $sqlTry -le $sqlPreCheckMax; $sqlTry++) {
@@ -836,12 +835,12 @@ CurrentBranch=1
                 $conn.Open()
                 $conn.Close()
                 $sqlPreCheckOk = $true
-                Write-DscStatus "SQL pre-flight: connected to [$sqlTarget] on attempt $sqlTry"
+                Write-DscStatus "SQL pre-flight: SqlClient connected to [$sqlTarget] on attempt $sqlTry"
                 break
             }
             catch {
                 $sqlPreErr = $_.Exception.Message
-                Write-DscStatus "SQL pre-flight: attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr"
+                Write-DscStatus "SQL pre-flight: SqlClient attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr"
                 if ($sqlTry -lt $sqlPreCheckMax) {
                     Start-Sleep -Seconds 15
                 }
@@ -851,10 +850,57 @@ CurrentBranch=1
             Write-DscStatus "SQL pre-flight failed after $sqlPreCheckMax attempts to [$sqlTarget]: $sqlPreErr. Cannot start setup.exe." -Failure
             return
         }
+
+        # Step 3 (SQLAO only): Verify using ODBC Driver 18 — the same driver
+        # that setup.exe uses. SqlClient with Integrated Security silently falls
+        # back to NTLM when Kerberos isn't ready, but ODBC's Trusted_Connection
+        # requires real Kerberos for SQLAO listeners. If ODBC fails here,
+        # setup.exe would fail with error 18452 ("untrusted domain").
+        if ($installToAO) {
+            $odbcPreCheckMax = 12   # 12 attempts x 15s = 3 min
+            $odbcPreCheckOk = $false
+            for ($odbcTry = 1; $odbcTry -le $odbcPreCheckMax; $odbcTry++) {
+                try {
+                    $odbcCs = "Driver={ODBC Driver 18 for SQL Server};Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
+                    $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs
+                    $odbcConn.Open()
+                    $odbcConn.Close()
+                    $odbcPreCheckOk = $true
+                    Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $odbcTry (Kerberos OK)"
+                    break
+                }
+                catch {
+                    $odbcPreErr = $_.Exception.Message
+                    Write-DscStatus "SQL pre-flight: ODBC attempt $odbcTry/$odbcPreCheckMax to [$sqlTarget] failed: $odbcPreErr"
+                    # Purge stale Kerberos tickets so the next attempt gets fresh ones
+                    & klist purge -li 0x3e7 2>&1 | Out-Null   # SYSTEM logon session
+                    & klist purge 2>&1 | Out-Null               # current user
+                    Clear-DnsClientCache -ErrorAction SilentlyContinue
+                    if ($odbcTry -lt $odbcPreCheckMax) { Start-Sleep -Seconds 15 }
+                }
+            }
+            if (-not $odbcPreCheckOk) {
+                Write-DscStatus "SQL pre-flight: ODBC failed after $odbcPreCheckMax attempts to [$sqlTarget]: $odbcPreErr. setup.exe would fail with same auth error. Cannot start." -Failure
+                return
+            }
+        }
     }
 
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"
     start-sleep -seconds 2
+
+    # Rename any existing ConfigMgrSetup.log from a prior attempt so the host
+    # monitoring loop (bail-early check) only sees errors from THIS run.
+    if (Test-Path 'C:\ConfigMgrSetup.log') {
+        $oldLogName = "C:\ConfigMgrSetup_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        try {
+            Rename-Item -Path 'C:\ConfigMgrSetup.log' -NewName (Split-Path $oldLogName -Leaf) -Force
+            Write-DscStatus "Renamed prior ConfigMgrSetup.log to $(Split-Path $oldLogName -Leaf)"
+        }
+        catch {
+            Write-DscStatus "Warning: could not rename prior ConfigMgrSetup.log: $($_.Exception.Message)"
+        }
+    }
 
     Write-DscStatusSetup
 

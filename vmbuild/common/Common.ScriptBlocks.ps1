@@ -3309,7 +3309,9 @@ $global:VM_Config = {
                     }
 
                     $bailEarly = $false
-                    # Check ConfigMgrSetup.log for fatal errors in a single PSDirect call
+                    # Check ConfigMgrSetup.log for fatal errors in a single PSDirect call.
+                    # The in-VM script renames any prior ConfigMgrSetup.log before each
+                    # setup.exe launch, so errors here are always from the current run.
                     $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
                         if (Test-Path C:\ConfigMgrSetup.log) {
                             Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights|Prereq check didn't pass" | Select-Object -First 1
