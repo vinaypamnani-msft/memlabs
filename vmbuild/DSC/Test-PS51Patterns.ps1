@@ -33,6 +33,19 @@ foreach ($f in $Files) {
             $issues += "    Fix: @(`$hash.Values)"
             $issues += ""
         }
+
+        # Pattern 3: $variable: with invalid scope qualifier
+        # "$attempt:" is parsed as a scope-qualified variable (like "$script:")
+        # which throws 'Variable reference is not valid' at runtime.
+        # Valid scopes: global, local, script, private, using, workflow, env,
+        # variable, function, alias, plus drive letters (C:, HKLM:, etc.)
+        $validScopes = 'global|local|script|private|using|workflow|env|variable|function|alias|[A-Z]'
+        if ($line -match '\$([A-Za-z_]\w*):\s' -and $Matches[1] -notmatch "^($validScopes)$") {
+            $issues += "  $f  Invalid variable scope '`$$($Matches[1]):' -- colon is treated as a scope qualifier."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: use `${$($Matches[1])} to delimit the variable name before the colon."
+            $issues += ""
+        }
     }
 }
 
