@@ -827,73 +827,59 @@ CurrentBranch=1
             Write-DscStatus "SQL pre-flight DNS: WARNING — '$sqlFQDN' still not resolvable after registration attempts. Proceeding with SQL connection test anyway."
         }
 
-        # Step 2: Verify SQL connectivity using SqlClient with Integrated Auth.
-        $sqlPreCheckMax = 12   # 12 attempts x 15s = 3 min
+        # Step 2: Verify SQL connectivity using ODBC — the same driver and
+        # connection strings that setup.exe's CSql::Connect() uses.
+        #
+        # setup.exe tries two connection strings in order:
+        #   1) DRIVER={SQL Server} + Trusted_Connection=yes + Encrypt=no
+        #   2) DRIVER={ODBC Driver 18} + Trusted_Connection=yes + Encrypt=yes;TrustServerCertificate=no
+        # We test the same way. If both fail after retries, setup.exe would
+        # also fail with error 18452 ("untrusted domain").
+        #
+        # If we bounced the cluster Network Name during DNS recovery, auth
+        # can take 10-15 min to settle. Use a longer retry window.
+        if ($clusterBounced) {
+            $sqlPreCheckMax = 60   # 60 attempts x 15s = 15 min (cluster settling)
+            Write-DscStatus "SQL pre-flight: cluster was bounced during DNS recovery, using extended retry window (15 min)"
+        }
+        else {
+            $sqlPreCheckMax = 12   # 12 attempts x 15s = 3 min
+        }
         $sqlPreCheckOk = $false
         for ($sqlTry = 1; $sqlTry -le $sqlPreCheckMax; $sqlTry++) {
+            # Try unsecure first (same as setup.exe: bUseSecureConnection=false)
+            $odbcCs1 = "Driver={SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
             try {
-                $cs = "Data Source=$sqlTarget;Initial Catalog=master;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
-                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
-                $conn.Open()
-                $conn.Close()
+                $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs1
+                $odbcConn.Open()
+                $odbcConn.Close()
                 $sqlPreCheckOk = $true
-                Write-DscStatus "SQL pre-flight: SqlClient connected to [$sqlTarget] on attempt $sqlTry"
+                Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={SQL Server})"
                 break
             }
             catch {
-                $sqlPreErr = $_.Exception.Message
-                Write-DscStatus "SQL pre-flight: SqlClient attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr"
-                if ($sqlTry -lt $sqlPreCheckMax) {
-                    Start-Sleep -Seconds 15
-                }
+                $sqlPreErr1 = $_.Exception.Message
             }
+            # Fallback to secure (same as setup.exe: bUseSecureConnection=true)
+            $odbcCs2 = "Driver={ODBC Driver 18 for SQL Server};AutoTranslate=no;Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=yes;TrustServerCertificate=no"
+            try {
+                $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs2
+                $odbcConn.Open()
+                $odbcConn.Close()
+                $sqlPreCheckOk = $true
+                Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={ODBC Driver 18}, secure)"
+                break
+            }
+            catch {
+                $sqlPreErr2 = $_.Exception.Message
+            }
+            Write-DscStatus "SQL pre-flight: attempt $sqlTry/$sqlPreCheckMax to [$sqlTarget] failed: $sqlPreErr1"
+            if ($sqlTry -lt $sqlPreCheckMax) { Start-Sleep -Seconds 15 }
         }
         if (-not $sqlPreCheckOk) {
-            Write-DscStatus "SQL pre-flight failed after $sqlPreCheckMax attempts to [$sqlTarget]: $sqlPreErr. Cannot start setup.exe." -Failure
+            Write-DscStatus "SQL pre-flight: ODBC failed after $sqlPreCheckMax attempts to [$sqlTarget]. setup.exe would also fail. Cannot start." -Failure
+            Write-DscStatus "SQL pre-flight: Last errors — Driver={SQL Server}: $sqlPreErr1 | Driver={ODBC Driver 18}: $sqlPreErr2"
             return
-        }
-
-        # Step 3 (SQLAO only): Verify using ODBC Driver 18 — the same driver
-        # that setup.exe uses. SqlClient with Integrated Security silently falls
-        # back to NTLM when Kerberos isn't ready, but ODBC's Trusted_Connection
-        # requires real Kerberos for SQLAO listeners. If ODBC fails here,
-        # setup.exe would fail with error 18452 ("untrusted domain").
-        #
-        # If we bounced the cluster Network Name during DNS recovery, Kerberos
-        # SPNs and tickets need 10-15 min to settle. Use a longer retry window.
-        if ($installToAO) {
-            if ($clusterBounced) {
-                $odbcPreCheckMax = 60   # 60 attempts x 15s = 15 min (cluster settling)
-                Write-DscStatus "SQL pre-flight: cluster was bounced during DNS recovery, using extended ODBC retry window (15 min)"
-            }
-            else {
-                $odbcPreCheckMax = 12   # 12 attempts x 15s = 3 min
-            }
-            $odbcPreCheckOk = $false
-            for ($odbcTry = 1; $odbcTry -le $odbcPreCheckMax; $odbcTry++) {
-                try {
-                    $odbcCs = "Driver={ODBC Driver 18 for SQL Server};Server=$sqlTarget;Database=master;Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=yes"
-                    $odbcConn = New-Object System.Data.Odbc.OdbcConnection $odbcCs
-                    $odbcConn.Open()
-                    $odbcConn.Close()
-                    $odbcPreCheckOk = $true
-                    Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $odbcTry (Kerberos OK)"
-                    break
-                }
-                catch {
-                    $odbcPreErr = $_.Exception.Message
-                    Write-DscStatus "SQL pre-flight: ODBC attempt $odbcTry/$odbcPreCheckMax to [$sqlTarget] failed: $odbcPreErr"
-                    # Purge stale Kerberos tickets so the next attempt gets fresh ones
-                    & klist purge -li 0x3e7 2>&1 | Out-Null   # SYSTEM logon session
-                    & klist purge 2>&1 | Out-Null               # current user
-                    Clear-DnsClientCache -ErrorAction SilentlyContinue
-                    if ($odbcTry -lt $odbcPreCheckMax) { Start-Sleep -Seconds 15 }
-                }
-            }
-            if (-not $odbcPreCheckOk) {
-                Write-DscStatus "SQL pre-flight: ODBC failed after $odbcPreCheckMax attempts to [$sqlTarget]: $odbcPreErr. setup.exe would fail with same auth error. Cannot start." -Failure
-                return
-            }
         }
     }
 
