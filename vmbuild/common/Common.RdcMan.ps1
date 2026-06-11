@@ -131,8 +131,8 @@ function Save-RdcManSettingsFile {
         $modified = $true
     }
 
-    if ($settings.GroupSortOrder -ne "NoSort") {
-        $settings.GroupSortOrder = "NoSort"
+    if ($settings.GroupSortOrder -ne "None") {
+        $settings.GroupSortOrder = "None"
         $modified = $true
     }
 
@@ -604,6 +604,23 @@ function New-RDCManFileFromHyperV {
             if ($isSiteGroup -and $gName -notin $validSiteNames) {
                 [void]$findGroup.RemoveChild($childGroup)
                 $shouldSave = $true
+            }
+        }
+
+        # Re-order category groups to match desired display order:
+        # Domain Servers, [site groups: CAS→PRI→SEC], Servers, Clients
+        # (Linux is added later during the VM loop and stays at the end)
+        $desiredOrder = @("Domain Servers")
+        if ($siteHierarchy) {
+            $desiredOrder += @($siteHierarchy.Sites | ForEach-Object { "$($_.RoleLabel) ($($_.SiteCode))" })
+        }
+        $desiredOrder += @("Servers", "Clients")
+        $allChildGroups = @($findGroup.SelectNodes('group'))
+        foreach ($orderName in $desiredOrder) {
+            $g = $allChildGroups | Where-Object { $_.properties.name -eq $orderName } | Select-Object -First 1
+            if ($g) {
+                [void]$findGroup.RemoveChild($g)
+                [void]$findGroup.AppendChild($g)
             }
         }
 
