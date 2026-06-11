@@ -2252,13 +2252,50 @@ class DownloadFile {
         # (e.g. sqlserver2016-kb5014351-x64_{sha1hash}.exe)
         if ($this.DownloadUrl -match '-x64_([\da-fA-F]{40})\.exe$') {
             $expectedHash = $Matches[1].ToLowerInvariant()
-            $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+            $fileItem = Get-Item $this.FilePath
+            $hashCachePath = "$($this.FilePath).SHA1"
+
+            # Check for a cached hash sidecar file with size and last-modified metadata
+            $useCachedHash = $false
+            if (Test-Path $hashCachePath) {
+                try {
+                    $cacheLines = Get-Content $hashCachePath
+                    if ($cacheLines.Count -ge 3) {
+                        $cachedHash = $cacheLines[0].Trim().ToLowerInvariant()
+                        $cachedSize = [long]$cacheLines[1].Trim()
+                        $cachedLastWrite = [datetime]$cacheLines[2].Trim()
+                        if ($fileItem.Length -eq $cachedSize -and $fileItem.LastWriteTimeUtc -eq $cachedLastWrite) {
+                            $useCachedHash = $true
+                            $actualHash = $cachedHash
+                        }
+                    }
+                }
+                catch {
+                    # Sidecar corrupt or unreadable; fall through to full hash
+                }
+            }
+
+            if (-not $useCachedHash) {
+                $actualHash = (Get-FileHash $this.FilePath -Algorithm SHA1).Hash.ToLowerInvariant()
+            }
+
             if ($actualHash -ne $expectedHash) {
                 Write-Status "Hash mismatch for $(Split-Path $this.FilePath -Leaf): expected $expectedHash, got $actualHash. Deleting corrupt download."
                 $parentDir = Split-Path $this.FilePath -Parent
                 Remove-Item $parentDir -Recurse -Force -ErrorAction SilentlyContinue
                 return $false
             }
+
+            # Write/update the sidecar cache so subsequent runs skip hashing
+            if (-not $useCachedHash) {
+                try {
+                    @($actualHash, $fileItem.Length.ToString(), $fileItem.LastWriteTimeUtc.ToString('o')) | Out-File -FilePath $hashCachePath -Force
+                }
+                catch {
+                    Write-Verbose "Could not write hash cache file: $_"
+                }
+            }
+
             Write-Verbose "SHA1 hash verified for $(Split-Path $this.FilePath -Leaf)"
         }
 
