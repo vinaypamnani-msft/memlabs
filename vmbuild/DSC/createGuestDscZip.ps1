@@ -191,6 +191,12 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
                 Write-Host "    $($f.Errors)" -ForegroundColor DarkYellow
             }
             Write-Host ""
+            # Delete the zip so the next run rebuilds it
+            $dscZipPath = Join-Path $PSScriptRoot "DSC.zip"
+            if (Test-Path $dscZipPath) {
+                Remove-Item $dscZipPath -Force -ErrorAction SilentlyContinue
+                Write-Host "Deleted DSC.zip so next run will rebuild." -ForegroundColor Yellow
+            }
             throw "PS5.1 parse check failed. Fix the above files before deploying to guest VMs."
         }
         else {
@@ -234,6 +240,14 @@ finally {
     }
     if ($parseCheckJob -and $parseCheckJob.State -eq 'Running') {
         $parseCheckJob | Stop-Job -PassThru | Remove-Job -Force -ErrorAction SilentlyContinue
+    }
+    # If we terminated with an error, delete DSC.zip so the next run rebuilds
+    if (-not $?) {
+        $dscZipPath = Join-Path $PSScriptRoot "DSC.zip"
+        if (Test-Path $dscZipPath) {
+            Remove-Item $dscZipPath -Force -ErrorAction SilentlyContinue
+            Write-Host "Deleted DSC.zip due to build failure." -ForegroundColor Yellow
+        }
     }
     $parentDir = Split-Path -Path $PSScriptRoot -Parent
     Set-Location $parentDir
