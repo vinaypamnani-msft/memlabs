@@ -2818,8 +2818,6 @@ $global:VM_Config = {
         $suppressNoisyLogging = $Common.VerboseEnabled -eq $false
         [int]$failedHeartbeats = 0
         [int]$failedHeartbeatThreshold = 100 # 3 seconds * 100 tries = ~5 minutes
-        [int]$prereqFailCount = 0  # Track prereq failures; guest retries once before host bails
-        $prereqFailSeen = $false   # Debounce: true while the prereq-failed log is still present
 
         $noStatus = $true
         $lastStatusChangeTime = [DateTime]::UtcNow
@@ -3314,41 +3312,19 @@ $global:VM_Config = {
                     # Check ConfigMgrSetup.log for fatal errors in a single PSDirect call.
                     # The in-VM script renames any prior ConfigMgrSetup.log before each
                     # setup.exe launch, so errors here are always from the current run.
+                    # Prereq failures are NOT checked here — the guest script
+                    # (InstallAndUpdateSCCM.ps1) handles prereq retries internally
+                    # by renaming the log and re-launching setup.exe. If the retry
+                    # also fails, the guest writes a JOBFAILURE status that the
+                    # normal monitoring loop above detects.
                     $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
                         if (Test-Path C:\ConfigMgrSetup.log) {
-                            Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights|Prereq check didn't pass" | Select-Object -First 1
+                            Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" | Select-Object -First 1
                         }
                     }
                     if ($cmLogCheck.ScriptBlockOutput.Line) {
                         $failEntry = $cmLogCheck.ScriptBlockOutput.Line
-                        # On first prereq failure, the guest script renames the log
-                        # and retries setup.exe. Don't bail until the second occurrence.
-                        # Use $prereqFailSeen to avoid counting the same log file twice
-                        # across multiple poll cycles before the guest renames it.
-                        $isPrereq = $failEntry -match "Prereq check didn't pass"
-                        if ($isPrereq) {
-                            if (-not $prereqFailSeen) {
-                                $prereqFailSeen = $true
-                                $prereqFailCount++
-                                if ($prereqFailCount -le 1) {
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Prereq check failed (attempt $prereqFailCount). Guest will rename log and retry setup.exe — continuing to monitor." -Warning -OutputStream
-                                }
-                                else {
-                                    $bailEarly = $true
-                                }
-                            }
-                            # else: same prereq log still present from first failure, guest hasn't renamed yet — skip
-                        }
-                        else {
-                            $bailEarly = $true
-                        }
-                    }
-                    else {
-                        # Log absent or no error found — if we were tracking a prereq
-                        # failure, the guest has renamed the log and is retrying.
-                        if ($prereqFailSeen) {
-                            $prereqFailSeen = $false
-                        }
+                        $bailEarly = $true
                     }
 
                     if ($bailEarly) {
