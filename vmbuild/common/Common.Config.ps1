@@ -43,6 +43,49 @@ function Get-ConfigCmOptions {
         $_.role -in @('CAS', 'Primary') -and $_.cmOptions
     } | Select-Object -First 1
     if ($anySiteServer) { return $anySiteServer.cmOptions }
+    # Domain-level fallback: in add-to-existing scenarios the CAS/Primary may
+    # not be in the config at all (user is only adding new VMs). Check the
+    # existing VMs in the domain from the Hyper-V VM-note cache.
+    if ($Config.vmOptions.domainName) {
+        try {
+            $existingVMs = Get-List -Type VM -DomainName $Config.vmOptions.domainName
+            $existingSiteServer = $existingVMs | Where-Object {
+                $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
+            } | Select-Object -First 1
+            if ($existingSiteServer) { return $existingSiteServer.cmOptions }
+
+            # CAS/Primary exists but has no cmOptions in its VM note (deployed
+            # before cmOptions was persisted). Synthesize from domainDefaults
+            # and safe defaults so validation passes and new VMs deploy.
+            $anySiteServerInDomain = $existingVMs | Where-Object {
+                $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+            } | Select-Object -First 1
+            if ($anySiteServerInDomain) {
+                $dcVM = $existingVMs | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                $inferredVersion = if ($dcVM -and $dcVM.domainDefaults -and $dcVM.domainDefaults.CMVersion) {
+                    $dcVM.domainDefaults.CMVersion
+                } else {
+                    Get-CMLatestBaselineVersion
+                }
+                $inferredUsePKI = if ($dcVM -and $dcVM.pkiOptions -and $dcVM.pkiOptions.EnablePKI) { $true } else { $false }
+                $synthesized = [PSCustomObject]@{
+                    Version            = $inferredVersion
+                    Install            = $true
+                    PrePopulateObjects = $true
+                    EVALVersion        = $false
+                    OfflineSCP         = $false
+                    OfflineSUP         = $false
+                    UsePKI             = $inferredUsePKI
+                    EnableBLM          = $false
+                }
+                Write-Log "Get-ConfigCmOptions: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) - existing site server $($anySiteServerInDomain.vmName) had no cmOptions in VM note." -Verbose
+                return $synthesized
+            }
+        }
+        catch {
+            # Cache may not be available (e.g. in-job context). Fall through.
+        }
+    }
     return $null
 }
 
