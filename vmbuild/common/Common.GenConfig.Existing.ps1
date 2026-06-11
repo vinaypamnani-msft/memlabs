@@ -974,6 +974,13 @@ function New-UserConfig {
         $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode -and $_.cmOptions
     } | Select-Object -First 1
     $existingCmOptions = $topLevelSite.cmOptions
+    # Also locate any CAS/Primary regardless of cmOptions presence, for the
+    # synthesis fallback below when cmOptions was never persisted.
+    if (-not $topLevelSite) {
+        $topLevelSite = $allDomainVMs | Where-Object {
+            $_.role -in @('CAS', 'Primary') -and -not $_.parentSiteCode
+        } | Select-Object -First 1
+    }
 
     if ([string]::IsNullOrWhiteSpace($adminUser)) {
         $adminUser = "admin"
@@ -1014,6 +1021,25 @@ function New-UserConfig {
     # Import cmOptions from existing site server so new VMs inherit EnableBLM, UsePKI, etc.
     if ($existingCmOptions) {
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $existingCmOptions -force
+    }
+    elseif ($topLevelSite) {
+        # CAS/Primary exists but has no cmOptions in its VM note (deployed before
+        # cmOptions was persisted). Synthesize from domainDefaults and defaults so
+        # validation and new-VM deployment have a usable block.
+        $inferredVersion = if ($domainDefaults -and $domainDefaults.CMVersion) { $domainDefaults.CMVersion } else { Get-CMLatestBaselineVersion }
+        $inferredUsePKI = if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) { $true } else { $false }
+        $synthesized = [PSCustomObject]@{
+            Version            = $inferredVersion
+            Install            = $true
+            PrePopulateObjects = $true
+            EVALVersion        = $false
+            OfflineSCP         = $false
+            OfflineSUP         = $false
+            UsePKI             = $inferredUsePKI
+            EnableBLM          = $false
+        }
+        $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $synthesized -force
+        Write-Log "New-UserConfig: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) for domain $Domain - existing site server $($topLevelSite.vmName) had no cmOptions in VM note." -Verbose
     }
 
     # Import PKI settings from existing DC so new VMs inherit CA configuration
