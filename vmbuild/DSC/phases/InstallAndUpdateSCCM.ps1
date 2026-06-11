@@ -1020,6 +1020,16 @@ CurrentBranch=1
 
             Write-DscStatus "Re-launching setup.exe (attempt 2)"
             Start-Process -Filepath ($CMInstallationFile) -ArgumentList ('/NOUSERINPUT /script "' + $CMINIPath + '"') -wait
+
+            # Check if the retry also failed prereq
+            if (Test-Path 'C:\ConfigMgrSetup.log') {
+                $prereqFail2 = Get-Content 'C:\ConfigMgrSetup.log' -Tail 10 -ErrorAction SilentlyContinue |
+                    Select-String "Prereq check didn't pass" | Select-Object -First 1
+                if ($prereqFail2) {
+                    Write-DscStatus "setup.exe failed prerequisite check on both attempts. Check C:\ConfigMgrSetup.log." -Failure
+                    return
+                }
+            }
         }
     }
 
