@@ -56,6 +56,86 @@ function Remove-VirtualMachine {
         return $false
     }
 
+    # Helper: find and kill processes holding open handles inside a folder.
+    # Uses Sysinternals handle.exe (auto-downloaded to C:\tools if missing).
+    function Stop-LockingProcesses {
+        param (
+            [string] $FolderPath
+        )
+
+        $handleExe = "C:\tools\handle.exe"
+
+        # Download handle.exe from Sysinternals if not present
+        if (-not (Test-Path $handleExe)) {
+            Write-Log "Downloading handle.exe from Sysinternals..." -SubActivity
+            if (-not (Test-Path "C:\tools")) {
+                New-Item -Path "C:\tools" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+            try {
+                $ProgressPreference = 'SilentlyContinue'
+                Start-BitsTransfer -Source "https://live.sysinternals.com/handle.exe" -Destination $handleExe -ErrorAction Stop
+            }
+            catch {
+                Write-Log "Could not download handle.exe: $($_.Exception.Message)" -Warning
+                return $false
+            }
+            finally {
+                $ProgressPreference = 'Continue'
+            }
+        }
+
+        # Run handle.exe to find processes with open handles in the folder
+        try {
+            $output = & $handleExe -accepteula -nobanner "$FolderPath" 2>&1 | Out-String
+        }
+        catch {
+            Write-Log "handle.exe failed: $($_.Exception.Message)" -Warning
+            return $false
+        }
+
+        if (-not $output -or $output -match 'No matching handles found') {
+            Write-Log "No locking processes found by handle.exe." -SubActivity
+            return $false
+        }
+
+        # Parse output lines: "processname pid: type (access): handle: path"
+        # Each line with a PID represents a process holding a handle.
+        $killedAny = $false
+        $pidsKilled = @{}
+        foreach ($line in $output -split "`n") {
+            if ($line -match '^(?<name>\S+)\s+pid:\s+(?<pid>\d+)') {
+                $procName = $Matches['name']
+                $procPid  = [int]$Matches['pid']
+
+                # Never kill vmms.exe (VM Management Service) -- that would
+                # break all Hyper-V management until the service restarts.
+                if ($procName -eq 'vmms.exe') {
+                    Write-Log "Skipping vmms.exe (PID $procPid) -- killing it would affect all VMs." -Warning
+                    continue
+                }
+
+                if (-not $pidsKilled.ContainsKey($procPid)) {
+                    $pidsKilled[$procPid] = $true
+                    Write-Log "Killing $procName (PID $procPid) holding handle in '$FolderPath'..." -Warning
+                    try {
+                        Stop-Process -Id $procPid -Force -ErrorAction Stop
+                        $killedAny = $true
+                    }
+                    catch {
+                        Write-Log "Could not kill $procName (PID $procPid): $($_.Exception.Message)" -Warning
+                    }
+                }
+            }
+        }
+
+        if ($killedAny) {
+            # Give the OS a moment to release handles after process termination
+            Start-Sleep -Seconds 2
+        }
+
+        return $killedAny
+    }
+
     # Helper: ensure VM is fully stopped with timeout.
     # Since we're deleting the VM, skip the graceful shutdown and TurnOff directly
     # (no point waiting for the guest OS to shut down cleanly).
@@ -218,8 +298,17 @@ function Remove-VirtualMachine {
         if (Test-Path $vmTest.Path) {
             Write-Log "$VmName`: Purging $($vmTest.Path) folder..." -HostOnly
             $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5 -WhatIf:$WhatIf
-            if (-not $folderRemoved) {
-                Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+            if (-not $folderRemoved -and -not $WhatIf) {
+                # Initial retries exhausted -- try to kill whichever process
+                # is holding a file lock and retry the removal.
+                Write-Log "$VmName`: Attempting to identify and kill process holding file locks..." -SubActivity
+                $killed = Stop-LockingProcesses -FolderPath $vmTest.Path
+                if ($killed) {
+                    $folderRemoved = Remove-ItemWithRetry -Path $vmTest.Path -MaxAttempts 3 -DelaySeconds 5
+                }
+                if (-not $folderRemoved) {
+                    Write-Log "$VmName`: WARNING - Folder '$($vmTest.Path)' could not be removed. Manual cleanup required." -Warning
+                }
             }
         }
         else {
