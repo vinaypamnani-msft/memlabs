@@ -59,12 +59,14 @@ if ((Get-Location).Drive.Name -ne $SiteCode) {
 $DPs = @()
 $MPs = @()
 $PullDPs = @()
+$BareSiteSystems = @()
 $ValidSiteCodes = @($SiteCode)
 $ReportingSiteCodes = Get-CMSite | Where-Object { $_.ReportingSiteCode -eq $SiteCode } | Select-Object -Expand SiteCode
 $ValidSiteCodes += $ReportingSiteCodes
 
 foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "SiteSystem" } ) {
     if ($vm.siteCode -in $ValidSiteCodes) {
+        $hasAnyRole = $vm.installDP -or $vm.installMP -or $vm.installSUP -or $vm.installRP -or $vm.installSMSProv
         if ($vm.installDP) {
             if ($vm.enablePullDP) {
                 $PullDPs += [PSCustomObject]@{
@@ -89,6 +91,14 @@ foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.role -eq "Site
             }
             else {
                 Write-DscStatus "Skip MP role for $($vm.vmName) since it's a remote site system in Secondary site"
+            }
+        }
+        # Register VMs with no automated roles so they appear in the console
+        # and roles (e.g. Reporting Services Point) can be added manually.
+        if (-not $hasAnyRole) {
+            $BareSiteSystems += [PSCustomObject]@{
+                ServerName     = $vm.vmName
+                ServerSiteCode = $vm.siteCode
             }
         }
     }
@@ -137,6 +147,17 @@ if ($allInstalled) {
         $allInstalled = $false
     }
 }
+# Check bare site systems are registered
+if ($allInstalled) {
+    foreach ($BSS in $BareSiteSystems) {
+        if ([string]::IsNullOrWhiteSpace($BSS.ServerName)) { continue }
+        $BSSFQDN = $BSS.ServerName.Trim() + "." + $DomainFullName
+        if (-not (Get-CMSiteSystemServer -SiteSystemServerName $BSSFQDN -SiteCode $BSS.ServerSiteCode)) {
+            $allInstalled = $false
+            break
+        }
+    }
+}
 
 if ($allInstalled) {
     Write-DscStatus "All DP/MP roles already installed. Skipping InstallDPMPClient."
@@ -151,6 +172,21 @@ if ($allInstalled) {
 Write-DscStatus "MP role to be installed on '$($MPNames -join ',')'"
 Write-DscStatus "DP role to be installed on '$($DPNames -join ',')'"
 Write-DscStatus "Pull DP role to be installed on '$($PullDPNames -join ',')'"
+
+# Register bare site systems (no DP/MP/SUP/RP) in the console so roles can
+# be added manually after deployment (e.g. Reporting Services Point).
+foreach ($BSS in $BareSiteSystems) {
+    if ([string]::IsNullOrWhiteSpace($BSS.ServerName)) { continue }
+    $BSSFQDN = $BSS.ServerName.Trim() + "." + $DomainFullName
+    $existing = Get-CMSiteSystemServer -SiteSystemServerName $BSSFQDN -SiteCode $BSS.ServerSiteCode
+    if (-not $existing) {
+        Write-DscStatus "Registering bare site system $BSSFQDN in site $($BSS.ServerSiteCode)"
+        New-CMSiteSystemServer -SiteSystemServerName $BSSFQDN -SiteCode $BSS.ServerSiteCode *>&1 | Write-StatusLogEntry
+    }
+    else {
+        Write-DscStatus "Site system $BSSFQDN already registered in site $($BSS.ServerSiteCode)"
+    }
+}
 
 foreach ($DP in $DPs) {
 
