@@ -206,6 +206,27 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
         $zipOutput | ForEach-Object { Write-Host "  $_" }
         Write-Host "DSC.zip ready."
     }
+
+    # Auto-bump MemLabsVersion now that the DSC build succeeded.
+    # Format: YYMMDD.n — if today's date matches the current prefix, increment n; otherwise reset to .0
+    $commonPs1Path = Join-Path $PSScriptRoot "..\Common.ps1"
+    $commonPs1Path = (Resolve-Path $commonPs1Path).Path
+    $todayPrefix = (Get-Date).ToString("yyMMdd")
+    $oldVersion = $Common.MemLabsVersion
+
+    if ($oldVersion -match "^$todayPrefix\.(\d+)$") {
+        $newVersion = "$todayPrefix.$([int]$Matches[1] + 1)"
+    }
+    else {
+        $newVersion = "$todayPrefix.0"
+    }
+
+    $content = Get-Content $commonPs1Path -Raw
+    # Update both MemLabsVersion and LatestHotfixVersion
+    $content = $content -replace "MemLabsVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "MemLabsVersion              = `"$newVersion`""
+    $content = $content -replace "LatestHotfixVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "LatestHotfixVersion         = `"$newVersion`""
+    [System.IO.File]::WriteAllText($commonPs1Path, $content)
+    Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion" -ForegroundColor Cyan
 }
 finally {
     if ($zipJob -and $zipJob.State -eq 'Running') {
