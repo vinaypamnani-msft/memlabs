@@ -854,6 +854,7 @@ CurrentBranch=1
                 $odbcConn.Open()
                 $odbcConn.Close()
                 $sqlPreCheckOk = $true
+                $sqlPreCheckCs = $odbcCs1
                 Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={SQL Server})"
                 break
             }
@@ -867,6 +868,7 @@ CurrentBranch=1
                 $odbcConn.Open()
                 $odbcConn.Close()
                 $sqlPreCheckOk = $true
+                $sqlPreCheckCs = $odbcCs2
                 Write-DscStatus "SQL pre-flight: ODBC connected to [$sqlTarget] on attempt $sqlTry (Driver={ODBC Driver 18}, secure)"
                 break
             }
@@ -880,6 +882,27 @@ CurrentBranch=1
             Write-DscStatus "SQL pre-flight: ODBC failed after $sqlPreCheckMax attempts to [$sqlTarget]. setup.exe would also fail. Cannot start." -Failure
             Write-DscStatus "SQL pre-flight: Last errors — Driver={SQL Server}: $sqlPreErr1 | Driver={ODBC Driver 18}: $sqlPreErr2"
             return
+        }
+
+        # Step 3: Verify Kerberos authentication to remote SQL.
+        # NTLM can fail intermittently during cluster settling when the DC
+        # is briefly unreachable for pass-through validation.
+        try {
+            $authConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
+            $authConn.Open()
+            $authCmd = $authConn.CreateCommand()
+            $authCmd.CommandText = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+            $authScheme = $authCmd.ExecuteScalar()
+            $authConn.Close()
+            if ($authScheme -eq 'KERBEROS') {
+                Write-DscStatus "SQL pre-flight: auth_scheme = KERBEROS — good"
+            }
+            else {
+                Write-DscStatus "SQL pre-flight: WARNING — auth_scheme = $authScheme (expected KERBEROS). setup.exe may fail with error 18452 during cluster settling. Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account."
+            }
+        }
+        catch {
+            Write-DscStatus "SQL pre-flight: could not query auth_scheme: $($_.Exception.Message)"
         }
     }
 
