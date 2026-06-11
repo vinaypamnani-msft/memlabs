@@ -310,6 +310,9 @@ else {
     if ($BootImages.Count -eq 0) {
         Write-DscStatus "$Tag WARNING: No boot images found — skipping boot image configuration"
     }
+    else {
+        Write-DscStatus "$Tag Found $($BootImages.Count) boot image(s): $(($BootImages | ForEach-Object { $_.Name }) -join ', ')"
+    }
 
     # Loop through each boot image: enable command support, then distribute
     foreach ($BootImage in $BootImages) {
