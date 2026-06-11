@@ -738,10 +738,10 @@
                         }
                     }
                     if ($missingDCs.Count -eq 0) {
-                        Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s) (attempt $attempt)"
+                        Write-Verbose "Verified: DNS A record exists on all $($allDCs.Count) DC(s) (attempt ${attempt})"
                         return
                     }
-                    Write-Verbose "Attempt $attempt: record still missing on DC(s): $($missingDCs -join ', ')"
+                    Write-Verbose "Attempt ${attempt}: record still missing on DC(s): $($missingDCs -join ', ')"
                     if ($attempt -lt $maxAttempts) {
                         Start-Sleep -Seconds 10
                     }
