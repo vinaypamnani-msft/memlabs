@@ -1,4 +1,4 @@
-# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.ps1
 [CmdletBinding()]
 param (
@@ -4915,6 +4915,9 @@ function Install-Tools {
         }
     }
 
+    # Clean up shared fingerprint-keyed tool zips now that all VMs are done
+    Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
     return $success
 }
 
@@ -4945,7 +4948,8 @@ function Copy-ToolToVM {
     }
 
     # --- Build list of source paths to bundle ---
-    $zipEntries = @()
+    $commonEntries = @()
+    $extraEntries = @()
     foreach ($ToolItem in $Tool) {
         if ($ToolItem.NoUpdate -eq $true) {
             Write-Log "$vmName`: Skipped injecting '$($ToolItem.Name) since it's marked NoUpdate." -Verbose
@@ -4974,22 +4978,30 @@ function Copy-ToolToVM {
             continue
         }
 
-        $zipEntries += [PSCustomObject]@{
+        $entry = [PSCustomObject]@{
             Name             = $ToolItem.Name
             SourcePath       = $toolPathHost
             TargetRelative   = $fileTargetRelative
         }
+
+        # Tools with Optional+Roles are VM-specific; everything else is common
+        if ($ToolItem.Optional -and $ToolItem.Roles) {
+            $extraEntries += $entry
+        }
+        else {
+            $commonEntries += $entry
+        }
     }
 
-    # --- Add maintenance fix InjectFiles/InjectTools so they ride with the
-    #     tools bundle. Phase 10 skips the redundant PSDirect copy when the
-    #     files already exist on the VM. ---
+    # --- Add maintenance fix InjectFiles/InjectTools to the common bundle
+    #     so they ride with the tools. Phase 10 skips the redundant PSDirect
+    #     copy when the files already exist on the VM. ---
     try {
         $maintPaths = Get-MaintenanceInjectPaths
         foreach ($file in $maintPaths.Files) {
             $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
             if (Test-Path $sourcePath) {
-                $zipEntries += [PSCustomObject]@{
+                $commonEntries += [PSCustomObject]@{
                     Name           = "MaintFix:$file"
                     SourcePath     = $sourcePath
                     TargetRelative = "staging\$file"
@@ -4999,7 +5011,7 @@ function Copy-ToolToVM {
         foreach ($toolFolder in $maintPaths.Tools) {
             $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
             if (Test-Path $sourcePath) {
-                $zipEntries += [PSCustomObject]@{
+                $commonEntries += [PSCustomObject]@{
                     Name           = "MaintFix:$toolFolder"
                     SourcePath     = $sourcePath
                     TargetRelative = "tools\$toolFolder"
@@ -5011,16 +5023,15 @@ function Copy-ToolToVM {
         Write-Log "$vmName`: Could not add maintenance fix files to tools bundle: $_" -LogOnly
     }
 
-    if ($zipEntries.Count -eq 0) {
+    if ($commonEntries.Count -eq 0 -and $extraEntries.Count -eq 0) {
         Write-Log "$vmName`: No tools to inject." -Verbose
         return $true
     }
 
-    # --- Compute source fingerprint for cache-based skip logic ---
-    $sourceFingerprint = $null
-    $hostCachePath = Join-Path $Common.TempPath "toolhash-$VMName.json"
-    try {
-        $fingerprintParts = foreach ($entry in $zipEntries | Sort-Object { $_.TargetRelative }) {
+    # --- Helper: compute a fingerprint for a set of zip entries ---
+    $computeFingerprint = {
+        param([object[]]$entries)
+        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
             $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
             if ($item -is [System.IO.DirectoryInfo]) {
                 $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
@@ -5032,22 +5043,46 @@ function Copy-ToolToVM {
                 "$($entry.TargetRelative)|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
             }
         }
-        $fingerprintString = $fingerprintParts -join "`n"
-        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($fingerprintString))
-        $sourceFingerprint = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+        $str = $parts -join "`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
+        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
         $stream.Dispose()
+        return $hash
+    }
+
+    # --- Compute fingerprints ---
+    $commonFingerprint = $null
+    $extraFingerprint = $null
+    $vmHashPath = "C:\Tools\Tools.MD5"
+    $hostCachePath = Join-Path $Common.TempPath "toolhash-$VMName.json"
+
+    try {
+        if ($commonEntries.Count -gt 0) {
+            $commonFingerprint = & $computeFingerprint $commonEntries
+        }
+        if ($extraEntries.Count -gt 0) {
+            $extraFingerprint = & $computeFingerprint $extraEntries
+        }
     }
     catch {
         Write-Log "$vmName`: Source fingerprint computation failed, will do full rebuild: $_" -LogOnly
     }
 
-    # --- Fast skip: if source fingerprint matches host cache AND VM hash matches, skip everything ---
-    #     This avoids the expensive staging/zipping when tools haven't changed.
-    if ($sourceFingerprint -and -not $WhatIf -and -not $Force) {
+    # Combined fingerprint for the VM-level skip check (common + extras)
+    $combinedFingerprint = if ($commonFingerprint -and $extraFingerprint) {
+        $s = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes("$commonFingerprint|$extraFingerprint"))
+        $h = (Get-FileHash -InputStream $s -Algorithm MD5).Hash; $s.Dispose(); $h
+    }
+    elseif ($commonFingerprint) { $commonFingerprint }
+    elseif ($extraFingerprint) { $extraFingerprint }
+    else { $null }
+
+    # --- Fast skip: if combined fingerprint + VM hash match, skip everything ---
+    if ($combinedFingerprint -and -not $WhatIf -and -not $Force) {
         try {
             if (Test-Path $hostCachePath) {
                 $cached = Get-Content $hostCachePath -Raw | ConvertFrom-Json
-                if ($cached.SourceFingerprint -eq $sourceFingerprint) {
+                if ($cached.SourceFingerprint -eq $combinedFingerprint) {
                     $cachedBundleHash = $cached.BundleMD5
                     $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
                         if (Test-Path $using:vmHashPath) {
@@ -5067,45 +5102,109 @@ function Copy-ToolToVM {
         }
     }
 
-    # --- Create a single zip bundle on the host ---
-    $zipStagingDir = Join-Path $Common.TempPath "toolzip-$VMName"
-    if (Test-Path $zipStagingDir) { Remove-Item $zipStagingDir -Recurse -Force }
-    New-Item -Path $zipStagingDir -ItemType Directory -Force | Out-Null
+    # --- Helper: build a zip with mutex guarding. Returns the zip path. ---
+    #     If another job already built the zip (fingerprint match), reuses it.
+    $buildZip = {
+        param([object[]]$entries, [string]$fingerprint, [string]$label)
 
-    foreach ($entry in $zipEntries) {
-        $dest = Join-Path $zipStagingDir $entry.TargetRelative
-        $destDir = Split-Path $dest -Parent
-        if (-not (Test-Path $destDir)) {
-            New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+        if ($entries.Count -eq 0) { return $null }
+
+        $zipPath = Join-Path $Common.TempPath "tools-$fingerprint.zip"
+        $mutexName = "Global\MemLabs-ToolZip-$fingerprint"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        try {
+            # Wait up to 10 minutes for the mutex
+            if (-not $mutex.WaitOne(600000)) {
+                Write-Log "$vmName`: Timed out waiting for $label zip mutex. Building anyway." -Warning
+            }
+
+            # After acquiring the mutex, check if the zip already exists
+            if (Test-Path $zipPath) {
+                Write-Log "$vmName`: Reusing existing $label bundle (built by another VM)." -LogOnly
+                return $zipPath
+            }
+
+            # Build the zip
+            $stagingDir = Join-Path $Common.TempPath "toolzip-$fingerprint"
+            if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+            New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
+
+            foreach ($entry in $entries) {
+                $dest = Join-Path $stagingDir $entry.TargetRelative
+                $destDir = Split-Path $dest -Parent
+                if (-not (Test-Path $destDir)) {
+                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                }
+                if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+                    Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+                }
+                else {
+                    Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+                }
+            }
+
+            Write-Log "$vmName`: Creating $label bundle ($($entries.Count) items)..." -LogOnly
+            $prevPref = $ProgressPreference
+            $ProgressPreference = "SilentlyContinue"
+            try {
+                Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+            }
+            finally {
+                $ProgressPreference = $prevPref
+            }
+            Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+
+            return $zipPath
         }
-        if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
-            Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+        finally {
+            try { $mutex.ReleaseMutex() } catch {}
+            $mutex.Dispose()
+        }
+    }
+
+    # --- Build the common zip (shared across all VMs, mutex-guarded) ---
+    $commonZipPath = $null
+    $extraZipPath = $null
+
+    if ($commonEntries.Count -gt 0) {
+        if ($commonFingerprint) {
+            $commonZipPath = & $buildZip $commonEntries $commonFingerprint "common tools"
         }
         else {
-            Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+            # No fingerprint available — fall back to VM-specific zip without mutex
+            $commonZipPath = & $buildZip $commonEntries $VMName "common tools"
         }
     }
 
-    $zipPath = Join-Path $Common.TempPath "tools-$VMName.zip"
-    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-
-    Write-Log "$vmName`: Creating tools bundle ($($zipEntries.Count) tools)..." -LogOnly
-    $progressPref = $ProgressPreference
-    $ProgressPreference = "SilentlyContinue"
-    try {
-        Compress-Archive -Path "$zipStagingDir\*" -DestinationPath $zipPath -Force
-    }
-    finally {
-        $ProgressPreference = $progressPref
+    # --- Build the extras zip (role-specific tools, also mutex-guarded by its fingerprint) ---
+    if ($extraEntries.Count -gt 0) {
+        if ($extraFingerprint) {
+            $extraZipPath = & $buildZip $extraEntries $extraFingerprint "extra tools"
+        }
+        else {
+            $extraZipPath = & $buildZip $extraEntries "$VMName-extra" "extra tools"
+        }
     }
 
-    $zipSizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+    # --- Compute a combined MD5 from the zip file(s) for the VM hash check ---
+    $zipPaths = @()
+    if ($commonZipPath) { $zipPaths += $commonZipPath }
+    if ($extraZipPath) { $zipPaths += $extraZipPath }
 
-    # --- Compute MD5 of the bundle and compare with the VM's cached hash ---
-    $bundleHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
-    $vmHashPath = "C:\Tools\Tools.MD5"
+    $hashParts = foreach ($zp in $zipPaths) {
+        (Get-FileHash -Path $zp -Algorithm MD5).Hash
+    }
+    $combinedHashString = $hashParts -join "|"
+    $bundleStream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($combinedHashString))
+    $bundleHash = (Get-FileHash -InputStream $bundleStream -Algorithm MD5).Hash
+    $bundleStream.Dispose()
+
+    $totalSizeMB = [Math]::Round(($zipPaths | ForEach-Object { (Get-Item $_).Length } | Measure-Object -Sum).Sum / 1MB, 1)
+    $totalItems = $commonEntries.Count + $extraEntries.Count
+
+    # --- Check if the VM already has this exact bundle ---
     $skipCopy = $false
-
     if (-not $WhatIf -and -not $Force) {
         $hashCheck = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
             if (Test-Path $using:vmHashPath) {
@@ -5120,47 +5219,47 @@ function Copy-ToolToVM {
     }
 
     if ($skipCopy) {
-        # Save host cache so next run skips the zip rebuild entirely
-        if ($sourceFingerprint) {
-            @{ SourceFingerprint = $sourceFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+        if ($combinedFingerprint) {
+            @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
         }
-        # Cleanup host temp files
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
         return $true
     }
 
-    Write-Log "$vmName`: Copying tools bundle (${zipSizeMB} MB, $($zipEntries.Count) tools) to VM..."
-    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${zipSizeMB} MB) to $VMName" -Log
+    Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
+    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log
 
-    # --- Copy the single zip to the VM and expand ---
+    # --- Copy each zip to the VM and expand ---
     $success = $true
-    $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+    $progressPref = $ProgressPreference
     try {
         $ProgressPreference = "SilentlyContinue"
-        if ($Fast) {
-            Copy-Item -ToSession $ps -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
-        }
-        else {
-            $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zipPath -Destination $vmZipPath -Force -WhatIf:$WhatIf
-            if ($copyResult -eq $false) {
-                throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+        foreach ($zp in $zipPaths) {
+            $vmZipPath = "C:\Windows\Temp\tools-bundle.zip"
+
+            if ($Fast) {
+                Copy-Item -ToSession $ps -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf -ErrorAction Stop
+            }
+            else {
+                $copyResult = Copy-ItemSafe -VMName $vm.vmName -VmDomainName $vm.domain -Path $zp -Destination $vmZipPath -Force -WhatIf:$WhatIf
+                if ($copyResult -eq $false) {
+                    throw "Copy-ItemSafe exhausted retries copying tools bundle to VM"
+                }
+            }
+
+            if (-not $WhatIf) {
+                $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
+                    Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
+                    Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
+                }
+                if ($expandResult.ScriptBlockFailed) {
+                    Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
+                    $success = $false
+                    break
+                }
             }
         }
 
-        # Expand inside the VM
-        if (-not $WhatIf) {
-            $expandResult = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -ScriptBlock {
-                Expand-Archive -Path $using:vmZipPath -DestinationPath "C:\" -Force
-                Remove-Item -Path $using:vmZipPath -Force -ErrorAction SilentlyContinue
-            }
-            if ($expandResult.ScriptBlockFailed) {
-                Write-Log "$vmName`: Failed to expand tools bundle inside VM. $($expandResult.ScriptBlockOutput)" -Failure
-                $success = $false
-            }
-        }
-
-        # Write the bundle hash to the VM so subsequent runs can skip
+        # Write the combined bundle hash to the VM
         if ($success -and -not $WhatIf) {
             $writeHash = Invoke-VmCommand -VmName $vm.vmName -VmDomainName $vm.domain -SuppressLog -ScriptBlock {
                 $using:bundleHash | Set-Content -Path $using:vmHashPath -Force -ErrorAction SilentlyContinue
@@ -5171,10 +5270,9 @@ function Copy-ToolToVM {
         }
 
         if ($success) {
-            Write-Log "$vmName`: Successfully injected $($zipEntries.Count) tools via bundle. Hash: $bundleHash" -Success
-            # Save host cache so next run skips the zip rebuild entirely
-            if ($sourceFingerprint) {
-                @{ SourceFingerprint = $sourceFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+            Write-Log "$vmName`: Successfully injected $totalItems tools via bundle. Hash: $bundleHash" -Success
+            if ($combinedFingerprint) {
+                @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -5184,9 +5282,6 @@ function Copy-ToolToVM {
     }
     finally {
         $ProgressPreference = $progressPref
-        # Cleanup host temp files
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-        Remove-Item $zipStagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     return $success
 }
