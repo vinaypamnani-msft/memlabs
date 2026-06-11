@@ -1439,6 +1439,26 @@ WHERE drs.is_local = 1
             }
 
             # ==============================================================
+            # 6b. Kerberos authentication to listener
+            # ==============================================================
+            if ($listenerName -and $listenerPort) {
+                $results.Details.Add("CMD: Check auth_scheme on listener '$listenerConnStr'")
+                try {
+                    $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+                    $authResult = Invoke-Sqlcmd -ServerInstance $listenerConnStr -Query $authQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                    if ($authResult.auth_scheme -eq 'KERBEROS') {
+                        $results.Details.Add("OK: Listener auth_scheme = KERBEROS")
+                    }
+                    else {
+                        $results.Details.Add("WARN: Listener auth_scheme = $($authResult.auth_scheme) (expected KERBEROS). Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account.")
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not query auth_scheme on listener: $($_.Exception.Message)")
+                }
+            }
+
+            # ==============================================================
             # 7. Backup and Witness share accessibility
             # ==============================================================
             foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare }, @{Name = 'Backup'; Path = $backupShare })) {

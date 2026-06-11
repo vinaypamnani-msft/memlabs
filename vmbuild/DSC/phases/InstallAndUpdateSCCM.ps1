@@ -885,24 +885,35 @@ CurrentBranch=1
         }
 
         # Step 3: Verify Kerberos authentication to remote SQL.
-        # NTLM can fail intermittently during cluster settling when the DC
-        # is briefly unreachable for pass-through validation.
-        try {
-            $authConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
-            $authConn.Open()
-            $authCmd = $authConn.CreateCommand()
-            $authCmd.CommandText = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
-            $authScheme = $authCmd.ExecuteScalar()
-            $authConn.Close()
+        # NTLM works but can fail intermittently during cluster settling
+        # when the DC is briefly unreachable for pass-through validation.
+        # If we see NTLM, wait up to 5 min for Kerberos to become available.
+        $authScheme = $null
+        $kerbMaxAttempts = 20   # 20 x 15s = 5 min
+        for ($authTry = 1; $authTry -le $kerbMaxAttempts; $authTry++) {
+            try {
+                $authConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
+                $authConn.Open()
+                $authCmd = $authConn.CreateCommand()
+                $authCmd.CommandText = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+                $authScheme = $authCmd.ExecuteScalar()
+                $authConn.Close()
+            }
+            catch {
+                Write-DscStatus "SQL pre-flight: could not query auth_scheme (attempt $authTry): $($_.Exception.Message)"
+                $authScheme = $null
+            }
             if ($authScheme -eq 'KERBEROS') {
-                Write-DscStatus "SQL pre-flight: auth_scheme = KERBEROS — good"
+                Write-DscStatus "SQL pre-flight: auth_scheme = KERBEROS on attempt $authTry — good"
+                break
             }
-            else {
-                Write-DscStatus "SQL pre-flight: WARNING — auth_scheme = $authScheme (expected KERBEROS). setup.exe may fail with error 18452 during cluster settling. Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account."
+            if ($authTry -eq 1) {
+                Write-DscStatus "SQL pre-flight: auth_scheme = $authScheme (not KERBEROS). Waiting up to 5 min for Kerberos to become available..."
             }
+            if ($authTry -lt $kerbMaxAttempts) { Start-Sleep -Seconds 15 }
         }
-        catch {
-            Write-DscStatus "SQL pre-flight: could not query auth_scheme: $($_.Exception.Message)"
+        if ($authScheme -and $authScheme -ne 'KERBEROS') {
+            Write-DscStatus "SQL pre-flight: WARNING — auth_scheme still $authScheme after $kerbMaxAttempts attempts. setup.exe may fail with error 18452 during cluster settling. Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account."
         }
     }
 
