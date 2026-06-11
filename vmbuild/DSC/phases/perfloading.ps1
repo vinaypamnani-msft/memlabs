@@ -1320,8 +1320,20 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     if ($Sups -and $syncNeeded) {
-        Write-DscStatus "$Tag Waiting for WSUS sync to complete (was triggered before collection creation)..."
-        $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
+        # If a sync already completed within the last 7 days, skip the blocking
+        # wait and let the new sync run in the background (wsyncmgr handles it
+        # server-side, so it keeps running after this script exits).
+        $recentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+        $syncAge = if ($recentSync.LastSyncStateTime) { (Get-Date) - $recentSync.LastSyncStateTime } else { $null }
+
+        if ($recentSync.LastSyncState -eq 6702 -and $syncAge -and $syncAge.TotalDays -lt 7) {
+            Write-DscStatus "$Tag WSUS last synced $([math]::Round($syncAge.TotalHours, 1)) hours ago — skipping blocking wait, sync will continue in background"
+            $syncSuccess = $true
+        }
+        else {
+            Write-DscStatus "$Tag Waiting for WSUS sync to complete (was triggered before collection creation)..."
+            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
+        }
 
         if ($syncSuccess) {
 
