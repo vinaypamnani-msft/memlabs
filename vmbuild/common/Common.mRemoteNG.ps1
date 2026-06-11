@@ -1407,7 +1407,7 @@ function New-MRemoteNGFileFromHyperV {
                 if ($vm.ParentSiteCode) { $displayName += "->$($vm.ParentSiteCode)" }
                 $displayName += ")"
             }
-            elseif ($clientPushSiteMap.ContainsKey($vm.vmName)) {
+            elseif ($clientPushSiteMap -and $clientPushSiteMap.ContainsKey($vm.vmName)) {
                 $displayName += " ($($clientPushSiteMap[$vm.vmName]))"
             }
 
