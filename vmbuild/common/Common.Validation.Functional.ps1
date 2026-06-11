@@ -1439,22 +1439,30 @@ WHERE drs.is_local = 1
             }
 
             # ==============================================================
-            # 6b. Kerberos authentication to listener
+            # 6b. Kerberos authentication to remote SQL node
             # ==============================================================
-            if ($listenerName -and $listenerPort) {
-                $results.Details.Add("CMD: Check auth_scheme on listener '$listenerConnStr'")
+            # The listener may resolve to the local node (primary), and
+            # loopback connections always use NTLM. Test against the other
+            # node instead — that's always a network hop where Kerberos
+            # should be in effect.
+            if ($otherNode) {
+                $remoteConnStr = $otherNode
+                if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
+                    $remoteConnStr = "$otherNode\$sqlInstName"
+                }
+                $results.Details.Add("CMD: Check auth_scheme on remote node '$remoteConnStr'")
                 try {
                     $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
-                    $authResult = Invoke-Sqlcmd -ServerInstance $listenerConnStr -Query $authQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                    $authResult = Invoke-Sqlcmd -ServerInstance $remoteConnStr -Query $authQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
                     if ($authResult.auth_scheme -eq 'KERBEROS') {
-                        $results.Details.Add("OK: Listener auth_scheme = KERBEROS")
+                        $results.Details.Add("OK: Remote SQL auth_scheme = KERBEROS")
                     }
                     else {
-                        $results.Details.Add("WARN: Listener auth_scheme = $($authResult.auth_scheme) (expected KERBEROS). Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account.")
+                        $results.Details.Add("WARN: Remote SQL auth_scheme = $($authResult.auth_scheme) (expected KERBEROS). Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account.")
                     }
                 }
                 catch {
-                    $results.Details.Add("WARN: Could not query auth_scheme on listener: $($_.Exception.Message)")
+                    $results.Details.Add("WARN: Could not query auth_scheme on '$remoteConnStr': $($_.Exception.Message)")
                 }
             }
 
