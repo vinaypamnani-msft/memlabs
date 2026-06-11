@@ -2256,6 +2256,7 @@ class DownloadFile {
             $hashCachePath = "$($this.FilePath).SHA1"
 
             # Check for a cached hash sidecar file with size and last-modified metadata
+            $actualHash = $null
             $useCachedHash = $false
             if (Test-Path $hashCachePath) {
                 try {
