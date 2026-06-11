@@ -324,6 +324,17 @@
 
         $nextDepend = '[PromoteDomainController]DomainControllerAllProperties'
 
+        # Set the KDC default encryption types so all accounts get AES tickets.
+        # Must be set on every DC since each runs its own KDC service.
+        Registry KdcDefaultEncryptionTypes {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\KDC'
+            ValueName = 'DefaultDomainSupportedEncTypes'
+            ValueType = 'Dword'
+            ValueData = '28'
+            DependsOn = $nextDepend
+        }
+
         # Now that DNS server role is installed (InstallDns=$true above),
         # point DNS at self first for the local AD-integrated zones, with
         # PDC as fallback for records not yet replicated.

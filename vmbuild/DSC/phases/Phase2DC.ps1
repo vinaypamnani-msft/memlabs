@@ -196,6 +196,21 @@
             DomainNetBiosName             = $netbiosName
         }
 
+        # Set the KDC default encryption types so all accounts (even those
+        # without msDS-SupportedEncryptionTypes) get AES tickets. Without this,
+        # Windows Server 2025 issues only RC4 tickets for accounts that lack
+        # the attribute, and SQL Server rejects them — causing NTLM fallback
+        # and transient 18452 errors during setup.
+        # Value 28 = RC4_HMAC (4) + AES128 (8) + AES256 (16)
+        Registry KdcDefaultEncryptionTypes {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\KDC'
+            ValueName = 'DefaultDomainSupportedEncTypes'
+            ValueType = 'Dword'
+            ValueData = '28'
+            DependsOn = '[ADDomain]FirstDS'
+        }
+
         $PageFileSize = ($thisVM.memory) / 2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[ADDomain]FirstDS"
