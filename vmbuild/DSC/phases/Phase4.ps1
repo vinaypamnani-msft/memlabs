@@ -273,10 +273,13 @@
                     $spnDependency += "[ADServicePrincipalName]spn$i"
                 }
 
-                # Grant the SQL service account "Validated Write to servicePrincipalName"
-                # on its own AD object. Without this, SQL Server's startup SPN self-check
-                # fails with 0x2098 (insufficient access) and Kerberos auth is disabled
-                # for all inbound connections, falling back to NTLM.
+                # Grant the SQL service account "Write servicePrincipalName" on
+                # its own AD object. Without this, SQL Server's startup SPN
+                # self-registration fails with 0x2098 (insufficient access) and
+                # SQL marks Kerberos as unavailable, falling back to NTLM for
+                # ALL inbound connections. We use WriteProperty on the
+                # servicePrincipalName attribute (not the validated write, which
+                # doesn't work for user service accounts).
                 $sqlSvcAccountName = $ThisVM.SqlServiceAccount
                 Script GrantSPNWritePermission {
                     GetScript  = { return @{ Result = "N/A" } }
@@ -285,13 +288,13 @@
                             $user = Get-ADUser -Identity $using:sqlSvcAccountName -ErrorAction Stop
                             $dn = $user.DistinguishedName
                             $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
-                            # Check for "Validated write to service principal name" (GUID: f3a64788-5306-11d1-a9c5-0000f80367c1)
-                            $spnGuid = [Guid]'f3a64788-5306-11d1-a9c5-0000f80367c1'
+                            # servicePrincipalName attribute GUID
+                            $spnAttrGuid = [Guid]'28630EBB-41D5-11D1-A9C1-0000F80367C1'
                             $sid = $user.SID
                             $hasRight = $acl.Access | Where-Object {
                                 $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -eq $sid -and
-                                $_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::Self -and
-                                $_.ObjectType -eq $spnGuid -and
+                                $_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty -and
+                                $_.ObjectType -eq $spnAttrGuid -and
                                 $_.AccessControlType -eq 'Allow'
                             }
                             return [bool]$hasRight
@@ -305,15 +308,15 @@
                         $user = Get-ADUser -Identity $using:sqlSvcAccountName -ErrorAction Stop
                         $dn = $user.DistinguishedName
                         $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
-                        # "Validated write to service principal name" — allows SQL Server to
-                        # register SPNs on its service account at startup
-                        $spnGuid = [Guid]'f3a64788-5306-11d1-a9c5-0000f80367c1'
+                        # servicePrincipalName attribute GUID — grants WriteProperty
+                        # so SQL Server can self-register SPNs at startup
+                        $spnAttrGuid = [Guid]'28630EBB-41D5-11D1-A9C1-0000F80367C1'
                         $sid = New-Object System.Security.Principal.SecurityIdentifier($user.SID)
                         $ace = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
                             $sid,
-                            [System.DirectoryServices.ActiveDirectoryRights]::Self,
+                            [System.DirectoryServices.ActiveDirectoryRights]::WriteProperty,
                             [System.Security.AccessControl.AccessControlType]::Allow,
-                            $spnGuid
+                            $spnAttrGuid
                         )
                         $acl.AddAccessRule($ace)
                         Set-Acl "AD:\$dn" $acl -ErrorAction Stop
