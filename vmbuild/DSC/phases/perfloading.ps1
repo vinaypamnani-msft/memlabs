@@ -734,20 +734,26 @@ else {
         $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
         $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
 
-        # Rename products to match SUP naming convention
-        $products = $products -replace "^Server 2016$", "Windows Server 2016"
-        $products = $products -replace "^Server 2019$", "Windows Server 2019"
-        $products = $products -replace "^Server 2022.*$", "Microsoft Server operating system-21H2"
-        $products = $products -replace "^Server 2025$", "Microsoft Server operating system-24H2"
-        $products = $products -replace "^Windows 10.*$", "Windows 10, version 1903 and later"
-        $products = $products -replace "^Windows 11.*$", "Windows 11"
-        $products = $products -replace "^Sql Server 2016$", "Microsoft SQL server 2016"
-        $products = $products -replace "^Sql Server 2017$", "Microsoft SQL server 2017"
-        $products = $products -replace "^Sql Server 2019$", "Microsoft SQL server 2019"
-        $products = $products -replace "^Sql Server 2022$", "Microsoft SQL server 2022"
+        # Filter out Linux OS names — WSUS has no products for Ubuntu/Linux
+        $products = @($products | Where-Object { $_ -and $_ -notmatch '^Ubuntu|^CentOS|^RHEL|^Debian|^Linux' })
+
+        # Rename products to match SUP naming convention.
+        # OS names may have date/variant suffixes (e.g. "Server 2019 March 2021")
+        # so anchors use .* instead of $ to match variants.
+        $products = $products -replace "^Server 2016\b.*$", "Windows Server 2016"
+        $products = $products -replace "^Server 2019\b.*$", "Windows Server 2019"
+        $products = $products -replace "^Server 2022\b.*$", "Microsoft Server operating system-21H2"
+        $products = $products -replace "^Server 2025\b.*$", "Microsoft Server operating system-24H2"
+        $products = $products -replace "^Windows 10\b.*$", "Windows 10, version 1903 and later"
+        $products = $products -replace "^Windows 11\b.*$", "Windows 11"
+        $products = $products -replace "^Sql Server 2016\b.*$", "Microsoft SQL server 2016"
+        $products = $products -replace "^Sql Server 2017\b.*$", "Microsoft SQL server 2017"
+        $products = $products -replace "^Sql Server 2019\b.*$", "Microsoft SQL server 2019"
+        $products = $products -replace "^Sql Server 2022\b.*$", "Microsoft SQL server 2022"
+        $products = $products -replace "^Sql Server 2025\b.*$", "Microsoft SQL server 2025"
         $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
         $products += "Microsoft Defender for Endpoint"
-        $products = @($products | ForEach-Object { "$_" })
+        $products = @($products | Where-Object { $_ } | Select-Object -Unique)
 
         $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
 
