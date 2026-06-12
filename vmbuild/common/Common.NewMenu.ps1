@@ -1306,6 +1306,12 @@ function Show-Menu {
         foreach ($mi in $menuItems) { [void]$_originalItems.Add($mi) }
     }
 
+    # When the rendered menu causes the viewport to scroll (content taller
+    # than expected), stored item positions become wrong. This counter
+    # accumulates the detected scroll amount so the next render reserves
+    # fewer rows and avoids the overflow. Reset on window resize.
+    $scrollCorrection = 0
+
     While ($true) {
         # Reset per-iteration state. HelpPosition must be cleared each loop:
         # the shrink plan may drop the help banner this iteration even though
@@ -1400,6 +1406,16 @@ function Show-Menu {
         if ($RoomLeft -lt $TotalLineCount) {
             Write-Host "`e[2J`e[H" #Try Clearing the screen again.  Maybe this gives us enough room.
             $RoomLeft = Get-RoomLeftFromCurrentPosition
+        }
+
+        # Snapshot the viewport top before drawing content. If the viewport
+        # scrolls during rendering (content taller than expected), we detect
+        # it afterward and redraw with fewer lines.
+        $preRenderViewportTop = $Host.UI.RawUI.WindowPosition.Y
+
+        # Apply scroll correction from a previous iteration that overflowed.
+        if ($scrollCorrection -gt 0) {
+            $RoomLeft = [Math]::Max(1, $RoomLeft - $scrollCorrection)
         }
 
         # Decide which tiers of non-selectable content to drop so the menu fits.
@@ -1555,6 +1571,19 @@ function Show-Menu {
         # End synchronized output — terminal paints the entire menu as one frame.
         [Console]::Write("`e[?2026l")
 
+        # Detect if the viewport scrolled during rendering. This happens on
+        # small screens when text wrapping or summary functions produce more
+        # lines than the layout predicted. Scroll shifts all stored
+        # CurrentPosition values so the arrow and mouse point at the wrong
+        # rows. Reduce available room by the scroll amount and redraw.
+        $postRenderViewportTop = $Host.UI.RawUI.WindowPosition.Y
+        if ($postRenderViewportTop -gt $preRenderViewportTop) {
+            $scrollShift = $postRenderViewportTop - $preRenderViewportTop
+            $scrollCorrection += $scrollShift
+            Write-Log -Verbose "Show-Menu: viewport scrolled $scrollShift rows during render (total correction: $scrollCorrection); redrawing with fewer lines"
+            continue
+        }
+
         # Re-check the window size. If it changed while we were drawing this
         # frame, the layout we just painted is stale (text truncated for the
         # old width, items positioned for the old height, etc). Restart the
@@ -1563,6 +1592,7 @@ function Show-Menu {
         $postDrawSize = Get-LiveWindowSize
         if ($postDrawSize) {
             if ([int]$postDrawSize.Width -ne $drawWidth -or [int]$postDrawSize.Height -ne $drawHeight) {
+                $scrollCorrection = 0
                 Write-Log -Verbose "Show-Menu: window resized during draw ($drawWidth x $drawHeight -> $($postDrawSize.Width) x $($postDrawSize.Height)); redrawing"
                 continue
             }
