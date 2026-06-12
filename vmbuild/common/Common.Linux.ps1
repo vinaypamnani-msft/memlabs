@@ -2185,12 +2185,11 @@ function Set-LinuxVmsDcDns {
             $vmUptimeSec = [int]$vmState.Uptime.TotalSeconds
             if ($vmState.Heartbeat -in 'OkApplicationsHealthy', 'OkApplicationsUnknown') {
                 $heartbeatHealthy = $true
-                if ($vmUptimeSec -gt 600) {
-                    # sshd normally starts within 2-3 min. If the VM has been
-                    # up >10 min it's stuck (systemd hung, cloud-init deadlock,
-                    # etc.). Use a short 30s probe to confirm, then restart.
-                    Write-Log "[Linux DNS] $($vm.vmName): heartbeat=$($vmState.Heartbeat) but uptime=${vmUptimeSec}s (>10 min) -- likely stuck boot" -Warning
-                }
+                # OkApplicationsUnknown is the normal steady state for Linux
+                # VMs — Ubuntu doesn't implement the Hyper-V application
+                # heartbeat protocol, so it never reports OkApplicationsHealthy.
+                # Don't treat long uptime as "stuck boot"; just use the full
+                # probe timeout and let TCP/22 decide.
             }
             elseif ($vmState.Heartbeat) {
                 Write-Log "[Linux DNS] $($vm.vmName): heartbeat=$($vmState.Heartbeat) state=$($vmState.State) uptime=${vmUptimeSec}s -- guest not healthy, will restart" -Warning
@@ -2206,10 +2205,10 @@ function Set-LinuxVmsDcDns {
         $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
         if ($vmIpPre -and -not $needsRestart) {
             $tcpUp = $false
-            # If heartbeat is OK but VM has been up >10 min, sshd should
-            # have started long ago. Quick 30s confirmation probe, then
-            # restart. Otherwise use the full scaled timeout.
-            $effectiveProbe = if ($heartbeatHealthy -and $vmUptimeSec -gt 600) { 30 } else { $probeTimeoutSec }
+            # Use the full scaled timeout. Linux VMs always report
+            # OkApplicationsUnknown so heartbeat alone cannot distinguish
+            # "healthy but slow sshd" from "stuck boot". Let TCP/22 decide.
+            $effectiveProbe = $probeTimeoutSec
             $probeEnd = (Get-Date).AddSeconds($effectiveProbe)
             while (-not $tcpUp -and (Get-Date) -lt $probeEnd) {
                 try {
@@ -2225,12 +2224,11 @@ function Set-LinuxVmsDcDns {
                 if (-not $tcpUp) { Start-Sleep -Seconds 10 }
             }
             if (-not $tcpUp) {
-                if ($heartbeatHealthy -and $vmUptimeSec -le 600) {
-                    # Guest recently booted, OS alive (heartbeat OK) but sshd
-                    # isn't listening yet. Give it 3 more minutes -- sshd may
-                    # be waiting on cloud-init, dpkg lock, or entropy. Don't
-                    # restart a recently-booted healthy VM; that resets
-                    # boot progress.
+                if ($heartbeatHealthy) {
+                    # OS alive (heartbeat OK) but sshd isn't listening yet.
+                    # Give it 3 more minutes — sshd may be waiting on
+                    # cloud-init, dpkg lock, or entropy. Don't restart a
+                    # healthy VM; that resets boot progress.
                     Write-Log "[Linux DNS] $($vm.vmName): tcp/22 not open after ${effectiveProbe}s but heartbeat healthy (uptime ${vmUptimeSec}s) -- waiting 3 more min for sshd" -Warning
                     $extendEnd = (Get-Date).AddSeconds(180)
                     while (-not $tcpUp -and (Get-Date) -lt $extendEnd) {
