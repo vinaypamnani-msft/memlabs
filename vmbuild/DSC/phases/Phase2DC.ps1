@@ -317,18 +317,20 @@
         }
        
         # Stamp msDS-SupportedEncryptionTypes = 28 (RC4 + AES128 + AES256) on
-        # every domain user/service account created above. Without this attribute
-        # the Windows Server 2025 KDC issues RC4-only SERVICE tickets for these
-        # accounts (it deliberately won't assume AES long-term keys for accounts
-        # that lack the attribute), which makes SQL Server reject the ticket and
-        # fall back to NTLM. The KdcDefaultEncryptionTypes registry value above
-        # only fixes TGTs, not service tickets, so the attribute must be set
-        # per-account. AES long-term keys are already generated at ADUser
-        # password-set time, so stamping the attribute is sufficient here; no
-        # password reset is needed because SQL doesn't connect until later phases
-        # and no KDC has cached an RC4 view of these brand-new accounts yet.
+        # every domain user/service account created above, then reset each
+        # account's password (to the SAME credential ADUser already set) so
+        # the DC regenerates AES long-term keys with the attribute in place.
+        #
+        # Why both steps?  On Windows Server 2025 the KDC issues RC4-only
+        # SERVICE tickets for accounts without this attribute (it won't
+        # assume AES long-term keys), causing SQL to fall back to NTLM.
+        # The KdcDefaultEncryptionTypes registry only fixes TGTs.  Setting
+        # the attribute alone may not regenerate the AES long-term keys
+        # stored in supplementalCredentials — a password reset is the only
+        # documented way to guarantee the DC derives and stores them.
         $allDomainUserAccounts = @($DomainAccounts) + @($DomainAccountsUPN) | Where-Object { $_ } | Select-Object -Unique
         $cvUserAccountList = ($allDomainUserAccounts | ForEach-Object { "'$_'" }) -join ','
+        $cvEncPassB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Admincreds.GetNetworkCredential().Password))
         Script SetUserKerberosEncryptionTypes {
             DependsOn  = $adObjectDependency
             GetScript  = { return @{ Result = (Get-Date).ToString() } }
@@ -341,10 +343,14 @@
                 return `$true
             "
             SetScript  = [string]"
+                `$pass = [System.Text.Encoding]::Unicode.GetString(
+                             [Convert]::FromBase64String('$cvEncPassB64'))
+                `$secPass = ConvertTo-SecureString `$pass -AsPlainText -Force
                 `$accounts = @($cvUserAccountList)
                 foreach (`$a in `$accounts) {
                     try {
                         Set-ADUser -Identity `$a -KerberosEncryptionType AES128,AES256,RC4 -ErrorAction Stop
+                        Set-ADAccountPassword -Identity `$a -Reset -NewPassword `$secPass -ErrorAction Stop
                     }
                     catch {
                         Write-Verbose ""Failed to set Kerberos encryption types on `$a : `$(`$_.Exception.Message)""
