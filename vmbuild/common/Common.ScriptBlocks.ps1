@@ -1907,13 +1907,16 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Detect if modules need to be updated."
         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
             New-Item -Path "C:\staging\DSC" -ItemType Directory -Force | Out-Null
+            $flagPath = "C:\staging\DSC\DSC.zip.Installed"
             [PSCustomObject]@{
-                Hash        = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
-                FlagExists  = Test-Path "C:\staging\DSC\DSC.zip.Installed"
+                Hash         = (Get-FileHash -Path "C:\staging\DSC\DSC.zip" -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
+                FlagExists   = Test-Path $flagPath
+                InstalledHash = if (Test-Path $flagPath) { $c = Get-Content $flagPath -First 1 -ErrorAction SilentlyContinue; if ($c) { $c.Trim() } } else { $null }
             }
         } -DisplayName "DSC: Detect modules and ensure staging directory."
         $guestZipHash = $result.ScriptBlockOutput.Hash
         $guestFlagExists = $result.ScriptBlockOutput.FlagExists
+        $guestInstalledHash = $result.ScriptBlockOutput.InstalledHash
 
         $dscZipHash = (Get-FileHash -Path "$rootPath\DSC\DSC.zip" -Algorithm MD5).Hash
 
@@ -2062,13 +2065,44 @@ $global:VM_Config = {
                         "Failed to copy $($folder.Name) to WindowsPowerShell\Modules. Retrying once after killing WMIPRvSe.exe hosting DSC modules." | Out-File $log -Append
                         Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" } | Stop-Process -Force -ErrorAction SilentlyContinue
                         Start-Sleep -Seconds 10
-                        Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction SilentlyContinue
+                        Copy-Item $folder.FullName "C:\Program Files\WindowsPowerShell\Modules" -Recurse -Container -Force -ErrorAction Stop
                     }
                 }
 
-                # Create the zip flag
-                New-Item -Path "C:\staging\DSC\DSC.zip.Installed" -ItemType File -Force -ErrorAction SilentlyContinue
-                "Modules Installed" | Out-File $log -Append
+                # Verify installed modules match the extracted source.
+                # Compare file count + total size per module — catches silent
+                # copy failures (locked files, permission errors) that would
+                # leave stale code. Cost: ~5ms per module (directory listing).
+                $verifyFailures = @()
+                foreach ($folder in $modules) {
+                    $targetFolder = Join-Path "C:\Program Files\WindowsPowerShell\Modules" $folder.Name
+                    if (-not (Test-Path $targetFolder)) {
+                        $verifyFailures += "$($folder.Name): target folder missing"
+                        continue
+                    }
+                    $srcFiles  = Get-ChildItem -Path $folder.FullName -File -Recurse
+                    $destFiles = Get-ChildItem -Path $targetFolder -File -Recurse
+                    if ($srcFiles.Count -ne $destFiles.Count) {
+                        $verifyFailures += "$($folder.Name): file count mismatch (source=$($srcFiles.Count), installed=$($destFiles.Count))"
+                    }
+                    else {
+                        $srcTotal  = ($srcFiles | Measure-Object -Property Length -Sum).Sum
+                        $destTotal = ($destFiles | Measure-Object -Property Length -Sum).Sum
+                        if ($srcTotal -ne $destTotal) {
+                            $verifyFailures += "$($folder.Name): total size mismatch (source=$srcTotal, installed=$destTotal)"
+                        }
+                    }
+                }
+                if ($verifyFailures.Count -gt 0) {
+                    foreach ($vf in $verifyFailures) { "VERIFY FAILED: $vf" | Out-File $log -Append }
+                    throw "Module install verification failed: $($verifyFailures -join '; ')"
+                }
+
+                # Write the zip hash into the flag file so the host can verify
+                # which version is installed without re-hashing on the guest.
+                $installedHash = (Get-FileHash -Path $zipPath -Algorithm MD5).Hash
+                $installedHash | Out-File "C:\staging\DSC\DSC.zip.Installed" -Force
+                "Modules installed and verified. Hash: $installedHash" | Out-File $log -Append
             }
             catch {
                 $error_message = "[Phase $Phase]: $($currentItem.vmName): $($global:ScriptBlockName): Exception: $_ $($_.ScriptStackTrace)"
@@ -2077,7 +2111,11 @@ $global:VM_Config = {
             }
         }
 
-        if ($dscZipHash -ne $guestZipHash -or -not $guestFlagExists) {
+        # Reinstall if: zip hash changed, flag missing, or flag hash doesn't
+        # match the expected zip (catches stale installs from old empty-flag
+        # format or partial installs that wrote the wrong hash).
+        $needsInstall = ($dscZipHash -ne $guestZipHash) -or (-not $guestFlagExists) -or ($guestInstalledHash -ne $dscZipHash)
+        if ($needsInstall) {
             Write-Progress2 $Activity -Status "Expanding and installing modules" -percentcomplete 40 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Expanding and installing DSC modules inside the VM."
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ExpandAndInstall -DisplayName "DSC: Expand and Install Modules"
