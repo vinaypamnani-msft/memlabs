@@ -489,17 +489,20 @@ function Test-VmResponsive {
             return $false
         }
         
-        # Test basic ping with timeout
-        $pingTest = Test-Connection -ComputerName $VmName -Count 2 -Quiet -ErrorAction SilentlyContinue
-        if (-not $pingTest) {
-            Write-Log "VM $VmName not responding to ping" -Warning
+        # Get the VM's IP from Hyper-V directly (avoids DNS, which may point at
+        # the DC we're testing and can hang Test-Connection indefinitely).
+        $vmIp = ($vm | Get-VMNetworkAdapter | Select-Object -First 1).IPAddresses |
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+        if (-not $vmIp) {
+            Write-Log "VM $VmName has no IPv4 address from Hyper-V" -Warning
             return $false
         }
-        
-        # Test RDP port with hard timeout + retry (Test-NetConnection can hang indefinitely)
+
+        # Test RDP port with hard timeout + retry (never uses Test-Connection or
+        # Test-NetConnection — both can hang on DNS reverse lookups).
         $tcpTimeoutMs = [Math]::Max(1000, $TimeoutSeconds * 1000 / 3)
-        if (-not (Test-TcpPort -ComputerName $VmName -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
-            Write-Log "VM $VmName RDP port test failed after retries" -Warning
+        if (-not (Test-TcpPort -ComputerName $vmIp -Port 3389 -TimeoutMs $tcpTimeoutMs -Retries 3 -RetryDelayMs 1000)) {
+            Write-Log "VM $VmName ($vmIp) RDP port test failed after retries" -Warning
             return $false
         }
         
