@@ -196,6 +196,56 @@ function Move-CmOptionsToTopLevelSiteServer {
     $Config.PSObject.Properties.Remove('cmOptions')
 }
 
+function Resolve-ConfigVmReference {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [string] $VmReference,
+        [Parameter(Mandatory = $false)]
+        [object[]] $VmNames = $null,
+        [Parameter(Mandatory = $false)]
+        [string] $Prefix = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmReference)) { return $VmReference }
+
+    $normalized = $VmReference
+    $ansiPattern = [regex]'\x1b\[[0-9;?]*[A-Za-z]'
+    $normalized = $ansiPattern.Replace($normalized, '').Trim()
+
+    if ($normalized.Length -ge 2 -and $normalized.StartsWith('[') -and $normalized.EndsWith(']')) {
+        $normalized = $normalized.Substring(1, $normalized.Length - 2).Trim()
+    }
+
+    $normalized = $normalized.Trim("'")
+    $normalized = $normalized.Trim('"')
+
+    if (-not $VmNames -or @($VmNames).Count -eq 0) {
+        return $normalized
+    }
+
+    $candidateNames = @($VmNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { [string]$_ })
+    if ($candidateNames.Count -eq 0) { return $normalized }
+
+    $exactMatch = $candidateNames | Where-Object { $_ -ieq $normalized } | Select-Object -First 1
+    if ($exactMatch) { return $exactMatch }
+
+    if ($Prefix) {
+        if (-not $normalized.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $prefixedCandidate = "$Prefix$normalized"
+            $prefixedMatch = $candidateNames | Where-Object { $_ -ieq $prefixedCandidate } | Select-Object -First 1
+            if ($prefixedMatch) { return $prefixedMatch }
+        }
+        else {
+            $unprefixedCandidate = $normalized.Substring($Prefix.Length)
+            $unprefixedMatch = $candidateNames | Where-Object { $_ -ieq $unprefixedCandidate } | Select-Object -First 1
+            if ($unprefixedMatch) { return $unprefixedMatch }
+        }
+    }
+
+    return $normalized
+}
+
 function Get-UserConfiguration {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Configuration Name/File")]
@@ -319,6 +369,16 @@ function Get-UserConfiguration {
             }
         }
 
+        if ($config.pkiOptions) {
+            $knownVmNames = @($config.virtualMachines | ForEach-Object { $_.vmName })
+            if ($config.pkiOptions.IssuingCAVM) {
+                $config.pkiOptions.IssuingCAVM = Resolve-ConfigVmReference -VmReference $config.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $config.vmOptions.prefix
+            }
+            if ($config.pkiOptions.OfflineRootCAVM) {
+                $config.pkiOptions.OfflineRootCAVM = Resolve-ConfigVmReference -VmReference $config.pkiOptions.OfflineRootCAVM -VmNames $knownVmNames -Prefix $config.vmOptions.prefix
+            }
+        }
+
         if ($null -ne $config.vmOptions.domainAdminName) {
             if ($null -eq ($config.vmOptions.adminName)) {
                 $config.vmOptions | Add-Member -MemberType NoteProperty -Name "adminName" -Value $config.vmOptions.domainAdminName -force
@@ -346,6 +406,13 @@ function Get-UserConfiguration {
             catch {
                 # Non-fatal; Get-List may not be available in all contexts
             }
+        }
+
+        $normalizedIssuingCAVM = $null
+        if ($config.pkiOptions -and $config.pkiOptions.IssuingCAVM) {
+            $knownVmNames = @($config.VirtualMachines | ForEach-Object { $_.vmName })
+            $normalizedIssuingCAVM = Resolve-ConfigVmReference -VmReference $config.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $config.vmOptions.prefix
+            $config.pkiOptions.IssuingCAVM = $normalizedIssuingCAVM
         }
 
         foreach ($vm in $config.VirtualMachines) {
@@ -388,7 +455,7 @@ function Get-UserConfiguration {
             $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*"
             if ($vm.role -notin 'StandaloneRootCA', 'WorkgroupMember', 'AADClient', 'InternetClient' -and -not $isClientOS) {
                 if ($config.pkiOptions -and $config.pkiOptions.EnablePKI) {
-                    if ($config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                        if ($normalizedIssuingCAVM -eq $vm.vmName) {
                         $vm | Add-Member -MemberType NoteProperty -Name "InstallCA" -Value $true -Force
                     }
                     elseif ($null -eq $vm.InstallCA) {
@@ -402,7 +469,7 @@ function Get-UserConfiguration {
                     }
                 }
                 # Derive UseOfflineRoot from pkiOptions
-                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI -and $config.pkiOptions.IssuingCAVM -eq $vm.vmName) {
+                if ($config.pkiOptions -and $config.pkiOptions.EnablePKI -and $normalizedIssuingCAVM -eq $vm.vmName) {
                     $vm | Add-Member -MemberType NoteProperty -Name "UseOfflineRoot" -Value ([bool]$config.pkiOptions.UseOfflineRoot) -Force
                 }
                 elseif ($vm.InstallCA -and $null -eq $vm.UseOfflineRoot) {
@@ -787,6 +854,13 @@ function New-DeployConfig {
 
         # Add prefix to pkiOptions VM references
         if ($configObject.pkiOptions) {
+            $knownVmNames = @($virtualMachines | ForEach-Object { $_.vmName })
+            if ($configObject.pkiOptions.IssuingCAVM) {
+                $configObject.pkiOptions.IssuingCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $configObject.vmOptions.prefix
+            }
+            if ($configObject.pkiOptions.OfflineRootCAVM) {
+                $configObject.pkiOptions.OfflineRootCAVM = Resolve-ConfigVmReference -VmReference $configObject.pkiOptions.OfflineRootCAVM -VmNames $knownVmNames -Prefix $configObject.vmOptions.prefix
+            }
             if ($configObject.pkiOptions.IssuingCAVM -and -not $configObject.pkiOptions.IssuingCAVM.StartsWith($configObject.vmOptions.prefix)) {
                 $configObject.pkiOptions.IssuingCAVM = $configObject.vmOptions.prefix + $configObject.pkiOptions.IssuingCAVM
             }

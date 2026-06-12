@@ -63,6 +63,58 @@ function Convert-ValidationMessages {
     }
 }
 
+if (-not (Get-Command Resolve-ConfigVmReference -ErrorAction SilentlyContinue)) {
+    function Resolve-ConfigVmReference {
+        [CmdletBinding()]
+        param (
+            [Parameter(Mandatory = $false)]
+            [string] $VmReference,
+            [Parameter(Mandatory = $false)]
+            [object[]] $VmNames = $null,
+            [Parameter(Mandatory = $false)]
+            [string] $Prefix = $null
+        )
+
+        if ([string]::IsNullOrWhiteSpace($VmReference)) { return $VmReference }
+
+        $normalized = $VmReference
+        $ansiPattern = [regex]'\x1b\[[0-9;?]*[A-Za-z]'
+        $normalized = $ansiPattern.Replace($normalized, '').Trim()
+
+        if ($normalized.Length -ge 2 -and $normalized.StartsWith('[') -and $normalized.EndsWith(']')) {
+            $normalized = $normalized.Substring(1, $normalized.Length - 2).Trim()
+        }
+
+        $normalized = $normalized.Trim("'")
+        $normalized = $normalized.Trim('"')
+
+        if (-not $VmNames -or @($VmNames).Count -eq 0) {
+            return $normalized
+        }
+
+        $candidateNames = @($VmNames | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { [string]$_ })
+        if ($candidateNames.Count -eq 0) { return $normalized }
+
+        $exactMatch = $candidateNames | Where-Object { $_ -ieq $normalized } | Select-Object -First 1
+        if ($exactMatch) { return $exactMatch }
+
+        if ($Prefix) {
+            if (-not $normalized.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $prefixedCandidate = "$Prefix$normalized"
+                $prefixedMatch = $candidateNames | Where-Object { $_ -ieq $prefixedCandidate } | Select-Object -First 1
+                if ($prefixedMatch) { return $prefixedMatch }
+            }
+            else {
+                $unprefixedCandidate = $normalized.Substring($Prefix.Length)
+                $unprefixedMatch = $candidateNames | Where-Object { $_ -ieq $unprefixedCandidate } | Select-Object -First 1
+                if ($unprefixedMatch) { return $unprefixedMatch }
+            }
+        }
+
+        return $normalized
+    }
+}
+
 function Test-ValidVmOptions {
     param (
         [object] $ConfigObject,
@@ -206,6 +258,56 @@ function Test-ValidVmOptions {
     }
 }
 
+function Resolve-DomainVmReference {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigObject,
+        [Parameter(Mandatory = $false)]
+        [string] $VmReference
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmReference)) { return $null }
+
+    $knownVmNames = @($ConfigObject.virtualMachines | ForEach-Object { $_.vmName })
+    $resolved = Resolve-ConfigVmReference -VmReference $VmReference -VmNames $knownVmNames -Prefix $ConfigObject.vmOptions.prefix
+
+    $vmInConfig = $ConfigObject.virtualMachines | Where-Object { $_.vmName -ieq $resolved } | Select-Object -First 1
+    if ($vmInConfig) {
+        return [PSCustomObject]@{
+            Exists       = $true
+            ResolvedName = $vmInConfig.vmName
+            Vm           = $vmInConfig
+            InConfig     = $true
+        }
+    }
+
+    $existingVm = $null
+    if ($ConfigObject.vmOptions -and $ConfigObject.vmOptions.domainName) {
+        try {
+            $existingDomainVms = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName)
+            if ($existingDomainVms.Count -gt 0) {
+                $existingNames = @($existingDomainVms | ForEach-Object { $_.vmName })
+                $resolvedExisting = Resolve-ConfigVmReference -VmReference $resolved -VmNames $existingNames -Prefix $ConfigObject.vmOptions.prefix
+                $existingVm = $existingDomainVms | Where-Object { $_.vmName -ieq $resolvedExisting } | Select-Object -First 1
+                if ($existingVm) {
+                    $resolved = $existingVm.vmName
+                }
+            }
+        }
+        catch {
+            $existingVm = $null
+        }
+    }
+
+    return [PSCustomObject]@{
+        Exists       = [bool]$existingVm
+        ResolvedName = $resolved
+        Vm           = $existingVm
+        InConfig     = $false
+    }
+}
+
 function Test-ValidCmOptions {
     param (
         [object] $ConfigObject,
@@ -280,10 +382,13 @@ function Test-ValidCmOptions {
             $ConfigObject.pkiOptions.EnablePKI = $true
         }
         if ($ConfigObject.pkiOptions.EnablePKI) {
-            $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+            $caRef = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.IssuingCAVM
+            $caVM = if ($caRef) { $caRef.ResolvedName } else { $null }
+            if ($caVM -and $caVM -ne $ConfigObject.pkiOptions.IssuingCAVM) {
+                $ConfigObject.pkiOptions.IssuingCAVM = $caVM
+            }
             if ($caVM) {
-                $caVMExists = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
-                if (-not $caVMExists) {
+                if (-not $caRef.Exists) {
                     Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
                 }
             }
@@ -293,10 +398,13 @@ function Test-ValidCmOptions {
     # Validate pkiOptions
     if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
         # Validate IssuingCAVM references a real VM
-        $caVM = $ConfigObject.pkiOptions.IssuingCAVM
+        $caRef = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.IssuingCAVM
+        $caVM = if ($caRef) { $caRef.ResolvedName } else { $null }
+        if ($caVM -and $caVM -ne $ConfigObject.pkiOptions.IssuingCAVM) {
+            $ConfigObject.pkiOptions.IssuingCAVM = $caVM
+        }
         if ($caVM) {
-            $caVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $caVM }
-            if (-not $caVMObj) {
+            if (-not $caRef.Exists) {
                 Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
             }
         }
@@ -372,12 +480,16 @@ function Test-ValidCmOptions {
         }
     }
     if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
-        $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -eq $ConfigObject.pkiOptions.OfflineRootCAVM }
-        if (-not $rootVMObj) {
-            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+        $offlineRootRefResult = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.OfflineRootCAVM
+        $offlineRootRef = if ($offlineRootRefResult) { $offlineRootRefResult.ResolvedName } else { $null }
+        if ($offlineRootRef -and $offlineRootRef -ne $ConfigObject.pkiOptions.OfflineRootCAVM) {
+            $ConfigObject.pkiOptions.OfflineRootCAVM = $offlineRootRef
         }
-        elseif ($rootVMObj.role -ne 'StandaloneRootCA') {
-            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$($ConfigObject.pkiOptions.OfflineRootCAVM)] which does not have the StandaloneRootCA role." -ReturnObject $ReturnObject -Failure
+        if (-not $offlineRootRefResult.Exists) {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$offlineRootRef] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
+        }
+        elseif ($offlineRootRefResult.Vm -and $offlineRootRefResult.Vm.role -ne 'StandaloneRootCA') {
+            Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$offlineRootRef] which does not have the StandaloneRootCA role." -ReturnObject $ReturnObject -Failure
         }
     }
 
