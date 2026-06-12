@@ -1104,8 +1104,17 @@ function Restore-DynamicMemory {
             }
 
             if ($vm.DynamicMemoryEnabled) {
+                # On a running VM, Hyper-V only allows max memory to be
+                # increased, never decreased. Clamp to at least the current
+                # value to avoid "Invalid maximum memory amount" errors on
+                # legacy/existing VMs whose previous config was higher.
+                $effectiveMax = $maxBytes
+                if ($vm.State -eq 'Running' -and $vm.MemoryMaximum -gt $maxBytes) {
+                    $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Keeping current max memory $($vm.MemoryMaximum) (config wants $maxBytes but VM is running)" })
+                    $effectiveMax = $vm.MemoryMaximum
+                }
                 $messages.Add(@{ Level = 'LogOnly'; Text = "[Phase 11]   $vmName`: Lowering dynamic memory min to $($vmConfig.dynamicMinRam) / $($vmConfig.memory)" })
-                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $maxBytes -StartupBytes $maxBytes -Priority $priority -Buffer $buffer -ErrorAction Stop
+                $vm | Set-VMMemory -MinimumBytes $minBytes -MaximumBytes $effectiveMax -StartupBytes $effectiveMax -Priority $priority -Buffer $buffer -ErrorAction Stop
             }
             else {
                 $wasRunning = $vm.State -eq 'Running'
