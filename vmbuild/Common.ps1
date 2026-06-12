@@ -2111,15 +2111,43 @@ function Test-NetworkSwitch {
             $exists = Get-VMSwitch2 -NetworkName $NetworkName
             if ($exists) {
                 if ([String]::IsNullOrWhiteSpace($exists.Notes)) {
-                    Write-Log "HyperV Network switch for '$NetworkName' already exists but has no notes. Please verify this network is not in use by another domain." -LogOnly
-                    Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
-                    $doNotRecreate = $true
+                    if ($doNotRecreate -and $notes -ne "Unknown network") {
+                        try {
+                            Set-VMSwitch -VMSwitch $exists -Notes $notes -ErrorAction Stop | Out-Null
+                            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+                            Write-Log "Updated notes on shared HyperV switch '$NetworkName' to '$notes'." -LogOnly
+                        }
+                        catch {
+                            Write-Log "Failed to update notes on shared HyperV switch '$NetworkName'." -LogOnly
+                            Write-Log "$($_.Exception.Message)" -LogOnly
+                        }
+                    }
+
+                    if ([String]::IsNullOrWhiteSpace($exists.Notes)) {
+                        Write-Log "HyperV Network switch for '$NetworkName' already exists but has no notes. Please verify this network is not in use by another domain." -LogOnly
+                        Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
+                        $doNotRecreate = $true
+                    }
                 }
 
                 if ($exists.Notes -eq "Unknown network") {
-                    Write-Log "HyperV Network switch for '$NetworkName' already exists but is Unknown. Please verify this network is not in use by another domain." -LogOnly
-                    Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
-                    $doNotRecreate = $true
+                    if ($doNotRecreate -and $notes -ne "Unknown network") {
+                        try {
+                            Set-VMSwitch -VMSwitch $exists -Notes $notes -ErrorAction Stop | Out-Null
+                            $exists = Get-VMSwitch2 -NetworkName $NetworkName
+                            Write-Log "Updated notes on shared HyperV switch '$NetworkName' from 'Unknown network' to '$notes'." -LogOnly
+                        }
+                        catch {
+                            Write-Log "Failed to update notes on shared HyperV switch '$NetworkName'." -LogOnly
+                            Write-Log "$($_.Exception.Message)" -LogOnly
+                        }
+                    }
+
+                    if ($exists.Notes -eq "Unknown network") {
+                        Write-Log "HyperV Network switch for '$NetworkName' already exists but is Unknown. Please verify this network is not in use by another domain." -LogOnly
+                        Write-Log "Current Notes are: $($exists.Notes) but we expected $notes"  -LogOnly
+                        $doNotRecreate = $true
+                    }
                 }
 
                 if ($exists.Notes -eq $notes -or $doNotRecreate) {

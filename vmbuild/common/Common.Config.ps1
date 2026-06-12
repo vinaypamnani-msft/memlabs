@@ -711,7 +711,10 @@ function Get-FilesForConfiguration {
         $ISOPath = Join-Path $Common.AzureFilesPath "ISO\OS"
         $osFiles = Get-ChildItem -Path $ISOPath -Filter "*.iso" -Recurse 
         if ($osFiles) {
-            Write-Log "Deleting old OS ISO files that are not in the filelist.json: $($osFiles | ForEach-Object { $_.FullName })" -LogOnly
+            $staleOsFiles = @($osFiles | Where-Object { $osISOFileNames -notcontains $_.Name })
+            if ($staleOsFiles.Count -gt 0) {
+                Write-Log "Deleting old OS ISO files that are not in the filelist.json: $($staleOsFiles | ForEach-Object { $_.FullName })" -LogOnly
+            }
             foreach ($file in $osFiles) {
                 #Check if the file is not in the list of osISOFileNames
                 if ($osISOFileNames -contains $file.Name) {
