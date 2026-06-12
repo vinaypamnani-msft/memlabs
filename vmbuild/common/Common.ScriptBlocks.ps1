@@ -3212,16 +3212,36 @@ $global:VM_Config = {
                                 $lastStaleWarningTime = [DateTime]::MinValue
                             }
                             else {
-                                # LCM is Idle/unreachable — VM may be genuinely stuck
-                                $staleRestartCount++
+                                # LCM is Idle/unreachable — check if ScriptWorkflow task is still running
+                                # Phase 8/9 use a scheduled task that keeps running after DSC completes;
+                                # restarting the VM would kill it mid-work (e.g. during WSUS sync waits).
                                 $lcmState = if ($lcmCheck.ScriptBlockFailed) { "unreachable" } else { $lcmCheck.ScriptBlockOutput }
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). LCM state: $lcmState. Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
-                                Stop-VM2 -name $currentItem.vmName
-                                Start-Sleep -Seconds 10
-                                Start-VM2 -Name $currentItem.vmName
-                                Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
-                                $lastStatusChangeTime = [DateTime]::UtcNow
-                                $lastStaleWarningTime = [DateTime]::MinValue
+                                $swTaskRunning = $false
+                                if (-not $lcmCheck.ScriptBlockFailed) {
+                                    $swCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -AsJob -TimeoutSeconds 30 -ScriptBlock {
+                                        $t = Get-ScheduledTask -TaskName 'ScriptWorkflow' -ErrorAction SilentlyContinue
+                                        if ($t -and $t.State -eq 'Running') { 'Running' } else { $null }
+                                    } -SuppressLog
+                                    if (-not $swCheck.ScriptBlockFailed -and $swCheck.ScriptBlockOutput -eq 'Running') {
+                                        $swTaskRunning = $true
+                                    }
+                                }
+                                if ($swTaskRunning) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())') but ScriptWorkflow task is still running. Not restarting." -Warning
+                                    $lastStatusChangeTime = [DateTime]::UtcNow
+                                    $lastStaleWarningTime = [DateTime]::MinValue
+                                }
+                                else {
+                                    # VM is genuinely stuck
+                                    $staleRestartCount++
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())'). LCM state: $lcmState. Forcefully restarting VM (attempt $staleRestartCount/$staleRestartMax)." -Warning -OutputStream
+                                    Stop-VM2 -name $currentItem.vmName
+                                    Start-Sleep -Seconds 10
+                                    Start-VM2 -Name $currentItem.vmName
+                                    Wait-ForHeartbeat -VmName $currentItem.vmName -Stopwatch $stopWatch -Timespan $timespan | Out-Null
+                                    $lastStatusChangeTime = [DateTime]::UtcNow
+                                    $lastStaleWarningTime = [DateTime]::MinValue
+                                }
                             }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {

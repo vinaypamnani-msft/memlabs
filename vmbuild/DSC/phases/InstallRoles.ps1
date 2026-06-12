@@ -313,8 +313,36 @@ if ($configureSUP) {
                     Write-DscStatus "Running Set-CMSoftwareUpdatePointComponent."
                     #Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddProduct $productsToAdd -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
                     Set-CMSoftwareUpdatePointComponent -SiteCode $topSite.SiteCode -AddUpdateClassification $classificationsToAdd -Schedule $schedule -EnableCallWsusCleanupWizard $true -EnableThirdPartyUpdates $true -EnableManualCertManagement $false
-                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting 2 mins for WCM to configure WSUS."
-                    Start-Sleep -Seconds 120  # Sleep for 2 mins to let WCM config WSUS
+                    Write-DscStatus "Set-CMSoftwareUpdatePointComponent successful. Waiting for WCM to configure WSUS..."
+
+                    # Poll WCM registry state instead of blind sleep. WCM stores its
+                    # configuration result at this key (0=NONE,1=PENDING,2=SUCCESS,3=FAILED,4=SUBSCRIPTION_PENDING).
+                    $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                    $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                    $wcmReady = $false
+                    for ($wcmWait = 1; $wcmWait -le 30; $wcmWait++) {
+                        Start-Sleep -Seconds 30
+                        try {
+                            $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                        } catch { $wcmRegVal = -1 }
+                        $wcmName = if ($wcmStateNames.ContainsKey($wcmRegVal)) { $wcmStateNames[$wcmRegVal] } else { "UNKNOWN($wcmRegVal)" }
+                        if ($wcmRegVal -eq 2) {
+                            Write-DscStatus "WCM reached SUCCESS state (attempt $wcmWait)"
+                            $wcmReady = $true
+                            break
+                        }
+                        if ($wcmRegVal -eq 3) {
+                            Write-DscStatus "WCM state is FAILED (attempt $wcmWait). Restarting WsusService to trigger reconfiguration."
+                            Restart-Service -Name WsusService -Force -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 30
+                        }
+                        else {
+                            Write-DscStatus "WCM state: $wcmName (attempt $wcmWait of 30)"
+                        }
+                    }
+                    if (-not $wcmReady) {
+                        Write-DscStatus "WARNING: WCM did not reach SUCCESS after 30 attempts. Proceeding anyway."
+                    }
                 }
  
                 Sync-CMSoftwareUpdate

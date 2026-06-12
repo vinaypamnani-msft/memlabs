@@ -698,145 +698,6 @@ else {
     }
     } # end top-level client settings
 
-    # Define helper functions for SUP sync (used later)
-    function Check-SyncSucceeded {
-        param (
-            [string]$SiteCode
-        )
- 
-        $syncFinished = $syncTimeout = $syncFailed = $false
-        $i = 0
-
-        # Get sync status for this site code. Don't filter on WSUSSourceServer
-        # because hierarchy Primaries sync from the CAS WSUS (not Microsoft Update).
-        $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-
-        if (-not $($syncState.WSUSServerName)) {
-            # WCM may still be registering the SUP. Retry up to 5 times (5 min).
-            for ($w = 1; $w -le 5; $w++) {
-                Write-DscStatus "$Tag SUM Sync: WSUS server not detected yet for site $SiteCode, waiting 60s... (attempt $w of 5)"
-                Start-Sleep -Seconds 60
-                $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-                if ($syncState.WSUSServerName) { break }
-            }
-            if (-not $($syncState.WSUSServerName)) {
-                Write-DscStatus "$Tag SUM Sync not configured properly on site $SiteCode. WSUS Server not detected after 5 attempts. Exiting the sync check."
-                $syncFailed = $true
-                return $false
-            }
-        }
- 
-        do {
-            # Refresh sync state each iteration
-            $syncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-
-            if (-not $syncState.LastSyncState -or $syncState.LastSyncState -eq 6703) {
-                $i++
-
-                # Check if WCM is still configuring WSUS. Syncs will fail until
-                # WCM reaches state 2 (WSUS_CONFIG_SUCCESS), so wait instead of
-                # spamming Sync-CMSoftwareUpdate with guaranteed-to-fail requests.
-                $wcmBusy = $false
-                try {
-                    $wcmLog = Join-Path $CMInstallDir "Logs\WCM.log"
-                    if (Test-Path $wcmLog) {
-                        $wcmTail = Get-Content $wcmLog -Tail 10 -ErrorAction SilentlyContinue
-                        $wcmState = $wcmTail | Where-Object { $_ -match 'Setting new configuration state to (\d+)' } | Select-Object -Last 1
-                        if ($wcmState -and $wcmState -match 'state to (\d+)') {
-                            $stateNum = [int]$Matches[1]
-                            # 1=WSUS_CONFIG_STARTING, 3=WSUS_CONFIG_PENDING, 4=WSUS_CONFIG_SUBSCRIPTION_PENDING
-                            if ($stateNum -ne 2 -and $stateNum -ne 0) {
-                                $wcmBusy = $true
-                                $wcmStateNames = @{ 1='STARTING'; 3='PENDING'; 4='SUBSCRIPTION_PENDING'; 5='FAILED' }
-                                $wcmStateName = if ($wcmStateNames.ContainsKey($stateNum)) { $wcmStateNames[$stateNum] } else { "state $stateNum" }
-                                Write-DscStatus "$Tag SUM Sync: WCM is still configuring WSUS ($wcmStateName). Waiting 60s... (attempt $i of 30)"
-                            }
-                        }
-                    }
-                } catch {}
-
-                if ($wcmBusy) {
-                    # WCM is still working — don't call Sync-CMSoftwareUpdate, just wait
-                    if ($i -ge 30) {
-                        $syncTimeout = $true
-                        Write-DscStatus "$Tag SUM Sync: gave up after $i attempts waiting for WCM. Skipping."
-                        return $false
-                    }
-                    Start-Sleep -Seconds 60
-                }
-                else {
-                    # WCM is done (or we can't tell) — attempt a sync
-                    Write-DscStatus "$Tag SUM Sync not running on $($syncState.WSUSServerName). Triggering sync. (attempt $i of 30)"
-
-                    # Log diagnostics on first attempt and every 5th retry
-                    if ($i -eq 1 -or $i % 5 -eq 0) {
-                        try {
-                            $diag = @()
-                            $diag += "LastSyncState=$($syncState.LastSyncState) LastSyncErrorCode=$($syncState.LastSyncErrorCode) LastSyncStateTime=$($syncState.LastSyncStateTime)"
-                            $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
-                            $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
-                            $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
-                            $wsyncLog = Join-Path $CMInstallDir "Logs\wsyncmgr.log"
-                            if (Test-Path $wsyncLog) {
-                                $recent = Get-Content $wsyncLog -Tail 5 -ErrorAction SilentlyContinue
-                                foreach ($line in $recent) {
-                                    if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "wsyncmgr: $($Matches[1])" }
-                                }
-                            }
-                            Write-DscStatus "$Tag SUM Sync diag: $($diag -join ' | ')"
-                        } catch {}
-                    }
-
-                    Sync-CMSoftwareUpdate
-                    if ($i -ge 30) {
-                        $syncTimeout = $true
-                        Write-DscStatus "$Tag SUM Sync: gave up after $i attempts. Skipping."
-                        return $false
-                    }
-                    # Wait 5 min between sync attempts when WCM is done but sync keeps failing
-                    $sleepSec = if ($i -le 3) { 60 } else { 300 }
-                    Write-DscStatus "$Tag SUM Sync: waiting ${sleepSec}s before next attempt..."
-                    Start-Sleep -Seconds $sleepSec
-                }
-            } 
-            else {
-                $syncStateString = "Unknown"
-                switch ($($syncState.LastSyncState)) {
-                    "6700" { $syncStateString = "WSUS Sync Manager Error" }
-                    "6701" { $syncStateString = "WSUS Synchronization Started" }
-                    "6702" { $syncStateString = "WSUS Synchronization Done" }
-                    "6703" { $syncStateString = "WSUS Synchronization Failed" }
-                    "6704" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing WSUS Server" }
-                    "6705" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing SMS Database" }
-                    "6706" { $syncStateString = "WSUS Synchronization In Progress Phase Synchronizing Internet facing WSUS Server" }
-                    "6707" { $syncStateString = "Content of WSUS Server is out of sync with upstream server" }
-                    "6709" { $syncStateString = "SMS Legacy Update Synchronization started" }
-                    "6710" { $syncStateString = "SMS Legacy Update Synchronization done" }
-                    "6711" { $syncStateString = "SMS Legacy Update Synchronization failed" }
-                }
-                Write-DscStatus "$Tag SUM Sync: State $($syncState.LastSyncState) $syncStateString [$($syncState.WSUSServerName)] (check $i of 60)"
- 
-                if ($syncState.LastSyncState -eq 6702) {
-                    Write-DscStatus "$Tag SUM Sync finished successfully."
-                    return $true
-                }
- 
-                if (-not $syncFinished) {
-                    $i++
-                    Start-Sleep -Seconds 30
-                }
- 
-                if ($i -gt 60) {
-                    $syncTimeout = $true
-                    Write-DscStatus "$Tag SUM Sync timed out. Skipping Set-CMSoftwareUpdatePointComponent"
-                    return $false
-                }
-            }
-        }  until ($syncFinished -or $syncTimeout -or $syncFailed)
- 
-        return $false
-    }
-
     function Invoke-FullSync {
         $syncFolder = "$CMInstallDir\inboxes\wsyncmgr.box"
         $syncFile = Join-Path $syncFolder "full.syn"
@@ -884,8 +745,22 @@ else {
         if ($missingproducts.Count -gt 0) {
             $syncNeeded = $true
             Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
-            Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
-            Invoke-FullSync
+            # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
+            # will fail with 'WSUS server not configured' and block WCM from
+            # finishing its subscription setup (deadlock).
+            $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+            try {
+                $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+            } catch { $wcmEarlyState = -1 }
+            if ($wcmEarlyState -eq 2) {
+                Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
+                Invoke-FullSync
+            }
+            else {
+                $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
+                Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+            }
         }
         else {
             Write-DscStatus "$Tag SUP products and classifications are already enabled ($($productclassifications.Count) subscribed)."
@@ -1321,81 +1196,141 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     if ($Sups -and $syncNeeded) {
-        # If a sync already completed within the last 7 days, skip the blocking
-        # wait and let the new sync run in the background (wsyncmgr handles it
-        # server-side, so it keeps running after this script exits).
-        $recentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-        $syncAge = if ($recentSync.LastSyncStateTime) { (Get-Date) - $recentSync.LastSyncStateTime } else { $null }
+        # No blocking wait for the initial sync — it provides no functional benefit.
+        # Set-CMSoftwareUpdatePointComponent works with product categories already
+        # in the DB from WCM's initial setup, and ADRs are rules that evaluate on
+        # future syncs. The sync continues in the background via wsyncmgr.
 
-        if ($recentSync.LastSyncState -eq 6702 -and $syncAge -and $syncAge.TotalDays -lt 7) {
-            Write-DscStatus "$Tag WSUS last synced $([math]::Round($syncAge.TotalHours, 1)) hours ago — skipping blocking wait, sync will continue in background"
-            $syncSuccess = $true
+        Write-DscStatus "$Tag Found missing $products, enabling them now (sync continues in background)"
+        $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
+        $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+
+        # Get the language setting
+        $lang = $deployConfig.vmOptions.locale
+
+        # Define language mappings
+        switch ($lang) {
+            "en-us" { $addLang = "English" }
+            "ja-jp" { $addLang = "Japanese" }
+            "es-es" { $addLang = "Spanish" }
+            "de-de" { $addLang = "German" }
+            "fr-fr" { $addLang = "French" }
+            default { $addLang = "English" }
         }
-        else {
-            Write-DscStatus "$Tag Waiting for WSUS sync to complete (was triggered before collection creation)..."
-            $syncSuccess = Check-SyncSucceeded -SiteCode $SiteCode
+
+        Write-DscStatus "$Tag the locale language is $addLang"
+
+        $parameters = @{
+            InputObject                   = $supComp
+            SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
+            AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+            Schedule                      = $schedule
+            EnableSyncFailureAlert        = $true
+            ImmediatelyExpireSupersedence = $false
+            AddLanguageUpdateFile         = $addLang
+            AddLanguageSummaryDetails     = $addLang
+            EnableCallWsusCleanupWizard   = $true
+            WaitMonth                     = 3
+            EnableThirdPartyUpdates       = $true
+            EnableManualCertManagement    = $false
+            AddProduct                    = $products
         }
 
-        if ($syncSuccess) {
+        Set-CMSoftwareUpdatePointComponent @parameters
 
-            Write-DscStatus "$Tag Found missing $products, enabling them now"
-            $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
-            $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
+        #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
+        Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+        Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
 
-            # Get the language setting
-            $lang = $deployConfig.vmOptions.locale
-
-            # Define language mappings
-            switch ($lang) {
-                "en-us" { $addLang = "English" }
-                "ja-jp" { $addLang = "Japanese" }
-                "es-es" { $addLang = "Spanish" }
-                "de-de" { $addLang = "German" }
-                "fr-fr" { $addLang = "French" }
-                default { $addLang = "English" }
+        # Adding products triggers WCM reconfiguration (SUBSCRIPTION_PENDING).
+        # We must wait for WCM to reach SUCCESS before triggering a sync,
+        # otherwise wsyncmgr sees 'WSUS server not configured' and the sync
+        # blocks WCM from setting the subscription (deadlock).
+        $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+        $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+        $wcmReady = $false
+        for ($wcmWait = 1; $wcmWait -le 20; $wcmWait++) {
+            Start-Sleep -Seconds 30
+            try {
+                $wcmRegVal = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+            } catch { $wcmRegVal = -1 }
+            $wcmName = if ($wcmStateNames.ContainsKey($wcmRegVal)) { $wcmStateNames[$wcmRegVal] } else { "UNKNOWN($wcmRegVal)" }
+            if ($wcmRegVal -eq 2) {
+                Write-DscStatus "$Tag WCM reached SUCCESS after product update (attempt $wcmWait)"
+                $wcmReady = $true
+                break
             }
-
-            Write-DscStatus "$Tag the locale language is $addLang"
-
-            $parameters = @{
-                InputObject                   = $supComp
-                SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-                AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
-                Schedule                      = $schedule
-                EnableSyncFailureAlert        = $true
-                ImmediatelyExpireSupersedence = $false
-                AddLanguageUpdateFile         = $addLang
-                AddLanguageSummaryDetails     = $addLang
-                EnableCallWsusCleanupWizard   = $true
-                WaitMonth                     = 3
-                EnableThirdPartyUpdates       = $true
-                EnableManualCertManagement    = $false
-                AddProduct                    = $products
-            }
-
-            Set-CMSoftwareUpdatePointComponent @parameters
-
-            #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
-            Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
-            Write-DscStatus "$Tag Products enabled. Triggering final sync..."
-            Invoke-FullSync
-        }
-        else {
-            # Log sync failure details so we can diagnose without digging through wsyncmgr.log
-            $failState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-            $stateDetail = "State=$($failState.LastSyncState) ErrorCode=$($failState.LastSyncErrorCode) LastTime=$($failState.LastSyncStateTime) Server=$($failState.WSUSServerName)"
-            Write-DscStatus "$Tag Sync failed ($stateDetail) - ADRs will not be created"
-
-            # Re-check which products are still missing after the failed sync
-            $currentProducts = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-            $stillMissing = @($products | Where-Object { $_ -notin $currentProducts })
-            if ($stillMissing.Count -gt 0) {
-                Write-DscStatus "$Tag Products still missing ($($stillMissing.Count)): $($stillMissing -join ', ')"
+            if ($wcmRegVal -eq 3 -and ($wcmWait % 5 -eq 0)) {
+                Write-DscStatus "$Tag WCM state is FAILED. Restarting WsusService to trigger reconfiguration (attempt $wcmWait of 20)"
+                Restart-Service -Name WsusService -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 30
             }
             else {
-                Write-DscStatus "$Tag All products are now subscribed despite sync failure — products may have been enabled by a prior sync"
+                Write-DscStatus "$Tag WCM state: $wcmName (attempt $wcmWait of 20)"
             }
+        }
+        if ($wcmReady) {
+            # Verify products are actually subscribed before triggering sync
+            $postProducts = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
+            $stillMissing = @($products | Where-Object { $_ -notin $postProducts })
+            if ($stillMissing.Count -gt 0) {
+                Write-DscStatus "$Tag WARNING: Products still not subscribed after WCM SUCCESS ($($stillMissing.Count)): $($stillMissing -join ', ')"
+                Write-DscStatus "$Tag Subscribed products ($($postProducts.Count)): $($postProducts -join ', ')"
+            }
+            else {
+                Write-DscStatus "$Tag All $($products.Count) products confirmed subscribed"
+            }
+
+            Write-DscStatus "$Tag Triggering final sync with new products..."
             Invoke-FullSync
+
+            # Verify the sync actually started — if it didn't, log diagnostics
+            Start-Sleep -Seconds 30
+            $postSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            $syncRunning = $postSync.LastSyncState -in @(6701, 6704, 6705, 6706)
+            $syncDone = $postSync.LastSyncState -eq 6702
+            if ($syncRunning) {
+                Write-DscStatus "$Tag Sync is running (state $($postSync.LastSyncState)) — continuing, it will finish in background"
+            }
+            elseif ($syncDone -and $postSync.LastSyncStateTime -and ((Get-Date) - $postSync.LastSyncStateTime).TotalMinutes -lt 5) {
+                Write-DscStatus "$Tag Sync already completed (finished $([math]::Round(((Get-Date) - $postSync.LastSyncStateTime).TotalMinutes, 1)) min ago)"
+            }
+            else {
+                # Sync didn't start — log diagnostics
+                $diag = @()
+                $diag += "SyncState=$($postSync.LastSyncState) ErrorCode=$($postSync.LastSyncErrorCode) LastTime=$($postSync.LastSyncStateTime)"
+                $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+                $w3svc = Get-Service -Name W3SVC -ErrorAction SilentlyContinue
+                $diag += "WsusService=$($wsusSvc.Status) W3SVC=$($w3svc.Status)"
+                try {
+                    $wcmRegVal2 = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                    $diag += "WCM=$($wcmStateNames[$wcmRegVal2])"
+                } catch { $diag += "WCM=unreadable" }
+                $synFile = Join-Path $CMInstallDir 'inboxes\wsyncmgr.box\full.syn'
+                $diag += "full.syn=$(if (Test-Path $synFile) { 'present (not yet picked up)' } else { 'gone (picked up or never created)' })"
+                Write-DscStatus "$Tag WARNING: Sync did not start after full.syn drop. Diag: $($diag -join ' | ')"
+                Write-DscStatus "$Tag Dropping full.syn again as remediation..."
+                Invoke-FullSync
+            }
+        }
+        else {
+            Write-DscStatus "$Tag WCM did not reach SUCCESS after 20 attempts. Skipping sync trigger — wsyncmgr will sync on schedule."
+            # Log diagnostics so we can investigate
+            $diag = @()
+            try {
+                $wcmRegVal2 = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                $diag += "WCM=$($wcmStateNames[$wcmRegVal2])"
+            } catch { $diag += "WCM=unreadable" }
+            $wsusSvc = Get-Service -Name WsusService -ErrorAction SilentlyContinue
+            $diag += "WsusService=$($wsusSvc.Status)"
+            $wcmLog = Join-Path $CMInstallDir "Logs\WCM.log"
+            if (Test-Path $wcmLog) {
+                $wcmTail = @(Get-Content $wcmLog -Tail 3 -ErrorAction SilentlyContinue)
+                foreach ($line in $wcmTail) {
+                    if ($line -match 'LOG\[(.+?)\]LOG') { $diag += "WCM.log: $($Matches[1].Substring(0, [Math]::Min(120, $Matches[1].Length)))" }
+                }
+            }
+            Write-DscStatus "$Tag WCM timeout diag: $($diag -join ' | ')"
         }
     }
     if ($Sups) {
@@ -1498,11 +1433,10 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     $success = $true
                 }
                 catch {
-                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates"
-                    Check-SyncSucceeded -SiteCode $SiteCode
+                    Write-DscStatus "$Tag An error occurred while creating the ADR for Windows 10 and 11 Security Updates: $_"
                     $attempt++
                     Write-DscStatus "$Tag Retrying ADR creation, attempt $attempt of $maxAttempts"
-                    Start-Sleep -Seconds 10  # Pause before retrying
+                    Start-Sleep -Seconds 30
                 }
             }
         
