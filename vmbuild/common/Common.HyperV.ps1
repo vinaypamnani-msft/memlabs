@@ -482,11 +482,14 @@ function Test-VmResponsive {
             return $false
         }
         
-        # Test heartbeat integration service
+        # Test heartbeat integration service (only fail on explicit error statuses;
+        # null/empty means the service hasn't reported yet, not that the VM is down)
         $heartbeat = $vm | Get-VMIntegrationService | Where-Object { $_.Name -eq 'Heartbeat' }
-        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription -ne 'OK') {
-            Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
-            return $false
+        if ($heartbeat -and $heartbeat.Enabled -and $heartbeat.PrimaryStatusDescription) {
+            if ($heartbeat.PrimaryStatusDescription -notin 'OK', 'OkApplicationsHealthy', 'OkApplicationsUnknown') {
+                Write-Log "VM $VmName heartbeat status: $($heartbeat.PrimaryStatusDescription)" -Warning
+                return $false
+            }
         }
         
         # Get the VM's IP from Hyper-V directly (avoids DNS, which may point at
