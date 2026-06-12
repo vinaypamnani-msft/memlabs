@@ -343,7 +343,7 @@ function Test-DCFunctionality {
                     if ($vm.LastKnownIP -and $vm.LastKnownIP -ne $ip) {
                         try {
                             Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $ip })
-                            Write-Log "[Phase $Phase] $VMName: Updated LastKnownIP for $($vm.vmName): $($vm.LastKnownIP) -> $ip" -LogOnly
+                            Write-Log "[Phase $Phase] ${VMName}: Updated LastKnownIP for $($vm.vmName): $($vm.LastKnownIP) -> $ip" -LogOnly
                         } catch {}
                     }
                 }
