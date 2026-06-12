@@ -424,8 +424,17 @@ function Test-DCFunctionality {
                         $fixStatus = 'failed'
                         try {
                             $zone = $domainFqdn
+                            # Get the actual record objects — Remove by InputObject is
+                            # more reliable than by -RecordData for dynamic/secure records.
+                            $existingRecs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction SilentlyContinue
                             foreach ($staleIp in $resolvedIps) {
-                                Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -Force -ErrorAction Stop
+                                $matchRec = $existingRecs | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $staleIp }
+                                if ($matchRec) {
+                                    Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $matchRec -Force -ErrorAction Stop
+                                }
+                                else {
+                                    Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -Force -ErrorAction Stop
+                                }
                             }
                             Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ErrorAction Stop
                             # Re-verify via zone database (bypasses DNS resolver cache)
@@ -439,7 +448,9 @@ function Test-DCFunctionality {
                                 $fixStatus = 'applied'
                             }
                         }
-                        catch {}
+                        catch {
+                            $results.Details.Add("DIAG: DNS auto-fix for '$fqdn' threw: $_")
+                        }
                         if ($fixStatus -eq 'verified') {
                             $results.Details.Add("OK: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); auto-fixed -> $expectedIp")
                         }
