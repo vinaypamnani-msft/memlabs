@@ -253,6 +253,56 @@ function Test-ValidVmOptions {
     }
 }
 
+function Resolve-DomainVmReference {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object] $ConfigObject,
+        [Parameter(Mandatory = $false)]
+        [string] $VmReference
+    )
+
+    if ([string]::IsNullOrWhiteSpace($VmReference)) { return $null }
+
+    $knownVmNames = @($ConfigObject.virtualMachines | ForEach-Object { $_.vmName })
+    $resolved = Resolve-ConfigVmReference -VmReference $VmReference -VmNames $knownVmNames -Prefix $ConfigObject.vmOptions.prefix
+
+    $vmInConfig = $ConfigObject.virtualMachines | Where-Object { $_.vmName -ieq $resolved } | Select-Object -First 1
+    if ($vmInConfig) {
+        return [PSCustomObject]@{
+            Exists       = $true
+            ResolvedName = $vmInConfig.vmName
+            Vm           = $vmInConfig
+            InConfig     = $true
+        }
+    }
+
+    $existingVm = $null
+    if ($ConfigObject.vmOptions -and $ConfigObject.vmOptions.domainName) {
+        try {
+            $existingDomainVms = @(Get-List -Type VM -DomainName $ConfigObject.vmOptions.domainName)
+            if ($existingDomainVms.Count -gt 0) {
+                $existingNames = @($existingDomainVms | ForEach-Object { $_.vmName })
+                $resolvedExisting = Resolve-ConfigVmReference -VmReference $resolved -VmNames $existingNames -Prefix $ConfigObject.vmOptions.prefix
+                $existingVm = $existingDomainVms | Where-Object { $_.vmName -ieq $resolvedExisting } | Select-Object -First 1
+                if ($existingVm) {
+                    $resolved = $existingVm.vmName
+                }
+            }
+        }
+        catch {
+            $existingVm = $null
+        }
+    }
+
+    return [PSCustomObject]@{
+        Exists       = [bool]$existingVm
+        ResolvedName = $resolved
+        Vm           = $existingVm
+        InConfig     = $false
+    }
+}
+
 function Test-ValidCmOptions {
     param (
         [object] $ConfigObject,
@@ -307,7 +357,6 @@ function Test-ValidCmOptions {
     }
 
     if ($cmOptions.usePKI) {
-        $knownVmNames = @($ConfigObject.virtualMachines | ForEach-Object { $_.vmName })
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
         if (-not $ConfigObject.pkiOptions) {
             $ConfigObject | Add-Member -MemberType NoteProperty -Name "pkiOptions" -Value ([PSCustomObject]@{
@@ -321,13 +370,13 @@ function Test-ValidCmOptions {
             $ConfigObject.pkiOptions.EnablePKI = $true
         }
         if ($ConfigObject.pkiOptions.EnablePKI) {
-            $caVM = Resolve-ConfigVmReference -VmReference $ConfigObject.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $ConfigObject.vmOptions.prefix
+            $caRef = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.IssuingCAVM
+            $caVM = if ($caRef) { $caRef.ResolvedName } else { $null }
             if ($caVM -and $caVM -ne $ConfigObject.pkiOptions.IssuingCAVM) {
                 $ConfigObject.pkiOptions.IssuingCAVM = $caVM
             }
             if ($caVM) {
-                $caVMExists = $knownVmNames | Where-Object { $_ -ieq $caVM }
-                if (-not $caVMExists) {
+                if (-not $caRef.Exists) {
                     Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
                 }
             }
@@ -336,15 +385,14 @@ function Test-ValidCmOptions {
 
     # Validate pkiOptions
     if ($ConfigObject.pkiOptions -and $ConfigObject.pkiOptions.EnablePKI) {
-        $knownVmNames = @($ConfigObject.virtualMachines | ForEach-Object { $_.vmName })
         # Validate IssuingCAVM references a real VM
-        $caVM = Resolve-ConfigVmReference -VmReference $ConfigObject.pkiOptions.IssuingCAVM -VmNames $knownVmNames -Prefix $ConfigObject.vmOptions.prefix
+        $caRef = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.IssuingCAVM
+        $caVM = if ($caRef) { $caRef.ResolvedName } else { $null }
         if ($caVM -and $caVM -ne $ConfigObject.pkiOptions.IssuingCAVM) {
             $ConfigObject.pkiOptions.IssuingCAVM = $caVM
         }
         if ($caVM) {
-            $caVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -ieq $caVM }
-            if (-not $caVMObj) {
+            if (-not $caRef.Exists) {
                 Add-ValidationMessage -Message "PKI Validation: pkiOptions.IssuingCAVM references VM [$caVM] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
             }
         }
@@ -420,16 +468,15 @@ function Test-ValidCmOptions {
         }
     }
     if ($offlineRootEnabled -and $ConfigObject.pkiOptions.OfflineRootCAVM) {
-        $knownVmNames = @($ConfigObject.virtualMachines | ForEach-Object { $_.vmName })
-        $offlineRootRef = Resolve-ConfigVmReference -VmReference $ConfigObject.pkiOptions.OfflineRootCAVM -VmNames $knownVmNames -Prefix $ConfigObject.vmOptions.prefix
+        $offlineRootRefResult = Resolve-DomainVmReference -ConfigObject $ConfigObject -VmReference $ConfigObject.pkiOptions.OfflineRootCAVM
+        $offlineRootRef = if ($offlineRootRefResult) { $offlineRootRefResult.ResolvedName } else { $null }
         if ($offlineRootRef -and $offlineRootRef -ne $ConfigObject.pkiOptions.OfflineRootCAVM) {
             $ConfigObject.pkiOptions.OfflineRootCAVM = $offlineRootRef
         }
-        $rootVMObj = $ConfigObject.virtualMachines | Where-Object { $_.vmName -ieq $offlineRootRef }
-        if (-not $rootVMObj) {
+        if (-not $offlineRootRefResult.Exists) {
             Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$offlineRootRef] which does not exist in the configuration." -ReturnObject $ReturnObject -Failure
         }
-        elseif ($rootVMObj.role -ne 'StandaloneRootCA') {
+        elseif ($offlineRootRefResult.Vm -and $offlineRootRefResult.Vm.role -ne 'StandaloneRootCA') {
             Add-ValidationMessage -Message "PKI Validation: pkiOptions.OfflineRootCAVM references VM [$offlineRootRef] which does not have the StandaloneRootCA role." -ReturnObject $ReturnObject -Failure
         }
     }
