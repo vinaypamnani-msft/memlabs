@@ -2029,6 +2029,19 @@ $global:VM_Config = {
                 "Installing modules" | Out-File $log -Append
                 $modules = Get-ChildItem -Path $extractPath -Directory
 
+                # Kill WmiPrvSE hosting DSC modules up front so Remove-Item can
+                # delete the old module files. On existing VMs that already ran
+                # DSC, WmiPrvSE holds a lock on the .psm1 and Remove-Item with
+                # SilentlyContinue silently fails, leaving stale module code.
+                $wmiprvseKilled = $false
+                $dscHosts = Get-Process wmiprvse* -ErrorAction SilentlyContinue | Where-Object { $_.modules.ModuleName -like "*DSC*" }
+                if ($dscHosts) {
+                    "Killing $($dscHosts.Count) WmiPrvSE process(es) holding DSC modules before module install." | Out-File $log -Append
+                    $dscHosts | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    $wmiprvseKilled = $true
+                }
+
                 foreach ($folder in $modules) {
                     try {
                         $targetFolder = Join-Path "C:\Program Files\WindowsPowerShell\Modules" $folder.Name
