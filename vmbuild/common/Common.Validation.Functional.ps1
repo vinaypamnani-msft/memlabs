@@ -1449,9 +1449,7 @@ WHERE drs.is_local = 1
                 # Use FQDN for the remote connection — short hostnames can
                 # prevent SqlClient from constructing the correct Kerberos
                 # SPN, causing silent NTLM fallback.
-                $dnsSuffix = (Get-DnsClient | Where-Object { $_.ConnectionSpecificSuffix } | Select-Object -First 1).ConnectionSpecificSuffix
-                if (-not $dnsSuffix) { $dnsSuffix = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName }
-                $remoteNodeFQDN = if ($dnsSuffix) { "$otherNode.$dnsSuffix" } else { $otherNode }
+                try { $remoteNodeFQDN = ([System.Net.Dns]::GetHostEntry($otherNode)).HostName } catch { $remoteNodeFQDN = $otherNode }
                 $remoteConnStr = $remoteNodeFQDN
                 if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
                     $remoteConnStr = "$remoteNodeFQDN\$sqlInstName"
