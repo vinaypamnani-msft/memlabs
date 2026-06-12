@@ -252,26 +252,55 @@
 
                 # Add roles explicitly, for re-runs to make sure new accounts are added as sysadmin
                 $spnDependency = @($nextDepend)
-                $i = 0
 
                 WriteStatus SetSQLSPN {
                     DependsOn = $nextDepend
                     Status    = "Updating SQL SPNs ($($SPNs -join ",")) for $($ThisVM.SqlServiceAccount)"
                 }
 
-                foreach ($spn in $SPNs ) {
-                    $i++
-
-                    ADServicePrincipalName "spn$i" {
-                        Ensure               = 'Present'
-                        ServicePrincipalName = $spn
-                        Account              = $ThisVM.SqlServiceAccount
-                        DependsOn            = $nextDepend
-                        PsDscRunAsCredential = $Admincreds
-                    }
-
-                    $spnDependency += "[ADServicePrincipalName]spn$i"
+                # Register SPNs via a single Script resource that targets the
+                # PDC explicitly.  When two SQLAO nodes run Phase 4 in parallel,
+                # each writes SPNs to the same AD account (e.g. FryerSvc).  If
+                # they talk to different DCs, the concurrent writes to the
+                # multi-valued servicePrincipalName attribute cause a replication
+                # conflict and last-writer-wins discards one node's SPNs.
+                # Targeting the PDC serialises all writes through one DC.
+                $cvSPNList    = ($SPNs | ForEach-Object { "'$_'" }) -join ','
+                $cvSvcAccount = $ThisVM.SqlServiceAccount
+                $cvDCName     = $deployConfig.parameters.DCName
+                Script SetSQLSPNs {
+                    DependsOn            = '[WriteStatus]SetSQLSPN'
+                    PsDscRunAsCredential = $Admincreds
+                    GetScript  = { return @{ Result = (Get-Date).ToString() } }
+                    TestScript = [string]"
+                        `$spns    = @($cvSPNList)
+                        `$account = '$cvSvcAccount'
+                        `$dc      = '$cvDCName'
+                        `$user = Get-ADUser -Identity `$account -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                        if (-not `$user) { return `$false }
+                        foreach (`$s in `$spns) {
+                            if (`$user.servicePrincipalName -notcontains `$s) { return `$false }
+                        }
+                        return `$true
+                    "
+                    SetScript  = [string]"
+                        `$spns    = @($cvSPNList)
+                        `$account = '$cvSvcAccount'
+                        `$dc      = '$cvDCName'
+                        foreach (`$s in `$spns) {
+                            # Remove from any other account that holds this SPN
+                            `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                            if (`$holder) {
+                                foreach (`$h in `$holder) {
+                                    Set-ADObject -Identity `$h -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction SilentlyContinue
+                                }
+                            }
+                            # Add to the service account
+                            Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                        }
+                    "
                 }
+                $spnDependency += '[Script]SetSQLSPNs'
 
                 # Grant the SQL service account "Write servicePrincipalName" on
                 # its own AD object. Without this, SQL Server's startup SPN
