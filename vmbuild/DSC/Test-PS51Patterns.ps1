@@ -3,7 +3,7 @@
 # Called from .git/hooks/pre-commit for files that run inside VMs.
 
 $Files = git diff --cached --name-only --diff-filter=ACM |
-    Where-Object { $_ -match '(vmbuild/DSC/|Common\.ScriptBlocks\.ps1|TemplateHelpDSC)' }
+    Where-Object { $_ -match '(vmbuild/DSC/|vmbuild/common/|Common\.ScriptBlocks\.ps1|TemplateHelpDSC)' }
 
 if (-not $Files) { exit 0 }
 
