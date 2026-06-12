@@ -699,6 +699,15 @@ else {
     } # end top-level client settings
 
     function Invoke-FullSync {
+        # Skip if a sync is already running — dropping full.syn during an active
+        # sync is harmless but pointless, and it can confuse post-sync verification.
+        $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
+        if ($currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+            $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
+            $stateName = $syncStateNames[$currentSync.LastSyncState]
+            Write-DscStatus "$Tag Sync already in progress ($stateName) — skipping full.syn drop"
+            return
+        }
         $syncFolder = "$CMInstallDir\inboxes\wsyncmgr.box"
         $syncFile = Join-Path $syncFolder "full.syn"
         if (Test-Path $syncFolder) {
@@ -1196,12 +1205,67 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     if ($Sups -and $syncNeeded) {
-        # No blocking wait for the initial sync — it provides no functional benefit.
-        # Set-CMSoftwareUpdatePointComponent works with product categories already
-        # in the DB from WCM's initial setup, and ADRs are rules that evaluate on
-        # future syncs. The sync continues in the background via wsyncmgr.
+        # Two syncs are needed for WSUS to be fully operational:
+        #   Sync 1: Pulls in the product catalog so products can be subscribed
+        #   Sync 2: After subscribing to products, downloads update metadata
+        # InstallRoles already ran sync 1 and waited for it, plus we may have
+        # fired an early background sync above. Verify sync 1 completed before
+        # adding products — if not, wait for it (up to ~10 min).
+        $sync1Done = $false
+        $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+        if ($syncStatus.LastSyncState -eq 6702) {
+            Write-DscStatus "$Tag Sync 1 already completed (last: $($syncStatus.LastSyncStateTime)) — proceeding to add products"
+            $sync1Done = $true
+        }
+        elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+            # Sync is running — wait for it to finish
+            Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState)) — waiting for completion before adding products..."
+            for ($s1 = 1; $s1 -le 40; $s1++) {
+                Start-Sleep -Seconds 30
+                $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                if ($syncStatus.LastSyncState -eq 6702) {
+                    Write-DscStatus "$Tag Sync 1 completed (attempt $s1)"
+                    $sync1Done = $true
+                    break
+                }
+                elseif ($syncStatus.LastSyncState -eq 6703) {
+                    Write-DscStatus "$Tag Sync 1 failed (attempt $s1). Triggering retry..."
+                    Invoke-FullSync
+                }
+                else {
+                    Write-DscStatus "$Tag Sync 1 still running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                }
+            }
+        }
+        else {
+            # No sync has run or last sync failed — trigger one and wait
+            Write-DscStatus "$Tag No completed sync found (state=$($syncStatus.LastSyncState)). Triggering sync 1..."
+            Invoke-FullSync
+            for ($s1 = 1; $s1 -le 40; $s1++) {
+                Start-Sleep -Seconds 30
+                $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                if ($syncStatus.LastSyncState -eq 6702) {
+                    Write-DscStatus "$Tag Sync 1 completed (attempt $s1)"
+                    $sync1Done = $true
+                    break
+                }
+                elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                    Write-DscStatus "$Tag Sync 1 running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                }
+                elseif ($syncStatus.LastSyncState -eq 6703 -and ($s1 % 5 -eq 0)) {
+                    Write-DscStatus "$Tag Sync 1 failed. Retrying... (attempt $s1 of 40)"
+                    Invoke-FullSync
+                }
+                else {
+                    Write-DscStatus "$Tag Sync 1 state: $($syncStatus.LastSyncState) (attempt $s1 of 40)"
+                }
+            }
+        }
+        if (-not $sync1Done) {
+            Write-DscStatus "$Tag WARNING: Sync 1 did not complete after 40 attempts. Adding products anyway — sync 2 may fail if catalog is incomplete."
+        }
 
-        Write-DscStatus "$Tag Found missing $products, enabling them now (sync continues in background)"
+        Write-DscStatus "$Tag Enabling missing products: $($products -join ', ')"
         $supComp = Get-CMSoftwareUpdatePointComponent -SiteCode $SiteCode
         $schedule = New-CMSchedule -RecurCount 1 -RecurInterval Days -Start "2024/1/7 12:00:00"
 
@@ -1281,11 +1345,11 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                 Write-DscStatus "$Tag All $($products.Count) products confirmed subscribed"
             }
 
-            Write-DscStatus "$Tag Triggering final sync with new products..."
+            Write-DscStatus "$Tag Requesting sync with new products..."
             Invoke-FullSync
 
-            # Verify the sync actually started — if it didn't, log diagnostics
-            Start-Sleep -Seconds 30
+            # Verify the sync is running or completed — if not, log diagnostics
+            Start-Sleep -Seconds 15
             $postSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
             $syncRunning = $postSync.LastSyncState -in @(6701, 6704, 6705, 6706)
             $syncDone = $postSync.LastSyncState -eq 6702
