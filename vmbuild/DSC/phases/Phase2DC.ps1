@@ -211,6 +211,28 @@
             DependsOn = '[ADDomain]FirstDS'
         }
 
+        # Reduce intra-site replication notification delay from 15s to 0s.
+        # In a lab environment this makes AD changes replicate to partner DCs
+        # near-instantly, avoiding races where parallel DSC nodes read stale
+        # data from different DCs.
+        Registry ReplNotifyPauseAfterModify {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause after modify (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = '[ADDomain]FirstDS'
+        }
+
+        Registry ReplNotifyPauseBetweenDSAs {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause between DSAs (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = '[ADDomain]FirstDS'
+        }
+
         $PageFileSize = ($thisVM.memory) / 2MB
         SetCustomPagingFile PagingSettings {
             DependsOn   = "[ADDomain]FirstDS"

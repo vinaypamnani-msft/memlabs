@@ -335,6 +335,25 @@
             DependsOn = $nextDepend
         }
 
+        # Reduce intra-site replication notification delay from 15s to 0s.
+        Registry ReplNotifyPauseAfterModify {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause after modify (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = $nextDepend
+        }
+
+        Registry ReplNotifyPauseBetweenDSAs {
+            Ensure    = 'Present'
+            Key       = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+            ValueName = 'Replicator notify pause between DSAs (secs)'
+            ValueType = 'Dword'
+            ValueData = '0'
+            DependsOn = $nextDepend
+        }
+
         # Now that DNS server role is installed (InstallDns=$true above),
         # point DNS at self first for the local AD-integrated zones, with
         # PDC as fallback for records not yet replicated.
