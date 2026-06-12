@@ -2844,6 +2844,7 @@ $global:VM_Config = {
         $dscStatusPolls = 0
         [int]$failCount = 0
         $dscRecoveryAttempted = $false
+        $dcReadySince = $null  # track when DC became reachable for non-DC nodes
         try {
             do {
 
@@ -2853,12 +2854,35 @@ $global:VM_Config = {
                 # node but nothing arrived, compile and start DSC locally.
                 # This handles transient WinRM/DNS failures during the DC's
                 # multi-node Start-DscConfiguration push.
-                # Base timeout: 3 min.  Add 20s per VM beyond 10 to give
-                # the DC time to push to large labs sequentially.
+                # Base timeout: 3 min after the DC is confirmed reachable.
+                # Add 20s per VM beyond 10 to give the DC time to push to
+                # large labs sequentially.  If the DC is still rebooting
+                # (no heartbeat), defer the timer until it comes back.
                 $nodeCount = @($ConfigurationData.AllNodes | Where-Object { $_.NodeName -ne '*' }).Count
                 $recoveryMinutes = 3 + [Math]::Max(0, ($nodeCount - 10) * 20 / 60)
-                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted -and $stopWatch.Elapsed.TotalMinutes -gt $recoveryMinutes) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
+                if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted) {
+                    # Find DC readiness: don't start the recovery clock until
+                    # the DC VM has a heartbeat (it may be rebooting).
+                    if (-not $dcReadySince) {
+                        $dcVmObj = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
+                        if ($dcVmObj) {
+                            $dcHb = $null
+                            try { $dcHb = (Get-VM -Name $dcVmObj.vmName -ErrorAction SilentlyContinue).Heartbeat } catch {}
+                            if ($dcHb -and $dcHb.ToString() -match 'Ok') {
+                                $dcReadySince = [DateTime]::UtcNow
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DC ($($dcVmObj.vmName)) heartbeat OK, recovery timer starts now." -LogOnly
+                            } elseif ($stopWatch.Elapsed.TotalMinutes -gt 1 -and ($dscStatusPolls % 20) -eq 0) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): Waiting for DC ($($dcVmObj.vmName)) heartbeat before recovery timer (elapsed $([Math]::Round($stopWatch.Elapsed.TotalMinutes, 1)) min, heartbeat=$dcHb)." -LogOnly
+                            }
+                        } else {
+                            # No DC in config (shouldn't happen) — fall back to original timer
+                            $dcReadySince = [DateTime]::UtcNow
+                        }
+                    }
+
+                    $minutesSinceDcReady = if ($dcReadySince) { ([DateTime]::UtcNow - $dcReadySince).TotalMinutes } else { 0 }
+                    if ($dcReadySince -and $minutesSinceDcReady -gt $recoveryMinutes) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): No DSC status after $([Math]::Round($recoveryMinutes, 1)) min ($nodeCount nodes) since DC ready -- DC may have failed to push config. Attempting local compile+start." -Warning -OutputStream
                     $DSC_RecoverLocal = {
                         param($DscFolder)
                         $log = "C:\staging\DSC\DSC_Init.log"
@@ -2944,7 +2968,8 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC local recovery: $recoveryOutput" -Warning -OutputStream
                     }
                     $dscRecoveryAttempted = $true
-                }
+                    } # if dcReadySince and minutesSinceDcReady > recoveryMinutes
+                } # if skipStartDsc and noStatus
 
                 if ($dscStatusPolls -ge 10) {
                     $failure = $false
