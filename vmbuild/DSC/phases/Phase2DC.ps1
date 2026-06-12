@@ -316,6 +316,43 @@
            
         }
        
+        # Stamp msDS-SupportedEncryptionTypes = 28 (RC4 + AES128 + AES256) on
+        # every domain user/service account created above. Without this attribute
+        # the Windows Server 2025 KDC issues RC4-only SERVICE tickets for these
+        # accounts (it deliberately won't assume AES long-term keys for accounts
+        # that lack the attribute), which makes SQL Server reject the ticket and
+        # fall back to NTLM. The KdcDefaultEncryptionTypes registry value above
+        # only fixes TGTs, not service tickets, so the attribute must be set
+        # per-account. AES long-term keys are already generated at ADUser
+        # password-set time, so stamping the attribute is sufficient here; no
+        # password reset is needed because SQL doesn't connect until later phases
+        # and no KDC has cached an RC4 view of these brand-new accounts yet.
+        $allDomainUserAccounts = @($DomainAccounts) + @($DomainAccountsUPN) | Where-Object { $_ } | Select-Object -Unique
+        $cvUserAccountList = ($allDomainUserAccounts | ForEach-Object { "'$_'" }) -join ','
+        Script SetUserKerberosEncryptionTypes {
+            DependsOn  = $adObjectDependency
+            GetScript  = { return @{ Result = (Get-Date).ToString() } }
+            TestScript = [string]"
+                `$accounts = @($cvUserAccountList)
+                foreach (`$a in `$accounts) {
+                    `$u = Get-ADUser -Identity `$a -Properties 'msDS-SupportedEncryptionTypes' -ErrorAction SilentlyContinue
+                    if (`$u -and `$u.'msDS-SupportedEncryptionTypes' -ne 28) { return `$false }
+                }
+                return `$true
+            "
+            SetScript  = [string]"
+                `$accounts = @($cvUserAccountList)
+                foreach (`$a in `$accounts) {
+                    try {
+                        Set-ADUser -Identity `$a -KerberosEncryptionType AES128,AES256,RC4 -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Verbose ""Failed to set Kerberos encryption types on `$a : `$(`$_.Exception.Message)""
+                    }
+                }
+            "
+        }
+        $adObjectDependency += "[Script]SetUserKerberosEncryptionTypes"
 
         $i = 0
         foreach ($computer in $DomainComputers) {
