@@ -1524,22 +1524,32 @@ $global:VM_Config = {
         # A pending reboot can leave PSDirect file operations hanging indefinitely
         # even though sessions connect fine.
         $Test_PendingReboot = {
+            $reasons = @()
             # Component Based Servicing
-            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { return $true }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') { $reasons += 'CBS\RebootPending' }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootInProgress') { $reasons += 'CBS\RebootInProgress' }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending') { $reasons += 'CBS\PackagesPending' }
             # Windows Update
-            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { return $true }
+            if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') { $reasons += 'WindowsUpdate\RebootRequired' }
+            # SCCM client
+            try {
+                $ccmReboot = Invoke-CimMethod -Namespace 'root\ccm\ClientSDK' -ClassName CCM_ClientUtilities -MethodName DetermineIfRebootPending -ErrorAction SilentlyContinue
+                if ($ccmReboot -and $ccmReboot.RebootPending) { $reasons += 'SCCM\RebootPending' }
+                if ($ccmReboot -and $ccmReboot.IsHardRebootPending) { $reasons += 'SCCM\HardRebootPending' }
+            } catch {}
             # Pending file rename operations
             $pfro = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
-            if ($pfro) { return $true }
+            if ($pfro) { $reasons += "PendingFileRename ($($pfro.Count) ops)" }
             # Pending computer rename
             $active = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
             $pending = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
-            if ($active -and $pending -and $active -ne $pending) { return $true }
+            if ($active -and $pending -and $active -ne $pending) { $reasons += "ComputerRename ($active -> $pending)" }
+            if ($reasons.Count -gt 0) { return $reasons -join '; ' }
             return $false
         }
         $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
-        if ($rebootCheck.ScriptBlockOutput -eq $true) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected. Rebooting VM before proceeding." -Warning -OutputStream
+        if ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected: $($rebootCheck.ScriptBlockOutput). Rebooting VM before proceeding." -Warning -OutputStream
             Write-Progress2 $Activity -Status "Rebooting VM (pending reboot detected)" -percentcomplete 7 -force
             Stop-VM2 -Name $currentItem.vmName
             Start-Sleep -Seconds 10
@@ -3577,8 +3587,8 @@ $global:VM_Config = {
         if ($complete -and $Phase -lt 8) {
             try {
                 $reboot = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Post-phase reboot check" -SuppressLog
-                if ($reboot.ScriptBlockOutput -eq $true) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion. Rebooting now."
+                if ($reboot.ScriptBlockOutput -and $reboot.ScriptBlockOutput -ne $false) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion: $($reboot.ScriptBlockOutput). Rebooting now."
                     Stop-VM2 -Name $currentItem.vmName
                     Start-Sleep -Seconds 5
                     Start-VM2 -Name $currentItem.vmName
