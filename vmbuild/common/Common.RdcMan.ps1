@@ -638,14 +638,15 @@ function New-RDCManFileFromHyperV {
                 $isLinuxClient = $vm.Role -eq 'LinuxClient'
                 $hasRdp = $rdpOn -or $isLinuxClient
 
-                # Resolve IP (Ubuntu doesn't respond to LLMNR)
-                $linuxIp = $vm.LastKnownIP
-                if ([string]::IsNullOrWhiteSpace($linuxIp)) {
-                    try {
-                        $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
-                            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
-                    } catch {}
-                }
+                # Resolve IP (Ubuntu doesn't respond to LLMNR).
+                # Prefer live IP from Hyper-V over cached LastKnownIP — DHCP
+                # leases can change and LastKnownIP goes stale.
+                $linuxIp = $null
+                try {
+                    $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
+                        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
+                } catch {}
+                if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $linuxName = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
                 # Build display name

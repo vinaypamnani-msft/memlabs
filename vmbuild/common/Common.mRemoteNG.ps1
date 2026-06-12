@@ -1264,15 +1264,16 @@ function New-MRemoteNGFileFromHyperV {
                     }
                 }
 
-                # Resolve IP (same LLMNR fallback as RDCMan)
-                $linuxIp = $vm.LastKnownIP
-                if ([string]::IsNullOrWhiteSpace($linuxIp)) {
-                    try {
-                        $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
-                            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
-                    }
-                    catch { }
+                # Resolve IP (same LLMNR fallback as RDCMan).
+                # Prefer live IP from Hyper-V over cached LastKnownIP — DHCP
+                # leases can change and LastKnownIP goes stale.
+                $linuxIp = $null
+                try {
+                    $linuxIp = (Get-VMNetworkAdapter -VMName $vm.VmName -ErrorAction Stop).IPAddresses |
+                        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } | Select-Object -First 1
                 }
+                catch { }
+                if ([string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp = $vm.LastKnownIP }
                 $sshHost = if (-not [string]::IsNullOrWhiteSpace($linuxIp)) { $linuxIp } else { $vm.VmName }
 
                 $sshDisplayName = "$($vm.VmName) [Linux SSH]"

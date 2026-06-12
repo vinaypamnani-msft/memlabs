@@ -512,6 +512,24 @@ $global:VM_Create = {
                 # this to scrub known_hosts even when the VM is off.
                 $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $linuxIP -Force
 
+                # Create a DHCP reservation so the IP is stable across reboots.
+                # Linux VMs use DHCP but don't support LLMNR, so RDCMan/mRemoteNG
+                # reference them by IP. Without a reservation, a scope rebuild or
+                # lease expiry could reassign a different IP, breaking connections
+                # and DNS records.
+                try {
+                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter
+                    if ($vmnet) {
+                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
+                    }
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $linuxIP. $_" -Warning
+                }
+
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
                 # dynamic DNS registration themselves). Skip this when the DC
@@ -641,6 +659,20 @@ $global:VM_Create = {
                 # Persist the IP so Remove-Lab can scrub known_hosts even if
                 # the VM is off (KVP is unavailable after power-off).
                 Set-VMNote -vmName $currentItem.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $linuxIP })
+
+                # Create/refresh DHCP reservation so the IP is stable across reboots.
+                try {
+                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter
+                    if ($vmnet) {
+                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
+                    }
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $linuxIP. $_" -Warning
+                }
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
                 return

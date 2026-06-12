@@ -337,7 +337,16 @@ function Test-DCFunctionality {
                 $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
                     Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' -and $_ -notlike '10.250.251.*' }
                 $ip = $ips | Select-Object -First 1
-                if ($ip) { $entries.Add("$($vm.vmName)=$ip") }
+                if ($ip) {
+                    $entries.Add("$($vm.vmName)=$ip")
+                    # Update LastKnownIP in VM Notes if the live IP differs
+                    if ($vm.LastKnownIP -and $vm.LastKnownIP -ne $ip) {
+                        try {
+                            Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $ip })
+                            Write-Log "[Phase $Phase] $VMName: Updated LastKnownIP for $($vm.vmName): $($vm.LastKnownIP) -> $ip" -LogOnly
+                        } catch {}
+                    }
+                }
             }
             catch {}
         }
