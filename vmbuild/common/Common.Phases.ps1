@@ -697,6 +697,7 @@ function Wait-Phase {
 
     try {
 
+        Set-PS7ProgressWidth # Refresh progress bar width in case the terminal was resized
         Write-Host -NoNewline "$hideCursor" # Reduce flickering in Progress bars
 
         # Create return object

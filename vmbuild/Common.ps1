@@ -5991,7 +5991,19 @@ Function Set-PS7ProgressWidth {
     if ($PSVersionTable.PSVersion.Major -eq 7) {
         $maxWidth = 500
         try {
-            $currentWidth = [Console]::WindowWidth
+            $currentWidth = 0
+            # Get-LiveWindowSize uses a fresh CONOUT$ handle via P/Invoke, which
+            # returns the real terminal width even in ConPTY hosts (Windows Terminal,
+            # VS Code) where [Console]::WindowWidth can return a stale cached value.
+            if (Get-Command Get-LiveWindowSize -ErrorAction SilentlyContinue) {
+                $size = Get-LiveWindowSize
+                if ($size -and $size.Width -gt 0) {
+                    $currentWidth = $size.Width
+                }
+            }
+            if ($currentWidth -le 0) {
+                $currentWidth = [Console]::WindowWidth
+            }
             if ($currentWidth -gt 0) {
                 $maxWidth = [Math]::Round(($currentWidth * 0.95), 0)
             }
