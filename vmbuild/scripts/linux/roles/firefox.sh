@@ -5,6 +5,14 @@ set -euo pipefail
 echo "[memlabs-firefox] start: $(date -Is)"
 export DEBIAN_FRONTEND=noninteractive
 
+# Idempotency: skip if the Mozilla deb version of Firefox is already installed.
+# Check both binary exists and the Mozilla apt repo is configured (to
+# distinguish from the Ubuntu snap shim).
+if command -v firefox >/dev/null 2>&1 && [ -f /etc/apt/sources.list.d/mozilla.list ]; then
+    echo "[memlabs-firefox] already installed (Mozilla deb); skipping."
+    exit 0
+fi
+
 # Firefox: the Ubuntu 'firefox' package is a snap shim that takes 30s+ to
 # first-launch. Use the real Mozilla deb instead, pinned high so apt prefers
 # it over the transitional snap stub.

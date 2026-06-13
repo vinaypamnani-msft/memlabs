@@ -12,6 +12,12 @@ set -euo pipefail
 echo "[memlabs-realm-join] start: $(date -Is)"
 export DEBIAN_FRONTEND=noninteractive
 
+# Idempotency: skip if already joined to the target domain.
+if command -v realm >/dev/null 2>&1 && realm list 2>/dev/null | grep -qi "$DOMAIN"; then
+    echo "[memlabs-realm-join] already joined to $DOMAIN; skipping."
+    exit 0
+fi
+
 wait_for_apt_lock
 apt_retry apt-get update
 apt_retry apt-get install -y realmd sssd sssd-tools adcli krb5-user packagekit \
