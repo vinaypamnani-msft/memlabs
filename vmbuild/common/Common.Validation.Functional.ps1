@@ -237,6 +237,25 @@ function Test-VmFunctionality {
         $testsPassed = Test-UserProfilePreCreation -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
     }
 
+    # ---- Linux health check ----
+    # For all Linux VMs: ping + SSH smoke test from the host. If ping fails,
+    # the VM's network stack is dead and it needs a restart. If ping works but
+    # SSH fails, log a warning (sshd watchdog + Samba are the fallback).
+    if ($testsPassed -and $vmIsLinux) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking Linux VM health (ping + SSH)"
+        $healthResult = Test-LinuxVmHealth -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry:$IsRetry
+        if ($healthResult -eq 'Restarted') {
+            # VM was restarted and recovered — re-run all tests from scratch
+            $script:Phase11OutputBuffer = [System.Collections.Generic.List[hashtable]]::new()
+            $testsPassed = Test-VmFunctionality -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry
+            return $testsPassed
+        }
+        elseif ($healthResult -eq 'Failed') {
+            $testsPassed = $false
+        }
+        # 'OK' or 'SshDown' — continue to SMB and role tests
+    }
+
     # ---- Linux SMB validation ----
     # For all Linux VMs: verify Samba is accessible from the host (TCP 445 + shares).
     # This runs from the host side — no SSH needed — so it validates the backup
@@ -5570,6 +5589,82 @@ function Test-CMSiteRoleProxy {
 #endregion Proxy Validation Tests
 
 #region Linux Common Validation Tests
+
+function Test-LinuxVmHealth {
+    <#
+    .SYNOPSIS
+        Phase 11 health check for Linux VMs: ping and SSH from the host.
+    .DESCRIPTION
+        Verifies the Linux VM is network-reachable and SSH-responsive.
+        - Ping failure: the VM's network stack is dead. If this is not a
+          retry, restart the VM via Restart-UnresponsiveVm and return
+          'Restarted' so the caller re-runs all tests.
+        - Ping OK + SSH failure: sshd is hung (the known long-uptime issue).
+          Log a warning and return 'SshDown'. The sshd watchdog cron and
+          Samba provide fallback access.
+        - Both OK: return 'OK'.
+    .OUTPUTS
+        String: 'OK', 'SshDown', 'Restarted', or 'Failed'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig,
+        [switch]$IsRetry
+    )
+
+    $Phase = 11
+    $RoleLabel = $CurrentItem.role
+
+    # Resolve IP from Hyper-V KVP.
+    $vmIp = Get-LinuxVmIPAddress -VmName $VMName
+    if (-not $vmIp) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Cannot resolve VM IP for health check" -Warning -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - Health check skipped (no IP from KVP)"; Level = 'Warning' })
+        return 'OK'  # can't test without IP; don't block
+    }
+
+    # 1) Ping test — 2 attempts, 1-second timeout each.
+    $pingOk = Test-Connection -ComputerName $vmIp -Count 2 -Quiet -ErrorAction SilentlyContinue
+
+    if (-not $pingOk) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Ping to $vmIp failed" -Failure
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Ping unreachable ($vmIp)"; Level = 'Failure' })
+
+        if (-not $IsRetry) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Ping failed — restarting VM to recover..." -Warning
+            $rebooted = Restart-UnresponsiveVm -VmName $VMName -MaxRetries 1 -WaitTimeSeconds 120
+            if ($rebooted) {
+                # Verify ping works after reboot
+                Start-Sleep -Seconds 10
+                $newIp = Get-LinuxVmIPAddress -VmName $VMName
+                if ($newIp -and (Test-Connection -ComputerName $newIp -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: VM recovered after restart — retrying all tests" -Warning
+                    return 'Restarted'
+                }
+            }
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: VM did not recover after restart" -Failure
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - VM unresponsive after restart"; Level = 'Failure' })
+        }
+        return 'Failed'
+    }
+
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Ping to $vmIp succeeded" -LogOnly
+
+    # 2) SSH smoke test — run 'true' (no-op) to verify sshd is responsive.
+    if (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue) {
+        $sshResult = Invoke-LinuxVmCommand -VmName $VMName -BashCommand 'true' -TimeoutSeconds 15 -SuppressLog -DisplayName "Phase11-SSH-SmokeTest"
+        if (-not $sshResult -or $sshResult.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Ping OK but SSH unresponsive on $vmIp (sshd watchdog should recover within 5 min)" -Warning
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - SSH unresponsive (ping OK, sshd watchdog active)"; Level = 'Warning' })
+            return 'SshDown'
+        }
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - SSH responsive on $vmIp" -LogOnly
+    }
+
+    return 'OK'
+}
 
 function Test-LinuxSmbAccess {
     <#
