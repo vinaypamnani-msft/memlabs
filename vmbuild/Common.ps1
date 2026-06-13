@@ -2598,39 +2598,28 @@ function Test-DHCPScope {
 
 
         # Check if scope exists
-        $createScope = $true
+        $createScope = $false
+        $updateOptions = $false
         $scope = Get-DhcpServerv4Scope -ScopeId $scopeID -ErrorAction SilentlyContinue
         if ($scope) {
             if ($DHCPDNSAddress) {
                 $scopeOptions = get-DhcpServerv4OptionValue -scopeID $scopeID -ErrorAction SilentlyContinue
                 $currentDNS = ($scopeOptions | Where-Object OptionID -eq 6).Value
                 if ($currentDNS -ne $DHCPDNSAddress) {
-                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope does not match preferred DNS server"
-                    $createScope = $true
+                    Write-OrangePoint "'$ScopeID ($ScopeName)' scope DNS ($currentDNS) does not match preferred ($DHCPDNSAddress) — updating options in-place"
+                    $updateOptions = $true
                 }
                 else {
                     Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
-                    $createScope = $false
                 }
             }
             else {
                 Write-GreenCheck "'$ScopeID ($ScopeName)' scope is already present in DHCP."
-                $createScope = $false
             }
         }
         else {
             Write-OrangePoint "'$ScopeID ($ScopeName)' scope is not present in DHCP. Creating new scope"
             $createScope = $true
-        }
-
-        $dhcp = Start-DHCP
-        if (-not $dhcp) {
-            Write-Log "DHCP Could not be started" -Failure
-            return $false
-        }
-
-        if ($scope -and $createScope) {
-            Remove-DhcpServerv4Scope -scopeID $scopeID -force
         }
 
         $dhcp = Start-DHCP
@@ -2687,8 +2676,12 @@ function Test-DHCPScope {
                     }
                 }
             }
+        }
 
-
+        # Set or update scope options (for new scopes AND existing scopes
+        # whose DNS option needs updating). Updating in-place preserves
+        # all existing leases and reservations.
+        if ($createScope -or $updateOptions) {
             try {
                 if (-not $DomainScope) {
                     if ($ScopeName -eq "cluster") {

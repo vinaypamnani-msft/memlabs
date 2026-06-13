@@ -2341,6 +2341,32 @@ function Set-LinuxVmsDcDns {
         catch {}
         if ($vmIp) {
             $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIp
+
+            # Refresh DHCP reservation and LastKnownIP if the IP changed
+            # since Phase 1. This catches cases where the VM rebooted and
+            # got a different DHCP lease (e.g. after scope option update).
+            $vmNote = Get-VMNote -vmName $vm.vmName
+            $oldIp = if ($vmNote) { $vmNote.LastKnownIP } else { $null }
+            if ($oldIp -ne $vmIp) {
+                if ($oldIp) {
+                    Write-Log "[Linux DNS] $($vm.vmName): IP changed $oldIp -> $vmIp — refreshing DHCP reservation and LastKnownIP" -Verbose
+                }
+                # Update VM note so mRemoteNG/RDCMan use the correct IP
+                Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $vmIp })
+                # Refresh DHCP reservation so the IP is stable across future reboots
+                try {
+                    $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter
+                    if ($vmnet) {
+                        $realnetwork = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
+                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $vmIp -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName) (Linux)" -ErrorAction Stop | Out-Null
+                        Write-Log "[Linux DNS] $($vm.vmName): DHCP reservation refreshed for $vmIp" -LogOnly
+                    }
+                }
+                catch {
+                    Write-Log "[Linux DNS] $($vm.vmName): Could not refresh DHCP reservation for $vmIp. $_" -Warning
+                }
+            }
         }
         else {
             Write-Log "[Linux DNS] $($vm.vmName): could not resolve IPv4; skipping DNS A record registration" -Warning
