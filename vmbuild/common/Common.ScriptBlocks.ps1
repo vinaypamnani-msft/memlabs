@@ -1261,17 +1261,17 @@ $global:VM_Create = {
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                     $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
                     if ($dvd) {
-                        write-Log "Dvd successfully mounted from $($dvd.Path)"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DVD successfully mounted from $($dvd.Path)"
                     }
                     else {
-                        write-Log "Failed to mount the dvd from $isoPath $err"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to mount DVD from $isoPath $err"
                         start-sleep -seconds 30
                         $dvd = Set-VMDvdDrive -VMName $currentItem.vmName -Path $isoPath -Passthru -ErrorVariable $err
                         if (-not $dvd) {
-                            write-Log "2nd Try. Failed to mount the dvd from $isoPath $err"
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): 2nd try - Failed to mount DVD from $isoPath $err"
                         }
                         else {
-                            write-Log "Successfully mounted the dvd from $($dvd.Path)"
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DVD successfully mounted on retry from $($dvd.Path)"
                         }
                     }
                     $dirname = (join-path $driveLetter "OSD" $isoFile.id)
@@ -1285,11 +1285,11 @@ $global:VM_Create = {
 
                     # Copy files from DVD
                     Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Copying $($isoFile.id) ISO to VM ($isoIndex/$isoTotal)" -force
-                    Write-Log "Copying ISO WIM Files to $dirname"
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying ISO WIM files to $dirname"
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Copy ISO WIM Files" -ScriptBlock $CopyIsoFiles -ArgumentList $dirname
                     if ($result.ScriptBlockFailed) {
                         $result2 = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Show Data" -ScriptBlock { $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }; Get-ChildItem "$($cd.DriveLetter):" }
-                        Write-Log "Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Contents of Drive: $($result2.ScriptBlockOutput) Mounted on $((Get-VMDvdDrive -VMName $currentItem.vmName).Path)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy ISO WIM files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
                         return
                     }
@@ -1970,7 +1970,7 @@ $global:VM_Config = {
                 }
                 if ($parseFailures.Count -gt 0) {
                     foreach ($pf in $parseFailures) {
-                        Write-Log "[Phase $Phase]: DSC parse-check WARNING: $pf" -Warning
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC parse-check WARNING: $pf" -Warning
                     }
                 }
             }

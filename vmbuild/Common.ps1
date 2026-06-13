@@ -3879,7 +3879,29 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ImageState } -ShowVMSessionError
+
+            # Log a detailed failure summary so the root cause is visible without scrolling
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastOobeState = if ($lastAttempt.ScriptBlockOutput) { $lastAttempt.ScriptBlockOutput } else { "PSDirect failed" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            $reason = if (-not $readyOobe) {
+                "OOBE never completed (ImageState='$lastOobeState')"
+            } elseif (-not $readySmb) {
+                "OOBE done but SMB (\\localhost\c$) never became accessible"
+            } else {
+                "OOBE+SMB done but WWAHost never stopped"
+            }
+
+            Write-Log "$VmName`: OOBE FAILURE SUMMARY: $reason | Elapsed=${elapsedMin}min | PowerCycles=$powerCycles/$maxPowerCycles | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
@@ -3933,7 +3955,20 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue } -ShowVMSessionError
+
+            # Log a detailed failure summary
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            Write-Log "$VmName`: OOBE-START FAILURE SUMMARY: WWAHost never appeared | Elapsed=${elapsedMin}min | PowerCycles=$powerCycles/$maxPowerCycles | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
@@ -4071,7 +4106,28 @@ function Wait-ForVm {
 
         if (-not $ready) {
             # Try the command one more time, to get real error in logs
-            Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError | Out-Null
+            $lastAttempt = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -ScriptBlock { Test-Path $using:PathToVerify } -ShowVMSessionError
+
+            # Log a detailed failure summary
+            $elapsedMin = [int]$stopWatch.Elapsed.TotalMinutes
+            $vmCheck = Get-VM2 -Name $VmName -ErrorAction SilentlyContinue
+            $vmState = if ($vmCheck) { $vmCheck.State } else { "NotFound" }
+            $vmHb = if ($vmCheck) { $vmCheck.Heartbeat } else { "N/A" }
+            $vmUptime = if ($vmCheck -and $vmCheck.State -eq "Running") { "$([int]$vmCheck.Uptime.TotalMinutes)min" } else { "N/A" }
+            $lastError = if ($lastAttempt.ScriptBlockFailed -and $lastAttempt.ErrorDetails) { ($lastAttempt.ErrorDetails -join '; ') } else { $null }
+
+            $reason = if ($lastAttempt.ScriptBlockOutput -eq $false) {
+                "PSDirect works but '$PathToVerify' does not exist"
+            } elseif ($lastAttempt.ScriptBlockFailed) {
+                "PSDirect connection failed"
+            } else {
+                "Unknown (last output: $($lastAttempt.ScriptBlockOutput))"
+            }
+
+            Write-Log "$VmName`: WAIT FAILURE SUMMARY: $reason | Elapsed=${elapsedMin}min | Restarts=$restartCount/$maxRestarts | VM=$vmState | Heartbeat=$vmHb | Uptime=$vmUptime" -Warning
+            if ($lastError) {
+                Write-Log "$VmName`: Last PSDirect error: $lastError" -Warning
+            }
         }
     }
 
