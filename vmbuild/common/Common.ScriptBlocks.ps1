@@ -1589,17 +1589,42 @@ $global:VM_Config = {
             } catch {}
             # Pending file rename operations
             $pfro = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
-            if ($pfro) { $reasons += "PendingFileRename ($($pfro.Count) ops)" }
+            if ($pfro) {
+                $reasons += "PendingFileRename ($($pfro.Count) ops)"
+                # Build a summary of pending rename/delete ops for diagnostics.
+                # The registry value is a flat array: [source, dest, source, dest, ...]
+                # An empty dest means "delete source on reboot".
+                $opLines = @()
+                for ($i = 0; $i -lt $pfro.Count; $i += 2) {
+                    $src = $pfro[$i] -replace '^\\\?\?\\', ''
+                    $dst = if ($i + 1 -lt $pfro.Count -and $pfro[$i + 1]) { $pfro[$i + 1] -replace '^\\\?\?\\', '' } else { '(delete)' }
+                    $opLines += "$src -> $dst"
+                }
+                $global:_PendingFileRenameDetails = $opLines -join "`n"
+            }
             # Pending computer rename
             $active = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
             $pending = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
             if ($active -and $pending -and $active -ne $pending) { $reasons += "ComputerRename ($active -> $pending)" }
-            if ($reasons.Count -gt 0) { return $reasons -join '; ' }
+            if ($reasons.Count -gt 0) {
+                $result = [pscustomobject]@{
+                    Reasons = $reasons -join '; '
+                    PendingFileOps = if ($global:_PendingFileRenameDetails) { $global:_PendingFileRenameDetails } else { $null }
+                }
+                return $result
+            }
             return $false
         }
         $rebootCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Check pending reboot"
         if ($rebootCheck.ScriptBlockOutput -and $rebootCheck.ScriptBlockOutput -ne $false) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected: $($rebootCheck.ScriptBlockOutput). Rebooting VM before proceeding." -Warning -OutputStream
+            $rebootResult = $rebootCheck.ScriptBlockOutput
+            $reasonText = if ($rebootResult.Reasons) { $rebootResult.Reasons } else { $rebootResult.ToString() }
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected: $reasonText. Rebooting VM before proceeding." -Warning -OutputStream
+            if ($rebootResult.PendingFileOps) {
+                foreach ($opLine in ($rebootResult.PendingFileOps -split "`n")) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName):   PendingFileRename: $opLine" -LogOnly
+                }
+            }
             Write-Progress2 $Activity -Status "Rebooting VM (pending reboot detected)" -percentcomplete 7 -force
             Stop-VM2 -Name $currentItem.vmName
             Start-Sleep -Seconds 10
@@ -3733,7 +3758,14 @@ $global:VM_Config = {
             try {
                 $reboot = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Test_PendingReboot -DisplayName "Post-phase reboot check" -SuppressLog
                 if ($reboot.ScriptBlockOutput -and $reboot.ScriptBlockOutput -ne $false) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion: $($reboot.ScriptBlockOutput). Rebooting now."
+                    $rebootResult = $reboot.ScriptBlockOutput
+                    $reasonText = if ($rebootResult.Reasons) { $rebootResult.Reasons } else { $rebootResult.ToString() }
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion: $reasonText. Rebooting now."
+                    if ($rebootResult.PendingFileOps) {
+                        foreach ($opLine in ($rebootResult.PendingFileOps -split "`n")) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName):   PendingFileRename: $opLine" -LogOnly
+                        }
+                    }
                     Stop-VM2 -Name $currentItem.vmName
                     Start-Sleep -Seconds 5
                     Start-VM2 -Name $currentItem.vmName
