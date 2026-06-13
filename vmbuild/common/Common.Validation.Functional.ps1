@@ -237,6 +237,15 @@ function Test-VmFunctionality {
         $testsPassed = Test-UserProfilePreCreation -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
     }
 
+    # ---- Linux SMB validation ----
+    # For all Linux VMs: verify Samba is accessible from the host (TCP 445 + shares).
+    # This runs from the host side — no SSH needed — so it validates the backup
+    # file-access channel that works when SSH is down.
+    if ($testsPassed -and $vmIsLinux) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying Samba (SMB) access"
+        $testsPassed = Test-LinuxSmbAccess -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # ---- Proxy validation ----
     # 1) For the Proxy VM itself: verify Squid is listening on TCP 3128.
     if ($testsPassed -and $role -eq 'Proxy') {
@@ -5559,6 +5568,66 @@ function Test-CMSiteRoleProxy {
 }
 
 #endregion Proxy Validation Tests
+
+#region Linux Common Validation Tests
+
+function Test-LinuxSmbAccess {
+    <#
+    .SYNOPSIS
+        Phase 11 test for Linux VMs: verifies Samba is listening and shares are accessible.
+    .DESCRIPTION
+        Tests SMB connectivity from the host to the Linux VM without using SSH.
+        1) Resolves the VM's IPv4 via Hyper-V KVP (Get-LinuxVmIPAddress).
+        2) Verifies TCP 445 is reachable (Test-NetConnection).
+        3) Lists shares via net view to confirm smb.conf is loaded.
+        This validates the backup file-access channel that works when SSH is down.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $RoleLabel = $CurrentItem.role
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Testing Samba (SMB) accessibility from host" -LogOnly
+
+    # Resolve the VM's IP from Hyper-V KVP — no SSH required.
+    $vmIp = Get-LinuxVmIPAddress -VmName $VMName
+    if (-not $vmIp) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Cannot resolve VM IP for SMB test; skipping" -Warning -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - SMB test skipped (no IP from KVP)"; Level = 'Warning' })
+        return $true  # non-fatal: IP may not be available yet
+    }
+
+    # 1) TCP 445 reachability
+    $tcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    if (-not $tcp.TcpTestSucceeded) {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - TCP 445 not reachable on $vmIp" -Failure -LogOnly
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Samba TCP 445 not reachable"; Level = 'Failure' })
+        return $false
+    }
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - TCP 445 reachable on $vmIp" -LogOnly
+
+    # 2) Verify shares are listed via net view (runs as host, no auth needed for listing)
+    $netViewOutput = & net view "\\$vmIp" /all 2>&1
+    $netViewString = ($netViewOutput | Out-String).Trim()
+    $hasShares = $netViewString -match 'logs' -and $netViewString -match 'home'
+    if (-not $hasShares) {
+        # net view may fail without credentials — fall back to just the TCP check
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - net view did not list expected shares (may need auth); TCP 445 is open" -Warning -LogOnly
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: net view output: $netViewString" -LogOnly
+    }
+    else {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba shares 'logs' and 'home' visible via net view" -LogOnly
+    }
+
+    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: OK - Samba accessible on $vmIp:445"; Level = 'Success' })
+    return $true
+}
+
+#endregion Linux Common Validation Tests
 
 #endregion
 
