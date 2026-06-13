@@ -82,6 +82,55 @@ Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
     Where-Object { $_.TaskName -match 'MicrosoftEdgeUpdate' } |
     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
 
+# Disable telemetry, diagnostics, and consumer experience
+# These generate network traffic, disk I/O, and occasional PendingFileRename
+# entries that interfere with deterministic lab builds.
+Update-Log "Disable telemetry and diagnostics services"
+foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s) {
+        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    }
+}
+
+Update-Log "Disable telemetry via registry"
+$dtPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+New-Item -Path $dtPath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $dtPath -Name 'AllowTelemetry' -PropertyType DWord -Value 0 -Force | Out-Null
+New-ItemProperty -Path $dtPath -Name 'AllowDeviceNameInTelemetry' -PropertyType DWord -Value 0 -Force | Out-Null
+
+Update-Log "Disable consumer experience and spotlight"
+$cePath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
+New-Item -Path $cePath -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableWindowsConsumerFeatures' -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableSoftLanding' -PropertyType DWord -Value 1 -Force | Out-Null
+New-ItemProperty -Path $cePath -Name 'DisableCloudOptimizedContent' -PropertyType DWord -Value 1 -Force | Out-Null
+
+Update-Log "Disable scheduled tasks: defrag, NGEN, CEIP, telemetry, Server Manager"
+$disableTasks = @(
+    '\Microsoft\Windows\Defrag\ScheduledDefrag'
+    '\Microsoft\Windows\Server Manager\ServerManager'
+    '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser'
+    '\Microsoft\Windows\Application Experience\ProgramDataUpdater'
+    '\Microsoft\Windows\Autochk\Proxy'
+    '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator'
+    '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip'
+    '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector'
+)
+foreach ($taskFullName in $disableTasks) {
+    $taskName = Split-Path $taskFullName -Leaf
+    $taskPath = (Split-Path $taskFullName -Parent) + '\'
+    $t = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+    if ($t -and $t.State -ne 'Disabled') {
+        Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+# NGEN tasks use version-specific paths — match by wildcard
+Get-ScheduledTask -TaskPath '\Microsoft\Windows\.NET Framework\' -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -match 'NGEN' } |
+    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+
 # Common Windows Settings
 # ========================
 Update-Log "Prevent automatic device encryption (managed by ConfigMgr when needed)"

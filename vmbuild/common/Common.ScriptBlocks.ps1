@@ -1016,6 +1016,49 @@ $global:VM_Create = {
                     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
             } catch { $warnings += "Disable Edge Update: $_" }
 
+            # Suppress telemetry, diagnostics, and background tasks that
+            # generate network traffic, disk I/O, or PendingFileRename entries.
+            try {
+                foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
+                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($s) {
+                        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+                        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+                    }
+                }
+                # Telemetry registry keys
+                $dtPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
+                New-Item -Path $dtPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $dtPath -Name 'AllowTelemetry' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                # Consumer experience / spotlight
+                $cePath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
+                New-Item -Path $cePath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $cePath -Name 'DisableWindowsConsumerFeatures' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                # Disable noisy scheduled tasks
+                $disableTasks = @(
+                    '\Microsoft\Windows\Defrag\ScheduledDefrag'
+                    '\Microsoft\Windows\Server Manager\ServerManager'
+                    '\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser'
+                    '\Microsoft\Windows\Application Experience\ProgramDataUpdater'
+                    '\Microsoft\Windows\Autochk\Proxy'
+                    '\Microsoft\Windows\Customer Experience Improvement Program\Consolidator'
+                    '\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip'
+                    '\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector'
+                )
+                foreach ($taskFullName in $disableTasks) {
+                    $taskName = Split-Path $taskFullName -Leaf
+                    $taskPath = (Split-Path $taskFullName -Parent) + '\'
+                    $t = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+                    if ($t -and $t.State -ne 'Disabled') {
+                        Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue | Out-Null
+                    }
+                }
+                # NGEN tasks (version-specific paths)
+                Get-ScheduledTask -TaskPath '\Microsoft\Windows\.NET Framework\' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.TaskName -match 'NGEN' } |
+                    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+            } catch { $warnings += "Disable telemetry/tasks: $_" }
+
             [PSCustomObject]@{ Warnings = $warnings }
         }
 
