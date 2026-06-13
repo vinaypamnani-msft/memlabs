@@ -603,32 +603,50 @@ $global:VM_Create = {
                 $HashArguments.Add("SwitchName2", "ClusterV2")
             }
 
-            $created = New-VirtualMachine @HashArguments
+            $created = $false
+            $oobeRetries = 0
+            $maxOobeRetries = 1  # One full delete+recreate attempt after initial failure
 
-            if (-not ($created -eq $true)) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs. $created" -Failure -OutputStream -HostOnly
-                return
-            }
+            while ($true) {
+                if ($oobeRetries -gt 0) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): OOBE retry $oobeRetries/$maxOobeRetries - deleting and recreating VM from base image." -Warning -OutputStream
+                    # Delete the stuck VM completely
+                    Remove-VirtualMachine -VmName $currentItem.vmName -Force -SkipProxyCleanup
+                    Start-Sleep -Seconds 5
+                }
 
-            if (-not $Migrate) {
-                if ($currentItem.role -eq "OSDClient") {
-                    New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+                $created = New-VirtualMachine @HashArguments
+
+                if (-not ($created -eq $true)) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM was not created. Check vmbuild logs. $created" -Failure -OutputStream -HostOnly
                     return
                 }
-                Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
-                start-sleep -seconds 3
-                # Wait for VM to finish OOBE
-                $oobeTimeout = 25
-                if ($deployConfig.virtualMachines.Count -gt 3) {
-                    $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
-                }
 
-                $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
-                if (-not $connected) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished. Exiting." -Failure -OutputStream
-                    return
+                if (-not $Migrate) {
+                    if ($currentItem.role -eq "OSDClient") {
+                        New-VmNote -VmName $currentItem.vmName -DeployConfig $deployConfig -Successful $true
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): VM Creation completed successfully for $($currentItem.role)." -OutputStream -Success
+                        return
+                    }
+                    Write-Progress2 "Waiting for OOBE" -Status "Starting" -percentcomplete 0 -force
+                    Start-Sleep -Seconds 3
+                    # Wait for VM to finish OOBE
+                    $oobeTimeout = 25
+                    if ($deployConfig.virtualMachines.Count -gt 3) {
+                        $oobeTimeout = $deployConfig.virtualMachines.Count + $oobeTimeout
+                    }
+
+                    $connected = Wait-ForVm -VmName $currentItem.vmName -OobeComplete -TimeoutMinutes $oobeTimeout
+                    if (-not $connected) {
+                        if ($oobeRetries -lt $maxOobeRetries) {
+                            $oobeRetries++
+                            continue  # Delete and recreate
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if OOBE finished after $($oobeRetries + 1) attempt(s). Exiting." -Failure -OutputStream
+                        return
+                    }
                 }
+                break  # OOBE succeeded, exit retry loop
             }
         }
         else {
