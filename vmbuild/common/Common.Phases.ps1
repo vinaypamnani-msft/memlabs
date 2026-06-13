@@ -171,21 +171,7 @@ function Start-Phase {
         return $true
     }
     $global:PhaseSkipped = $false
-
-    # Diagnostic: transcript captures all console output during Wait-Phase
-    # to identify what is writing blank lines. Search the transcript file
-    # for sequences of empty lines to find the culprit.
-    $transcriptPath = $null
-    if ($Phase -eq 2) {
-        $transcriptPath = Join-Path $Common.LogPath "Phase2-Transcript.log"
-        try { Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
-    }
-
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
-
-    if ($transcriptPath) {
-        try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
-    }
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
@@ -901,21 +887,6 @@ function Wait-Phase {
             }
             $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
             foreach ($job in $completedJobs) {
-                # Diagnostic: log all unique progress activities for this job
-                $streamSource2 = Get-JobStreamSource -Job $job
-                if ($streamSource2 -and $streamSource2.Progress -and $streamSource2.Progress.Count -gt 0) {
-                    $activities = @{}
-                    foreach ($pr in $streamSource2.Progress) {
-                        $key = "$($pr.ActivityId)|$($pr.Activity)"
-                        if (-not $activities.ContainsKey($key)) {
-                            $activities[$key] = 0
-                        }
-                        $activities[$key]++
-                    }
-                    $diagLines = $activities.GetEnumerator() | ForEach-Object { "$($_.Key) x$($_.Value)" }
-                    Write-Log "[Diag] $($job.Name) completed with $($streamSource2.Progress.Count) progress records: $($diagLines -join '; ')" -LogOnly
-                }
-
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name

@@ -5394,22 +5394,23 @@ function Set-Phase2DhcpReservations {
         }
 
         try {
-            $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-            if (-not $vmnet -or -not $vmnet.MacAddress) {
-                Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): No MAC address found, skipping." -LogOnly
-                $skipped++
-                continue
-            }
+            & {
+                $ProgressPreference = 'SilentlyContinue'
+                $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
+                if (-not $vmnet -or -not $vmnet.MacAddress) {
+                    return
+                }
 
-            if ($vm.role -in "InternetClient", "AADClient") {
-                $realnetwork = "172.31.250.0"
-            }
-            else {
-                $realnetwork = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
-            }
+                if ($vm.role -in "InternetClient", "AADClient") {
+                    $realnetwork = "172.31.250.0"
+                }
+                else {
+                    $realnetwork = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+                }
 
-            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
-            Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName)" -ErrorAction Stop
+                Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
+                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName)" -ErrorAction Stop
+            } *>$null
             Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): Reservation created for $validIP" -LogOnly
             $created++
         }
