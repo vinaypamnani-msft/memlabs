@@ -33,7 +33,8 @@ function Write-JobProgress {
             $progressCount = $streamSource.Progress.Count
             for ($pi = $progressCount - 1; $pi -ge 0; $pi--) {
                 $candidate = $streamSource.Progress[$pi]
-                if ($candidate.Activity -ne "Preparing modules for first use.") {
+                if ($candidate.Activity -ne "Preparing modules for first use." -and
+                    $candidate.Activity -ne "Compress-Archive") {
                     $lastProgress = $candidate
                     break
                 }

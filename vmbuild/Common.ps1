@@ -5366,13 +5366,13 @@ function Copy-ToolToVM {
             }
 
             Write-Log "$vmName`: Creating $label bundle ($($entries.Count) items)..." -LogOnly
-            $prevPref = $ProgressPreference
-            $ProgressPreference = "SilentlyContinue"
+            $prevPref = $Global:ProgressPreference
+            $Global:ProgressPreference = "SilentlyContinue"
             try {
                 Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
             }
             finally {
-                $ProgressPreference = $prevPref
+                $Global:ProgressPreference = $prevPref
             }
             Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 
