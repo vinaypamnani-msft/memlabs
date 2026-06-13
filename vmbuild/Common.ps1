@@ -5134,8 +5134,9 @@ function Install-Tools {
         }
     }
 
-    # Clean stale tool zips that are no longer referenced by any VM
-    Clean-StaleToolZips
+    # Stale tool zip cleanup is handled by the caller (Start-Phase post-P2
+    # block) after all parallel jobs complete. Do NOT clean here — parallel
+    # jobs would delete zips that other in-flight jobs still need.
 
     return $success
 }
