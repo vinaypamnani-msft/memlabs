@@ -1881,7 +1881,12 @@ $global:VM_Config = {
                         try {
                             $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
                             if ($vmnet -and $vmnet.MacAddress) {
-                                $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                                if ($currentItem.role -in "InternetClient", "AADClient") {
+                                    $realnetwork = "172.31.250.0"
+                                }
+                                else {
+                                    $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                                }
                                 Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
                                 Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop | Out-Null
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
