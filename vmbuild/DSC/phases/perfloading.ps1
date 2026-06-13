@@ -6,15 +6,7 @@ param(
 
 $Tag = "[perfloading]"
 
-$flagFile = "C:\staging\DSC\perfloading.flag"
-
-# Check if the flag file exists
-if (Test-Path $flagFile) {
-    Write-DscStatus "$Tag Flag file exists. Skipping execution."
-}
-else {
-
-    Write-DscStatus "$Tag Flag file does not exists. start execution."
+Write-DscStatus "$Tag Starting perfloading"
 
     if ( -not $ConfigFilePath) {
         $ConfigFilePath = "C:\staging\DSC\deployConfig.json"
@@ -844,24 +836,41 @@ else {
 
         $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
 
+        # Check if the specific products we need exist as categories in the
+        # full catalog (not just subscribed). WSUS ships with built-in
+        # categories, so a generic count isn't meaningful. If our target
+        # products are present, sync 1 has populated the catalog and we can
+        # subscribe without waiting for the current sync.
+        $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $productsInCatalog = @($products | Where-Object { $_ -in $allCatalogProducts })
+        $catalogHasOurProducts = $productsInCatalog.Count -eq $products.Count
+
         if ($missingproducts.Count -gt 0) {
             $syncNeeded = $true
             Write-DscStatus "$Tag SUP products missing ($($missingproducts.Count)): $($missingproducts -join ', ')"
-            # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
-            # will fail with 'WSUS server not configured' and block WCM from
-            # finishing its subscription setup (deadlock).
-            $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
-            try {
-                $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
-            } catch { $wcmEarlyState = -1 }
-            if ($wcmEarlyState -eq 2) {
-                Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
-                Invoke-FullSync
+            if ($catalogHasOurProducts) {
+                # Our target products exist in the catalog from a previous sync —
+                # no need to trigger or wait for sync 1. Skip straight to subscribing.
+                Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
             }
             else {
-                $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
-                $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
-                Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                # First run: catalog empty, need sync 1 to populate it.
+                # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
+                # will fail with 'WSUS server not configured' and block WCM from
+                # finishing its subscription setup (deadlock).
+                $wcmRegPath = 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER'
+                try {
+                    $wcmEarlyState = [int](Get-ItemPropertyValue -Path $wcmRegPath -Name 'ConfigurationState' -ErrorAction Stop)
+                } catch { $wcmEarlyState = -1 }
+                if ($wcmEarlyState -eq 2) {
+                    Write-DscStatus "$Tag Triggering WSUS sync now (will finish later while we create collections)"
+                    Invoke-FullSync
+                }
+                else {
+                    $wcmStateNames = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                    $wcmName = if ($wcmStateNames.ContainsKey($wcmEarlyState)) { $wcmStateNames[$wcmEarlyState] } else { "UNKNOWN($wcmEarlyState)" }
+                    Write-DscStatus "$Tag WCM state is $wcmName — skipping early sync to avoid blocking WCM"
+                }
             }
         }
         else {
@@ -1304,28 +1313,38 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         # InstallRoles already ran sync 1 and waited for it, plus we may have
         # fired an early background sync above. Verify sync 1 completed before
         # adding products — if not, wait for it (up to ~20 min).
+        #
+        # On re-run: if the product catalog is already populated (from a
+        # previous sync 1), skip the wait entirely — we can subscribe
+        # products immediately without waiting for any current sync.
         $sync1Done = $false
-        $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
-        if ($syncStatus.LastSyncState -eq 6702) {
-            Write-DscStatus "$Tag Sync 1 already completed (last: $($syncStatus.LastSyncStateTime)) — proceeding to add products"
+        if ($catalogHasOurProducts) {
+            Write-DscStatus "$Tag Target products already in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait, proceeding to subscribe"
             $sync1Done = $true
         }
-        elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
-            # Sync appears to be running — but check if the state is stale.
-            $syncAge = (Get-Date) - $syncStatus.LastSyncStateTime
-            if ($syncAge.TotalMinutes -gt 15) {
-                Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) is stale ($([math]::Round($syncAge.TotalMinutes,0)) min old) — treating as failed. Repairing WSUS..."
-                Repair-WsusSync
+        else {
+            $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            if ($syncStatus.LastSyncState -eq 6702) {
+                Write-DscStatus "$Tag Sync 1 already completed (last: $($syncStatus.LastSyncStateTime)) — proceeding to add products"
+                $sync1Done = $true
+            }
+            elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                # Sync appears to be running — but check if the state is stale.
+                $syncAge = (Get-Date) - $syncStatus.LastSyncStateTime
+                if ($syncAge.TotalMinutes -gt 15) {
+                    Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) is stale ($([math]::Round($syncAge.TotalMinutes,0)) min old) — treating as failed. Repairing WSUS..."
+                    Repair-WsusSync
+                }
+                else {
+                    Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState), age $([math]::Round($syncAge.TotalMinutes,1)) min) — waiting for completion..."
+                }
+                $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1"
             }
             else {
-                Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState), age $([math]::Round($syncAge.TotalMinutes,1)) min) — waiting for completion..."
+                # No sync has run or last sync failed — trigger one and wait
+                Write-DscStatus "$Tag No completed sync found (state=$($syncStatus.LastSyncState)). Triggering sync 1..."
+                $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1" -TriggerFirst
             }
-            $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1"
-        }
-        else {
-            # No sync has run or last sync failed — trigger one and wait
-            Write-DscStatus "$Tag No completed sync found (state=$($syncStatus.LastSyncState)). Triggering sync 1..."
-            $sync1Done = Wait-WsusSyncCompletion -Label "Sync 1" -TriggerFirst
         }
         if (-not $sync1Done) {
             Write-DscStatus "$Tag WARNING: Sync 1 did not complete after 40 attempts. Adding products anyway — sync 2 may fail if catalog is incomplete."
@@ -1620,14 +1639,6 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         try { Invoke-CMCollectionUpdate -CollectionId $collection.CollectionID } catch {}
     }    
 
-    # Create the flag file
-    New-Item -ItemType File -Path $flagFile -Force | Out-Null
-    Write-DscStatus "$Tag $flagFile the perf loading the environment created"
-
     Write-DscStatus "$Tag Completed the perf loading the environment"
     Write-DscStatus "$Tag ******************************************" -NoStatus
     Write-DscStatus "$Tag ******************************************" -NoStatus
-
-
-
-}
