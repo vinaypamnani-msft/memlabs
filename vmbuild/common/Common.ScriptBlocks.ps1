@@ -522,7 +522,7 @@ $global:VM_Create = {
                     if ($vmnet) {
                         $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                         Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop | Out-Null
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
                     }
                 }
@@ -684,7 +684,7 @@ $global:VM_Create = {
                     if ($vmnet) {
                         $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                         Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop | Out-Null
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
                     }
                 }
@@ -728,15 +728,15 @@ $global:VM_Create = {
                     $splitNetwork = ($network.split(".") | Select-Object -First 3) -join "."
                     if ($currentItem.role -eq "CAS") {
                         Remove-DHCPReservation -ip ($splitNetwork + ".5") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop | Out-Null
                     }
                     if ($currentItem.role -eq "Primary") {
                         Remove-DHCPReservation -ip ($splitNetwork + ".10") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop | Out-Null
                     }
                     if ($currentItem.role -eq "Secondary") {
                         Remove-DHCPReservation -ip ($splitNetwork + ".15") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop
+                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop | Out-Null
                     }
                 }
             }
@@ -1705,7 +1705,7 @@ $global:VM_Config = {
                             if ($vmnet -and $vmnet.MacAddress) {
                                 $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                                 Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
+                                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop | Out-Null
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                             }
                         }
