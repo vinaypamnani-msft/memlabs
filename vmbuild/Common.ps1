@@ -4876,15 +4876,47 @@ function Get-Tools {
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    Write-Log -LogOnly "Extracting $fileName to $fileDestination."
-                    Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                    # Skip re-extraction if the staging dir is newer than the
+                    # download file (nothing changed). Expand-Archive -Force
+                    # rewrites file timestamps, which invalidates the tools
+                    # fingerprint and causes Copy-ToolToVM to re-copy every run.
+                    $downloadItem = Get-Item $downloadPath
+                    $skipExtract = $false
+                    if (Test-Path $fileDestination) {
+                        $newestStaged = Get-ChildItem $fileDestination -Recurse -File -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+                        if ($newestStaged -and $newestStaged.LastWriteTimeUtc -ge $downloadItem.LastWriteTimeUtc) {
+                            $skipExtract = $true
+                        }
+                    }
+                    if ($skipExtract) {
+                        Write-Log -LogOnly "Staging for $fileName already up-to-date, skipping extract."
+                    }
+                    else {
+                        Write-Log -LogOnly "Extracting $fileName to $fileDestination."
+                        Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                    }
                 }
                 else {
-                    Write-Log -LogOnly "Copying $fileName to $fileDestination."
-                    try {
-                        Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                    # Skip copy if the staged file already matches the download
+                    $skipCopy = $false
+                    if (Test-Path $fileDestination) {
+                        $srcItem = Get-Item $downloadPath
+                        $dstItem = Get-Item $fileDestination -ErrorAction SilentlyContinue
+                        if ($dstItem -and $dstItem.Length -eq $srcItem.Length -and $dstItem.LastWriteTimeUtc -ge $srcItem.LastWriteTimeUtc) {
+                            $skipCopy = $true
+                        }
                     }
-                    catch {}
+                    if ($skipCopy) {
+                        Write-Log -LogOnly "Staging for $fileName already up-to-date, skipping copy."
+                    }
+                    else {
+                        Write-Log -LogOnly "Copying $fileName to $fileDestination."
+                        try {
+                            Copy-Item -Path $downloadPath -Destination $fileDestination -Force -Confirm:$false
+                        }
+                        catch {}
+                    }
                 }
             }
         }
