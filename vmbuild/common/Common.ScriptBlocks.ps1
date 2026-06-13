@@ -1815,23 +1815,25 @@ $global:VM_Config = {
                             if ($retryCount -eq 1) {
                                 try {
                                     Write-Progress2 $Activity -Status "Attempting to repair network $($currentNetwork) " -percentcomplete 10 -force
-                                    stop-vm2 -Name $currentItem.vmname
-                                    Remove-VMSwitch2 -NetworkName $($currentNetwork)
-                                    Remove-DhcpServerv4Scope -scopeID $($currentNetwork) -ErrorAction SilentlyContinue
-                                    stop-service "DHCPServer" | Out-Null
-                                    $dhcp = Start-DHCP
-                                    start-sleep -seconds 10
-                                    $DC = get-list2 -deployConfig $deployConfig | where-object { $_.role -eq "DC" }
-                                    $DCNetwork = $DC.Network
-                                    if (-not $DCNetwork) {
-                                        $DCNetwork = $deployConfig.vmOptions.Network
+                                    # Disconnect and reconnect the VM's NIC to force
+                                    # a fresh DHCP discover, without destroying the
+                                    # scope (which nukes reservations for ALL VMs).
+                                    $vmNic = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.SwitchName -and $_.SwitchName -like "*$currentNetwork*" } |
+                                        Select-Object -First 1
+                                    if ($vmNic) {
+                                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disconnecting/reconnecting NIC '$($vmNic.Name)' on switch '$($vmNic.SwitchName)'" -Warning -OutputStream
+                                        $savedSwitch = $vmNic.SwitchName
+                                        Disconnect-VMNetworkAdapter -VMNetworkAdapter $vmNic -ErrorAction SilentlyContinue
+                                        Start-Sleep -Seconds 3
+                                        Connect-VMNetworkAdapter -VMNetworkAdapter $vmNic -SwitchName $savedSwitch -ErrorAction SilentlyContinue
                                     }
-                                    $DNSServer = ($DCNetwork.Substring(0, $DCNetwork.LastIndexOf(".")) + ".1")
-                                    $worked = Add-SwitchAndDhcp -NetworkName $currentNetwork -NetworkSubnet $currentNetwork -DomainName $deployConfig.vmOptions.domainName -DNSServer $DNSServer -WhatIf:$WhatIf -ErrorAction SilentlyContinue
-
-                                    start-vm2 -Name $currentItem.vmname
-                                    $connected = Wait-ForVM -VmName $currentItem.vmName -PathToVerify "C:\Users" -VmDomainName $deployConfig.vmOptions.domainName -SkipDiskTest
-                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew .\cache } -DisplayName "FixIPs"
+                                    # Restart DHCP service to clear any stale state
+                                    Stop-Service "DHCPServer" -ErrorAction SilentlyContinue | Out-Null
+                                    Start-Sleep -Seconds 3
+                                    $dhcp = Start-DHCP
+                                    Start-Sleep -Seconds 10
+                                    $IPrenew = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { ipconfig /renew } -DisplayName "FixIPs"
                                 }
                                 catch {
                                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to repair network $($currentNetwork). $($_.Exception.Message)" -Warning -OutputStream
