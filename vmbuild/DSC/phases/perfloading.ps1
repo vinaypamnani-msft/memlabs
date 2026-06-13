@@ -1282,8 +1282,14 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     break
                 }
                 elseif ($syncStatus.LastSyncState -eq 6703) {
-                    Write-DscStatus "$Tag Sync 1 failed (attempt $s1). Triggering retry..."
-                    Invoke-FullSync
+                    if ($s1 % 3 -eq 0) {
+                        Write-DscStatus "$Tag Sync 1 failed $s1 times. Repairing WSUS services... (attempt $s1 of 40)"
+                        Repair-WsusSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag Sync 1 failed (attempt $s1). Triggering retry..."
+                        Invoke-FullSync
+                    }
                 }
                 elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                     # Check for stale in-progress state within the wait loop too
@@ -1323,12 +1329,17 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                         Write-DscStatus "$Tag Sync 1 running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
                     }
                 }
-                elseif ($syncStatus.LastSyncState -eq 6703 -and ($s1 % 5 -eq 0)) {
-                    Write-DscStatus "$Tag Sync 1 failed. Retrying... (attempt $s1 of 40)"
-                    Invoke-FullSync
-                }
-                else {
-                    Write-DscStatus "$Tag Sync 1 state: $($syncStatus.LastSyncState) (attempt $s1 of 40)"
+                elseif ($syncStatus.LastSyncState -eq 6703) {
+                    if ($s1 % 3 -eq 0) {
+                        # Every 3rd attempt, escalate to Repair-WsusSync
+                        # (restart WsusPool + SMS_EXECUTIVE) since plain
+                        # Invoke-FullSync isn't clearing the failure.
+                        Write-DscStatus "$Tag Sync 1 failed $s1 times. Repairing WSUS services... (attempt $s1 of 40)"
+                        Repair-WsusSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag Sync 1 state: $($syncStatus.LastSyncState) (attempt $s1 of 40)"
+                    }
                 }
             }
         }
