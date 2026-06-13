@@ -326,11 +326,12 @@
                 # servicePrincipalName attribute (not the validated write, which
                 # doesn't work for user service accounts).
                 $sqlSvcAccountName = $ThisVM.SqlServiceAccount
+                $sqlDCName = $deployConfig.parameters.DCName
                 Script GrantSPNWritePermission {
                     GetScript  = { return @{ Result = "N/A" } }
                     TestScript = {
                         try {
-                            $user = Get-ADUser -Identity $using:sqlSvcAccountName -ErrorAction Stop
+                            $user = Get-ADUser -Identity $using:sqlSvcAccountName -Server $using:sqlDCName -ErrorAction Stop
                             $dn = $user.DistinguishedName
                             $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
                             # servicePrincipalName attribute GUID
@@ -350,7 +351,8 @@
                     }
                     SetScript  = {
                         Import-Module ActiveDirectory -ErrorAction Stop
-                        $user = Get-ADUser -Identity $using:sqlSvcAccountName -ErrorAction Stop
+                        $dc = $using:sqlDCName
+                        $user = Get-ADUser -Identity $using:sqlSvcAccountName -Server $dc -ErrorAction Stop
                         $dn = $user.DistinguishedName
                         $acl = Get-Acl "AD:\$dn" -ErrorAction Stop
                         # servicePrincipalName attribute GUID — grants WriteProperty
