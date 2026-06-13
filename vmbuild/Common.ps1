@@ -5341,9 +5341,11 @@ function Build-ToolZipsForPhase2 {
 
     # --- Build common zip ---
     $builtCount = 0
+    $allZipNames = @()
     if ($commonEntries.Count -gt 0) {
         $commonFP = & $computeFingerprint $commonEntries
         $null = & $buildZipLocal $commonEntries $commonFP "common tools"
+        $allZipNames += "tools-$commonFP.zip"
         $builtCount++
     }
 
@@ -5354,9 +5356,16 @@ function Build-ToolZipsForPhase2 {
         $extraFP = & $computeFingerprint $extraEntries
         if (-not $builtExtraFPs.ContainsKey($extraFP)) {
             $null = & $buildZipLocal $extraEntries $extraFP "extra tools ($role)"
+            $allZipNames += "tools-$extraFP.zip"
             $builtExtraFPs[$extraFP] = $true
             $builtCount++
         }
+    }
+
+    # --- Write a manifest so Clean-StaleToolZips knows these zips are active ---
+    if ($allZipNames.Count -gt 0) {
+        $manifestPath = Join-Path $Common.TempPath "toolhash-_prebuild.json"
+        @{ ZipFiles = $allZipNames } | ConvertTo-Json | Set-Content $manifestPath -Force -ErrorAction SilentlyContinue
     }
 
     $timer.Stop()
