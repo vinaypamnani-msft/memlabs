@@ -698,15 +698,52 @@ else {
     }
     } # end top-level client settings
 
+    function Repair-WsusSync {
+        # Remediate a stuck/failed WSUS sync by restarting the IIS app pool
+        # and the SMS wsyncmgr component, then triggering a fresh sync.
+        # Typical cause: WSUS returned HTTP 503 mid-sync and wsyncmgr couldn't
+        # write the failure state to SQL (SSL/connection error), leaving the
+        # sync status frozen at 6704 indefinitely.
+        Write-DscStatus "$Tag Restarting WsusPool app pool..."
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            Restart-WebAppPool WsusPool
+            Write-DscStatus "$Tag WsusPool restarted"
+        }
+        catch {
+            Write-DscStatus "$Tag Could not restart WsusPool: $_"
+        }
+        # Give the app pool time to fully initialize before wsyncmgr reconnects
+        Start-Sleep -Seconds 15
+        # Restart SMS_WSUS_SYNC_MANAGER by cycling SMS_EXECUTIVE. This clears
+        # any cached connection state and lets wsyncmgr pick up the fresh app pool.
+        Write-DscStatus "$Tag Restarting SMS_EXECUTIVE to cycle wsyncmgr..."
+        try {
+            Restart-Service SMS_EXECUTIVE -Force -ErrorAction Stop
+            Start-Sleep -Seconds 30
+            Write-DscStatus "$Tag SMS_EXECUTIVE restarted"
+        }
+        catch {
+            Write-DscStatus "$Tag Could not restart SMS_EXECUTIVE: $_"
+        }
+        # Now trigger a fresh sync
+        Invoke-FullSync
+    }
+
     function Invoke-FullSync {
-        # Skip if a sync is already running — dropping full.syn during an active
-        # sync is harmless but pointless, and it can confuse post-sync verification.
+        # Skip if a sync is genuinely running — dropping full.syn during an
+        # active sync is harmless but pointless. However, if the "running" state
+        # is stale (>15 min unchanged), the sync is dead and we should proceed.
         $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
         if ($currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
             $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
             $stateName = $syncStateNames[$currentSync.LastSyncState]
-            Write-DscStatus "$Tag Sync already in progress ($stateName) — skipping full.syn drop"
-            return
+            $stateAge = (Get-Date) - $currentSync.LastSyncStateTime
+            if ($stateAge.TotalMinutes -le 15) {
+                Write-DscStatus "$Tag Sync already in progress ($stateName, $([math]::Round($stateAge.TotalMinutes,1)) min) — skipping full.syn drop"
+                return
+            }
+            Write-DscStatus "$Tag Sync state $stateName is stale ($([math]::Round($stateAge.TotalMinutes,0)) min) — proceeding with full.syn drop"
         }
         $syncFolder = "$CMInstallDir\inboxes\wsyncmgr.box"
         $syncFile = Join-Path $syncFolder "full.syn"
@@ -1224,8 +1261,18 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             $sync1Done = $true
         }
         elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
-            # Sync is running — wait for it to finish
-            Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState)) — waiting for completion before adding products..."
+            # Sync appears to be running — but check if the state is stale.
+            # If wsyncmgr failed mid-sync AND couldn't update the DB (e.g. SQL
+            # connection failure), the status stays at 6704 indefinitely. Treat
+            # a sync whose state hasn't changed in >15 min as dead/failed.
+            $syncAge = (Get-Date) - $syncStatus.LastSyncStateTime
+            if ($syncAge.TotalMinutes -gt 15) {
+                Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) is stale ($([math]::Round($syncAge.TotalMinutes,0)) min old) — treating as failed. Repairing WSUS..."
+                Repair-WsusSync
+            }
+            else {
+                Write-DscStatus "$Tag Sync 1 is in progress (state $($syncStatus.LastSyncState), age $([math]::Round($syncAge.TotalMinutes,1)) min) — waiting for completion before adding products..."
+            }
             for ($s1 = 1; $s1 -le 40; $s1++) {
                 Start-Sleep -Seconds 30
                 $syncStatus = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
@@ -1238,8 +1285,19 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     Write-DscStatus "$Tag Sync 1 failed (attempt $s1). Triggering retry..."
                     Invoke-FullSync
                 }
+                elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                    # Check for stale in-progress state within the wait loop too
+                    $loopAge = (Get-Date) - $syncStatus.LastSyncStateTime
+                    if ($loopAge.TotalMinutes -gt 15) {
+                        Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) stale ($([math]::Round($loopAge.TotalMinutes,0)) min). Repairing WSUS... (attempt $s1 of 40)"
+                        Repair-WsusSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag Sync 1 still running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                    }
+                }
                 else {
-                    Write-DscStatus "$Tag Sync 1 still running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                    Write-DscStatus "$Tag Sync 1 unexpected state $($syncStatus.LastSyncState) (attempt $s1 of 40)"
                 }
             }
         }
@@ -1256,7 +1314,14 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     break
                 }
                 elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
-                    Write-DscStatus "$Tag Sync 1 running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                    $loopAge2 = (Get-Date) - $syncStatus.LastSyncStateTime
+                    if ($loopAge2.TotalMinutes -gt 15) {
+                        Write-DscStatus "$Tag Sync 1 state $($syncStatus.LastSyncState) stale ($([math]::Round($loopAge2.TotalMinutes,0)) min). Repairing WSUS... (attempt $s1 of 40)"
+                        Repair-WsusSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag Sync 1 running (state $($syncStatus.LastSyncState), attempt $s1 of 40)"
+                    }
                 }
                 elseif ($syncStatus.LastSyncState -eq 6703 -and ($s1 % 5 -eq 0)) {
                     Write-DscStatus "$Tag Sync 1 failed. Retrying... (attempt $s1 of 40)"

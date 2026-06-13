@@ -4710,6 +4710,11 @@ function Test-CMSiteWideFunctionality {
         }
     }
 
+    # Determine if this site has a SUP installed
+    $hasSUP = [bool]($DeployConfig.virtualMachines | Where-Object {
+        ($_.installSUP -or $_.InstallSUP) -and $_.siteCode -eq $siteCode
+    } | Select-Object -First 1)
+
     $siteRoleLabel = "$role ($siteCode)"
     Write-Log "[Phase $Phase] $VMName [$siteRoleLabel]: Testing site-wide settings (BoundaryGroups, Discovery, Apps, CommsMode)" -LogOnly
 
@@ -4718,11 +4723,12 @@ function Test-CMSiteWideFunctionality {
         # stringifies bools (any non-empty string is truthy) and (b) flattens
         # nested arrays. Bools are passed as '0'/'1' strings; arrays are
         # passed as a single CSV string and split inside.
-        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner)
+        param($sc, $usePkiInner, $expectedAppsCsv, $vmRole, $prePopInner, $isTopLevelInner, $hasSUPInner)
         $usePki = ($usePkiInner -eq 'True')
         $prePop = ($prePopInner -eq 'True')
         $topLevel = ($isTopLevelInner -eq 'True')
         $isPrimary = ($vmRole -eq 'Primary')
+        $hasSup = ($hasSUPInner -eq 'True')
         $expectedApps = if ([string]::IsNullOrEmpty($expectedAppsCsv)) { @() } else { @($expectedAppsCsv -split '\|') }
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
@@ -5019,12 +5025,49 @@ function Test-CMSiteWideFunctionality {
 
         } # end prePop checks
 
+        # SUP sync status check — verify at least one successful sync has completed
+        if ($hasSup) {
+            try {
+                $syncStatus = Get-WmiObject -Namespace $ns -Class SMS_SUPSyncStatus `
+                    -Filter "SiteCode='$sc'" -ErrorAction Stop | Select-Object -First 1
+                if (-not $syncStatus) {
+                    $results.Details.Add("WARN: No SUP sync status found for site '$sc' (sync may not have run yet)")
+                }
+                elseif ($syncStatus.LastSyncState -eq 6702) {
+                    $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
+                    $results.Details.Add("OK: SUP sync completed successfully (last: $syncTime)")
+                }
+                elseif ($syncStatus.LastSyncState -eq 6703) {
+                    $results.Details.Add("WARN: SUP last sync FAILED (state 6703, error code $($syncStatus.LastSyncErrorCode))")
+                }
+                elseif ($syncStatus.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                    $stateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
+                    $sName = if ($stateNames.ContainsKey([int]$syncStatus.LastSyncState)) { $stateNames[[int]$syncStatus.LastSyncState] } else { "state $($syncStatus.LastSyncState)" }
+                    $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
+                    $age = (Get-Date) - $syncTime
+                    if ($age.TotalMinutes -gt 30) {
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: SUP sync stuck at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime) — likely a dead sync")
+                    }
+                    else {
+                        $results.Details.Add("OK: SUP sync in progress ($sName, $([math]::Round($age.TotalMinutes,1)) min)")
+                    }
+                }
+                else {
+                    $results.Details.Add("WARN: SUP sync in unexpected state $($syncStatus.LastSyncState)")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: SMS_SUPSyncStatus query failed: $($_.Exception.Message)")
+            }
+        }
+
         return $results
     }
 
     $appsCsv = ($expectedAppNames -join '|')
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel) `
+        -ScriptBlock $scriptBlock -ArgumentList $siteCode, ([string]$usePKI), $appsCsv, $role, ([string]$prePopulate), ([string]$IsTopLevel), ([string]$hasSUP) `
         -DisplayName "Phase11-CMSite-Test" -SuppressLog `
         -AsJob -TimeoutSeconds 600
 
