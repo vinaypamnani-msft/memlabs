@@ -443,6 +443,43 @@ function Start-PhaseJobs {
         }
     }
 
+    # Phase 10 pre-filter: bulk-read VM notes and skip VMs where all
+    # new-VM maintenance fixes are already applied. This avoids spawning
+    # a job, dot-sourcing Common.ps1, opening PSDirect, and copying DSC
+    # for every VM that has nothing to do on a re-run.
+    $phase10SkipSet = @{}
+    if ($Phase -eq 10) {
+        $allFixDefs = Get-VMFixes -ReturnDummyList
+        $newVmFixes = @($allFixDefs | Where-Object { $_.AppliesToNew -eq $true })
+        $vmNoteCache = @{}
+        try {
+            foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+                if ($hvm.Notes -like "*appliedFixes*") {
+                    try { $vmNoteCache[$hvm.Name] = $hvm.Notes | ConvertFrom-Json } catch {}
+                }
+            }
+        } catch {}
+        foreach ($vm in $deployConfig.virtualMachines) {
+            if ($vm.hidden) { continue }
+            $note = $vmNoteCache[$vm.vmName]
+            if ($note -and $note.appliedFixes) {
+                $allApplied = $true
+                foreach ($fix in $newVmFixes) {
+                    if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
+                        $allApplied = $false
+                        break
+                    }
+                }
+                if ($allApplied) {
+                    $phase10SkipSet[$vm.vmName] = $true
+                }
+            }
+        }
+        if ($phase10SkipSet.Count -gt 0) {
+            Write-Log "[Phase 10] $($phase10SkipSet.Count) VM(s) already up-to-date, will skip." -LogOnly
+        }
+    }
+
     foreach ($currentItem in $deployConfig.virtualMachines) {
 
         $global:preparePhasePercent++
@@ -593,7 +630,11 @@ function Start-PhaseJobs {
             elseif ($Phase -eq 10) {         
                 if ($currentItem.Role -in @("OSDClient", "AADClient")) {
                     continue
-                }       
+                }
+                if ($phase10SkipSet.ContainsKey($currentItem.vmName)) {
+                    Write-Log "[Phase 10] $($currentItem.vmName): All fixes already applied, skipping." -LogOnly
+                    continue
+                }
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
                 if ($usePhaseThreadJob) {
                     $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
