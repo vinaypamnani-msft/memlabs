@@ -1694,6 +1694,25 @@ $global:VM_Config = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP" -LogOnly
                         $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
                     }
+
+                    # Create a DHCP reservation so the IP is stable across reboots
+                    # and VM recreations. CAS/Primary/Secondary already get fixed-IP
+                    # reservations in Phase 1; skip those here. Linux VMs get theirs
+                    # during Phase 1 creation. OSDClient has no network stack.
+                    if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
+                        try {
+                            $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
+                            if ($vmnet -and $vmnet.MacAddress) {
+                                $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                                Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
+                                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
+                            }
+                        }
+                        catch {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
+                        }
+                    }
                 }
             }
         }
