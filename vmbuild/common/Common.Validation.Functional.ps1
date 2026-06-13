@@ -1148,7 +1148,18 @@ function Test-SQLAOFunctionality {
                         $uniqueResources = @($clusterEvents | ForEach-Object {
                             try { $_.Properties[0].Value } catch { 'Unknown' }
                         } | Sort-Object -Unique)
-                        $results.Details.Add("WARN: $($clusterEvents.Count) cluster resource failure event(s) (1069) in last 30 min for: $($uniqueResources -join ', ')")
+                        # Check current state of each resource that had failures
+                        $stateNotes = @()
+                        foreach ($resName in $uniqueResources) {
+                            $cr = Get-ClusterResource -Name $resName -ErrorAction SilentlyContinue
+                            if ($cr) {
+                                $stateNotes += "$resName=$($cr.State)"
+                            }
+                            else {
+                                $stateNotes += "$resName=NotFound"
+                            }
+                        }
+                        $results.Details.Add("WARN: $($clusterEvents.Count) cluster resource failure event(s) (1069) in last 30 min for: $($uniqueResources -join ', ') (current: $($stateNotes -join ', '))")
                     }
                 }
                 catch {}
