@@ -215,6 +215,11 @@ function Start-Phase {
         # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
         # site-server desktops. No-op when no Proxy VM is in this config.
         Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
+
+        # Clean up shared fingerprint-keyed tool zips now that all Phase 2
+        # jobs have completed. Individual per-VM Install-Tools calls skip
+        # cleanup to avoid deleting zips still needed by parallel jobs.
+        Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
     return $true

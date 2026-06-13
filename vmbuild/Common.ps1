@@ -4999,8 +4999,12 @@ function Install-Tools {
         }
     }
 
-    # Clean up shared fingerprint-keyed tool zips now that all VMs are done
-    Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    # Clean up shared fingerprint-keyed tool zips only when Install-Tools
+    # managed its own parallel jobs. When called for a single VM from a
+    # Phase 2 job, other parallel jobs may still need the shared zips.
+    if ($allVMs.Count -gt 1) {
+        Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 
     return $success
 }

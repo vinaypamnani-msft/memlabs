@@ -334,9 +334,18 @@ function Test-DCFunctionality {
             # Workgroup/InternetClient VMs are not domain-joined and won't have DNS A records.
             if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
-                $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
-                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' -and $_ -notlike '10.250.251.*' }
-                $ip = $ips | Select-Object -First 1
+                # Prefer LastKnownIP (set during Phase 2 DHCP) — it's the
+                # node's actual IP, not a cluster/AG virtual IP that also
+                # appears on Get-VMNetworkAdapter for SQLAO nodes.
+                $ip = $null
+                if ($vm.LastKnownIP) {
+                    $ip = $vm.LastKnownIP
+                }
+                else {
+                    $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
+                        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' -and $_ -notlike '10.250.251.*' }
+                    $ip = $ips | Select-Object -First 1
+                }
                 if ($ip) {
                     $entries.Add("$($vm.vmName)=$ip")
                     # Update LastKnownIP in VM Notes if the live IP differs
@@ -4548,7 +4557,7 @@ function Test-AdditionalDisks {
         foreach ($letter in $expected) {
             $letter = $letter.TrimEnd(':').ToUpper()
             $results.Details.Add("CMD: Get-Volume -DriveLetter $letter")
-            $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue
+            $vol = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $vol) {
                 $results.Passed = $false
                 $results.Details.Add("FAIL: Volume '$letter`:' not present")
@@ -4558,7 +4567,7 @@ function Test-AdditionalDisks {
                 $results.Details.Add("WARN: Volume '$letter`:' filesystem is '$($vol.FileSystem)' (expected NTFS)")
             }
             $sizeGB = [math]::Round($vol.Size / 1GB, 1)
-            $results.Details.Add("OK: Volume '$letter`:' present ($sizeGB GB, $($vol.FileSystem))")
+            $results.Details.Add("OK: Volume '$letter`:' present ($sizeGB GB, $($vol.FileSystem) $($vol.FileSystemLabel))")
         }
 
         return $results
