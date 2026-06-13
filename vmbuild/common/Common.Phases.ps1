@@ -106,6 +106,7 @@ function Write-JobProgress {
                             $Global:ProgressPreference = 'Continue'
                             Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
                             $Global:ProgressPreference = $savedPref
+                            Write-Log "[Diag] Dismissed orphan bar: Id=$childActivityId Activity='$($lastProgress.Activity)' Job=$($job.Name)" -LogOnly
                         }
                     }
                 }
@@ -771,6 +772,7 @@ function Wait-Phase {
         }
 
         $global:JobProgressHistory = @{}
+        $global:JobProgressDiag = @{}
 
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
@@ -784,6 +786,27 @@ function Wait-Phase {
             [Console]::Write("$esc[?2026h")
 
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
+
+            # Diagnostic: track new progress records appearing during this iteration
+            foreach ($job in $runningJobs) {
+                $ss = Get-JobStreamSource -Job $job
+                if ($ss -and $ss.Progress) {
+                    $jk = $job.Id
+                    $cnt = $ss.Progress.Count
+                    $prev = if ($global:JobProgressDiag.ContainsKey($jk)) { $global:JobProgressDiag[$jk] } else { 0 }
+                    if ($cnt -gt $prev) {
+                        for ($di = $prev; $di -lt $cnt; $di++) {
+                            $rec = $ss.Progress[$di]
+                            if ($rec.Activity -ne "Preparing modules for first use." -and
+                                $rec.Activity -ne "Compress-Archive") {
+                                Write-Log "[Diag] New progress: Job=$($job.Name) Id=$($rec.ActivityId) Activity='$($rec.Activity)' Status='$($rec.StatusDescription)' RecordType=$($rec.RecordType)" -LogOnly
+                            }
+                        }
+                        $global:JobProgressDiag[$jk] = $cnt
+                    }
+                }
+            }
+
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
 
@@ -876,6 +899,21 @@ function Wait-Phase {
             }
             $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
             foreach ($job in $completedJobs) {
+                # Diagnostic: log all unique progress activities for this job
+                $streamSource2 = Get-JobStreamSource -Job $job
+                if ($streamSource2 -and $streamSource2.Progress -and $streamSource2.Progress.Count -gt 0) {
+                    $activities = @{}
+                    foreach ($pr in $streamSource2.Progress) {
+                        $key = "$($pr.ActivityId)|$($pr.Activity)"
+                        if (-not $activities.ContainsKey($key)) {
+                            $activities[$key] = 0
+                        }
+                        $activities[$key]++
+                    }
+                    $diagLines = $activities.GetEnumerator() | ForEach-Object { "$($_.Key) x$($_.Value)" }
+                    Write-Log "[Diag] $($job.Name) completed with $($streamSource2.Progress.Count) progress records: $($diagLines -join '; ')" -LogOnly
+                }
+
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name
