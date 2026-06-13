@@ -443,7 +443,8 @@ chpasswd:
         'openssh-server',
         'qemu-guest-agent',
         'linux-tools-virtual',
-        'linux-cloud-tools-virtual'
+        'linux-cloud-tools-virtual',
+        'samba'
     ) + $ExtraPackages | Select-Object -Unique
     $packagesYaml = ($packages | ForEach-Object { "  - $_" }) -join "`n"
 
@@ -511,8 +512,25 @@ chpasswd:
         # Delete the temporary bake-time console user. The bake runcmd
         # already runs userdel, but if it failed silently (|| true) the
         # account ships in the VHDX and every deployed VM inherits it.
-        'userdel -r memlabs 2>/dev/null || true'
-    ) + $ExtraRunCmd
+        'userdel -r memlabs 2>/dev/null || true',
+        # Install sshd watchdog cron job: every 5 minutes, check tcp/22
+        # and restart sshd if it's not listening.
+        '(crontab -l 2>/dev/null | grep -v memlabs-sshd-watchdog; echo "*/5 * * * * /usr/local/sbin/memlabs-sshd-watchdog") | crontab -',
+        # Enable Samba and set vmbuildadmin's SMB password (same as console).
+        # Allow SMB through the firewall. The share gives file access to
+        # /var/log and /home/vmbuildadmin when SSH is down.
+        'ufw allow Samba || true',
+        'systemctl enable --now smbd || true'
+    )
+
+    # Set vmbuildadmin's Samba password if we have the console password.
+    # printf pipes the password twice (new + confirm) to smbpasswd -a -s.
+    if ($consolePassword) {
+        $escapedPw = $consolePassword -replace "'", "'\''"
+        $runcmd += "printf '$escapedPw\n$escapedPw\n' | smbpasswd -a -s vmbuildadmin"
+    }
+
+    $runcmd = $runcmd + $ExtraRunCmd
     # Emit each runcmd item as a YAML double-quoted scalar.
     #
     # Why: plain (unquoted) YAML scalars are parsed greedily. A runcmd line
@@ -775,6 +793,41 @@ write_files:
       [Service]
       ExecStart=
       ExecStart=-/usr/bin/systemctl reboot
+  # sshd watchdog: every 5 minutes, verify sshd is listening on tcp/22.
+  # If the port is closed, restart the service. Logs to syslog so
+  # failures are visible in journalctl. This prevents the "long-uptime
+  # sshd goes unresponsive" issue that causes 30-min probe timeouts.
+  - path: /usr/local/sbin/memlabs-sshd-watchdog
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      if ! ss -tlnp | grep -q ':22\b'; then
+        logger -t memlabs-sshd-watchdog "tcp/22 not listening, restarting sshd"
+        systemctl restart ssh || systemctl restart sshd
+      fi
+  # Samba config: share /var/log (read-only) and /home/vmbuildadmin
+  # so admins can browse logs and files via SMB when SSH is down.
+  # Auth uses vmbuildadmin with the same password as LocalAdmin.
+  - path: /etc/samba/smb.conf
+    permissions: '0644'
+    content: |
+      [global]
+        workgroup = WORKGROUP
+        server string = %h (MemLabs)
+        security = user
+        map to guest = never
+        log file = /var/log/samba/log.%m
+        max log size = 1000
+      [logs]
+        path = /var/log
+        browseable = yes
+        read only = yes
+        valid users = vmbuildadmin
+      [home]
+        path = /home/vmbuildadmin
+        browseable = yes
+        read only = no
+        valid users = vmbuildadmin
 
 package_update: true
 package_upgrade: false
