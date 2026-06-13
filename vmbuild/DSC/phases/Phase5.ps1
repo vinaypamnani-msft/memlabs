@@ -1258,6 +1258,68 @@
 
             $adGroupDependency += "[ADGroup]SQLAOGroup$($pNode.vmName)"
 
+            # Grant the CNO (cluster computer account) Full Control on the
+            # prestaged listener VCO so the cluster service can set "Protect
+            # from accidental deletion" and manage the object without
+            # Event ID 1222 warnings.
+            $_cnoName = $pNode.ClusterName
+            $_listenerName = $pNode.thisParams.SQLAO.AlwaysOnListenerName
+
+            Script "GrantCnoVcoPermissions$i" {
+                SetScript  = {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    $cnoAccount = Get-ADComputer -Identity $using:_cnoName -ErrorAction Stop
+                    $cnoSID = [System.Security.Principal.SecurityIdentifier]$cnoAccount.SID
+
+                    $vcoNames = @($using:_cnoName, $using:_listenerName) | Where-Object { $_ }
+                    foreach ($vcoName in $vcoNames) {
+                        $vco = Get-ADComputer -Identity $vcoName -ErrorAction SilentlyContinue
+                        if (-not $vco) { continue }
+
+                        $vcoPath = "AD:\$($vco.DistinguishedName)"
+                        $acl = Get-Acl $vcoPath
+                        $hasFullControl = $acl.Access | Where-Object {
+                            $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $cnoSID.Value -and
+                            $_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+                        }
+                        if (-not $hasFullControl) {
+                            $identity = [System.Security.Principal.NTAccount]"$($env:USERDOMAIN)\$($using:_cnoName)$"
+                            $adRights = [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+                            $type = [System.Security.AccessControl.AccessControlType]::Allow
+                            $inherit = [System.DirectoryServices.ActiveDirectorySecurityInheritance]::None
+                            $ace = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+                                $identity, $adRights, $type, $inherit
+                            )
+                            $acl.AddAccessRule($ace)
+                            Set-Acl $vcoPath $acl
+                        }
+                    }
+                }
+                TestScript = {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    $cnoAccount = Get-ADComputer -Identity $using:_cnoName -ErrorAction SilentlyContinue
+                    if (-not $cnoAccount) { return $false }
+                    $cnoSID = [System.Security.Principal.SecurityIdentifier]$cnoAccount.SID
+
+                    $vcoNames = @($using:_cnoName, $using:_listenerName) | Where-Object { $_ }
+                    foreach ($vcoName in $vcoNames) {
+                        $vco = Get-ADComputer -Identity $vcoName -ErrorAction SilentlyContinue
+                        if (-not $vco) { continue }
+
+                        $acl = Get-Acl "AD:\$($vco.DistinguishedName)"
+                        $hasFullControl = $acl.Access | Where-Object {
+                            $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $cnoSID.Value -and
+                            $_.ActiveDirectoryRights -band [System.DirectoryServices.ActiveDirectoryRights]::GenericAll
+                        }
+                        if (-not $hasFullControl) { return $false }
+                    }
+                    return $true
+                }
+                GetScript  = { return @{ Result = "N/A" } }
+                DependsOn  = "[ADGroup]SQLAOGroup$($pNode.vmName)"
+            }
+            $adGroupDependency += "[Script]GrantCnoVcoPermissions$i"
+
             # Create PTR records for the cluster IP and AG listener IP so that
             # reverse DNS lookups work. OpenCluster() and other cluster APIs may
             # need reverse resolution. Skip legacy labs on the heartbeat subnet.

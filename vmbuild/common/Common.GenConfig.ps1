@@ -1170,7 +1170,14 @@ function ConvertTo-DeployConfigEx {
 
                             $DomainAccountsUPN += @($sql.SqlServiceAccount, $sql.SqlAgentAccount)
 
+                            # Prestage both the CNO (cluster name) and the VCO
+                            # (listener) as disabled computer objects so the
+                            # cluster service doesn't need Create Computer Objects
+                            # permission on the container.
                             $DomainComputers += @($ClusterName)
+                            if ($sql.AlwaysOnListenerName) {
+                                $DomainComputers += @($sql.AlwaysOnListenerName)
+                            }
                         }
                     }
                 }
