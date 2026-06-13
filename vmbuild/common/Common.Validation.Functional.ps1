@@ -1073,6 +1073,69 @@ function Test-SQLAOFunctionality {
             }
 
             # ==============================================================
+            # 1a. Cluster resource state — check all resources, remediate failed
+            # ==============================================================
+            # The AG SQL DMVs can report HEALTHY while the cluster resource
+            # itself is Failed (Event 1069). Check every cluster resource and
+            # attempt to bring failed ones online.
+            try {
+                $allResources = @(Get-ClusterResource -ErrorAction Stop)
+                $failedResources = @($allResources | Where-Object { $_.State -notin @('Online', 'Offline') })
+                $offlineResources = @($allResources | Where-Object { $_.State -eq 'Offline' })
+
+                if ($failedResources.Count -eq 0 -and $offlineResources.Count -eq 0) {
+                    $results.Details.Add("OK: All $($allResources.Count) cluster resource(s) are Online")
+                }
+                else {
+                    foreach ($res in $failedResources) {
+                        $results.Details.Add("REMEDIATE: Cluster resource '$($res.Name)' ($($res.ResourceType)) is $($res.State) in group '$($res.OwnerGroup)' — attempting Start")
+                        try {
+                            $res | Start-ClusterResource -ErrorAction Stop | Out-Null
+                            Start-Sleep -Seconds 5
+                            $recheck = Get-ClusterResource -Name $res.Name -ErrorAction Stop
+                            if ($recheck.State -eq 'Online') {
+                                $results.Details.Add("OK: Cluster resource '$($res.Name)' recovered to Online")
+                            }
+                            else {
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: Cluster resource '$($res.Name)' still $($recheck.State) after Start attempt")
+                            }
+                        }
+                        catch {
+                            $results.Passed = $false
+                            $results.Details.Add("FAIL: Could not start cluster resource '$($res.Name)': $($_.Exception.Message)")
+                        }
+                    }
+                    foreach ($res in $offlineResources) {
+                        # Offline is not necessarily wrong (e.g. a secondary AG role),
+                        # but flag it for visibility
+                        $results.Details.Add("WARN: Cluster resource '$($res.Name)' ($($res.ResourceType)) is Offline in group '$($res.OwnerGroup)'")
+                    }
+                }
+
+                # Check for recent cluster resource failures in System event log
+                try {
+                    $since = (Get-Date).AddMinutes(-30)
+                    $clusterEvents = Get-WinEvent -FilterHashtable @{
+                        LogName = 'System'
+                        ProviderName = 'Microsoft-Windows-FailoverClustering'
+                        Id = 1069   # Resource failed
+                        StartTime = $since
+                    } -ErrorAction SilentlyContinue
+                    if ($clusterEvents -and $clusterEvents.Count -gt 0) {
+                        $uniqueResources = @($clusterEvents | ForEach-Object {
+                            try { $_.Properties[0].Value } catch { 'Unknown' }
+                        } | Sort-Object -Unique)
+                        $results.Details.Add("WARN: $($clusterEvents.Count) cluster resource failure event(s) (1069) in last 30 min for: $($uniqueResources -join ', ')")
+                    }
+                }
+                catch {}
+            }
+            catch {
+                $results.Details.Add("WARN: Cluster resource check failed: $($_.Exception.Message)")
+            }
+
+            # ==============================================================
             # 1b. Network configuration validation
             # ==============================================================
             $results.Details.Add("CMD: Validate cluster network configuration")
