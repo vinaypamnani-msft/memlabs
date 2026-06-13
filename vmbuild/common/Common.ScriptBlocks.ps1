@@ -1879,28 +1879,30 @@ $global:VM_Config = {
                     # during Phase 1 creation. OSDClient has no network stack.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
                         try {
-                            # Suppress cmdlet progress (Get-VM, Get-VMNetworkAdapter,
-                            # Get-DhcpServerv4Scope/Reservation) so it doesn't leak
-                            # into the job's Progress stream and create orphan bars
-                            # that leave blank lines in Wait-Phase's Minimal view.
-                            $savedPP = $ProgressPreference
-                            $ProgressPreference = 'SilentlyContinue'
-                            $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-                            if ($vmnet -and $vmnet.MacAddress) {
-                                if ($currentItem.role -in "InternetClient", "AADClient") {
-                                    $realnetwork = "172.31.250.0"
+                            # Wrap DHCP work in a script block with all non-error
+                            # streams redirected to $null. DHCP/Hyper-V CIM cmdlets
+                            # produce host output, progress, and information records
+                            # that leak into the job's streams and cause blank lines
+                            # in Wait-Phase's Minimal progress view. Terminating
+                            # exceptions (-ErrorAction Stop) still propagate to the
+                            # outer catch block.
+                            & {
+                                $ProgressPreference = 'SilentlyContinue'
+                                $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
+                                if ($vmnet -and $vmnet.MacAddress) {
+                                    if ($currentItem.role -in "InternetClient", "AADClient") {
+                                        $realnetwork = "172.31.250.0"
+                                    }
+                                    else {
+                                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
+                                    }
+                                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
+                                    Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
                                 }
-                                else {
-                                    $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                                }
-                                Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop | Out-Null
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
-                            }
-                            $ProgressPreference = $savedPP
+                            } *>$null
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                         }
                         catch {
-                            $ProgressPreference = $savedPP
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
                         }
                     }
