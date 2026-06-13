@@ -5132,14 +5132,51 @@ function Install-Tools {
         }
     }
 
-    # Clean up shared fingerprint-keyed tool zips only when Install-Tools
-    # managed its own parallel jobs. When called for a single VM from a
-    # Phase 2 job, other parallel jobs may still need the shared zips.
-    if ($allVMs.Count -gt 1) {
-        Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
+    # Clean stale tool zips that are no longer referenced by any VM
+    Clean-StaleToolZips
 
     return $success
+}
+
+function Clean-StaleToolZips {
+    # Scan all per-VM toolhash cache files to find which tool zips are
+    # actively referenced, then delete any tools-*.zip that isn't needed.
+    # This prevents 200+ MB zips from accumulating across reruns when
+    # fingerprints change (e.g. a tool is added/removed).
+    try {
+        $tempPath = $Common.TempPath
+        if (-not $tempPath -or -not (Test-Path $tempPath)) { return }
+
+        $cacheFiles = Get-ChildItem -Path $tempPath -Filter "toolhash-*.json" -File -ErrorAction SilentlyContinue
+        if (-not $cacheFiles) { return }
+
+        $activeZips = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($cf in $cacheFiles) {
+            try {
+                $cached = Get-Content $cf.FullName -Raw | ConvertFrom-Json
+                if ($cached.ZipFiles) {
+                    foreach ($zf in $cached.ZipFiles) {
+                        $null = $activeZips.Add($zf)
+                    }
+                }
+            }
+            catch {}
+        }
+
+        if ($activeZips.Count -eq 0) { return }
+
+        $allZips = Get-ChildItem -Path $tempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue
+        foreach ($zip in $allZips) {
+            if (-not $activeZips.Contains($zip.Name)) {
+                $sizeMB = [Math]::Round($zip.Length / 1MB, 1)
+                Write-Log "Cleaning stale tool zip: $($zip.Name) (${sizeMB} MB)" -LogOnly
+                Remove-Item $zip.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-Log "Clean-StaleToolZips: $_" -LogOnly
+    }
 }
 
 function Copy-ToolToVM {
@@ -5252,16 +5289,20 @@ function Copy-ToolToVM {
     # --- Helper: compute a fingerprint for a set of zip entries ---
     $computeFingerprint = {
         param([object[]]$entries)
+        # Use path + size only (no timestamps). Get-Tools re-extracts tool
+        # zips on every run, which updates LastWriteTimeUtc even though the
+        # content is identical. Including timestamps would invalidate the
+        # fingerprint cache on every rerun.
         $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
             $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
             if ($item -is [System.IO.DirectoryInfo]) {
                 $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
                 foreach ($child in $children) {
-                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)|$($child.LastWriteTimeUtc.Ticks)"
+                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
                 }
             }
             else {
-                "$($entry.TargetRelative)|$($item.Length)|$($item.LastWriteTimeUtc.Ticks)"
+                "$($entry.TargetRelative)|$($item.Length)"
             }
         }
         $str = $parts -join "`n"
@@ -5439,9 +5480,12 @@ function Copy-ToolToVM {
         }
     }
 
+    # Collect zip filenames for the cleanup manifest
+    $activeZipNames = @($zipPaths | ForEach-Object { Split-Path $_ -Leaf })
+
     if ($skipCopy) {
         if ($combinedFingerprint) {
-            @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+            @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
         }
         return $true
     }
@@ -5493,7 +5537,7 @@ function Copy-ToolToVM {
         if ($success) {
             Write-Log "$vmName`: Successfully injected $totalItems tools via bundle. Hash: $bundleHash" -Success
             if ($combinedFingerprint) {
-                @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
+                @{ SourceFingerprint = $combinedFingerprint; BundleMD5 = $bundleHash; ZipFiles = $activeZipNames } | ConvertTo-Json | Set-Content $hostCachePath -Force -ErrorAction SilentlyContinue
             }
         }
     }

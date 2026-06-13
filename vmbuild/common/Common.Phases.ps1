@@ -167,6 +167,13 @@ function Start-Phase {
     }
     $global:PhaseSkipped = $false
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+
+    # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
+    # zips from previous runs that are no longer referenced.
+    if ($Phase -eq 2) {
+        Clean-StaleToolZips
+    }
+
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"
 
     # Record per-phase stats
