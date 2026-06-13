@@ -2177,6 +2177,7 @@ function Set-LinuxVmsDcDns {
         }
         if ($registered.Count -gt 0) {
             Write-Log "Set-LinuxVmsDcDns: $($registered.Count)/$($linuxVms.Count) already registered; will process $($missing.Count) remaining" -LogOnly
+            $linuxVms = @($linuxVms | Where-Object { $_.vmName -in $missing })
         }
     }
     catch {
@@ -2236,10 +2237,16 @@ function Set-LinuxVmsDcDns {
         $vmIpPre = Get-LinuxVmIPAddress -VmName $vm.vmName
         if ($vmIpPre -and -not $needsRestart) {
             $tcpUp = $false
-            # Use the full scaled timeout. Linux VMs always report
-            # OkApplicationsUnknown so heartbeat alone cannot distinguish
-            # "healthy but slow sshd" from "stuck boot". Let TCP/22 decide.
+            # If the VM has been running for 10+ minutes, sshd should
+            # already be up.  Use a short 60s probe so we restart quickly
+            # instead of waiting the full scaled timeout (480s+ in large
+            # labs).  The long timeout only makes sense during first boot
+            # when cloud-init / dpkg may still be running.
             $effectiveProbe = $probeTimeoutSec
+            if ($vmUptimeSec -gt 600) {
+                $effectiveProbe = [Math]::Min($effectiveProbe, 60)
+                Write-Log "[Linux DNS] $($vm.vmName): uptime ${vmUptimeSec}s, using short ${effectiveProbe}s SSH probe" -LogOnly
+            }
             $probeEnd = (Get-Date).AddSeconds($effectiveProbe)
             while (-not $tcpUp -and (Get-Date) -lt $probeEnd) {
                 try {
