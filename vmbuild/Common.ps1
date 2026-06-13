@@ -406,6 +406,11 @@ function Register-LogBufferExitFlush {
     try {
         Register-EngineEvent -SourceIdentifier ([System.Management.Automation.PsEngineEvent]::Exiting) -Action {
             try {
+                # Stop the verbose tail window
+                if ($global:Common.VerboseTailProcess -and -not $global:Common.VerboseTailProcess.HasExited) {
+                    try { $global:Common.VerboseTailProcess.Kill() } catch { }
+                    $global:Common.VerboseTailProcess = $null
+                }
                 # Stop the background flush timer before final flush
                 if ($global:LogFlushTimer) {
                     $global:LogFlushTimer.Dispose()
@@ -485,6 +490,72 @@ namespace MemLabs {
             2000,                # initial delay (ms)
             2000                 # period (ms) — flush every 2 seconds
         )
+    }
+}
+
+function Start-VerboseTailWindow {
+    <#
+    .SYNOPSIS
+    Spawns a secondary PowerShell window that tails the log file for verbose entries.
+    #>
+    if (-not $Common.LogPath -or -not (Test-Path $Common.LogPath)) {
+        Write-Log "Cannot start verbose tail window: log file not found." -Warning
+        return
+    }
+    if ($Common.VerboseTailProcess -and -not $Common.VerboseTailProcess.HasExited) {
+        Write-Log "Verbose tail window is already running (PID $($Common.VerboseTailProcess.Id))." -Verbose
+        return
+    }
+
+    $logPath = $Common.LogPath
+    # Build a self-contained script that tails the log and extracts verbose
+    # entries from the CMTrace XML format (type="0").
+    $tailScript = @"
+`$host.UI.RawUI.WindowTitle = 'MemLabs Verbose Output'
+Write-Host 'Tailing verbose entries from:' -ForegroundColor Cyan
+Write-Host '  $logPath' -ForegroundColor Cyan
+Write-Host ('  Started: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) -ForegroundColor Cyan
+Write-Host ''
+Get-Content -LiteralPath '$logPath' -Wait -Tail 0 | ForEach-Object {
+    if (`$_ -match 'type="0"' -and `$_ -match '<!\[LOG\[(.+?)\]LOG\]') {
+        `$msg = `$Matches[1]
+        `$ts = if (`$_ -match 'time="([^"]+)"') { `$Matches[1].Substring(0,12) } else { '' }
+        `$comp = if (`$_ -match 'component="([^"]+)"') { `$Matches[1] } else { '' }
+        Write-Host "`$ts [`$comp] `$msg" -ForegroundColor DarkGray
+    }
+}
+"@
+    $tempScript = Join-Path $env:TEMP "memlabs-verbose-tail.ps1"
+    Set-Content -LiteralPath $tempScript -Value $tailScript -Encoding UTF8 -Force
+
+    $psExe = if ($Common.PS7) { "pwsh.exe" } else { "powershell.exe" }
+    $Common.VerboseTailProcess = Start-Process $psExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScript`"" `
+        -PassThru -ErrorAction SilentlyContinue
+
+    if ($Common.VerboseTailProcess) {
+        Write-Log "Started verbose tail window (PID $($Common.VerboseTailProcess.Id))." -LogOnly
+    }
+    else {
+        Write-Log "Failed to start verbose tail window." -Warning
+    }
+}
+
+function Stop-VerboseTailWindow {
+    <#
+    .SYNOPSIS
+    Stops the secondary verbose tail window if it is still running.
+    #>
+    if ($Common.VerboseTailProcess -and -not $Common.VerboseTailProcess.HasExited) {
+        try {
+            $Common.VerboseTailProcess.Kill()
+            $Common.VerboseTailProcess = $null
+        }
+        catch { }
+    }
+    # Clean up temp script
+    $tempScript = Join-Path $env:TEMP "memlabs-verbose-tail.ps1"
+    if (Test-Path $tempScript) {
+        Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -663,8 +734,8 @@ function Write-Log {
         $writeHost = $true
     }
 
-    # Always log verbose to host, if VerboseEnabled
-    if ($IsVerbose -and $Common.VerboseEnabled) {
+    # Always log verbose to host, if VerboseEnabled and not suppressed for menus
+    if ($IsVerbose -and $Common.VerboseEnabled -and -not $Common.VerboseToLogOnly) {
         $writeHost = $true
     }
 
@@ -6695,6 +6766,8 @@ if (-not $Common.Initialized) {
             RdcManFilePath              = Join-Path $DesktopPath "memlabs.rdg"                                      # RDCMan File
             MRemoteNGFilePath           = Join-Path $env:ProgramData "memlabs\memlabs-mremoteng.xml"                # mRemoteNG File
             VerboseEnabled              = $VerboseEnabled.IsPresent                                                 # Verbose Logging
+            VerboseToLogOnly            = $false                                                                    # When true, verbose goes to log only (suppressed from console)
+            VerboseTailProcess          = $null                                                                     # Process object for secondary verbose tail window
             DevBranch                   = $devBranch                                                                # Git dev branch
             Supported                   = $null                                                                     # Supported Configs
             AzureFileList               = $null

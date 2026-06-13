@@ -1291,6 +1291,13 @@ function Show-Menu {
         # When set, "GOBACK" is returned as-is instead of collapsed to "ESCAPE".
         [switch]$SplitEscapeFromGoBack
     )
+    # Suppress verbose console output during interactive menu display so it
+    # doesn't corrupt the cursor-positioned rendering. Verbose messages still
+    # go to the log file. Restored in the finally block below.
+    $savedVerboseToLogOnly = $Common.VerboseToLogOnly
+    $Common.VerboseToLogOnly = $true
+    try {
+
     $LongestBreakLine = 0
     $Operation = ""
     $pageStartIndex = 0
@@ -1653,6 +1660,9 @@ function Show-Menu {
         }
     }
 
+    } finally {
+        $Common.VerboseToLogOnly = $savedVerboseToLogOnly
+    }
 
 }
 

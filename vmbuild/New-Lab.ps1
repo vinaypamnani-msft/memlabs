@@ -55,7 +55,9 @@ param (
     [Parameter(Mandatory = $false, HelpMessage = "Do not auto-remove Phase 1 VMs on failure (keep them around for forensics).")]
     [switch]$KeepFailedVMs,
     [Parameter(Mandatory = $false, HelpMessage = "Disable mouse support in menus.")]
-    [switch]$DisableMouse
+    [switch]$DisableMouse,
+    [Parameter(Mandatory = $false, HelpMessage = "Open a secondary window showing verbose log output in real time.")]
+    [switch]$VerboseWindow
 
 )
 
@@ -119,6 +121,10 @@ if ($global:init_failed) {
 
 if ($DisableMouse) {
     $Global:Common.MouseEnabled = $false
+}
+
+if ($VerboseWindow -and $enableVerbose) {
+    Start-VerboseTailWindow
 }
 
 
