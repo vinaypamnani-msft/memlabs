@@ -4876,16 +4876,16 @@ function Get-Tools {
             $extractIfZip = $tool.ExtractFolderIfZip
             if (Test-Path $downloadPath) {
                 if ($downloadPath.ToLowerInvariant().EndsWith(".zip") -and $extractIfZip -eq $true) {
-                    # Skip re-extraction if the staging dir is newer than the
-                    # download file (nothing changed). Expand-Archive -Force
-                    # rewrites file timestamps, which invalidates the tools
-                    # fingerprint and causes Copy-ToolToVM to re-copy every run.
-                    $downloadItem = Get-Item $downloadPath
+                    # Use a marker file to track which zip MD5 was last extracted.
+                    # Timestamp comparison is unreliable because Get-FileWithHash
+                    # can touch the download file during verification, and
+                    # Expand-Archive -Force rewrites all extracted file timestamps.
+                    $markerPath = Join-Path $fileDestination ".extracted-md5"
+                    $currentMd5 = if ($tool.md5) { $tool.md5 } else { (Get-FileHash $downloadPath -Algorithm MD5).Hash }
                     $skipExtract = $false
-                    if (Test-Path $fileDestination) {
-                        $newestStaged = Get-ChildItem $fileDestination -Recurse -File -ErrorAction SilentlyContinue |
-                            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-                        if ($newestStaged -and $newestStaged.LastWriteTimeUtc -ge $downloadItem.LastWriteTimeUtc) {
+                    if ((Test-Path $fileDestination) -and (Test-Path $markerPath)) {
+                        $lastMd5 = Get-Content $markerPath -Raw -ErrorAction SilentlyContinue
+                        if ($lastMd5 -and $lastMd5.Trim() -eq $currentMd5) {
                             $skipExtract = $true
                         }
                     }
@@ -4895,15 +4895,17 @@ function Get-Tools {
                     else {
                         Write-Log -LogOnly "Extracting $fileName to $fileDestination."
                         Expand-Archive -Path $downloadPath -DestinationPath $fileDestination -Force
+                        $currentMd5 | Set-Content $markerPath -Force -ErrorAction SilentlyContinue
                     }
                 }
                 else {
-                    # Skip copy if the staged file already matches the download
+                    # Skip copy if the staged file has the same size and the
+                    # download hash hasn't changed
                     $skipCopy = $false
                     if (Test-Path $fileDestination) {
                         $srcItem = Get-Item $downloadPath
                         $dstItem = Get-Item $fileDestination -ErrorAction SilentlyContinue
-                        if ($dstItem -and $dstItem.Length -eq $srcItem.Length -and $dstItem.LastWriteTimeUtc -ge $srcItem.LastWriteTimeUtc) {
+                        if ($dstItem -and -not $dstItem.PSIsContainer -and $dstItem.Length -eq $srcItem.Length) {
                             $skipCopy = $true
                         }
                     }
