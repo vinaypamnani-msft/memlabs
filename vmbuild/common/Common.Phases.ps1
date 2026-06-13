@@ -94,20 +94,6 @@ function Write-JobProgress {
                         }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
-
-                        # Dismiss any orphan progress bar that PS7 may auto-render from
-                        # the child job's original progress record. Child jobs write with
-                        # the default ActivityId (0), but the managed bar above uses
-                        # $Job.Id. If PS7 surfaces the child's record at its original Id,
-                        # an extra bar appears without the VM name prefix.
-                        $childActivityId = $lastProgress.ActivityId
-                        if ($childActivityId -ne $Job.Id) {
-                            $savedPref = $Global:ProgressPreference
-                            $Global:ProgressPreference = 'Continue'
-                            Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
-                            $Global:ProgressPreference = $savedPref
-                            Write-Log "[Diag] Dismissed orphan bar: Id=$childActivityId Activity='$($lastProgress.Activity)' Job=$($job.Name)" -LogOnly
-                        }
                     }
                 }
                 catch {
@@ -772,7 +758,6 @@ function Wait-Phase {
         }
 
         $global:JobProgressHistory = @{}
-        $global:JobProgressDiag = @{}
 
         # Track how many output objects we've already displayed per job so
         # warnings/errors from running jobs appear in real-time instead of
@@ -786,26 +771,6 @@ function Wait-Phase {
             [Console]::Write("$esc[?2026h")
 
             $runningJobs = $jobs | Where-Object { $_.State -ne "Completed" -and $_.State -ne "Failed" } | Sort-Object -Property Id
-
-            # Diagnostic: track new progress records appearing during this iteration
-            foreach ($job in $runningJobs) {
-                $ss = Get-JobStreamSource -Job $job
-                if ($ss -and $ss.Progress) {
-                    $jk = $job.Id
-                    $cnt = $ss.Progress.Count
-                    $prev = if ($global:JobProgressDiag.ContainsKey($jk)) { $global:JobProgressDiag[$jk] } else { 0 }
-                    if ($cnt -gt $prev) {
-                        for ($di = $prev; $di -lt $cnt; $di++) {
-                            $rec = $ss.Progress[$di]
-                            if ($rec.Activity -ne "Preparing modules for first use." -and
-                                $rec.Activity -ne "Compress-Archive") {
-                                Write-Log "[Diag] New progress: Job=$($job.Name) Id=$($rec.ActivityId) Activity='$($rec.Activity)' Status='$($rec.StatusDescription)' RecordType=$($rec.RecordType)" -LogOnly
-                            }
-                        }
-                        $global:JobProgressDiag[$jk] = $cnt
-                    }
-                }
-            }
 
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
