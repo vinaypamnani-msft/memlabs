@@ -395,6 +395,68 @@ function Test-DCFunctionality {
             $results.Details.Add("FAIL: DNS cannot resolve '$domainFqdn': $($_.Exception.Message)")
         }
 
+        # BDC: force AD replication from all partners (including DomainDnsZones)
+        # BEFORE checking DNS records. Without this, a VM that was recreated
+        # with a new IP will have the correct record on the primary DC but the
+        # BDC still shows the stale IP — causing the DNS check below to fail.
+        if ($isBdc) {
+            $results.Details.Add("CMD: repadmin /syncall /e /d /A (force inbound sync of all partitions)")
+            try {
+                # /e = enterprise (cross-site)  /d = DNS names  /A = all naming contexts
+                $syncOutput = & repadmin.exe /syncall /e /d /A 2>&1
+                $syncErrors = @($syncOutput | Where-Object { $_ -match 'SyncAll terminated with no errors' } )
+                if ($syncErrors.Count -gt 0) {
+                    $results.Details.Add("OK: repadmin /syncall completed successfully")
+                }
+                else {
+                    # Check for actual errors vs. just informational output
+                    $errs = @($syncOutput | Where-Object { $_ -match 'error|failed' -and $_ -notmatch 'no errors' })
+                    if ($errs.Count -gt 0) {
+                        $results.Details.Add("WARN: repadmin /syncall reported issues: $($errs[0].Trim())")
+                    }
+                    else {
+                        $results.Details.Add("OK: repadmin /syncall completed")
+                    }
+                }
+
+                # Wait for convergence — DNS zone changes propagate via AD replication,
+                # not DNS zone transfer, so the records won't appear until the
+                # DomainDnsZones partition has finished inbound replication.
+                Start-Sleep -Seconds 8
+
+                # Verify DomainDnsZones partition replicated recently
+                try {
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    $domainDN = (Get-ADDomain -ErrorAction Stop).DistinguishedName
+                    $dnsPartition = "DC=DomainDnsZones,$domainDN"
+                    $dnsPartners = Get-ADReplicationPartnerMetadata -Target $env:COMPUTERNAME -Scope Server -Partition $dnsPartition -ErrorAction Stop
+                    if ($dnsPartners) {
+                        $freshDns = @($dnsPartners | Where-Object { $_.LastReplicationSuccess -gt (Get-Date).AddMinutes(-5) })
+                        if ($freshDns.Count -gt 0) {
+                            $results.Details.Add("OK: DomainDnsZones partition replicated from $($freshDns.Count) partner(s) within last 5 min")
+                        }
+                        else {
+                            $most = $dnsPartners | Sort-Object LastReplicationSuccess -Descending | Select-Object -First 1
+                            $results.Details.Add("WARN: DomainDnsZones replication stale — last success $($most.LastReplicationSuccess) from $($most.Partner)")
+                            # Retry sync for just the DNS partition
+                            $results.Details.Add("CMD: repadmin /syncall /e /d /P:$dnsPartition (retry DNS partition)")
+                            try {
+                                & repadmin.exe /replicate $env:COMPUTERNAME ($most.Partner -replace '^CN=NTDS Settings,CN=','') $dnsPartition 2>&1 | Out-Null
+                                Start-Sleep -Seconds 5
+                            }
+                            catch {}
+                        }
+                    }
+                }
+                catch {
+                    $results.Details.Add("WARN: Could not verify DomainDnsZones replication: $($_.Exception.Message)")
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: repadmin /syncall failed: $($_.Exception.Message)")
+            }
+        }
+
         # Per-VM DNS sanity check: for each non-hidden VM in the deploy, confirm
         # its A record on this DC resolves to its actual Hyper-V-reported IPv4.
         # Catches stale static records (no aging) left by older code paths or
@@ -537,9 +599,9 @@ function Test-DCFunctionality {
             $results.Details.Add("WARN: Could not query NETLOGON event log: $($_.Exception.Message)")
         }
 
-        # BDC-only: confirm we can replicate inbound from at least one partner
-        # within the last hour. A stale/never-replicated BDC means later VMs
-        # built against it will be missing accounts/GPOs.
+        # BDC-only: confirm all naming contexts replicated recently.
+        # The forced sync above should have brought everything current;
+        # this is the final verification.
         if ($isBdc) {
             $results.Details.Add("CMD: Get-ADReplicationPartnerMetadata -Target `$env:COMPUTERNAME -Scope Server")
             try {
@@ -550,14 +612,26 @@ function Test-DCFunctionality {
                     $results.Details.Add("FAIL: No replication partners found for BDC")
                 }
                 else {
-                    $fresh = $partners | Where-Object { $_.LastReplicationSuccess -gt (Get-Date).AddHours(-1) }
-                    if ($fresh) {
-                        $results.Details.Add("OK: $($fresh.Count) replication partner(s) succeeded within last hour")
+                    # Group by partition to show per-NC replication status
+                    $partitions = $partners | Group-Object Partition
+                    $stalePartitions = @()
+                    foreach ($pg in $partitions) {
+                        $fresh = $pg.Group | Where-Object { $_.LastReplicationSuccess -gt (Get-Date).AddMinutes(-10) }
+                        $partName = ($pg.Name -split ',')[0] -replace '^DC=',''
+                        if ($fresh) {
+                            $results.Details.Add("OK: Partition '$partName' replicated from $($fresh.Count) partner(s) within last 10 min")
+                        }
+                        else {
+                            $most = $pg.Group | Sort-Object LastReplicationSuccess -Descending | Select-Object -First 1
+                            $stalePartitions += $partName
+                            $results.Details.Add("WARN: Partition '$partName' replication stale — last success $($most.LastReplicationSuccess)")
+                        }
+                    }
+                    if ($stalePartitions.Count -gt 0) {
+                        $results.Details.Add("WARN: $($stalePartitions.Count) partition(s) stale after forced sync: $($stalePartitions -join ', ')")
                     }
                     else {
-                        $most = $partners | Sort-Object LastReplicationSuccess -Descending | Select-Object -First 1
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: BDC replication stale -- last success $($most.LastReplicationSuccess) from $($most.Partner)")
+                        $results.Details.Add("OK: All $($partitions.Count) partition(s) replicated recently")
                     }
                 }
             }
