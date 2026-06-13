@@ -3757,7 +3757,7 @@ function Wait-ForVm {
         $readySmb = $false
 
         [int]$failures = 0
-        [int]$maxFailures = ([int]$TimeoutMinutes * 4)
+        [int]$maxFailures = 40  # ~10 min at ~15s per failure increment (power-cycle threshold, independent of total timeout)
         [int]$powerCycles = 0
         [int]$maxPowerCycles = 3
         # SuppressLog for all Invoke-VmCommand calls here since we're in a loop.
