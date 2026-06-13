@@ -288,15 +288,31 @@
                         `$account = '$cvSvcAccount'
                         `$dc      = '$cvDCName'
                         foreach (`$s in `$spns) {
-                            # Remove from any other account that holds this SPN
-                            `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
-                            if (`$holder) {
-                                foreach (`$h in `$holder) {
-                                    Set-ADObject -Identity `$h -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction SilentlyContinue
+                            # Try adding the SPN directly first — this is a fast
+                            # targeted write. Only if it fails with a duplicate
+                            # constraint do we scan the directory for the holder.
+                            try {
+                                Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                            }
+                            catch {
+                                if (`$_.Exception.Message -match 'constraint|already exists|duplicate') {
+                                    # SPN is held by another account — find and remove it
+                                    `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
+                                    if (`$holder) {
+                                        foreach (`$h in `$holder) {
+                                            Set-ADObject -Identity `$h -Server `$dc -Remove @{ servicePrincipalName = `$s } -ErrorAction SilentlyContinue
+                                        }
+                                    }
+                                    # Retry the add after clearing
+                                    Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
+                                }
+                                elseif (`$_.Exception.Message -match 'specified value already exists') {
+                                    # SPN already on this account — nothing to do
+                                }
+                                else {
+                                    throw
                                 }
                             }
-                            # Add to the service account
-                            Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
                         }
                     "
                 }
