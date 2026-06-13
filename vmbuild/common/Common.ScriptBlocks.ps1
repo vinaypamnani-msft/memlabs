@@ -1879,6 +1879,12 @@ $global:VM_Config = {
                     # during Phase 1 creation. OSDClient has no network stack.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
                         try {
+                            # Suppress cmdlet progress (Get-VM, Get-VMNetworkAdapter,
+                            # Get-DhcpServerv4Scope/Reservation) so it doesn't leak
+                            # into the job's Progress stream and create orphan bars
+                            # that leave blank lines in Wait-Phase's Minimal view.
+                            $savedPP = $ProgressPreference
+                            $ProgressPreference = 'SilentlyContinue'
                             $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
                             if ($vmnet -and $vmnet.MacAddress) {
                                 if ($currentItem.role -in "InternetClient", "AADClient") {
@@ -1891,8 +1897,10 @@ $global:VM_Config = {
                                 Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop | Out-Null
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                             }
+                            $ProgressPreference = $savedPP
                         }
                         catch {
+                            $ProgressPreference = $savedPP
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
                         }
                     }

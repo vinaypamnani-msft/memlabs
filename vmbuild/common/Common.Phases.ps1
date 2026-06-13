@@ -743,18 +743,6 @@ function Wait-Phase {
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
 
-    # PS7's default Minimal progress view renders each active progress bar as
-    # an inline terminal line.  When bars are completed/dismissed while text is
-    # also being written (Write-Host), the cursor math drifts and blank lines
-    # accumulate between completion messages.  Classic view renders progress as
-    # a fixed overlay at the top of the viewport, completely independent of
-    # normal text output, so dismissals never leave orphan blank lines.
-    $OriginalProgressView = $null
-    if ($PSVersionTable.PSVersion.Major -ge 7 -and $null -ne $PSStyle) {
-        $OriginalProgressView = $PSStyle.Progress.View
-        $PSStyle.Progress.View = 'Classic'
-    }
-
     $esc = [char]27
     $hideCursor = "$esc[?25l"
     $showCursor = "$esc[?25h"
@@ -1002,9 +990,6 @@ function Wait-Phase {
     }
     finally {
         $Global:ProgressPreference = $OriginalProgressPreference
-        if ($null -ne $OriginalProgressView -and $null -ne $PSStyle) {
-            $PSStyle.Progress.View = $OriginalProgressView
-        }
         Write-Host -NoNewline "$showCursor" # Show cursor again
     }
 }
