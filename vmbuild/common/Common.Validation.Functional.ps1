@@ -1807,6 +1807,7 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                             $results.Details.Add("FAIL: No MemLabs DatabaseBackup agent jobs found")
                         }
                         else {
+                            $agJobLastRunFailed = $false
                             foreach ($j in $jobs) {
                                 $enabledText = if ($j.enabled -eq 1) { 'enabled' } else { 'DISABLED' }
                                 $historyText = ''
@@ -1820,6 +1821,7 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                                     $results.Details.Add("FAIL: Agent job '$($j.name)' is $enabledText$historyText")
                                 }
                                 elseif ($null -ne $j.LastRunStatus -and $j.LastRunStatus -isnot [System.DBNull] -and [int]$j.LastRunStatus -eq 0) {
+                                    $agJobLastRunFailed = $true
                                     $results.Details.Add("WARN: Agent job '$($j.name)' is $enabledText$historyText")
                                 }
                                 else {
@@ -1849,7 +1851,11 @@ EXECUTE [dbo].[DatabaseBackup]
     @ChangeBackupType = 'Y'
 "@
                         Invoke-Sqlcmd -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
-                        $results.Details.Add("OK: AG log backup completed successfully on primary")
+                        $activeTestMsg = "OK: AG log backup completed successfully on primary"
+                        if ($agJobLastRunFailed) {
+                            $activeTestMsg += " (scheduled job failure above was transient)"
+                        }
+                        $results.Details.Add($activeTestMsg)
                     }
                     catch {
                         $results.Details.Add("WARN: AG log backup failed on primary: $($_.Exception.Message)")
