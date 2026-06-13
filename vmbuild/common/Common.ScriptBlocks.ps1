@@ -1030,6 +1030,36 @@ $global:VM_Create = {
                 $dtPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'
                 New-Item -Path $dtPath -Force -ErrorAction SilentlyContinue | Out-Null
                 New-ItemProperty -Path $dtPath -Name 'AllowTelemetry' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $dtPath -Name 'DoNotShowFeedbackNotifications' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                # Advertising ID
+                $advIdPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo'
+                New-Item -Path $advIdPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $advIdPath -Name 'DisabledByGroupPolicy' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                # Activity History
+                $actPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+                New-Item -Path $actPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $actPath -Name 'PublishUserActivities' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $actPath -Name 'UploadUserActivities' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $actPath -Name 'EnableActivityFeed' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                # Tailored experiences, feedback, speech, inking, app tracking, location, WiFi Sense
+                $tailoredPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy'
+                New-Item -Path $tailoredPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $tailoredPath -Name 'TailoredExperiencesWithDiagnosticDataEnabled' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                $siufPath = 'HKCU:\Software\Microsoft\Siuf\Rules'
+                New-Item -Path $siufPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $siufPath -Name 'NumberOfSIUFInPeriod' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                $speechPath = 'HKLM:\SOFTWARE\Policies\Microsoft\InputPersonalization'
+                New-Item -Path $speechPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $speechPath -Name 'AllowInputPersonalization' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $speechPath -Name 'RestrictImplicitInkCollection' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $speechPath -Name 'RestrictImplicitTextCollection' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'Start_TrackProgs' -Value 0 -Force -ErrorAction SilentlyContinue
+                $locPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
+                New-Item -Path $locPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $locPath -Name 'DisableLocation' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                $wfPath = 'HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config'
+                New-Item -Path $wfPath -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path $wfPath -Name 'AutoConnectAllowedOEM' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
                 # Consumer experience / spotlight
                 $cePath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent'
                 New-Item -Path $cePath -Force -ErrorAction SilentlyContinue | Out-Null
