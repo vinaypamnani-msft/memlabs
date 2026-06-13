@@ -411,6 +411,13 @@ function Wait-ForHeartbeat {
     $hbWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $hbLimit = New-TimeSpan -Seconds $TimeoutSeconds
     $hbState = "Unknown"
+    # Grace period: when we first see OkApplicationsUnknown, wait up to this
+    # many additional seconds for it to promote to OkApplicationsHealthy.
+    # If it doesn't, accept Unknown — the heartbeat IC is responding, meaning
+    # the VM is booted and PSDirect-ready; the "Applications" sub-report just
+    # hasn't loaded (common on Server OS or older integration services).
+    $unknownGrace = 30
+    $unknownSince = $null
 
     while ($hbWatch.Elapsed -lt $hbLimit) {
         # If a parent timeout was supplied, bail if it expired too
@@ -429,6 +436,21 @@ function Wait-ForHeartbeat {
         if ($hbState -eq "OkApplicationsHealthy") {
             Write-Log "$VmName`: Heartbeat healthy after $([int]$hbWatch.Elapsed.TotalSeconds)s." -Verbose
             return $true
+        }
+
+        if ($hbState -eq "OkApplicationsUnknown") {
+            if (-not $unknownSince) {
+                $unknownSince = $hbWatch.Elapsed
+                Write-Log "$VmName`: Heartbeat is OkApplicationsUnknown at $([int]$hbWatch.Elapsed.TotalSeconds)s — waiting up to ${unknownGrace}s for Healthy." -Verbose
+            }
+            elseif (($hbWatch.Elapsed - $unknownSince).TotalSeconds -ge $unknownGrace) {
+                Write-Log "$VmName`: Heartbeat stayed OkApplicationsUnknown for ${unknownGrace}s (total $([int]$hbWatch.Elapsed.TotalSeconds)s). VM is responsive — proceeding." -Verbose
+                return $true
+            }
+        }
+        else {
+            # State regressed (e.g. back to NoContact during a reboot cycle) — reset grace
+            $unknownSince = $null
         }
     }
 
