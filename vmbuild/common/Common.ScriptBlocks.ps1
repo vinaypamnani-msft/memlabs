@@ -999,6 +999,23 @@ $global:VM_Create = {
                 New-ItemProperty -Path $auPath -Name "NoAutoUpdate" -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
             } catch { $warnings += "Disable Windows Update services: $_" }
 
+            # Suppress Microsoft Edge Update — it auto-updates in background,
+            # leaving PendingFileRenameOperations that trigger unnecessary
+            # reboots at Phase 2 start (MicrosoftEdgeUpdate.exe.old, EdgeUpdate
+            # folder deletions). Disable the services and scheduled tasks.
+            try {
+                foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
+                    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                    if ($s) {
+                        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+                        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+                    }
+                }
+                Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
+                    Where-Object { $_.TaskName -match 'MicrosoftEdgeUpdate' } |
+                    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+            } catch { $warnings += "Disable Edge Update: $_" }
+
             [PSCustomObject]@{ Warnings = $warnings }
         }
 

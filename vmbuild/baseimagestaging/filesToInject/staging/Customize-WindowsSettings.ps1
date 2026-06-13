@@ -68,6 +68,20 @@ if ($server) {
     New-Item 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -Force | New-ItemProperty -Name NoAutoUpdate -Value 1 -Force | Out-Null
 }
 
+# Disable Microsoft Edge Update — auto-updates leave PendingFileRenameOperations
+# that trigger unnecessary reboots during lab builds.
+Update-Log "Disable Microsoft Edge Update services and scheduled tasks"
+foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
+    $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($s) {
+        Stop-Service $svc -Force -ErrorAction SilentlyContinue
+        Set-Service  $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    }
+}
+Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
+    Where-Object { $_.TaskName -match 'MicrosoftEdgeUpdate' } |
+    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+
 # Common Windows Settings
 # ========================
 Update-Log "Prevent automatic device encryption (managed by ConfigMgr when needed)"
