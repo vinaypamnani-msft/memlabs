@@ -1084,7 +1084,7 @@ function Get-ConfigurationData {
                 }
             }
             catch {
-                Write-Log "[Phase $Phase]: Error during VM connectivity test: $_" -Error
+                Write-Log "[Phase $Phase]: $($dc.NodeName): Error during VM connectivity test: $_" -Error
             }
             finally {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Done Testing net connection on $($dc.NodeName)" -PercentComplete $global:preparePhasePercent -Log

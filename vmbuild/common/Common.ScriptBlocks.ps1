@@ -3299,7 +3299,7 @@ $global:VM_Config = {
                         $failedHeartbeats = 0 # Reset heartbeat counter so we don't keep shutting down the VM over and over while it's starting up
                     }
                     catch {
-                        Write-Log -Failure "$_"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat recovery failed: $_" -Failure
                         Write-ProgressElapsed -stopwatch $stopWatch -timespan $timespan -text "$_"
                     }
                 }
