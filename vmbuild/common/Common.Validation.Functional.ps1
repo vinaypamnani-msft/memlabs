@@ -1738,6 +1738,9 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                                     $results.Passed = $false
                                     $results.Details.Add("FAIL: Agent job '$($j.name)' is $enabledText$historyText")
                                 }
+                                elseif ($null -ne $j.LastRunStatus -and $j.LastRunStatus -isnot [System.DBNull] -and [int]$j.LastRunStatus -eq 0) {
+                                    $results.Details.Add("WARN: Agent job '$($j.name)' is $enabledText$historyText")
+                                }
                                 else {
                                     $results.Details.Add("OK: Agent job '$($j.name)' is $enabledText$historyText")
                                 }
@@ -1746,6 +1749,29 @@ WHERE j.name LIKE 'MemLabs DatabaseBackup%'
                     }
                     catch {
                         $results.Details.Add("WARN: Agent job check failed: $($_.Exception.Message)")
+                    }
+
+                    # 8b2. Actively run the AG log backup on the primary to verify it works.
+                    # The scheduled job may have failed on a transient issue; this confirms
+                    # the backup path is currently functional and the log can be truncated.
+                    $results.Details.Add("CMD: EXECUTE [dbo].[DatabaseBackup] @Databases='AVAILABILITY_GROUP_DATABASES' @BackupType='LOG' (active test)")
+                    try {
+                        $agBackupQuery = @"
+EXECUTE [dbo].[DatabaseBackup]
+    @Databases = 'AVAILABILITY_GROUP_DATABASES',
+    @Directory = 'NUL',
+    @BackupType = 'LOG',
+    @Verify = 'N',
+    @CleanupTime = NULL,
+    @CheckSum = 'N',
+    @LogToTable = 'Y',
+    @ChangeBackupType = 'Y'
+"@
+                        Invoke-Sqlcmd -Query $agBackupQuery -QueryTimeout 120 -TrustServerCertificate -ErrorAction Stop
+                        $results.Details.Add("OK: AG log backup completed successfully on primary")
+                    }
+                    catch {
+                        $results.Details.Add("WARN: AG log backup failed on primary: $($_.Exception.Message)")
                     }
 
                     # 8c. Run a log backup and verify log space is recycled
