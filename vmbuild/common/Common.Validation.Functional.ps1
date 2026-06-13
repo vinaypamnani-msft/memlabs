@@ -238,9 +238,9 @@ function Test-VmFunctionality {
     }
 
     # ---- Linux health check ----
-    # For all Linux VMs: ping + SSH smoke test from the host. If ping fails,
-    # the VM's network stack is dead and it needs a restart. If ping works but
-    # SSH fails, log a warning (sshd watchdog + Samba are the fallback).
+    # For all Linux VMs: ping + SSH + SMB health cascade from the host.
+    # Ping fail → restart. SSH down + SMB down → restart (both services dead).
+    # SSH down + SMB up → read logs via SMB share to diagnose, warn only.
     if ($testsPassed -and $vmIsLinux) {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking Linux VM health (ping + SSH)"
         $healthResult = Test-LinuxVmHealth -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig -IsRetry:$IsRetry
@@ -5593,16 +5593,14 @@ function Test-CMSiteRoleProxy {
 function Test-LinuxVmHealth {
     <#
     .SYNOPSIS
-        Phase 11 health check for Linux VMs: ping and SSH from the host.
+        Phase 11 health check for Linux VMs: ping, SSH, and SMB from the host.
     .DESCRIPTION
         Verifies the Linux VM is network-reachable and SSH-responsive.
-        - Ping failure: the VM's network stack is dead. If this is not a
-          retry, restart the VM via Restart-UnresponsiveVm and return
-          'Restarted' so the caller re-runs all tests.
-        - Ping OK + SSH failure: sshd is hung (the known long-uptime issue).
-          Log a warning and return 'SshDown'. The sshd watchdog cron and
-          Samba provide fallback access.
-        - Both OK: return 'OK'.
+        - Ping failure: VM network stack is dead. Restart and return 'Restarted'.
+        - Ping OK + SSH down + SMB down: multiple services dead, restart.
+        - Ping OK + SSH down + SMB up: read sshd/syslog via SMB share to
+          diagnose the SSH failure, log findings, return 'SshDown'.
+        - Both ping + SSH OK: return 'OK'.
     .OUTPUTS
         String: 'OK', 'SshDown', 'Restarted', or 'Failed'.
     #>
@@ -5653,17 +5651,118 @@ function Test-LinuxVmHealth {
     Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - Ping to $vmIp succeeded" -LogOnly
 
     # 2) SSH smoke test — run 'true' (no-op) to verify sshd is responsive.
+    $sshOk = $false
     if (Get-Command Invoke-LinuxVmCommand -ErrorAction SilentlyContinue) {
         $sshResult = Invoke-LinuxVmCommand -VmName $VMName -BashCommand 'true' -TimeoutSeconds 15 -SuppressLog -DisplayName "Phase11-SSH-SmokeTest"
-        if (-not $sshResult -or $sshResult.ScriptBlockFailed) {
-            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: WARN - Ping OK but SSH unresponsive on $vmIp (sshd watchdog should recover within 5 min)" -Warning
-            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - SSH unresponsive (ping OK, sshd watchdog active)"; Level = 'Warning' })
-            return 'SshDown'
+        if ($sshResult -and -not $sshResult.ScriptBlockFailed) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - SSH responsive on $vmIp" -LogOnly
+            $sshOk = $true
         }
-        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: OK - SSH responsive on $vmIp" -LogOnly
+    }
+    else {
+        # Can't test SSH without the command; treat as OK to avoid blocking
+        $sshOk = $true
     }
 
-    return 'OK'
+    if ($sshOk) { return 'OK' }
+
+    # 3) SSH is down — probe SMB (TCP 445) to determine severity.
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SSH unresponsive on $vmIp — probing SMB as fallback..." -Warning -LogOnly
+    $smbTcp = Test-NetConnection -ComputerName $vmIp -Port 445 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+    $smbUp = $smbTcp -and $smbTcp.TcpTestSucceeded
+
+    if (-not $smbUp) {
+        # Both SSH and SMB are down — the VM is in a bad state.
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: FAIL - Both SSH and SMB (TCP 445) are down on $vmIp" -Failure
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - SSH + SMB both down (ping OK)"; Level = 'Failure' })
+
+        if (-not $IsRetry) {
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SSH + SMB both down — restarting VM to recover..." -Warning
+            $rebooted = Restart-UnresponsiveVm -VmName $VMName -MaxRetries 1 -WaitTimeSeconds 120
+            if ($rebooted) {
+                Start-Sleep -Seconds 10
+                $newIp = Get-LinuxVmIPAddress -VmName $VMName
+                if ($newIp -and (Test-Connection -ComputerName $newIp -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: VM recovered after restart — retrying all tests" -Warning
+                    return 'Restarted'
+                }
+            }
+            Write-Log "[Phase $Phase] $VMName [$RoleLabel]: VM did not recover after restart" -Failure
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: FAIL - VM unresponsive after restart"; Level = 'Failure' })
+        }
+        return 'Failed'
+    }
+
+    # 4) SMB is up — try to read sshd / syslog via the 'logs' share to diagnose SSH.
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SMB is up on $vmIp — reading logs to diagnose SSH failure..." -Warning -LogOnly
+    $smbLogPath = "\\$vmIp\logs"
+    try {
+        # Build credential for SMB auth (vmbuildadmin with LocalAdmin password).
+        $smbCred = $null
+        if ($Common -and $Common.LocalAdmin) {
+            $pw = $Common.LocalAdmin.GetNetworkCredential().Password
+            $secPw = ConvertTo-SecureString $pw -AsPlainText -Force
+            $smbCred = [PSCredential]::new('vmbuildadmin', $secPw)
+        }
+
+        # Map a temporary PSDrive to read log files.
+        $driveName = "MemLabsSMB_$($VMName -replace '[^a-zA-Z0-9]', '')"
+        $driveParams = @{
+            Name       = $driveName
+            PSProvider = 'FileSystem'
+            Root       = $smbLogPath
+            ErrorAction = 'Stop'
+        }
+        if ($smbCred) { $driveParams['Credential'] = $smbCred }
+        $null = New-PSDrive @driveParams
+
+        try {
+            # Read the last 30 lines of auth.log or syslog for sshd clues.
+            $logFile = $null
+            foreach ($candidate in @("${driveName}:\auth.log", "${driveName}:\syslog")) {
+                if (Test-Path $candidate) { $logFile = $candidate; break }
+            }
+
+            if ($logFile) {
+                $tail = Get-Content $logFile -Tail 30 -ErrorAction SilentlyContinue
+                $sshLines = $tail | Where-Object { $_ -match 'sshd|ssh|watchdog' }
+                if ($sshLines) {
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SSH-related log entries from $($logFile | Split-Path -Leaf):" -Warning -LogOnly
+                    foreach ($line in $sshLines) {
+                        Write-Log "[Phase $Phase] $VMName [$RoleLabel]:   $line" -LogOnly
+                    }
+                }
+                else {
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: No sshd entries in last 30 lines of $($logFile | Split-Path -Leaf)" -LogOnly
+                }
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: No auth.log or syslog found on \\$vmIp\logs" -LogOnly
+            }
+
+            # Also check for watchdog cron output.
+            $watchdogLog = "${driveName}:\memlabs-sshd-watchdog.log"
+            if (Test-Path $watchdogLog) {
+                $wdTail = Get-Content $watchdogLog -Tail 10 -ErrorAction SilentlyContinue
+                if ($wdTail) {
+                    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: sshd watchdog log:" -Warning -LogOnly
+                    foreach ($line in $wdTail) {
+                        Write-Log "[Phase $Phase] $VMName [$RoleLabel]:   $line" -LogOnly
+                    }
+                }
+            }
+        }
+        finally {
+            Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [$RoleLabel]: Could not read logs via SMB: $($_.Exception.Message)" -Warning -LogOnly
+    }
+
+    $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: WARN - SSH down, SMB up — sshd watchdog should recover"; Level = 'Warning' })
+    Write-Log "[Phase $Phase] $VMName [$RoleLabel]: SSH down but SMB accessible — sshd watchdog should recover within 5 min" -Warning
+    return 'SshDown'
 }
 
 function Test-LinuxSmbAccess {
