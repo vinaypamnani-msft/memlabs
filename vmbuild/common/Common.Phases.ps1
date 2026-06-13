@@ -189,6 +189,8 @@ function Start-Phase {
     # PSDirect so we don't have to thread proxy config through DSC. No-op if
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
+        $postPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
         # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
         # to the DC's DNS first, so the Proxy can resolve internal names
         # and clients pointed at it land on a fully-configured upstream.
@@ -220,6 +222,12 @@ function Start-Phase {
         # jobs have completed. Individual per-VM Install-Tools calls skip
         # cleanup to avoid deleting zips still needed by parallel jobs.
         Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+        $postPhaseTimer.Stop()
+        Write-Log "[Phase 2] Post-processing (Linux DNS, Proxy config) completed. Time: $($postPhaseTimer.Elapsed.ToString("hh\:mm\:ss"))"
+        if ($global:BuildStats -and $global:BuildStats.Phases.ContainsKey(2)) {
+            $global:BuildStats.Phases[2].Elapsed += $postPhaseTimer.Elapsed
+        }
     }
 
     return $true

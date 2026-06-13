@@ -2152,6 +2152,37 @@ function Set-LinuxVmsDcDns {
         return $false
     }
 
+    # Re-run idempotency: check if all Linux VMs already have DNS A records
+    # on the DC. If so, the previous run completed Set-LinuxVmsDcDns
+    # successfully — the VM-side netplan override persists across reboots,
+    # so skip the expensive SSH-probe + DNS-flip loop entirely.
+    try {
+        $vmNames = @($linuxVms | ForEach-Object { $_.vmName })
+        $namesCsv = $vmNames -join ','
+        $checkResult = Invoke-VmCommand -VmName $dcVm.vmName -VmDomainName $domain -ScriptBlock {
+            param($csv, $zone)
+            foreach ($n in ($csv -split ',')) {
+                $r = Get-DnsServerResourceRecord -ZoneName $zone -Name $n -RRType A -ErrorAction SilentlyContinue
+                if ($r) { $n }
+            }
+        } -ArgumentList $namesCsv, $domain -DisplayName "Check existing Linux DNS records" -SuppressLog
+        $registered = @()
+        if (-not $checkResult.ScriptBlockFailed -and $checkResult.ScriptBlockOutput) {
+            $registered = @($checkResult.ScriptBlockOutput | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        }
+        $missing = @($vmNames | Where-Object { $_ -notin $registered })
+        if ($missing.Count -eq 0) {
+            Write-Log "Set-LinuxVmsDcDns: All $($linuxVms.Count) Linux VM(s) already registered in DC DNS; skipping" -Success
+            return $true
+        }
+        if ($registered.Count -gt 0) {
+            Write-Log "Set-LinuxVmsDcDns: $($registered.Count)/$($linuxVms.Count) already registered; will process $($missing.Count) remaining" -LogOnly
+        }
+    }
+    catch {
+        Write-Log "Set-LinuxVmsDcDns: Could not check existing DNS records: $_" -LogOnly
+    }
+
     Write-Log "Set-LinuxVmsDcDns: Pointing $($linuxVms.Count) Linux VM(s) at DC $($dcVm.vmName) ($dcIp / $domain)" -Activity
     $allOk = $true
     foreach ($vm in $linuxVms) {
