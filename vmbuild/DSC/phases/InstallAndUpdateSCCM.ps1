@@ -1703,22 +1703,87 @@ else {
             Write-DscStatus "Primary is installed. Waiting for replication link to be 'Active'"
         }
 
+        # Replication wait with timeout, failure detection, and reinit
+        $drsStartTime = Get-Date
+        $drsTimeoutSec = 120 * 60  # 2 hours
+        # WMI ReplicationLinkStatus: Active=2, Initializing=4, NotStarted=5, Error=6, Unknown=7, Degraded=8, Failed=9
+        $failedStates = @(6, 8, 9)  # Error, Degraded, Failed
+        $failedSinceTime = @{}     # per-primary tracking
+        $reinitAttempted = @{}
+        $reinitCooldownMin = 10
+        $sleepSeconds = 30
+
+        # Expand stateMap to include all WMI enum values
+        $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed"; 5 = "NotStarted"; 6 = "Error"; 7 = "Unknown(7)"; 8 = "Degraded(8)"; 9 = "Failed(9)" }
+
         while ($waitList.Count -gt 0) {
             foreach ($PSVM in $PSVMs) {
                 if ($waitList -notcontains $PSVM.VmName) {
                     continue
                 }
                 $PSSiteCode = $PSVM.siteCode
+                $drsElapsed = [int]((Get-Date) - $drsStartTime).TotalSeconds
+                $drsElapsedMin = [int]($drsElapsed / 60)
+
+                if ($drsElapsed -ge $drsTimeoutSec) {
+                    Write-DscStatus "DRS replication wait timed out after ${drsElapsedMin}m. Proceeding anyway." -MachineName $PSVM.VmName
+                    $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
+                    $propName = "PSReadyToUse" + $PSVM.VmName
+                    $Configuration.$propName.Status = 'Completed'
+                    $Configuration.$propName.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
+                    Write-ScriptWorkFlowData -Configuration $Configuration -ConfigurationFile $ConfigurationFile
+                    continue
+                }
+
                 # Wait for replication ready
                 $replicationStatus = Get-CMDatabaseReplicationStatus -Site2 $PSSiteCode
 
                 if ( $replicationStatus.LinkStatus -ne 2 -or $replicationStatus.Site1ToSite2GlobalState -ne 2 -or $replicationStatus.Site2ToSite1GlobalState -ne 2 -or $replicationStatus.Site2ToSite1SiteState -ne 2 ) {
-                    # Map numeric states to friendly names for readability
-                    $stateMap = @{ 0 = "Unknown"; 1 = "Initializing"; 2 = "Active"; 3 = "Degraded"; 4 = "Failed" }
                     $linkName = $stateMap[[int]$replicationStatus.LinkStatus]; if (-not $linkName) { $linkName = "$($replicationStatus.LinkStatus)" }
                     $g12Name = $stateMap[[int]$replicationStatus.Site1ToSite2GlobalState]; if (-not $g12Name) { $g12Name = "$($replicationStatus.Site1ToSite2GlobalState)" }
                     $g21Name = $stateMap[[int]$replicationStatus.Site2ToSite1GlobalState]; if (-not $g21Name) { $g21Name = "$($replicationStatus.Site2ToSite1GlobalState)" }
                     $s21Name = $stateMap[[int]$replicationStatus.Site2ToSite1SiteState]; if (-not $s21Name) { $s21Name = "$($replicationStatus.Site2ToSite1SiteState)" }
+
+                    # Detect failed/degraded link and attempt reinit
+                    $linkInFailedState = [int]$replicationStatus.LinkStatus -in $failedStates -or `
+                        [int]$replicationStatus.Site1ToSite2GlobalState -in $failedStates -or `
+                        [int]$replicationStatus.Site2ToSite1GlobalState -in $failedStates -or `
+                        [int]$replicationStatus.Site2ToSite1SiteState -in $failedStates
+                    if ($linkInFailedState) {
+                        if (-not $failedSinceTime[$PSVM.VmName]) {
+                            $failedSinceTime[$PSVM.VmName] = Get-Date
+                            Write-DscStatus "DRS link is in a failed/degraded state (Link=$linkName, CAS->PRI=$g12Name, PRI->CAS=$g21Name, Site=$s21Name). Will attempt reinit after $reinitCooldownMin minutes." -MachineName $PSVM.VmName
+                        }
+                        $failedMin = [int]((Get-Date) - $failedSinceTime[$PSVM.VmName]).TotalMinutes
+                        if ($failedMin -ge $reinitCooldownMin -and -not $reinitAttempted[$PSVM.VmName]) {
+                            $reinitAttempted[$PSVM.VmName] = $true
+                            Write-DscStatus "DRS link has been failed for $failedMin minutes. Attempting reinitialization via SMS_ReplicationGroup.InitializeData..." -MachineName $PSVM.VmName
+                            try {
+                                $failedGroups = Get-WmiObject -Namespace "root\sms\site_$SiteCode" -Class SMS_ReplicationGroup `
+                                    -Filter "SiteCode1 = '$SiteCode' AND SiteCode2 = '$PSSiteCode' AND Status != 2"
+                                if ($failedGroups) {
+                                    foreach ($group in $failedGroups) {
+                                        Write-DscStatus "Reinitializing replication group '$($group.ReplicationGroup)' (ID=$($group.ID))..." -MachineName $PSVM.VmName
+                                        $result = ([wmiclass]"\\.\root\sms\site_$($SiteCode):SMS_ReplicationGroup").InitializeData($group.ID, $SiteCode, $PSSiteCode)
+                                        Write-DscStatus "InitializeData result for group '$($group.ReplicationGroup)': ReturnValue=$($result.ReturnValue)" -MachineName $PSVM.VmName
+                                    }
+                                }
+                                else {
+                                    Write-DscStatus "No failed replication groups found via WMI. Link may recover on its own." -MachineName $PSVM.VmName
+                                }
+                            }
+                            catch {
+                                Write-DscStatus "Failed to reinitialize DRS link: $_. Will continue waiting." -MachineName $PSVM.VmName
+                            }
+                        }
+                    }
+                    else {
+                        if ($failedSinceTime[$PSVM.VmName]) {
+                            Write-DscStatus "DRS link is no longer in a failed state (Link=$linkName). Continuing to wait for Active." -MachineName $PSVM.VmName
+                            $failedSinceTime[$PSVM.VmName] = $null
+                            $reinitAttempted[$PSVM.VmName] = $false
+                        }
+                    }
 
                     if ($replicationStatus.GlobalInitPercentage -ge 100) {
                         # Init complete but link not yet active - show which states are pending
@@ -1728,18 +1793,67 @@ else {
                         if ($replicationStatus.Site2ToSite1GlobalState -ne 2) { $pending += "Global($PSSiteCode->$SiteCode)=$g21Name" }
                         if ($replicationStatus.Site2ToSite1SiteState -ne 2) { $pending += "Site($PSSiteCode->$SiteCode)=$s21Name" }
                         $pendingStr = $pending -join ", "
-                        Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr" -RetrySeconds 30 -MachineName $PSVM.VmName
-                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds 30
+                        Write-DscStatus "Init 100% complete, waiting for link activation. Pending: $pendingStr (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
+
+                        # Log SQL Broker diagnostics every 5 minutes when stuck at 100% init
+                        if ($drsElapsedMin -gt 0 -and $drsElapsedMin % 5 -eq 0) {
+                            try {
+                                $sqlQuery = @"
+SELECT s.name AS [Queue], p.rows AS [Messages]
+FROM sys.service_queues s
+JOIN sys.partitions p ON s.object_id = p.object_id AND p.index_id = 1
+WHERE s.name LIKE '%Rcm%' OR s.name LIKE '%Drs%'
+ORDER BY p.rows DESC
+"@
+                                $sqlDs = if ($sqlInstanceName -and $sqlInstanceName.ToUpper() -ne 'MSSQLSERVER') { "$sqlServerName\$sqlInstanceName" } else { $sqlServerName }
+                                $cs = "Data Source=$sqlDs;Initial Catalog=CM_$SiteCode;Integrated Security=True;Connect Timeout=10;Encrypt=False;TrustServerCertificate=True"
+                                $conn = New-Object System.Data.SqlClient.SqlConnection $cs
+                                $conn.Open()
+                                try {
+                                    $cmd = $conn.CreateCommand()
+                                    $cmd.CommandText = $sqlQuery
+                                    $reader = $cmd.ExecuteReader()
+                                    $queueParts = @()
+                                    while ($reader.Read()) {
+                                        $queueParts += "$($reader['Queue'])=$($reader['Messages'])"
+                                    }
+                                    $reader.Close()
+                                    if ($queueParts.Count -gt 0) {
+                                        Write-DscStatus "SQL Broker queue depths: $($queueParts -join ', ')" -MachineName $PSVM.VmName
+                                    }
+                                }
+                                finally {
+                                    $conn.Close()
+                                }
+                            }
+                            catch { }
+                            # Check rcmctrl.log for errors
+                            try {
+                                $rcmLog = Join-Path $SMSInstallDir "Logs\rcmctrl.log"
+                                if (Test-Path $rcmLog) {
+                                    $lastErrors = Get-Content $rcmLog -Tail 20 | Where-Object { $_ -match 'ERROR|WARN|failed' } | Select-Object -Last 3
+                                    if ($lastErrors) {
+                                        foreach ($err in $lastErrors) {
+                                            $errTrimmed = $err.Substring(0, [Math]::Min(200, $err.Length))
+                                            Write-DscStatus "rcmctrl.log: $errTrimmed" -MachineName $PSVM.VmName
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init done, finalizing link ($pendingStr)" -NoLog -RetrySeconds $sleepSeconds
                     }
                     else {
                         $pct = $replicationStatus.GlobalInitPercentage
-                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct%" -RetrySeconds 30 -MachineName $PSVM.VmName
-                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds 30
+                        Write-DscStatus "$SiteCode -> $PSSiteCode global data init: $pct% (${drsElapsedMin}m elapsed)" -RetrySeconds $sleepSeconds -MachineName $PSVM.VmName
+                        Write-DscStatus "$SiteCode -> $PSSiteCode replication init: $pct%" -NoLog -RetrySeconds $sleepSeconds
                     }
-                    Start-Sleep -Seconds 30
+                    Start-Sleep -Seconds $sleepSeconds
                 }
                 else {
-                    Write-DscStatus "Replication link is Active" -MachineName $PSVM.VmName
+                    Write-DscStatus "Replication link is Active (${drsElapsedMin}m elapsed)" -MachineName $PSVM.VmName
                     Write-DscStatus "$SiteCode -> $PSSiteCode replication link Active"
                     $waitList = @($waitList | Where-Object { $_ -ne $PSVM.vmName })
                     $propName = "PSReadyToUse" + $PSVM.VmName

@@ -225,6 +225,22 @@ if ($isCas) {
     Write-DscStatus "CAS has no MP -- skipping AD SecurityModeMaskEx wait."
 }
 elseif ($enabled -or (Test-Path $flagFile)) {
+    # Force AD replication so SCM's OperationalXml update propagates immediately
+    # instead of waiting for the next replication cycle (which can take minutes).
+    try {
+        $dcList = Get-ADDomainController -Filter * | Select-Object -ExpandProperty HostName
+        if ($dcList.Count -gt 1) {
+            Write-DscStatus "Forcing AD replication across $($dcList.Count) DCs to speed up OperationalXml propagation..."
+            foreach ($dc in $dcList) {
+                repadmin /syncall $dc /APed 2>&1 | Out-Null
+            }
+            Write-DscStatus "AD replication triggered."
+        }
+    }
+    catch {
+        Write-DscStatus "AD replication force failed: $_ (will rely on natural replication)"
+    }
+
     $adWaitMax = 300  # 5 minutes
     $adPoll = 10
     $adElapsed = 0
