@@ -3158,15 +3158,39 @@ $global:VM_Config = {
                 $recoveryMinutes = 3 + [Math]::Max(0, ($nodeCount - 10) * 20 / 60)
                 if ($skipStartDsc -and $noStatus -and -not $dscRecoveryAttempted) {
                     # Find DC readiness: don't start the recovery clock until
-                    # the DC VM has a heartbeat (it may be rebooting).
+                    # the DC VM has a heartbeat AND AD Web Services are responding.
+                    # Heartbeat OK just means the OS is running; ADWS/DNS/Kerberos
+                    # may still be starting. DSC resources that use PsDscRunAsCredential
+                    # need working AD services for GP processing and credential validation.
                     if (-not $dcReadySince) {
                         $dcVmObj = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'DC' } | Select-Object -First 1
                         if ($dcVmObj) {
                             $dcHb = $null
                             try { $dcHb = (Get-VM -Name $dcVmObj.vmName -ErrorAction SilentlyContinue).Heartbeat } catch {}
                             if ($dcHb -and $dcHb.ToString() -match 'Ok') {
-                                $dcReadySince = [DateTime]::UtcNow
-                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DC ($($dcVmObj.vmName)) heartbeat OK, recovery timer starts now." -LogOnly
+                                # Heartbeat OK — now verify ADWS (port 9389) is accepting connections.
+                                # Without this, DSC local recovery fails with "Unable to find a default
+                                # server with Active Directory Web Services running" or GP error 1053.
+                                $dcIp = $deployConfig.vmOptions.network
+                                if ($dcIp) {
+                                    # DC is always .1 on the lab network
+                                    $dcIp = ($dcIp -replace '\.\d+$', '.1')
+                                }
+                                $adwsUp = $false
+                                if ($dcIp) {
+                                    try {
+                                        $tcp = [System.Net.Sockets.TcpClient]::new()
+                                        $task = $tcp.ConnectAsync($dcIp, 9389)
+                                        $adwsUp = $task.Wait(2000)  # 2-second timeout
+                                        $tcp.Dispose()
+                                    } catch { $adwsUp = $false }
+                                }
+                                if ($adwsUp) {
+                                    $dcReadySince = [DateTime]::UtcNow
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DC ($($dcVmObj.vmName)) heartbeat OK, ADWS responding — recovery timer starts now." -LogOnly
+                                } elseif ($stopWatch.Elapsed.TotalMinutes -gt 1 -and ($dscStatusPolls % 20) -eq 0) {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DC ($($dcVmObj.vmName)) heartbeat OK but ADWS not yet responding (elapsed $([Math]::Round($stopWatch.Elapsed.TotalMinutes, 1)) min)." -LogOnly
+                                }
                             } elseif ($stopWatch.Elapsed.TotalMinutes -gt 1 -and ($dscStatusPolls % 20) -eq 0) {
                                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Waiting for DC ($($dcVmObj.vmName)) heartbeat before recovery timer (elapsed $([Math]::Round($stopWatch.Elapsed.TotalMinutes, 1)) min, heartbeat=$dcHb)." -LogOnly
                             }
