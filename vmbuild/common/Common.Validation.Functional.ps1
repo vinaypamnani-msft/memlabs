@@ -1128,9 +1128,90 @@ function Test-SQLAOFunctionality {
                             $results.Details.Add("FAIL: Could not start cluster resource '$($res.Name)': $($_.Exception.Message)")
                         }
                     }
-                    foreach ($res in $offlineResources) {
-                        # Offline is not necessarily wrong (e.g. a secondary AG role),
-                        # but flag it for visibility
+                    # AG resources Offline after a cold cluster start is
+                    # recoverable — try Start-ClusterGroup for the AG group.
+                    # Common cause: domain NIC had APIPA during cold start,
+                    # cluster mapped it to a phantom network, AG IP couldn't bind.
+                    $offlineAGResources = @($offlineResources | Where-Object { $_.OwnerGroup -eq $agName })
+                    $offlineOtherResources = @($offlineResources | Where-Object { $_.OwnerGroup -ne $agName })
+
+                    if ($offlineAGResources.Count -gt 0) {
+                        foreach ($res in $offlineAGResources) {
+                            $results.Details.Add("REMEDIATE: AG resource '$($res.Name)' ($($res.ResourceType)) is Offline — will attempt group start")
+                        }
+
+                        # First attempt: just start the AG group
+                        try {
+                            Start-ClusterGroup $agName -ErrorAction Stop | Out-Null
+                            Start-Sleep -Seconds 10
+                            $agGroupState = (Get-ClusterGroup $agName -ErrorAction Stop).State
+                            if ($agGroupState -eq 'Online') {
+                                $results.Details.Add("OK: AG cluster group '$agName' recovered to Online")
+                            }
+                        }
+                        catch {
+                            $results.Details.Add("WARN: Start-ClusterGroup '$agName' failed: $($_.Exception.Message)")
+                        }
+
+                        # If still not online, check for APIPA (cold-start NIC issue)
+                        $agGroupState2 = (Get-ClusterGroup $agName -ErrorAction SilentlyContinue).State
+                        if ($agGroupState2 -ne 'Online') {
+                            $domainIPs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                                Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '10.250.*' -and $_.IPAddress -notlike '169.254.*' })
+                            $apipaOnly = $domainIPs.Count -eq 0
+
+                            if ($apipaOnly) {
+                                $results.Details.Add("REMEDIATE: Domain NIC has no valid IP (APIPA) — attempting DHCP renew")
+                                try {
+                                    $null = & ipconfig /renew 2>&1
+                                    Start-Sleep -Seconds 10
+                                    $newIPs = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                                        Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '10.250.*' -and $_.IPAddress -notlike '169.254.*' })
+                                    if ($newIPs.Count -gt 0) {
+                                        $results.Details.Add("OK: DHCP renew got $($newIPs[0].IPAddress)")
+                                        # Restart cluster service so it re-enumerates NICs
+                                        # and removes the phantom network
+                                        Restart-Service ClusSvc -Force -ErrorAction Stop
+                                        Start-Sleep -Seconds 20
+                                        $results.Details.Add("OK: Cluster service restarted for NIC re-enumeration")
+                                        # Retry AG group start
+                                        try {
+                                            Start-ClusterGroup $agName -ErrorAction Stop | Out-Null
+                                            Start-Sleep -Seconds 10
+                                            $agGroupFinal = (Get-ClusterGroup $agName -ErrorAction Stop).State
+                                            if ($agGroupFinal -eq 'Online') {
+                                                $results.Details.Add("OK: AG cluster group '$agName' recovered to Online after NIC fix")
+                                            }
+                                            else {
+                                                $results.Passed = $false
+                                                $results.Details.Add("FAIL: AG cluster group '$agName' still $agGroupFinal after NIC fix + group start")
+                                            }
+                                        }
+                                        catch {
+                                            $results.Passed = $false
+                                            $results.Details.Add("FAIL: Start-ClusterGroup '$agName' failed after NIC fix: $($_.Exception.Message)")
+                                        }
+                                    }
+                                    else {
+                                        $results.Passed = $false
+                                        $results.Details.Add("FAIL: DHCP renew did not obtain a valid IP — DHCP server may be down")
+                                    }
+                                }
+                                catch {
+                                    $results.Passed = $false
+                                    $results.Details.Add("FAIL: APIPA recovery failed: $($_.Exception.Message)")
+                                }
+                            }
+                            else {
+                                # NIC has a valid IP but AG group still won't start
+                                $results.Passed = $false
+                                $results.Details.Add("FAIL: AG cluster group '$agName' is $agGroupState2 (domain NIC has IP $($domainIPs[0].IPAddress) — not an APIPA issue)")
+                            }
+                        }
+                    }
+
+                    foreach ($res in $offlineOtherResources) {
+                        # Non-AG Offline resources are informational
                         $results.Details.Add("WARN: Cluster resource '$($res.Name)' ($($res.ResourceType)) is Offline in group '$($res.OwnerGroup)'")
                     }
                 }
