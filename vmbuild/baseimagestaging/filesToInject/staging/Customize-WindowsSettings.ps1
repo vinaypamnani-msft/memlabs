@@ -170,6 +170,95 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name 
 Update-Log "Disable network location wizard"
 New-Item 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff' -Force -ErrorAction SilentlyContinue | Out-Null
 
+# Visual performance optimizations
+# =================================
+# Set "Adjust for best performance" (disables all animations, transparency,
+# smooth scrolling, thumbnail caching, etc.) — dramatically reduces first-login
+# time and memory footprint on Windows 11 VMs.
+Update-Log "Set visual effects to 'Adjust for best performance'"
+# UserPreferencesMask controls all visual effects. 90 12 03 80 10 00 00 00 = "Best performance"
+$vfxPath = 'HKCU:\Control Panel\Desktop'
+Set-ItemProperty -Path $vfxPath -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary -Force
+Set-ItemProperty -Path $vfxPath -Name 'MenuShowDelay' -Value '0' -Force  # No menu animation delay
+$vfxWinPath = 'HKCU:\Control Panel\Desktop\WindowMetrics'
+Set-ItemProperty -Path $vfxWinPath -Name 'MinAnimate' -Value '0' -Force  # No minimize/maximize animation
+$vfxAdvPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarAnimations' -Value 0 -Force
+Set-ItemProperty -Path $vfxAdvPath -Name 'ListviewAlphaSelect' -Value 0 -Force  # No translucent selection rectangle
+Set-ItemProperty -Path $vfxAdvPath -Name 'ListviewShadow' -Value 0 -Force      # No drop shadows on icon labels
+# VisualFX key tells System Properties to show "Custom" or "Best Performance"
+$vfxSysPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+New-Item -Path $vfxSysPath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $vfxSysPath -Name 'VisualFXSetting' -Value 2 -Force  # 2 = Best Performance
+
+# Disable transparency effects (Win10/11 compositing overhead)
+Update-Log "Disable transparency and animation effects"
+$themePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+New-Item -Path $themePath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $themePath -Name 'EnableTransparency' -Value 0 -Force
+# SystemParametersInfo-equivalent: disable UI animations globally
+$dwmPath = 'HKCU:\Software\Microsoft\Windows\DWM'
+New-Item -Path $dwmPath -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path $dwmPath -Name 'EnableAeroPeek' -Value 0 -Force
+Set-ItemProperty -Path $dwmPath -Name 'AlwaysHibernateThumbnails' -Value 0 -Force
+
+# Windows 11 specific: disable Widgets, Copilot, Chat, Snap layouts, and
+# first-login "welcome" experience that installs suggested apps.
+if (-not $server) {
+    Update-Log "Disable Windows 11 Widgets, Copilot, Chat, and first-run bloat"
+    # Widgets
+    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -PropertyType DWord -Value 0 -Force | Out-Null
+    Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarDa' -Value 0 -Force -ErrorAction SilentlyContinue  # Hide Widgets button
+    # Copilot
+    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Name 'TurnOffWindowsCopilot' -PropertyType DWord -Value 1 -Force | Out-Null
+    # Chat (Teams consumer)
+    Set-ItemProperty -Path $vfxAdvPath -Name 'TaskbarMn' -Value 0 -Force -ErrorAction SilentlyContinue
+    # Snap assist overlay — distracting in RDP sessions
+    Set-ItemProperty -Path $vfxAdvPath -Name 'EnableSnapAssistFlyout' -Value 0 -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $vfxAdvPath -Name 'SnapAssist' -Value 0 -Force -ErrorAction SilentlyContinue
+}
+
+# Disable "Welcome Experience" and "Get tips/suggestions" that trigger
+# on first login and install promoted apps in the background.
+Update-Log "Disable Welcome Experience, tips, and suggested content"
+$cdmPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+New-Item -Path $cdmPath -Force -ErrorAction SilentlyContinue | Out-Null
+# Disable all content delivery (suggested apps, Start menu suggestions, tips)
+foreach ($cdmVal in @(
+    'SubscribedContent-310093Enabled'    # Welcome Experience
+    'SubscribedContent-338389Enabled'    # Tips/tricks
+    'SubscribedContent-338393Enabled'    # Suggested content in Settings
+    'SubscribedContent-353694Enabled'    # Suggested content in Settings
+    'SubscribedContent-353696Enabled'    # Suggested content in Settings
+    'SystemPaneSuggestionsEnabled'       # Start menu suggested apps
+    'SilentInstalledAppsEnabled'         # Auto-install suggested apps
+    'SoftLandingEnabled'                 # Tips about Windows
+    'RotatingLockScreenEnabled'          # Lock screen spotlight
+    'RotatingLockScreenOverlayEnabled'   # Lock screen fun facts
+)) {
+    New-ItemProperty -Path $cdmPath -Name $cdmVal -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+}
+
+# Disable first-logon animation ("Hi, we're getting things ready for you")
+Update-Log "Disable first-logon animation"
+New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Force -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableFirstLogonAnimation' -Value 0 -Force
+
+# Disable Search highlights (Bing images in search bar)
+Update-Log "Disable search highlights"
+New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force | Out-Null
+
+# Reduce Superfetch/SysMain memory pressure on VMs with limited RAM
+Update-Log "Disable SysMain (Superfetch) — counterproductive on dynamic-memory VMs"
+$s = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+if ($s) {
+    Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
+    Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
+}
+
 Update-Log "Add tools paths to PATH variable"
 $toolsPath = "C:\tools"
 $oldpath = (Get-ItemProperty -Path 'Registry::HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Session Manager\Environment' -Name PATH).path

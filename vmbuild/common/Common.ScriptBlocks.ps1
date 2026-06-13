@@ -1059,6 +1059,67 @@ $global:VM_Create = {
                     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
             } catch { $warnings += "Disable telemetry/tasks: $_" }
 
+            # Visual performance: "Adjust for best performance" + disable
+            # transparency, animations, Welcome Experience, Widgets, Copilot,
+            # SysMain, and first-logon animation.
+            try {
+                # UserPreferencesMask = best performance
+                $vfxPath = 'HKCU:\Control Panel\Desktop'
+                Set-ItemProperty -Path $vfxPath -Name 'UserPreferencesMask' -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Type Binary -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $vfxPath -Name 'MenuShowDelay' -Value '0' -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name 'MinAnimate' -Value '0' -Force -ErrorAction SilentlyContinue
+                $advPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+                Set-ItemProperty -Path $advPath -Name 'TaskbarAnimations' -Value 0 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name 'ListviewAlphaSelect' -Value 0 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $advPath -Name 'ListviewShadow' -Value 0 -Force -ErrorAction SilentlyContinue
+                $vfxSys = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+                New-Item -Path $vfxSys -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path $vfxSys -Name 'VisualFXSetting' -Value 2 -Force -ErrorAction SilentlyContinue
+                # Transparency + DWM
+                $themePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+                New-Item -Path $themePath -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path $themePath -Name 'EnableTransparency' -Value 0 -Force -ErrorAction SilentlyContinue
+                $dwmPath = 'HKCU:\Software\Microsoft\Windows\DWM'
+                New-Item -Path $dwmPath -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path $dwmPath -Name 'EnableAeroPeek' -Value 0 -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $dwmPath -Name 'AlwaysHibernateThumbnails' -Value 0 -Force -ErrorAction SilentlyContinue
+                # Win11 client: Widgets, Copilot, Chat
+                $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+                if ($os -and $os.ProductType -eq 1) {
+                    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -Name 'AllowNewsAndInterests' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                    Set-ItemProperty -Path $advPath -Name 'TaskbarDa' -Value 0 -Force -ErrorAction SilentlyContinue
+                    New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Force -ErrorAction SilentlyContinue | Out-Null
+                    New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' -Name 'TurnOffWindowsCopilot' -PropertyType DWord -Value 1 -Force -ErrorAction SilentlyContinue | Out-Null
+                    Set-ItemProperty -Path $advPath -Name 'TaskbarMn' -Value 0 -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $advPath -Name 'EnableSnapAssistFlyout' -Value 0 -Force -ErrorAction SilentlyContinue
+                    Set-ItemProperty -Path $advPath -Name 'SnapAssist' -Value 0 -Force -ErrorAction SilentlyContinue
+                }
+                # Content Delivery Manager (Welcome Experience, suggested apps, tips)
+                $cdmPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+                New-Item -Path $cdmPath -Force -ErrorAction SilentlyContinue | Out-Null
+                foreach ($cdmVal in @(
+                    'SubscribedContent-310093Enabled', 'SubscribedContent-338389Enabled',
+                    'SubscribedContent-338393Enabled', 'SubscribedContent-353694Enabled',
+                    'SubscribedContent-353696Enabled', 'SystemPaneSuggestionsEnabled',
+                    'SilentInstalledAppsEnabled', 'SoftLandingEnabled',
+                    'RotatingLockScreenEnabled', 'RotatingLockScreenOverlayEnabled'
+                )) {
+                    New-ItemProperty -Path $cdmPath -Name $cdmVal -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                # First-logon animation
+                Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name 'EnableFirstLogonAnimation' -Value 0 -Force -ErrorAction SilentlyContinue
+                # Search highlights
+                New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Force -ErrorAction SilentlyContinue | Out-Null
+                New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'EnableDynamicContentInWSB' -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
+                # SysMain (Superfetch) — counterproductive on dynamic-memory VMs
+                $s = Get-Service -Name 'SysMain' -ErrorAction SilentlyContinue
+                if ($s) {
+                    Stop-Service 'SysMain' -Force -ErrorAction SilentlyContinue
+                    Set-Service  'SysMain' -StartupType Disabled -ErrorAction SilentlyContinue
+                }
+            } catch { $warnings += "Visual performance: $_" }
+
             [PSCustomObject]@{ Warnings = $warnings }
         }
 
