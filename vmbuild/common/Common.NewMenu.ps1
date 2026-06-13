@@ -1312,6 +1312,12 @@ function Show-Menu {
     # fewer rows and avoids the overflow. Reset on window resize.
     $scrollCorrection = 0
 
+    # Per-page selection memory: maps pageStartIndex to the menuItems index
+    # that was selected on that page. When the user PgDn/PgUp away and comes
+    # back, the arrow returns to wherever they left it instead of snapping to
+    # the first item.
+    $pageSelections = @{}
+
     While ($true) {
         # Reset per-iteration state. HelpPosition must be cleared each loop:
         # the shrink plan may drop the help banner this iteration even though
@@ -1353,12 +1359,34 @@ function Show-Menu {
         # PGUP/PGDN bookkeeping: advance the page start index based on the
         # previous render's EndIndex (saved in $pageEndIndex). PgUp always
         # snaps back to the first page (preserves prior behavior).
-        if ($operation -eq 'PGUP') {
-            $pageStartIndex = 0
-        }
-        elseif ($operation -eq 'PGDN') {
-            $pageStartIndex = $pageEndIndex + 1
-            if ($pageStartIndex -ge $menuItems.Count) { $pageStartIndex = 0 }
+        if ($operation -eq 'PGUP' -or $operation -eq 'PGDN') {
+            # Save which item was selected on the page we're leaving.
+            $leavingSelected = $menuItems | Where-Object { $_.Selected -and $_.Selectable }
+            if ($leavingSelected) {
+                $pageSelections[$pageStartIndex] = [array]::IndexOf($menuItems.ToArray(), $leavingSelected)
+            }
+
+            if ($operation -eq 'PGUP') {
+                $pageStartIndex = 0
+            }
+            else {
+                $pageStartIndex = $pageEndIndex + 1
+                if ($pageStartIndex -ge $menuItems.Count) { $pageStartIndex = 0 }
+            }
+
+            # Clear .Selected on ALL items so only one arrow renders. The
+            # correct item will be re-selected by Start-Navigation using
+            # the remembered selection (restored below) or its first-item
+            # fallback.
+            foreach ($mi in $menuItems) { $mi.Selected = $false }
+
+            # Restore remembered selection for the page we're switching to.
+            if ($pageSelections.ContainsKey($pageStartIndex)) {
+                $rememberedIdx = $pageSelections[$pageStartIndex]
+                if ($rememberedIdx -ge 0 -and $rememberedIdx -lt $menuItems.Count) {
+                    $menuItems[$rememberedIdx].Selected = $true
+                }
+            }
         }
 
         # Single pass over the menu collects every layout number we need.
@@ -2413,9 +2441,14 @@ function Start-Navigation {
     }
     $i = 0
     if (-not $foundSelected) {
+        # No item on this page has .Selected — pick the first selectable
+        # displayed item and clear any stale .Selected on off-page items
+        # so only one arrow ever renders.
+        foreach ($mi in $menuItems) { $mi.Selected = $false }
         foreach ($menuItem in $menuItems) {
             if ($menuItem.Selectable -and $menuItem.Displayed) {
                 $selectedIndex = $i
+                $menuItem.Selected = $true
                 break
             }
             $i++
