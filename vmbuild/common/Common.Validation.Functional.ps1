@@ -382,17 +382,23 @@ function Test-DCFunctionality {
             }
         }
 
-        # DNS resolution test
-        $results.Details.Add("CMD: Resolve-DnsName -Name '$domainFqdn' -Type A")
+        # DNS resolution test — query the local DNS zone database directly
+        # instead of Resolve-DnsName, which can return cached/LLMNR results.
+        $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domainFqdn' -Name '@' -RRType A")
         try {
-            $dns = Resolve-DnsName -Name $domainFqdn -Type A -ErrorAction Stop
-            if ($dns) {
-                $results.Details.Add("OK: DNS resolves '$domainFqdn' -> $($dns.IPAddress -join ', ')")
+            $zoneRecs = @(Get-DnsServerResourceRecord -ZoneName $domainFqdn -Name '@' -RRType A -ErrorAction Stop)
+            $zoneIPs = @($zoneRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+            if ($zoneIPs.Count -gt 0) {
+                $results.Details.Add("OK: DNS zone '$domainFqdn' has A record(s): $($zoneIPs -join ', ')")
+            }
+            else {
+                $results.Passed = $false
+                $results.Details.Add("FAIL: DNS zone '$domainFqdn' has no A records at zone apex")
             }
         }
         catch {
             $results.Passed = $false
-            $results.Details.Add("FAIL: DNS cannot resolve '$domainFqdn': $($_.Exception.Message)")
+            $results.Details.Add("FAIL: DNS zone query for '$domainFqdn' failed: $($_.Exception.Message)")
         }
 
         # BDC: force AD replication from all partners (including DomainDnsZones)
@@ -473,9 +479,8 @@ function Test-DCFunctionality {
                 $expectedIp = $expected[$name]
                 $fqdn = "$name.$domainFqdn"
                 try {
-                    $recs = Resolve-DnsName -Name $fqdn -Type A -Server 127.0.0.1 -DnsOnly -ErrorAction Stop |
-                        Where-Object { $_.Type -eq 'A' }
-                    $resolvedIps = @($recs | ForEach-Object { $_.IPAddress })
+                    $recs = @(Get-DnsServerResourceRecord -ZoneName $domainFqdn -Name $name -RRType A -ErrorAction Stop)
+                    $resolvedIps = @($recs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     if (-not $resolvedIps -or $resolvedIps.Count -eq 0) {
                         $mismatches++
                         $results.Details.Add("WARN: DNS '$fqdn' returned no A records (expected $expectedIp)")
@@ -989,6 +994,12 @@ function Test-SQLAOFunctionality {
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # Resolve domain and DNS server once — used by all DNS zone queries.
+        # SQLAO VMs aren't DCs, so query the DC's DNS zone remotely.
+        $domain = (Get-CimInstance Win32_ComputerSystem).Domain
+        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
@@ -1033,10 +1044,12 @@ function Test-SQLAOFunctionality {
                 }
 
                 # Validate cluster name DNS points to the correct IP
+                # Query the DC's DNS zone directly instead of Resolve-DnsName
+                # (which can return LLMNR/cache results masking stale records).
                 if ($clusterName) {
-                    $results.Details.Add("CMD: Resolve-DnsName '$clusterName'")
-                    $clusterDns = @(Resolve-DnsName -Name $clusterName -Type A -ErrorAction SilentlyContinue | Where-Object { $_.QueryType -eq 'A' })
-                    $resolvedIPs = @($clusterDns | Select-Object -ExpandProperty IPAddress)
+                    $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$clusterName' -RRType A -ComputerName '$dnsServer'")
+                    $clusterRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $clusterName -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
+                    $resolvedIPs = @($clusterRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     if ($resolvedIPs.Count -eq 0) {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: Cluster name '$clusterName' does not resolve in DNS")
@@ -1241,9 +1254,6 @@ function Test-SQLAOFunctionality {
                 # falls through to LLMNR, which returns ALL local IPs (including
                 # the heartbeat IP) even when the DNS server has no stale records.
                 $hostname = $env:COMPUTERNAME
-                $domain = (Get-CimInstance Win32_ComputerSystem).Domain
-                $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                    Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
                 $staleRecords = @()
                 if ($dnsServer -and $domain) {
                     $allARecords = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $hostname -RRType A -ComputerName $dnsServer -ErrorAction SilentlyContinue)
@@ -1556,11 +1566,12 @@ WHERE drs.is_local = 1
             # ==============================================================
             # 5. Listener DNS resolution
             # ==============================================================
+            # Query the DC's DNS zone directly instead of Resolve-DnsName.
             if ($listenerName) {
-                $results.Details.Add("CMD: Resolve-DnsName '$listenerName'")
+                $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$dnsServer'")
                 try {
-                    $dns = @(Resolve-DnsName -Name $listenerName -Type A -ErrorAction Stop)
-                    $resolvedIPs = @($dns | Where-Object { $_.QueryType -eq 'A' } | Select-Object -ExpandProperty IPAddress)
+                    $listenerRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $listenerName -RRType A -ComputerName $dnsServer -ErrorAction Stop)
+                    $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     if ($resolvedIPs.Count -gt 0) {
                         $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')")
                         if ($agIP -and $agIP -notin $resolvedIPs) {
@@ -1569,12 +1580,12 @@ WHERE drs.is_local = 1
                     }
                     else {
                         $results.Passed = $false
-                        $results.Details.Add("FAIL: '$listenerName' did not resolve to any A records")
+                        $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                     }
                 }
                 catch {
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: DNS resolution for '$listenerName' failed: $($_.Exception.Message)")
+                    $results.Details.Add("FAIL: DNS zone query for '$listenerName' failed: $($_.Exception.Message)")
                 }
             }
 
