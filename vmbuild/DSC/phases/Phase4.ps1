@@ -295,7 +295,7 @@
                                 Set-ADUser -Identity `$account -Server `$dc -Add @{ servicePrincipalName = `$s } -ErrorAction Stop
                             }
                             catch {
-                                if (`$_.Exception.Message -match 'constraint|already exists|duplicate') {
+                                if (`$_.Exception.Message -match 'constraint|already exists|duplicate|not unique') {
                                     # SPN is held by another account — find and remove it
                                     `$holder = Get-ADObject -Filter { servicePrincipalName -eq `$s } -Server `$dc -Properties servicePrincipalName -ErrorAction SilentlyContinue
                                     if (`$holder) {
