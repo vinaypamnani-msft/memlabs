@@ -94,6 +94,19 @@ function Write-JobProgress {
                         }
                         Write-Progress2 -Activity $CurrentActivity -Id $Job.Id -Status $latestStatus -PercentComplete $latestPercentComplete -force
                         write-host -NoNewline "$hideCursor"
+
+                        # Dismiss any orphan progress bar that PS7 may auto-render from
+                        # the child job's original progress record. Child jobs write with
+                        # the default ActivityId (0), but the managed bar above uses
+                        # $Job.Id. If PS7 surfaces the child's record at its original Id,
+                        # an extra bar appears without the VM name prefix.
+                        $childActivityId = $lastProgress.ActivityId
+                        if ($childActivityId -ne $Job.Id) {
+                            $savedPref = $Global:ProgressPreference
+                            $Global:ProgressPreference = 'Continue'
+                            Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
+                            $Global:ProgressPreference = $savedPref
+                        }
                     }
                 }
                 catch {
@@ -145,6 +158,11 @@ function Start-Phase {
     # up in the same Wait-Phase progress block as the DC/client jobs and
     # benefits from the same lifetime/error handling.
 
+    # Pre-build tools zips on the host so Phase 2 jobs skip Compress-Archive.
+    if ($Phase -eq 2) {
+        Build-ToolZipsForPhase2 -deployConfig $deployConfig
+    }
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
@@ -153,7 +171,21 @@ function Start-Phase {
         return $true
     }
     $global:PhaseSkipped = $false
+
+    # Diagnostic: transcript captures all console output during Wait-Phase
+    # to identify what is writing blank lines. Search the transcript file
+    # for sequences of empty lines to find the culprit.
+    $transcriptPath = $null
+    if ($Phase -eq 2) {
+        $transcriptPath = Join-Path $Common.LogPath "Phase2-Transcript.log"
+        try { Start-Transcript -Path $transcriptPath -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
+    }
+
     $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+
+    if ($transcriptPath) {
+        try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+    }
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
@@ -185,6 +217,11 @@ function Start-Phase {
     # no Proxy VM or no opted-in clients are present.
     if ($Phase -eq 2) {
         $postPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Create DHCP reservations for VMs whose IPs were confirmed during P2.
+        # Runs on the host to avoid DHCP/Hyper-V CIM cmdlet output leaking
+        # into the Start-Job worker streams.
+        Set-Phase2DhcpReservations -deployConfig $deployConfig
 
         # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
         # to the DC's DNS first, so the Proxy can resolve internal names

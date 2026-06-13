@@ -1873,39 +1873,9 @@ $global:VM_Config = {
                         $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
                     }
 
-                    # Create a DHCP reservation so the IP is stable across reboots
-                    # and VM recreations. CAS/Primary/Secondary already get fixed-IP
-                    # reservations in Phase 1; skip those here. Linux VMs get theirs
-                    # during Phase 1 creation. OSDClient has no network stack.
-                    if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
-                        try {
-                            # Wrap DHCP work in a script block with all non-error
-                            # streams redirected to $null. DHCP/Hyper-V CIM cmdlets
-                            # produce host output, progress, and information records
-                            # that leak into the job's streams and cause blank lines
-                            # in Wait-Phase's Minimal progress view. Terminating
-                            # exceptions (-ErrorAction Stop) still propagate to the
-                            # outer catch block.
-                            & {
-                                $ProgressPreference = 'SilentlyContinue'
-                                $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-                                if ($vmnet -and $vmnet.MacAddress) {
-                                    if ($currentItem.role -in "InternetClient", "AADClient") {
-                                        $realnetwork = "172.31.250.0"
-                                    }
-                                    else {
-                                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                                    }
-                                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                                    Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
-                                }
-                            } *>$null
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
-                        }
-                        catch {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
-                        }
-                    }
+                    # DHCP reservations are now created in the post-Phase 2 block
+                    # on the host (Set-Phase2DhcpReservations) to avoid DHCP/Hyper-V
+                    # CIM cmdlet output leaking into the job's streams.
                 }
             }
         }

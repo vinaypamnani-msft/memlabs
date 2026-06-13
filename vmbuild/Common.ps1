@@ -5181,6 +5181,248 @@ function Clean-StaleToolZips {
     }
 }
 
+function Build-ToolZipsForPhase2 {
+    <#
+    .SYNOPSIS
+        Pre-builds the fingerprint-keyed tools zips on the host so Phase 2
+        jobs find them already built and skip the Compress-Archive step.
+        Runs serially on the host before Start-PhaseJobs dispatches workers.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$deployConfig
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    Write-Log "Build-ToolZipsForPhase2: Pre-building tool zips..." -LogOnly
+
+    # --- Collect all tool entries the same way Copy-ToolToVM does ---
+    $commonEntries = @()
+    $allExtraSets = @{}  # fingerprint -> entries
+
+    foreach ($tool in $Common.AzureFileList.Tools) {
+        if ($tool.NoUpdate) { continue }
+
+        $toolFileName = Split-Path $tool.url -Leaf
+        if ($toolFileName.Contains("?")) { $toolFileName = $toolFileName.Split("?")[0] }
+        $fileTargetRelative = Join-Path $tool.Target $toolFileName
+
+        if ($toolFileName.ToLowerInvariant().EndsWith(".zip") -and $tool.ExtractFolderIfZip) {
+            $fileTargetRelative = $tool.Target
+        }
+
+        $toolPathHost = Join-Path $Common.StagingInjectPath $fileTargetRelative
+
+        if ($tool.Name -eq "WMI Explorer") {
+            $toolPathHost = Join-Path $toolPathHost "WmiExplorer.exe"
+            $fileTargetRelative = Join-Path $fileTargetRelative "WmiExplorer.exe"
+        }
+
+        if (-not (Test-Path $toolPathHost)) { continue }
+
+        $entry = [PSCustomObject]@{
+            Name           = $tool.Name
+            SourcePath     = $toolPathHost
+            TargetRelative = $fileTargetRelative
+        }
+
+        if ($tool.Optional -and $tool.Roles) {
+            # Track per-role extra entries; they get their own fingerprint
+            foreach ($role in $tool.Roles) {
+                if (-not $allExtraSets.ContainsKey($role)) {
+                    $allExtraSets[$role] = @()
+                }
+                $allExtraSets[$role] += $entry
+            }
+        }
+        elseif ($tool.Optional -and -not $tool.Roles) {
+            # Pure optional with no roles — skipped in normal Install-Tools
+            continue
+        }
+        else {
+            $commonEntries += $entry
+        }
+    }
+
+    # Add maintenance fix files to common bundle
+    try {
+        $maintPaths = Get-MaintenanceInjectPaths
+        foreach ($file in $maintPaths.Files) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$file"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "staging\$file"
+                }
+            }
+        }
+        foreach ($toolFolder in $maintPaths.Tools) {
+            $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
+            if (Test-Path $sourcePath) {
+                $commonEntries += [PSCustomObject]@{
+                    Name           = "MaintFix:$toolFolder"
+                    SourcePath     = $sourcePath
+                    TargetRelative = "tools\$toolFolder"
+                }
+            }
+        }
+    }
+    catch {
+        Write-Log "Build-ToolZipsForPhase2: Could not add maintenance fix files: $_" -LogOnly
+    }
+
+    # --- Fingerprint helper (same logic as Copy-ToolToVM) ---
+    $computeFingerprint = {
+        param([object[]]$entries)
+        $parts = foreach ($entry in $entries | Sort-Object { $_.TargetRelative }) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $children = Get-ChildItem $item.FullName -Recurse -File | Sort-Object FullName
+                foreach ($child in $children) {
+                    "$($entry.TargetRelative)|$($child.FullName.Substring($item.FullName.Length))|$($child.Length)"
+                }
+            }
+            else {
+                "$($entry.TargetRelative)|$($item.Length)"
+            }
+        }
+        $str = $parts -join "`n"
+        $stream = [System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($str))
+        $hash = (Get-FileHash -InputStream $stream -Algorithm MD5).Hash
+        $stream.Dispose()
+        return $hash
+    }
+
+    # --- Build zip helper (same logic as Copy-ToolToVM.$buildZip) ---
+    $buildZipLocal = {
+        param([object[]]$entries, [string]$fingerprint, [string]$label)
+        if ($entries.Count -eq 0) { return $null }
+
+        $zipPath = Join-Path $Common.TempPath "tools-$fingerprint.zip"
+        if (Test-Path $zipPath) {
+            Write-Log "Build-ToolZipsForPhase2: $label zip already exists ($fingerprint)." -LogOnly
+            return $zipPath
+        }
+
+        $stagingDir = Join-Path $Common.TempPath "toolzip-$fingerprint"
+        if (Test-Path $stagingDir) { Remove-Item $stagingDir -Recurse -Force }
+        New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
+
+        foreach ($entry in $entries) {
+            $dest = Join-Path $stagingDir $entry.TargetRelative
+            $destDir = Split-Path $dest -Parent
+            if (-not (Test-Path $destDir)) {
+                New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+            }
+            if ((Get-Item $entry.SourcePath) -is [System.IO.DirectoryInfo]) {
+                Copy-Item -Path $entry.SourcePath -Destination $dest -Recurse -Force
+            }
+            else {
+                Copy-Item -Path $entry.SourcePath -Destination $dest -Force
+            }
+        }
+
+        Write-Log "Build-ToolZipsForPhase2: Creating $label zip ($($entries.Count) items)..." -LogOnly
+        $prevPref = $Global:ProgressPreference
+        $Global:ProgressPreference = "SilentlyContinue"
+        try {
+            Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+        }
+        finally {
+            $Global:ProgressPreference = $prevPref
+        }
+        Remove-Item $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        $sizeMB = [Math]::Round((Get-Item $zipPath).Length / 1MB, 1)
+        Write-Log "Build-ToolZipsForPhase2: $label zip created (${sizeMB} MB)." -LogOnly
+        return $zipPath
+    }
+
+    # --- Build common zip ---
+    $builtCount = 0
+    if ($commonEntries.Count -gt 0) {
+        $commonFP = & $computeFingerprint $commonEntries
+        $null = & $buildZipLocal $commonEntries $commonFP "common tools"
+        $builtCount++
+    }
+
+    # --- Build unique extra zips (one per distinct role-tool set) ---
+    $builtExtraFPs = @{}
+    foreach ($role in $allExtraSets.Keys) {
+        $extraEntries = $allExtraSets[$role]
+        $extraFP = & $computeFingerprint $extraEntries
+        if (-not $builtExtraFPs.ContainsKey($extraFP)) {
+            $null = & $buildZipLocal $extraEntries $extraFP "extra tools ($role)"
+            $builtExtraFPs[$extraFP] = $true
+            $builtCount++
+        }
+    }
+
+    $timer.Stop()
+    Write-Log "Build-ToolZipsForPhase2: Pre-built $builtCount zip(s) in $($timer.Elapsed.ToString('hh\:mm\:ss'))."
+}
+
+function Set-Phase2DhcpReservations {
+    <#
+    .SYNOPSIS
+        Creates DHCP reservations for all applicable VMs after Phase 2.
+        Runs on the host so DHCP/Hyper-V CIM cmdlet output doesn't leak
+        into Start-Job worker streams.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$deployConfig
+    )
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $created = 0
+    $skipped = 0
+    $failed = 0
+
+    foreach ($vm in $deployConfig.virtualMachines) {
+        # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
+        # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
+        if ($vm.role -in "CAS", "Primary", "Secondary", "OSDClient") { continue }
+        if ($vm.hidden) { continue }
+        if (Test-VmIsLinux -Vm $vm) { continue }
+
+        $validIP = $vm.LastKnownIP
+        if (-not $validIP) {
+            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): No LastKnownIP, skipping." -LogOnly
+            $skipped++
+            continue
+        }
+
+        try {
+            $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
+            if (-not $vmnet -or -not $vmnet.MacAddress) {
+                Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): No MAC address found, skipping." -LogOnly
+                $skipped++
+                continue
+            }
+
+            if ($vm.role -in "InternetClient", "AADClient") {
+                $realnetwork = "172.31.250.0"
+            }
+            else {
+                $realnetwork = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
+            }
+
+            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
+            Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName)" -ErrorAction Stop
+            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): Reservation created for $validIP" -LogOnly
+            $created++
+        }
+        catch {
+            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): Could not create reservation for $validIP. $_" -Warning
+            $failed++
+        }
+    }
+
+    $timer.Stop()
+    Write-Log "Set-Phase2DhcpReservations: Created $created, skipped $skipped, failed $failed. Time: $($timer.Elapsed.ToString('hh\:mm\:ss'))."
+}
+
 function Copy-ToolToVM {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Tool PS Object.")]
