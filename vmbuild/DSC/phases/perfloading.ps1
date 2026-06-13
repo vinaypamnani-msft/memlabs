@@ -854,7 +854,9 @@ Write-DscStatus "$Tag Starting perfloading"
                 Write-DscStatus "$Tag Target products found in catalog ($($productsInCatalog.Count)/$($products.Count)) — skipping sync 1 wait"
             }
             else {
-                # First run: catalog empty, need sync 1 to populate it.
+                # First run: catalog doesn't have our products yet, need sync 1.
+                $missingFromCatalog = @($products | Where-Object { $_ -notin $allCatalogProducts })
+                Write-DscStatus "$Tag Products missing from catalog ($($missingFromCatalog.Count)/$($products.Count)): $($missingFromCatalog -join ', ')"
                 # Only trigger early sync if WCM is at SUCCESS — otherwise the sync
                 # will fail with 'WSUS server not configured' and block WCM from
                 # finishing its subscription setup (deadlock).
