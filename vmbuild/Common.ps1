@@ -2678,6 +2678,43 @@ function Test-DHCPScope {
             }
         }
 
+        # After creating a new scope, rebuild DHCP reservations from existing
+        # VM notes and MAC addresses. This restores reservations for Linux VMs
+        # (which rely on stable IPs for SSH/mRemoteNG) and any other VMs that
+        # had reservations before the scope was lost.
+        if ($createScope -and $DomainScope) {
+            try {
+                $existingVms = Get-List -Type VM -DomainName $DomainName -ErrorAction SilentlyContinue
+                if ($existingVms) {
+                    $rebuilt = 0
+                    foreach ($evm in $existingVms) {
+                        $vmNote = Get-VMNote -VMName $evm.vmName -ErrorAction SilentlyContinue
+                        if (-not $vmNote -or -not $vmNote.LastKnownIP) { continue }
+                        $ip = $vmNote.LastKnownIP
+                        # Only rebuild if the IP falls within this scope's range
+                        if ($ip -notlike "$network.*") { continue }
+                        $vmnet = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter -ErrorAction SilentlyContinue
+                        if (-not $vmnet -or -not $vmnet.MacAddress) { continue }
+                        try {
+                            Add-DhcpServerv4Reservation -ScopeId $scopeID -IPAddress $ip -ClientId $vmnet.MacAddress `
+                                -Description "Reservation for $($evm.vmName) (rebuilt)" -ErrorAction Stop | Out-Null
+                            $rebuilt++
+                            Write-Log "Rebuilt DHCP reservation: $($evm.vmName) $ip -> $($vmnet.MacAddress)" -Verbose
+                        }
+                        catch {
+                            Write-Log "Could not rebuild DHCP reservation for $($evm.vmName) ($ip): $_" -Warning
+                        }
+                    }
+                    if ($rebuilt -gt 0) {
+                        Write-Log "Rebuilt $rebuilt DHCP reservation(s) for scope '$scopeID' from VM notes" -Verbose
+                    }
+                }
+            }
+            catch {
+                Write-Log "Failed to rebuild DHCP reservations for scope '$scopeID': $_" -Warning
+            }
+        }
+
         # Set or update scope options (for new scopes AND existing scopes
         # whose DNS option needs updating). Updating in-place preserves
         # all existing leases and reservations.
