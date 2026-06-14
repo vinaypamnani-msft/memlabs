@@ -524,24 +524,28 @@ function Test-DCFunctionality {
                     }
                     elseif ($resolvedIps -notcontains $expectedIp) {
                         # Stale record — attempt auto-remediation: remove wrong A records and add the correct one.
+                        # Target the PDC for DNS changes — the BDC can sometimes fail to
+                        # create new A records for names that had secure dynamic updates.
                         $fixStatus = 'failed'
                         try {
                             $zone = $domainFqdn
+                            $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
+                            if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
                             # Get the actual record objects — Remove by InputObject is
                             # more reliable than by -RecordData for dynamic/secure records.
-                            $existingRecs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction SilentlyContinue
+                            $existingRecs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
                             foreach ($staleIp in $resolvedIps) {
                                 $matchRec = $existingRecs | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $staleIp }
                                 if ($matchRec) {
-                                    Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $matchRec -Force -ErrorAction Stop
+                                    Remove-DnsServerResourceRecord -ZoneName $zone -InputObject $matchRec -ComputerName $dnsTarget -Force -ErrorAction Stop
                                 }
                                 else {
-                                    Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -Force -ErrorAction Stop
+                                    Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -ComputerName $dnsTarget -Force -ErrorAction Stop
                                 }
                             }
-                            Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ErrorAction Stop
+                            Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ComputerName $dnsTarget -ErrorAction Stop
                             # Re-verify via zone database (bypasses DNS resolver cache)
-                            $zoneRec = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ErrorAction SilentlyContinue
+                            $zoneRec = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
                             $zoneIps = @($zoneRec | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                             if ($zoneIps -contains $expectedIp) {
                                 $fixStatus = 'verified'
@@ -569,8 +573,12 @@ function Test-DCFunctionality {
                         # Extra records alongside the correct one — remove the extras.
                         $extras = @($resolvedIps | Where-Object { $_ -ne $expectedIp })
                         try {
+                            if (-not $dnsTarget) {
+                                $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
+                                if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
+                            }
                             foreach ($extraIp in $extras) {
-                                Remove-DnsServerResourceRecord -ZoneName $domainFqdn -RRType A -Name $name -RecordData $extraIp -Force -ErrorAction Stop
+                                Remove-DnsServerResourceRecord -ZoneName $domainFqdn -RRType A -Name $name -RecordData $extraIp -ComputerName $dnsTarget -Force -ErrorAction Stop
                             }
                             $results.Details.Add("OK: DNS '$fqdn' had extra A record(s) ($($extras -join ',')); removed, keeping $expectedIp")
                         }
