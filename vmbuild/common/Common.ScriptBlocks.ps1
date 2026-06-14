@@ -639,12 +639,16 @@ $global:VM_Create = {
                         $remaining = [int]($maxDelay - $deferSw.Elapsed.TotalSeconds)
                         Write-Progress2 "AADClient" -Status "Waiting for host load to settle (${remaining}s remaining)" -force
                         Start-Sleep -Seconds 10
-                        # Check if enough other VMs are past OOBE
-                        $readyCount = 0
-                        foreach ($vn in $otherVmNames) {
-                            $hb = (Get-VM2 -Name $vn -ErrorAction SilentlyContinue).Heartbeat
-                            if ($hb -eq 'OkApplicationsHealthy') { $readyCount++ }
+                        # Single Get-VM call for all VMs — faster and avoids
+                        # per-VM Get-VM2 issues inside Start-Job.
+                        try {
+                            $allVms = Get-VM -ErrorAction SilentlyContinue
+                            $readyCount = @($allVms | Where-Object { $_.Name -in $otherVmNames -and $_.Heartbeat -eq 'OkApplicationsHealthy' }).Count
                         }
+                        catch {
+                            $readyCount = 0
+                        }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Heartbeat poll: $readyCount/$($otherVmNames.Count) healthy (need $threshold)." -LogOnly
                         if ($readyCount -ge $threshold) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): $readyCount/$($otherVmNames.Count) VMs healthy after $([int]$deferSw.Elapsed.TotalSeconds)s — breaking early." -LogOnly
                             break
