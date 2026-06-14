@@ -4016,15 +4016,33 @@ function Wait-ForVm {
         [bool]$powerCycleEligible = $false
 
         do {
-            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost -ErrorAction SilentlyContinue }
+            $wwahost = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -AsJob -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -ScriptBlock { Get-Process wwahost, oobelauncher, UserOOBEBroker -ErrorAction SilentlyContinue }
 
             if ($wwahost.ScriptBlockOutput) {
                 $ready = $true
-                Write-Log "$VmName`: OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running." -Verbose
-                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. WWAHost (PID $($wwahost.ScriptBlockOutput.Id)) is running"
+                $oobeProcName = ($wwahost.ScriptBlockOutput | Select-Object -First 1).ProcessName
+                Write-Log "$VmName`: OOBE Started. $oobeProcName (PID $($wwahost.ScriptBlockOutput[0].Id)) is running." -Verbose
+                Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE Started. $oobeProcName is running"
+            }
+            elseif ($wwahost.ScriptBlockFailed) {
+                # PSDirect session failed — after sysprep /generalize, the local
+                # admin account is wiped so PSDirect can't authenticate. If the VM
+                # heartbeat is OK, this means OOBE is active (the only time the
+                # VM is running but has no usable local accounts).
+                $hbCheck = (Get-VM2 -Name $VmName -ErrorAction SilentlyContinue).Heartbeat
+                if ($hbCheck -and $hbCheck -match 'Ok') {
+                    $ready = $true
+                    Write-Log "$VmName`: OOBE detected via auth failure (post-sysprep, heartbeat=$hbCheck). Local accounts wiped — VM is at OOBE." -Verbose
+                    Write-ProgressElapsed -showTimeout -stopwatch $stopWatch -timespan $timespan -text "OOBE detected (auth failure + heartbeat OK)"
+                }
+                else {
+                    Write-Log "$VmName`: OOBE hasn't started yet. Session failed, heartbeat=$hbCheck."
+                    $ready = $false
+                    Start-Sleep -Seconds $WaitSeconds
+                }
             }
             else {
-                Write-Log "$VmName`: OOBE hasn't started yet. WWAHost not running."
+                Write-Log "$VmName`: OOBE hasn't started yet. No OOBE process running."
                 $ready = $false
                 Start-Sleep -Seconds $WaitSeconds
 

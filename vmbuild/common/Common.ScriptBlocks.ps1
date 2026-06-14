@@ -2089,8 +2089,15 @@ $global:VM_Config = {
         if ($bootToOOBE) {
             # Run Sysprep — first run only; the oobeComplete check above
             # ensures we never reach here on a rerun.
+            # Use /oobe /shutdown WITHOUT /generalize. The /generalize flag
+            # re-runs the specialize pass on next boot, which re-checks
+            # hardware requirements and fails on Windows 11 24H2 with
+            # "Windows Setup could not configure Windows to run on this
+            # computer's hardware." Since the VM stays on the same virtual
+            # hardware, /generalize is unnecessary — /oobe alone presents
+            # the OOBE wizard for AAD join.
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /oobe /shutdown }
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
             }
