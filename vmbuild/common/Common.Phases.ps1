@@ -153,6 +153,14 @@ function Start-Phase {
         }
     }
 
+    # Pre-allocate DHCP IPs for every VM before Phase 1 jobs start.
+    # This runs serially so there are no race conditions, and every VM's
+    # config gets an AssignedIP that New-VirtualMachine uses to create
+    # the reservation immediately after creating the NIC.
+    if ($Phase -eq 1) {
+        Set-DeployConfigIPAddresses -DeployConfig $deployConfig
+    }
+
     # Linux Proxy Squid install is dispatched as a per-VM job through
     # Start-PhaseJobs in Phase 2 (see $global:Proxy_Install), so it shows
     # up in the same Wait-Phase progress block as the DC/client jobs and

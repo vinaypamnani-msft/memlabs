@@ -376,29 +376,38 @@ function Test-DCFunctionality {
             if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
                 # IP source priority for DNS validation:
-                # 1. DHCP reservation (authoritative — set by us in Phase 2)
-                # 2. Get-VMNetworkAdapter (live Hyper-V data, with SQLAO virtual IP filtering)
-                # 3. LastKnownIP from VM Notes (last resort only)
+                # 1. AssignedIP from deployConfig (set before Phase 1)
+                # 2. DHCP reservation (authoritative — set by us in Phase 1)
+                # 3. Get-VMNetworkAdapter (live Hyper-V data, with SQLAO virtual IP filtering)
+                # 4. LastKnownIP from VM Notes (last resort only)
                 $ip = $null
                 $ipSource = 'none'
 
-                # 1. DHCP reservation — most authoritative source
-                try {
-                    $vmnet = Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop |
-                        Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
-                        Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress) {
-                        $scopeId = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
-                        $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
-                        if ($reservation) {
-                            $ip = $reservation.IPAddress.IPAddressToString
-                            $ipSource = 'DHCP'
-                        }
-                    }
-                } catch {}
+                # 1. AssignedIP — stamped by Set-DeployConfigIPAddresses
+                if ($vm.AssignedIP) {
+                    $ip = $vm.AssignedIP
+                    $ipSource = 'AssignedIP'
+                }
 
-                # 2. Get-VMNetworkAdapter — filter heartbeat, cluster and AG virtual IPs
+                # 2. DHCP reservation
+                if (-not $ip) {
+                    try {
+                        $vmnet = Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop |
+                            Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
+                            Select-Object -First 1
+                        if ($vmnet -and $vmnet.MacAddress) {
+                            $scopeId = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
+                            $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                                Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                            if ($reservation) {
+                                $ip = $reservation.IPAddress.IPAddressToString
+                                $ipSource = 'DHCP'
+                            }
+                        }
+                    } catch {}
+                }
+
+                # 3. Get-VMNetworkAdapter — filter heartbeat, cluster and AG virtual IPs
                 if (-not $ip) {
                     try {
                         $allIps = @((Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
@@ -418,7 +427,7 @@ function Test-DCFunctionality {
                     } catch {}
                 }
 
-                # 3. LastKnownIP from VM Notes — last resort only
+                # 4. LastKnownIP from VM Notes — last resort only
                 if (-not $ip) {
                     try {
                         $vmNote = Get-VMNote -VMName $vm.vmName
@@ -431,8 +440,8 @@ function Test-DCFunctionality {
 
                 if ($ip) {
                     $entries.Add("$($vm.vmName)=$ip")
-                    if ($ipSource -ne 'DHCP') {
-                        Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) expected IP $ip resolved via $ipSource (no DHCP reservation found)" -LogOnly
+                    if ($ipSource -notin 'AssignedIP', 'DHCP') {
+                        Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) expected IP $ip resolved via $ipSource (no AssignedIP or DHCP reservation found)" -LogOnly
                     }
                 }
                 else {

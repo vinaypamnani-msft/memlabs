@@ -512,23 +512,8 @@ $global:VM_Create = {
                 # this to scrub known_hosts even when the VM is off.
                 $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $linuxIP -Force
 
-                # Create a DHCP reservation so the IP is stable across reboots.
-                # Linux VMs use DHCP but don't support LLMNR, so RDCMan/mRemoteNG
-                # reference them by IP. Without a reservation, a scope rebuild or
-                # lease expiry could reassign a different IP, breaking connections
-                # and DNS records.
-                try {
-                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter
-                    if ($vmnet) {
-                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop | Out-Null
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
-                    }
-                }
-                catch {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $linuxIP. $_" -Warning
-                }
+                # DHCP reservation was already created by New-LinuxVirtualMachine
+                # using the pre-assigned IP from Set-DeployConfigIPAddresses.
 
                 # Push an A record to the domain DC so other VMs can resolve
                 # this Linux host by name (Linux VMs do not perform secure
@@ -762,39 +747,6 @@ $global:VM_Create = {
             if (-not $connected) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not verify if VM is connectable. Exiting." -Failure -OutputStream
                 return
-            }
-        }
-
-        # Assign DHCP reservation for PS/CS
-        if ($currentItem.role -in "Primary", "CAS", "Secondary" -and $createVM) {
-            try {
-                $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction SilentlyContinue | Get-VMNetworkAdapter
-                #$vmnet = Get-VMNetworkAdapter -VMName $currentItem.vmName -ErrorAction Stop
-                if ($vmnet) {
-                    $realnetwork = $deployConfig.vmOptions.network
-                    if ($currentItem.network) {
-                        $realnetwork = $currentItem.network
-                    }
-                    $network = $realnetwork.Substring(0, $realnetwork.LastIndexOf("."))
-
-                    $splitNetwork = ($network.split(".") | Select-Object -First 3) -join "."
-                    if ($currentItem.role -eq "CAS") {
-                        Remove-DHCPReservation -ip ($splitNetwork + ".5") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".5") -ClientId $vmnet.MacAddress -Description "Reservation for CAS" -ErrorAction Stop | Out-Null
-                    }
-                    if ($currentItem.role -eq "Primary") {
-                        Remove-DHCPReservation -ip ($splitNetwork + ".10") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".10") -ClientId $vmnet.MacAddress -Description "Reservation for Primary" -ErrorAction Stop | Out-Null
-                    }
-                    if ($currentItem.role -eq "Secondary") {
-                        Remove-DHCPReservation -ip ($splitNetwork + ".15") -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress ($splitNetwork + ".15") -ClientId $vmnet.MacAddress -Description "Reservation for Secondary" -ErrorAction Stop | Out-Null
-                    }
-                }
-            }
-            catch {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not assign DHCP Reservation for $($currentItem.role). $_" -Warning
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): $($_.ScriptStackTrace)" -LogOnly
             }
         }
 
@@ -1923,43 +1875,6 @@ $global:VM_Config = {
                     if (-not $existingIP -or $existingIP -ne $validIP) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP (was: $($existingIP ?? 'unset'))" -LogOnly
                         $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
-                    }
-
-                    # Create a DHCP reservation so the IP is stable across reboots.
-                    # CAS/Primary/Secondary get fixed well-known IPs (.5/.10/.15)
-                    # in Phase 1 — don't overwrite those with the DHCP-assigned IP.
-                    # Linux VMs get theirs in Set-LinuxVmsDcDns. OSDClient has no network.
-                    if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
-                        try {
-                            # Suppress progress rendering while CIM cmdlets run.
-                            # Write-Progress2Impl checks $Global:SuppressProgress
-                            # and skips the -force ProgressPreference toggle that
-                            # would otherwise let CIM progress records through.
-                            $Global:SuppressProgress = $true
-                            try {
-                                $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-                                if ($vmnet -and $vmnet.MacAddress) {
-                                    if ($currentItem.role -in "InternetClient", "AADClient") {
-                                        $realnetwork = "172.31.250.0"
-                                    }
-                                    else {
-                                        $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                                    }
-                                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                                    Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created: $validIP (MAC=$($vmnet.MacAddress), Scope=$realnetwork)" -LogOnly
-                                }
-                                else {
-                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No network adapter/MAC found; skipping DHCP reservation" -LogOnly
-                                }
-                            }
-                            finally {
-                                $Global:SuppressProgress = $false
-                            }
-                        }
-                        catch {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
-                        }
                     }
                 }
             }

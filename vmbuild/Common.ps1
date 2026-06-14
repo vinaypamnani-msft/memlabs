@@ -3335,6 +3335,117 @@ New-VirtualMachine -VmName "MyVM" -VmPath "C:\VMs" -Memory "4GB" -Processors 2 -
 This example creates a new virtual machine named "MyVM" with 4GB of memory, 2 processors, generation 2, and connects it to the "VirtualSwitch" virtual switch.
 
 #>
+
+function Set-DeployConfigIPAddresses {
+    <#
+    .SYNOPSIS
+        Pre-allocate DHCP IPs for every VM before Phase 1 starts.
+    .DESCRIPTION
+        Iterates all non-hidden VMs in the deploy config, determines
+        the correct DHCP scope, and assigns a stable IP:
+        - CAS -> .5, Primary -> .10, Secondary -> .15 (fixed well-known)
+        - Proxy (Linux) -> .2 (static cloud-init)
+        - DC -> .1 (set by DSC, but reserve it here)
+        - All others -> Get-DhcpServerv4FreeIPAddress from the scope
+
+        Stamps $vm.AssignedIP on each VM's config object. New-VirtualMachine
+        and New-LinuxVirtualMachine use this to create the DHCP reservation
+        immediately after VM creation (before boot), so every VM boots
+        with a deterministic, reserved IP.
+
+        This runs serially on the main thread before parallel Phase 1
+        jobs start, so no mutex is needed for IP allocation.
+    #>
+    param (
+        [Parameter(Mandatory)]
+        [object]$DeployConfig
+    )
+
+    $defaultNetwork = $DeployConfig.vmOptions.network
+    # Track IPs we've allocated to prevent duplicates within this run
+    $allocatedIps = [System.Collections.Generic.HashSet[string]]::new()
+
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden) { continue }
+        if ($vm.role -eq 'OSDClient') { continue }
+
+        # Determine the DHCP scope for this VM
+        if ($vm.role -in 'InternetClient', 'AADClient') {
+            $scopeId = '172.31.250.0'
+        }
+        else {
+            $scopeId = if ($vm.network) { $vm.network } else { $defaultNetwork }
+        }
+        $base = ($scopeId.Split('.') | Select-Object -First 3) -join '.'
+        $ip = $null
+        $ipSource = 'new'
+
+        # Check if a DHCP reservation already exists for this VM's MAC
+        # (from a previous deploy). If so, reuse it instead of allocating
+        # a new IP — avoids clobbering a working reservation on rerun.
+        try {
+            $existingVm = Get-VM2 -Name $vm.vmName -ErrorAction SilentlyContinue
+            if ($existingVm) {
+                $vmnet = $existingVm | Get-VMNetworkAdapter |
+                    Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
+                    Select-Object -First 1
+                if ($vmnet -and $vmnet.MacAddress) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                        Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                    if ($reservation) {
+                        $ip = $reservation.IPAddress.IPAddressToString
+                        $ipSource = 'existing-reservation'
+                    }
+                }
+            }
+        } catch {}
+
+        # Fixed well-known IPs (outside the DHCP pool .20-.199)
+        if (-not $ip) {
+            switch ($vm.role) {
+                'DC'        { $ip = "$base.1" }
+                'BDC'       { $ip = "$base.3" }
+                'CAS'       { $ip = "$base.5" }
+                'Primary'   { $ip = "$base.10" }
+                'Secondary' { $ip = "$base.15" }
+                'Proxy'     { $ip = "$base.2" }
+            }
+        }
+
+        # Dynamic allocation from the DHCP pool
+        if (-not $ip) {
+            try {
+                $ip = (Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop).IPAddressToString
+                # Exclude it immediately so the next call can't return the same address
+                Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $ip -EndRange $ip -ErrorAction SilentlyContinue | Out-Null
+            }
+            catch {
+                Write-Log "$($vm.vmName): Failed to get free IP from scope $scopeId. $_" -Warning
+                continue
+            }
+        }
+
+        if ($ip -and -not $allocatedIps.Add($ip)) {
+            Write-Log "$($vm.vmName): IP $ip already allocated to another VM in this deploy!" -Warning
+        }
+
+        $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force
+        Write-Log "$($vm.vmName): Pre-assigned IP $ip (scope $scopeId, role $($vm.role), source $ipSource)" -LogOnly
+    }
+
+    # Clean up exclusion ranges we added — the DHCP reservations (created
+    # in New-VirtualMachine after New-VM) will prevent reuse. Exclusions
+    # block the entire IP even from reservations on some DHCP versions.
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden -or -not $vm.AssignedIP) { continue }
+        if ($vm.role -in 'DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'Proxy', 'OSDClient') { continue }
+        $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
+        Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $vm.AssignedIP -EndRange $vm.AssignedIP -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    Write-Log "Pre-allocated IPs for $($allocatedIps.Count) VM(s)"
+}
+
 function New-VirtualMachine {
     param (
         [Parameter(Mandatory = $true)]
@@ -3485,6 +3596,41 @@ function New-VirtualMachine {
         # Add VMNote as soon as VM is created
         if ($DeployConfig) {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
+        }
+
+        # Create DHCP reservation now that the MAC is available.
+        # AssignedIP was stamped on the VM config by Set-DeployConfigIPAddresses
+        # before Phase 1 started, so every VM boots with a deterministic IP.
+        # Skip if a reservation already exists for this MAC (rerun scenario).
+        if ($DeployConfig -and -not $OSDClient.IsPresent) {
+            $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                try {
+                    $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
+                    if ($vmnet -and $vmnet.MacAddress) {
+                        $assignedIP = $thisVmConfig.AssignedIP
+                        $scopeId = if ($thisVmConfig.role -in 'InternetClient', 'AADClient') {
+                            '172.31.250.0'
+                        } else {
+                            if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
+                        }
+                        # Check if a reservation already exists for this MAC
+                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        if ($existing) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $($existing.IPAddress) (MAC=$($vmnet.MacAddress)); keeping" -LogOnly
+                        }
+                        else {
+                            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
+                            Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $assignedIP -ClientId $vmnet.MacAddress -Description "Reservation for $VmName" -ErrorAction Stop | Out-Null
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$($vmnet.MacAddress), Scope=$scopeId)" -LogOnly
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+            }
         }
 
         # Copy sysprepped image to VM location

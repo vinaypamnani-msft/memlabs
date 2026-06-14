@@ -1121,6 +1121,35 @@ function New-LinuxVirtualMachine {
             New-VmNote -VmName $VmName -DeployConfig $DeployConfig -InProgress $true
         }
 
+        # Create DHCP reservation now that the MAC is available.
+        # AssignedIP was stamped by Set-DeployConfigIPAddresses before Phase 1.
+        # Skip if a reservation already exists for this MAC (rerun scenario).
+        if ($DeployConfig) {
+            $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                try {
+                    $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
+                    if ($vmnet -and $vmnet.MacAddress) {
+                        $assignedIP = $thisVmConfig.AssignedIP
+                        $scopeId = if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
+                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        if ($existing) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $($existing.IPAddress) (MAC=$($vmnet.MacAddress)); keeping" -LogOnly
+                        }
+                        else {
+                            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
+                            Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $assignedIP -ClientId $vmnet.MacAddress -Description "Reservation for $VmName (Linux)" -ErrorAction Stop | Out-Null
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$($vmnet.MacAddress), Scope=$scopeId)" -LogOnly
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+            }
+        }
+
         # Copy the base VHDX to the VM dir as its OS disk.
         $osDiskName = "$($VmName)_OS.vhdx"
         $osDiskPath = Join-Path $vm.Path $osDiskName
@@ -1194,17 +1223,33 @@ function New-LinuxVirtualMachine {
         }
         if ($DeployConfig) {
             $thisVm = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
-            if ($thisVm -and $thisVm.role -eq 'Proxy') {
+
+            # Use pre-allocated AssignedIP as static cloud-init IP for all
+            # Linux VMs. This means the VM boots with its reserved IP from
+            # the very first DHCP request (or statically via netplan), so
+            # there's never a window where it has a different address.
+            if ($thisVm -and $thisVm.AssignedIP) {
+                $netBase = $thisVm.network
+                if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
+                if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+                    $base = $Matches[1]
+                    $seedArgs.StaticIPv4 = $thisVm.AssignedIP
+                    $seedArgs.Gateway = "$base.200"
+                    Write-Log "$VmName`: Using pre-assigned static IP $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
+                }
+                else {
+                    Write-Log "$VmName`: Network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
+                }
+            }
+            elseif ($thisVm -and $thisVm.role -eq 'Proxy') {
+                # Fallback for Proxy if AssignedIP wasn't set (shouldn't happen normally)
                 $netBase = $thisVm.network
                 if (-not $netBase) { $netBase = $DeployConfig.vmOptions.network }
                 if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
                     $base = $Matches[1]
                     $seedArgs.StaticIPv4 = "$base.2"
                     $seedArgs.Gateway = "$base.200"
-                    Write-Log "$VmName`: Proxy role detected; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
-                }
-                else {
-                    Write-Log "$VmName`: Proxy role but network '$netBase' isn't /24 a.b.c.0 form; falling back to DHCP" -Warning
+                    Write-Log "$VmName`: Proxy fallback; pinning to $($seedArgs.StaticIPv4) (gw $($seedArgs.Gateway))"
                 }
             }
             # enableRDP toggle: previously installed xrdp+xfce4+Firefox via
@@ -1281,13 +1326,12 @@ function Get-LinuxVmExpectedStaticIP {
         Return the IP a Linux VM is expected to claim, or $null if it uses DHCP.
 
     .DESCRIPTION
-        Mirrors the role-specific static-IP logic in New-LinuxVirtualMachine
-        (Proxy -> <network>.2). DHCP-only roles (LinuxServer today, future
-        LinuxDesktop) return $null so callers can skip the KVP-independent
-        fallback probe -- a DHCP guest's IP isn't predictable from config.
+        All Linux VMs now get a pre-assigned static IP via
+        Set-DeployConfigIPAddresses (stamped as AssignedIP on the VM
+        config). The seed ISO emits a static netplan config using this IP.
 
-        Keeping this in one place means Wait-LinuxVmReady callers and the
-        seed-ISO emitter agree on which VMs have a known IP.
+        Falls back to the legacy Proxy -> <network>.2 logic if
+        AssignedIP is not set (e.g. existing-VM reruns).
     #>
     [CmdletBinding()]
     param (
@@ -1299,12 +1343,17 @@ function Get-LinuxVmExpectedStaticIP {
     )
 
     if (-not $VmObject) { return $null }
-    if ($VmObject.role -ne 'Proxy') { return $null }
 
-    $netBase = $VmObject.network
-    if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
-    if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
-        return "$($Matches[1]).2"
+    # Pre-assigned IP from Set-DeployConfigIPAddresses
+    if ($VmObject.AssignedIP) { return $VmObject.AssignedIP }
+
+    # Legacy fallback for Proxy
+    if ($VmObject.role -eq 'Proxy') {
+        $netBase = $VmObject.network
+        if (-not $netBase -and $DeployConfig) { $netBase = $DeployConfig.vmOptions.network }
+        if ($netBase -match '^(\d+\.\d+\.\d+)\.\d+$') {
+            return "$($Matches[1]).2"
+        }
     }
     return $null
 }
@@ -2433,39 +2482,19 @@ function Set-LinuxVmsDcDns {
         if ($vmIp) {
             $null = Register-LinuxVmDns -VmName $vm.vmName -Domain $domain -DCName $dcVm.vmName -IPAddress $vmIp
 
-            # Refresh DHCP reservation and LastKnownIP if the IP changed
-            # since Phase 1. This catches cases where the VM rebooted and
-            # got a different DHCP lease (e.g. after scope option update).
-            # Also ensures a reservation exists even when the IP is unchanged,
-            # because lab init removes all old reservations before Phase 1.
+            # Update LastKnownIP in VM Notes if the IP differs from what
+            # was recorded in Phase 1 (shouldn't happen now that all Linux
+            # VMs boot with static IPs, but keep as a safety net).
             $vmNote = Get-VMNote -vmName $vm.vmName
             $oldIp = if ($vmNote) { $vmNote.LastKnownIP } else { $null }
             if ($oldIp -ne $vmIp) {
                 if ($oldIp) {
-                    Write-Log "[Linux DNS] $($vm.vmName): IP changed $oldIp -> $vmIp — refreshing DHCP reservation and LastKnownIP" -Verbose
+                    Write-Log "[Linux DNS] $($vm.vmName): IP changed $oldIp -> $vmIp — updating LastKnownIP" -Verbose
                 }
-                # Update VM note so mRemoteNG/RDCMan use the correct IP
                 Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $vmIp })
             }
-            # Always ensure DHCP reservation exists — lab init clears old
-            # reservations, and Linux VMs skip Phase 2 where Windows VMs
-            # get theirs created. Without a reservation, reboots during
-            # Phase 8 can cause the VM to get a different DHCP IP.
-            try {
-                $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter
-                if ($vmnet) {
-                    $realnetwork = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
-                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
-                    Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $vmIp -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName) (Linux)" -ErrorAction Stop | Out-Null
-                    Write-Log "[Linux DNS] $($vm.vmName): DHCP reservation created: $vmIp (MAC=$($vmnet.MacAddress), Scope=$realnetwork)" -LogOnly
-                }
-                else {
-                    Write-Log "[Linux DNS] $($vm.vmName): No network adapter found; skipping DHCP reservation" -Warning
-                }
-            }
-            catch {
-                Write-Log "[Linux DNS] $($vm.vmName): Could not create DHCP reservation for $vmIp. $_" -Warning
-            }
+            # DHCP reservation was already created by New-LinuxVirtualMachine
+            # in Phase 1 using the pre-assigned IP.
         }
         else {
             Write-Log "[Linux DNS] $($vm.vmName): could not resolve IPv4; skipping DNS A record registration" -Warning
