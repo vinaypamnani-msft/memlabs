@@ -5372,68 +5372,6 @@ function Build-ToolZipsForPhase2 {
     Write-Log "Build-ToolZipsForPhase2: Pre-built $builtCount zip(s) in $($timer.Elapsed.ToString('hh\:mm\:ss'))."
 }
 
-function Set-Phase2DhcpReservations {
-    <#
-    .SYNOPSIS
-        Creates DHCP reservations for all applicable VMs after Phase 2.
-        Runs on the host so DHCP/Hyper-V CIM cmdlet output doesn't leak
-        into Start-Job worker streams.
-    #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [object]$deployConfig
-    )
-
-    $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    $created = 0
-    $skipped = 0
-    $failed = 0
-
-    foreach ($vm in $deployConfig.virtualMachines) {
-        # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
-        # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
-        if ($vm.role -in "CAS", "Primary", "Secondary", "OSDClient") { continue }
-        if ($vm.hidden) { continue }
-        if (Test-VmIsLinux -Vm $vm) { continue }
-
-        $validIP = $vm.LastKnownIP
-        if (-not $validIP) {
-            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): No LastKnownIP, skipping." -LogOnly
-            $skipped++
-            continue
-        }
-
-        try {
-            & {
-                $ProgressPreference = 'SilentlyContinue'
-                $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-                if (-not $vmnet -or -not $vmnet.MacAddress) {
-                    return
-                }
-
-                if ($vm.role -in "InternetClient", "AADClient") {
-                    $realnetwork = "172.31.250.0"
-                }
-                else {
-                    $realnetwork = if ($vm.network) { $vm.network } else { $deployConfig.vmOptions.network }
-                }
-
-                Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
-                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName)" -ErrorAction Stop
-            } *>$null
-            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): Reservation created for $validIP" -LogOnly
-            $created++
-        }
-        catch {
-            Write-Log "Set-Phase2DhcpReservations: $($vm.vmName): Could not create reservation for $validIP. $_" -Warning
-            $failed++
-        }
-    }
-
-    $timer.Stop()
-    Write-Log "Set-Phase2DhcpReservations: Created $created, skipped $skipped, failed $failed. Time: $($timer.Elapsed.ToString('hh\:mm\:ss'))."
-}
-
 function Copy-ToolToVM {
     param(
         [Parameter(Mandatory = $true, HelpMessage = "Tool PS Object.")]

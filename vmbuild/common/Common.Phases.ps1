@@ -204,11 +204,6 @@ function Start-Phase {
     if ($Phase -eq 2) {
         $postPhaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-        # Create DHCP reservations for VMs whose IPs were confirmed during P2.
-        # Runs on the host to avoid DHCP/Hyper-V CIM cmdlet output leaking
-        # into the Start-Job worker streams.
-        Set-Phase2DhcpReservations -deployConfig $deployConfig
-
         # Flip Linux VMs (incl. the Proxy itself) from bootstrap public DNS
         # to the DC's DNS first, so the Proxy can resolve internal names
         # and clients pointed at it land on a fully-configured upstream.

@@ -523,16 +523,15 @@ function Test-DCFunctionality {
                         $results.Details.Add("WARN: DNS '$fqdn' returned no A records (expected $expectedIp)")
                     }
                     elseif ($resolvedIps -notcontains $expectedIp) {
-                        # Stale record — attempt auto-remediation: remove wrong A records and add the correct one.
-                        # Target the PDC for DNS changes — the BDC can sometimes fail to
-                        # create new A records for names that had secure dynamic updates.
+                        # Stale record — attempt auto-remediation: remove wrong A records
+                        # on the PDC, then trigger /registerdns on the target VM so it
+                        # re-registers its current IP via dynamic DNS (not a static record).
                         $fixStatus = 'failed'
                         try {
                             $zone = $domainFqdn
                             $dnsTarget = (Get-ADDomain -ErrorAction SilentlyContinue).PDCEmulator
                             if (-not $dnsTarget) { $dnsTarget = $env:COMPUTERNAME }
-                            # Get the actual record objects — Remove by InputObject is
-                            # more reliable than by -RecordData for dynamic/secure records.
+                            # Remove stale A records
                             $existingRecs = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
                             foreach ($staleIp in $resolvedIps) {
                                 $matchRec = $existingRecs | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $staleIp }
@@ -543,15 +542,27 @@ function Test-DCFunctionality {
                                     Remove-DnsServerResourceRecord -ZoneName $zone -RRType A -Name $name -RecordData $staleIp -ComputerName $dnsTarget -Force -ErrorAction Stop
                                 }
                             }
-                            Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ComputerName $dnsTarget -ErrorAction Stop
-                            # Re-verify via zone database (bypasses DNS resolver cache)
+                            # Trigger dynamic re-registration on the target VM
+                            $registerResult = Invoke-Command -ComputerName $fqdn -ScriptBlock {
+                                ipconfig /registerdns 2>&1 | Out-Null
+                                return $true
+                            } -ErrorAction SilentlyContinue
+                            if (-not $registerResult) {
+                                # VM unreachable by FQDN (stale record just removed),
+                                # try by expected IP
+                                $registerResult = Invoke-Command -ComputerName $expectedIp -ScriptBlock {
+                                    ipconfig /registerdns 2>&1 | Out-Null
+                                    return $true
+                                } -ErrorAction SilentlyContinue
+                            }
+                            Start-Sleep -Seconds 2
+                            # Re-verify via zone database
                             $zoneRec = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
                             $zoneIps = @($zoneRec | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                             if ($zoneIps -contains $expectedIp) {
                                 $fixStatus = 'verified'
                             }
-                            else {
-                                # Zone query may lag on AD-integrated zones; trust the cmdlets succeeded
+                            elseif ($registerResult) {
                                 $fixStatus = 'applied'
                             }
                         }
@@ -559,10 +570,10 @@ function Test-DCFunctionality {
                             $results.Details.Add("DIAG: DNS auto-fix for '$fqdn' threw: $_")
                         }
                         if ($fixStatus -eq 'verified') {
-                            $results.Details.Add("OK: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); auto-fixed -> $expectedIp")
+                            $results.Details.Add("OK: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); removed + /registerdns -> $expectedIp")
                         }
                         elseif ($fixStatus -eq 'applied') {
-                            $results.Details.Add("WARN: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); fix applied -> $expectedIp (zone re-verify pending replication)")
+                            $results.Details.Add("WARN: DNS '$fqdn' had stale record(s) ($($resolvedIps -join ',')); removed + /registerdns sent (re-verify pending)")
                         }
                         else {
                             $mismatches++
