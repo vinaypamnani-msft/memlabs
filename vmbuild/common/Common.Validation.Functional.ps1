@@ -356,33 +356,87 @@ function Test-DCFunctionality {
     $expectedDnsCsv = ''
     if ($DeployConfig) {
         $entries = New-Object System.Collections.Generic.List[string]
+
+        # Build set of cluster/AG virtual IPs to exclude when resolving SQLAO
+        # node IPs from Get-VMNetworkAdapter. These virtual IPs float between
+        # nodes and are NOT the node's own address.
+        $virtualIps = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+            if ($sqlaoVm.ClusterIPAddress) { $null = $virtualIps.Add(($sqlaoVm.ClusterIPAddress -replace '/\d+$','')) }
+            if ($sqlaoVm.AGIPAddress)      { $null = $virtualIps.Add(($sqlaoVm.AGIPAddress -replace '/\d+$','')) }
+        }
+        if ($virtualIps.Count -gt 0) {
+            Write-Log "[Phase $Phase] ${VMName}: SQLAO virtual IPs to exclude: $($virtualIps -join ', ')" -LogOnly
+        }
+
         foreach ($vm in $DeployConfig.virtualMachines) {
             if ($vm.hidden) { continue }
             if ($vm.domain -and $vm.domain -ne $Domain) { continue }
             # Workgroup/InternetClient VMs are not domain-joined and won't have DNS A records.
             if ($vm.role -in @('WorkgroupMember', 'InternetClient', 'AADClient')) { continue }
             try {
-                # Prefer LastKnownIP (set during Phase 2 DHCP) — it's the
-                # node's actual IP, not a cluster/AG virtual IP that also
-                # appears on Get-VMNetworkAdapter for SQLAO nodes.
+                # IP source priority for DNS validation:
+                # 1. DHCP reservation (authoritative — set by us in Phase 2)
+                # 2. Get-VMNetworkAdapter (live Hyper-V data, with SQLAO virtual IP filtering)
+                # 3. LastKnownIP from VM Notes (last resort only)
                 $ip = $null
-                if ($vm.LastKnownIP) {
-                    $ip = $vm.LastKnownIP
+                $ipSource = 'none'
+
+                # 1. DHCP reservation — most authoritative source
+                try {
+                    $vmnet = Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop |
+                        Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
+                        Select-Object -First 1
+                    if ($vmnet -and $vmnet.MacAddress) {
+                        $scopeId = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
+                        $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        if ($reservation) {
+                            $ip = $reservation.IPAddress.IPAddressToString
+                            $ipSource = 'DHCP'
+                        }
+                    }
+                } catch {}
+
+                # 2. Get-VMNetworkAdapter — filter heartbeat, cluster and AG virtual IPs
+                if (-not $ip) {
+                    try {
+                        $allIps = @((Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
+                            Where-Object {
+                                $_ -match '^\d+\.\d+\.\d+\.\d+$' -and
+                                $_ -notlike '10.250.250.*' -and
+                                $_ -notlike '10.250.251.*' -and
+                                -not $virtualIps.Contains($_)
+                            })
+                        if ($allIps.Count -gt 0) {
+                            $ip = $allIps[0]
+                            $ipSource = 'VMNetAdapter'
+                            if ($allIps.Count -gt 1) {
+                                Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) has $($allIps.Count) candidate IPs after filtering: $($allIps -join ', '); using $ip" -LogOnly
+                            }
+                        }
+                    } catch {}
                 }
-                else {
-                    $ips = (Get-VMNetworkAdapter -VMName $vm.vmName -ErrorAction Stop).IPAddresses |
-                        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' -and $_ -notlike '10.250.250.*' -and $_ -notlike '10.250.251.*' }
-                    $ip = $ips | Select-Object -First 1
+
+                # 3. LastKnownIP from VM Notes — last resort only
+                if (-not $ip) {
+                    try {
+                        $vmNote = Get-VMNote -VMName $vm.vmName
+                        if ($vmNote -and $vmNote.LastKnownIP) {
+                            $ip = $vmNote.LastKnownIP
+                            $ipSource = 'LastKnownIP'
+                        }
+                    } catch {}
                 }
+
                 if ($ip) {
                     $entries.Add("$($vm.vmName)=$ip")
-                    # Update LastKnownIP in VM Notes if the live IP differs
-                    if ($vm.LastKnownIP -and $vm.LastKnownIP -ne $ip) {
-                        try {
-                            Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $ip })
-                            Write-Log "[Phase $Phase] ${VMName}: Updated LastKnownIP for $($vm.vmName): $($vm.LastKnownIP) -> $ip" -LogOnly
-                        } catch {}
+                    if ($ipSource -ne 'DHCP') {
+                        Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) expected IP $ip resolved via $ipSource (no DHCP reservation found)" -LogOnly
                     }
+                }
+                else {
+                    Write-Log "[Phase $Phase] ${VMName}: $($vm.vmName) could not determine expected IP; skipping DNS check for this VM" -LogOnly
                 }
             }
             catch {}
@@ -550,6 +604,16 @@ function Test-DCFunctionality {
                                     ipconfig /registerdns 2>&1 | Out-Null
                                     return $true
                                 } -ErrorAction SilentlyContinue
+                                # If /registerdns failed (Linux VM, unreachable, etc.),
+                                # add the correct A record directly on the DC.
+                                if (-not $registered) {
+                                    try {
+                                        Add-DnsServerResourceRecordA -ZoneName $zone -Name $name -IPv4Address $expectedIp -ComputerName $dnsTarget -ErrorAction Stop
+                                    }
+                                    catch {
+                                        # Best-effort; re-verify below will catch success/failure
+                                    }
+                                }
                                 Start-Sleep -Seconds 3
                                 # Re-verify via zone database on the PDC
                                 $zoneRec = Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $dnsTarget -ErrorAction SilentlyContinue
@@ -607,6 +671,39 @@ function Test-DCFunctionality {
             }
             if ($mismatches -eq 0) {
                 $results.Details.Add("OK: DNS A records for $($expected.Count) deploy VM(s) match Hyper-V IPs")
+            }
+            else {
+                # Collect recent DNS-related event log entries for diagnostics
+                try {
+                    $dnsEvents = Get-WinEvent -FilterHashtable @{
+                        LogName      = 'DNS Server'
+                        Level        = @(2,3)   # Error, Warning
+                        StartTime    = (Get-Date).AddMinutes(-60)
+                    } -MaxEvents 10 -ErrorAction SilentlyContinue
+                    if ($dnsEvents) {
+                        $results.Details.Add("DIAG: $($dnsEvents.Count) DNS Server event(s) in last 60 min:")
+                        foreach ($evt in $dnsEvents | Select-Object -First 5) {
+                            $msg = ($evt.Message -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                            if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + '...' }
+                            $results.Details.Add("  Event $($evt.Id) ($($evt.LevelDisplayName)): $msg")
+                        }
+                    }
+                } catch {}
+                try {
+                    $netlogonEvents = Get-WinEvent -FilterHashtable @{
+                        LogName   = 'System'
+                        Id        = @(5774, 5775, 5781, 5783)
+                        StartTime = (Get-Date).AddMinutes(-60)
+                    } -MaxEvents 5 -ErrorAction SilentlyContinue
+                    if ($netlogonEvents) {
+                        $results.Details.Add("DIAG: $($netlogonEvents.Count) NETLOGON DNS event(s) in last 60 min:")
+                        foreach ($evt in $netlogonEvents | Select-Object -First 3) {
+                            $msg = ($evt.Message -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                            if ($msg.Length -gt 200) { $msg = $msg.Substring(0, 200) + '...' }
+                            $results.Details.Add("  Event $($evt.Id): $msg")
+                        }
+                    }
+                } catch {}
             }
         }
 
@@ -1773,6 +1870,12 @@ WHERE drs.is_local = 1
                 # prevent SqlClient from constructing the correct Kerberos
                 # SPN, causing silent NTLM fallback.
                 try { $remoteNodeFQDN = ([System.Net.Dns]::GetHostEntry($otherNode)).HostName } catch { $remoteNodeFQDN = $otherNode }
+                # GetHostEntry can return mDNS suffix (.local) instead of
+                # the AD domain suffix — Kerberos SPNs are registered under
+                # the real domain, so .local causes silent NTLM fallback.
+                if ($domain -and -not $remoteNodeFQDN.EndsWith(".$domain", [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $remoteNodeFQDN = "$otherNode.$domain"
+                }
                 $remoteConnStr = $remoteNodeFQDN
                 if ($sqlInstName -and $sqlInstName -ne 'MSSQLSERVER') {
                     $remoteConnStr = "$remoteNodeFQDN\$sqlInstName"

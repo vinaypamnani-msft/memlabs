@@ -2436,6 +2436,8 @@ function Set-LinuxVmsDcDns {
             # Refresh DHCP reservation and LastKnownIP if the IP changed
             # since Phase 1. This catches cases where the VM rebooted and
             # got a different DHCP lease (e.g. after scope option update).
+            # Also ensures a reservation exists even when the IP is unchanged,
+            # because lab init removes all old reservations before Phase 1.
             $vmNote = Get-VMNote -vmName $vm.vmName
             $oldIp = if ($vmNote) { $vmNote.LastKnownIP } else { $null }
             if ($oldIp -ne $vmIp) {
@@ -2444,19 +2446,25 @@ function Set-LinuxVmsDcDns {
                 }
                 # Update VM note so mRemoteNG/RDCMan use the correct IP
                 Set-VMNote -vmName $vm.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $vmIp })
-                # Refresh DHCP reservation so the IP is stable across future reboots
-                try {
-                    $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter
-                    if ($vmnet) {
-                        $realnetwork = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $vmIp -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName) (Linux)" -ErrorAction Stop | Out-Null
-                        Write-Log "[Linux DNS] $($vm.vmName): DHCP reservation refreshed for $vmIp" -LogOnly
-                    }
+            }
+            # Always ensure DHCP reservation exists — lab init clears old
+            # reservations, and Linux VMs skip Phase 2 where Windows VMs
+            # get theirs created. Without a reservation, reboots during
+            # Phase 8 can cause the VM to get a different DHCP IP.
+            try {
+                $vmnet = Get-VM2 -Name $vm.vmName -ErrorAction Stop | Get-VMNetworkAdapter
+                if ($vmnet) {
+                    $realnetwork = if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
+                    Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $vm.vmName
+                    Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $vmIp -ClientId $vmnet.MacAddress -Description "Reservation for $($vm.vmName) (Linux)" -ErrorAction Stop | Out-Null
+                    Write-Log "[Linux DNS] $($vm.vmName): DHCP reservation created: $vmIp (MAC=$($vmnet.MacAddress), Scope=$realnetwork)" -LogOnly
                 }
-                catch {
-                    Write-Log "[Linux DNS] $($vm.vmName): Could not refresh DHCP reservation for $vmIp. $_" -Warning
+                else {
+                    Write-Log "[Linux DNS] $($vm.vmName): No network adapter found; skipping DHCP reservation" -Warning
                 }
+            }
+            catch {
+                Write-Log "[Linux DNS] $($vm.vmName): Could not create DHCP reservation for $vmIp. $_" -Warning
             }
         }
         else {

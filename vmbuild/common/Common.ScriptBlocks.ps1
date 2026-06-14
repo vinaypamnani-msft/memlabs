@@ -1921,13 +1921,14 @@ $global:VM_Config = {
                 if ($validIP) {
                     $existingIP = $currentItem.LastKnownIP
                     if (-not $existingIP -or $existingIP -ne $validIP) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP" -LogOnly
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP (was: $($existingIP ?? 'unset'))" -LogOnly
                         $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
                     }
 
                     # Create a DHCP reservation so the IP is stable across reboots.
-                    # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
-                    # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
+                    # CAS/Primary/Secondary get fixed well-known IPs (.5/.10/.15)
+                    # in Phase 1 — don't overwrite those with the DHCP-assigned IP.
+                    # Linux VMs get theirs in Set-LinuxVmsDcDns. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
                         try {
                             # Suppress progress rendering while CIM cmdlets run.
@@ -1946,12 +1947,15 @@ $global:VM_Config = {
                                     }
                                     Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
                                     Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created: $validIP (MAC=$($vmnet.MacAddress), Scope=$realnetwork)" -LogOnly
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): No network adapter/MAC found; skipping DHCP reservation" -LogOnly
                                 }
                             }
                             finally {
                                 $Global:SuppressProgress = $false
                             }
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                         }
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $validIP. $_" -Warning
