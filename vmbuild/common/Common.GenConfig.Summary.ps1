@@ -212,6 +212,7 @@ function Get-SortedProperties {
         'tpmEnabled'          = 'tpmEnabled'
         'BitLocker'           = 'BitLocker'
         'InstallSSMS'         = 'InstallSSMS'
+        'installOffice'       = 'InstallOffice'
         'pushClient'          = 'pushClient'
         'additionalDisks'     = 'AdditionalDisks'
         'installDP'           = 'InstallDP'

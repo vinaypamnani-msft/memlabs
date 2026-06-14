@@ -183,6 +183,188 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
+    #region Microsoft 365 Apps deployment via ODT
+    # Check if any VMs have installOffice configured
+    $officeVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
+    if ($officeVMs.Count -gt 0) {
+
+        $officeAppName = "MEMLABS-Microsoft365Apps"
+        $officeSourceRoot = "C:\OfficeSource"
+        $officeShareName = "OfficeSource$"
+        $odtPath = "C:\tools\odt"
+
+        if (Get-CMApplication -Name $officeAppName -Fast -ErrorAction SilentlyContinue) {
+            Write-DscStatus "$Tag Office application '$officeAppName' already exists, skipping Office deployment setup"
+        }
+        else {
+            Write-DscStatus "$Tag Configuring Microsoft 365 Apps deployment for $($officeVMs.Count) VM(s)"
+
+            # Determine unique channels needed
+            $channels = @($officeVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
+            Write-DscStatus "$Tag Office channels requested: $($channels -join ', ')"
+
+            # Channel name to ODT Channel attribute mapping
+            $channelMap = @{
+                'Current'           = 'Current'
+                'MonthlyEnterprise' = 'MonthlyEnterprise'
+                'SemiAnnual'        = 'SemiAnnualPreview'
+            }
+
+            # Download ODT setup.exe if not present
+            if (-not (Test-Path "$odtPath\setup.exe")) {
+                Write-DscStatus "$Tag Downloading Office Deployment Tool"
+                New-Item -ItemType Directory -Path $odtPath -Force | Out-Null
+                $odtUrl = "https://officecdn.microsoft.com/pr/wsus/setup.exe"
+                try {
+                    Invoke-WebRequest -Uri $odtUrl -OutFile "$odtPath\setup.exe" -UseBasicParsing -ErrorAction Stop
+                    Write-DscStatus "$Tag ODT downloaded successfully"
+                }
+                catch {
+                    Write-DscStatus "$Tag WARNING: Failed to download ODT: $_. Office deployment will be skipped."
+                    $officeVMs = @()
+                }
+            }
+
+            if ($officeVMs.Count -gt 0 -and (Test-Path "$odtPath\setup.exe")) {
+
+                # For each unique channel, download source files and create an application
+                foreach ($channel in $channels) {
+                    $odtChannel = $channelMap[$channel]
+                    if (-not $odtChannel) {
+                        Write-DscStatus "$Tag WARNING: Unknown Office channel '$channel', defaulting to Current"
+                        $odtChannel = 'Current'
+                    }
+
+                    $channelSourcePath = Join-Path $officeSourceRoot $channel
+                    New-Item -ItemType Directory -Path $channelSourcePath -Force | Out-Null
+
+                    # Generate download configuration.xml
+                    $downloadXml = @"
+<Configuration>
+  <Add SourcePath="$channelSourcePath" OfficeClientEdition="64" Channel="$odtChannel">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Add>
+</Configuration>
+"@
+                    $downloadXmlPath = Join-Path $channelSourcePath "download.xml"
+                    $downloadXml | Set-Content -Path $downloadXmlPath -Encoding UTF8 -Force
+
+                    # Generate install configuration.xml
+                    $installXml = @"
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="$odtChannel">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Add>
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Property Name="AUTOACTIVATE" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+  <Updates Enabled="TRUE" />
+  <RemoveMSI />
+</Configuration>
+"@
+                    $installXmlPath = Join-Path $channelSourcePath "install.xml"
+                    $installXml | Set-Content -Path $installXmlPath -Encoding UTF8 -Force
+
+                    # Generate uninstall configuration.xml
+                    $uninstallXml = @"
+<Configuration>
+  <Remove>
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+    </Product>
+  </Remove>
+  <Display Level="None" AcceptEULA="TRUE" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+</Configuration>
+"@
+                    $uninstallXmlPath = Join-Path $channelSourcePath "uninstall.xml"
+                    $uninstallXml | Set-Content -Path $uninstallXmlPath -Encoding UTF8 -Force
+
+                    # Copy ODT setup.exe into the channel source folder
+                    Copy-Item "$odtPath\setup.exe" -Destination $channelSourcePath -Force
+
+                    # Download Office source files (this pulls ~2-4 GB from officecdn.microsoft.com)
+                    if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
+                        Write-DscStatus "$Tag Downloading Office source files for channel '$channel' (this may take several minutes)..."
+                        $downloadProcess = Start-Process -FilePath "$channelSourcePath\setup.exe" -ArgumentList "/download `"$downloadXmlPath`"" -Wait -PassThru -NoNewWindow
+                        if ($downloadProcess.ExitCode -eq 0) {
+                            Write-DscStatus "$Tag Office source download complete for channel '$channel'"
+                        }
+                        else {
+                            Write-DscStatus "$Tag WARNING: ODT download for channel '$channel' exited with code $($downloadProcess.ExitCode)"
+                        }
+                    }
+                    else {
+                        Write-DscStatus "$Tag Office source files already present for channel '$channel', skipping download"
+                    }
+                }
+
+                # Create SMB share for Office source
+                if (-not (Get-SmbShare -Name $officeShareName -ErrorAction SilentlyContinue)) {
+                    New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+                    Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
+                }
+
+                # Create one CM Application per channel
+                foreach ($channel in $channels) {
+                    $channelSourcePath = Join-Path $officeSourceRoot $channel
+                    $channelAppName = if ($channels.Count -eq 1) { $officeAppName } else { "$officeAppName-$channel" }
+                    $contentUNC = "\\$ThisMachineName\$officeShareName\$channel"
+
+                    if (Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue) {
+                        Write-DscStatus "$Tag Application '$channelAppName' already exists, skipping"
+                        continue
+                    }
+
+                    Write-DscStatus "$Tag Creating application '$channelAppName'"
+                    New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -ErrorAction SilentlyContinue
+
+                    # Script deployment type: ODT install/uninstall with registry detection
+                    $installCmd = "setup.exe /configure install.xml"
+                    $uninstallCmd = "setup.exe /configure uninstall.xml"
+                    $detectScript = @'
+$ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
+'@
+                    Add-CMScriptDeploymentType -ApplicationName $channelAppName `
+                        -DeploymentTypeName "ODT Install ($channel)" `
+                        -ContentLocation $contentUNC `
+                        -InstallCommand $installCmd `
+                        -UninstallCommand $uninstallCmd `
+                        -ScriptLanguage PowerShell `
+                        -ScriptText $detectScript `
+                        -LogonRequirementType WhetherOrNotUserLoggedOn `
+                        -UserInteractionMode Hidden `
+                        -InstallationBehaviorType InstallForSystem `
+                        -MaximumRuntimeMins 120 `
+                        -EstimatedRuntimeMins 30 `
+                        -Force `
+                        -ErrorAction SilentlyContinue
+
+                    Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
+                    Start-CMContentDistribution -ApplicationName $channelAppName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+
+                    # Deploy as Required to target VMs
+                    $officeCollectionName = "MEMLABS-Office Install Targets"
+                    Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
+                    New-CMApplicationDeployment -ApplicationName $channelAppName `
+                        -CollectionName $officeCollectionName `
+                        -DeployAction Install `
+                        -DeployPurpose Required `
+                        -UserNotification DisplayAll `
+                        -ErrorAction SilentlyContinue
+
+                    Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
+                }
+            }
+        }
+    }
+    #endregion Microsoft 365 Apps deployment via ODT
+
     } # end Primary-only apps/packages block
 
     ## Changing the auto-approval setting on Hierarchy settings
@@ -1271,6 +1453,32 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             catch {
                 Write-DscStatus "$Tag WARNING: Failed to fully configure collection '$CollectionName': $($_.Exception.Message)"
             }
+        }
+    }
+
+    # Office Install Targets collection: direct membership for VMs with installOffice
+    $officeCollectionName = "MEMLABS-Office Install Targets"
+    $officeTargetVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
+    if ($officeTargetVMs.Count -gt 0 -and -not (Get-CMDeviceCollection -Name $officeCollectionName -ErrorAction SilentlyContinue)) {
+        try {
+            $officeCol = New-CMDeviceCollection -Name $officeCollectionName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install"
+            Write-DscStatus "$Tag Created collection: $officeCollectionName"
+            foreach ($ovm in $officeTargetVMs) {
+                $device = Get-CMDevice -Name $ovm.vmName -ErrorAction SilentlyContinue
+                if ($device) {
+                    Add-CMDeviceCollectionDirectMembershipRule -CollectionId $officeCol.CollectionID -ResourceId $device.ResourceID -ErrorAction SilentlyContinue
+                    Write-DscStatus "$Tag Added $($ovm.vmName) to Office Install Targets collection"
+                }
+                else {
+                    Write-DscStatus "$Tag WARNING: Device '$($ovm.vmName)' not found in CM — it may not have been discovered yet. Office deployment will target it once it appears."
+                }
+            }
+            Invoke-CMCollectionUpdate -CollectionId $officeCol.CollectionID -ErrorAction SilentlyContinue
+            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $officeCol.CollectionID -ErrorAction SilentlyContinue
+            Write-DscStatus "$Tag Moved collection '$officeCollectionName' under MEMLABS folder"
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to create Office Install Targets collection: $($_.Exception.Message)"
         }
     }
 

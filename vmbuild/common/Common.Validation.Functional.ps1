@@ -4325,6 +4325,40 @@ function Test-DomainMemberFunctionality {
         }
     }
 
+    # Office deployment policy check: if installOffice is set, verify the client received the deployment
+    $officeChannel = $CurrentItem.installOffice
+    if ($officeChannel -and $officeChannel -ne $false -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Passed) {
+        $officeCheckBlock = {
+            $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
+            try {
+                $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
+                if ($app) {
+                    $officeResults.Details.Add("OK: Office deployment policy received (Name=$($app.Name), State=$($app.EvaluationState))")
+                }
+                else {
+                    $officeResults.Details.Add("WARN: Office deployment policy not yet received — deployment may still be processing")
+                }
+            }
+            catch {
+                $officeResults.Details.Add("WARN: Could not query CCM_Application for Office policy: $_")
+            }
+            # Also check if Office is already installed
+            $ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+            if ($ctr -and $ctr.VersionToReport) {
+                $officeResults.Details.Add("OK: Microsoft 365 Apps installed (version $($ctr.VersionToReport))")
+            }
+            return $officeResults
+        }
+        $officeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $officeCheckBlock -DisplayName "Phase11-DomainMember-OfficeCheck" -SuppressLog
+        if ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details) {
+            foreach ($detail in $officeResult.ScriptBlockOutput.Details) {
+                $result.ScriptBlockOutput.Details.Add($detail)
+            }
+        }
+    }
+
     return (Format-TestResult -VMName $VMName -RoleLabel 'DomainMember' -Result $result)
 }
 

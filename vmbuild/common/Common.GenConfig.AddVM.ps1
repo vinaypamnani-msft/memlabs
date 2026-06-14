@@ -572,6 +572,7 @@ function Add-NewVMForRole {
             if ($virtualMachine.operatingSystem.Contains("Windows 11") ) {
                 $virtualMachine.Memory = "4GB"
             }
+            $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -force
         }
         "OSDClient" {
             $virtualMachine.memory = "2GB"

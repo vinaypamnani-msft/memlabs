@@ -368,6 +368,30 @@ function Test-ValidCmOptions {
         }
     }
 
+    # Office deployment validation
+    $officeVMs = $ConfigObject.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false -and -not $_.Hidden }
+    if ($officeVMs) {
+        $hasPrimary = $ConfigObject.virtualMachines | Where-Object { $_.role -eq 'Primary' -and -not $_.Hidden }
+        if (-not $hasPrimary) {
+            Add-ValidationMessage -Message "Office Validation: installOffice is set on $($officeVMs.vmName -join ', ') but no Primary site server exists to create the SCCM application deployment. Removing installOffice." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $officeVMs) { $vm.installOffice = $false }
+        }
+
+        # Reject Office on server OS
+        $serverOffice = $officeVMs | Where-Object { $_.operatingSystem -like '*Server*' }
+        if ($serverOffice) {
+            Add-ValidationMessage -Message "Office Validation: installOffice is not supported on Server OS. Removing from: $($serverOffice.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $serverOffice) { $vm.installOffice = $false }
+        }
+
+        # Reject Office when pushClient is disabled
+        $noPushOffice = $officeVMs | Where-Object { $_.pushClient -eq $false }
+        if ($noPushOffice) {
+            Add-ValidationMessage -Message "Office Validation: installOffice requires pushClient (SCCM client agent needed for deployment). Removing from: $($noPushOffice.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $noPushOffice) { $vm.installOffice = $false }
+        }
+    }
+
     if ($cmOptions.usePKI) {
         # When UsePKI is enabled, pkiOptions must have a valid IssuingCAVM
         if (-not $ConfigObject.pkiOptions) {

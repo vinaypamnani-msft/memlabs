@@ -421,6 +421,21 @@ function Select-Options {
                 Get-CMVersionMenu -property $property -name $name -CurrentValue $value
                 continue MainLoop
             }
+            "installOffice" {
+                $officeChannels = @("Disabled", "Current", "MonthlyEnterprise", "SemiAnnual")
+                $currentDisplay = if ($value -eq $false) { "Disabled" } else { $value }
+                Write-Log -Activity -NoNewLine "Office Channel Selection"
+                $selection = Get-Menu2 -MenuName "Office 365 Channel" -Prompt "Select Office update channel (or Disabled)" -OptionArray $officeChannels -CurrentValue $currentDisplay -Test:$false -NoClear
+                if ($selection -ne "ESCAPE") {
+                    if ($selection -eq "Disabled") {
+                        $property.installOffice = $false
+                    }
+                    else {
+                        $property.installOffice = $selection
+                    }
+                }
+                continue MainLoop
+            }
             "version" {
                 Get-CMVersionMenu -property $property -name $name -CurrentValue $value
                 continue MainLoop

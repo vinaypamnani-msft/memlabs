@@ -530,6 +530,33 @@ function Get-UserConfiguration {
                 $vm.PsObject.Members.Remove("BitLocker")
             }
 
+            # installOffice property: normalize for DomainMember client-OS VMs.
+            # Valid values: $false, "Current", "MonthlyEnterprise", "SemiAnnual".
+            # Only allowed on DomainMember VMs with a client OS (Windows 10/11)
+            # and pushClient enabled (SCCM client required for deployment).
+            $isClientOS = $vm.operatingSystem -and $vm.operatingSystem -like "Windows 1*" -and $vm.operatingSystem -notlike "*Server*"
+            if ($vm.role -eq 'DomainMember' -and $isClientOS) {
+                if ($null -eq $vm.installOffice) {
+                    $vm | Add-Member -MemberType NoteProperty -Name "installOffice" -Value $false -Force
+                }
+                elseif ($vm.installOffice -notin @($false, 'Current', 'MonthlyEnterprise', 'SemiAnnual')) {
+                    # Coerce legacy $true or invalid values to 'Current'
+                    if ($vm.installOffice -eq $true) {
+                        $vm.installOffice = 'Current'
+                    }
+                    else {
+                        $vm.installOffice = $false
+                    }
+                }
+                # Strip if pushClient is explicitly disabled — SCCM client is required
+                if ($vm.installOffice -and $vm.installOffice -ne $false -and $vm.pushClient -eq $false) {
+                    $vm.installOffice = $false
+                }
+            }
+            elseif ($null -ne $vm.installOffice) {
+                $vm.PsObject.Members.Remove("installOffice")
+            }
+
             # pushClient property: auto-add for DomainMember and site system VMs.
             # Precedence: existing per-VM value > legacy cmOptions.pushClientToDomainMembers
             # > domainDefaults.PushCMClientToClients/Servers/SiteSystems > $true.

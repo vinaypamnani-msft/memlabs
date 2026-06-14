@@ -292,6 +292,7 @@
       "tpmEnabled": true,
       "vmGeneration": "2",
       "installSSMS": false,
+      "installOffice": "Current",
       "useFakeWSUSServer": false,
       "domainUser": "user1",
       "useProxy": true,
