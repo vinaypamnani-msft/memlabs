@@ -613,11 +613,26 @@ $global:VM_Create = {
             # Phase 1 OOBE also runs slower. Since AADClient has no DSC phases
             # (3-9) and completes P1 fast, a startup delay doesn't increase
             # overall build time — other VMs are still running longer phases.
-            if ($currentItem.role -eq "AADClient" -and $deployConfig.virtualMachines.Count -gt 5) {
-                $delaySec = [Math]::Min($deployConfig.virtualMachines.Count * 8, 180)
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring AADClient creation by ${delaySec}s to let other VMs finish disk-intensive steps." -LogOnly
-                Write-Progress2 "AADClient" -Status "Waiting ${delaySec}s for host load to settle" -force
-                Start-Sleep -Seconds $delaySec
+            #
+            # Delay is based on the number of NON-AADClient VMs (the ones
+            # causing I/O load). If the config is only AADClients, no delay.
+            # Multiple AADClients are staggered by 15s each so they don't all
+            # hit OOBE simultaneously.
+            if ($currentItem.role -eq "AADClient") {
+                $otherVmCount = @($deployConfig.virtualMachines | Where-Object { $_.role -ne "AADClient" }).Count
+                $aadClients = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "AADClient" })
+                $aadIndex = 0
+                for ($ai = 0; $ai -lt $aadClients.Count; $ai++) {
+                    if ($aadClients[$ai].vmName -eq $currentItem.vmName) { $aadIndex = $ai; break }
+                }
+                $baseDelay = if ($otherVmCount -gt 3) { [Math]::Min($otherVmCount * 8, 180) } else { 0 }
+                $staggerDelay = $aadIndex * 15
+                $totalDelay = $baseDelay + $staggerDelay
+                if ($totalDelay -gt 0) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring AADClient creation by ${totalDelay}s (base=${baseDelay}s for $otherVmCount other VMs + stagger=${staggerDelay}s, index $aadIndex of $($aadClients.Count))." -LogOnly
+                    Write-Progress2 "AADClient" -Status "Waiting ${totalDelay}s for host load to settle" -force
+                    Start-Sleep -Seconds $totalDelay
+                }
             }
 
             while ($true) {
