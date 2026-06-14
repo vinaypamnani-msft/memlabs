@@ -641,9 +641,7 @@ try {
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly
     Write-Log "----------------------------------------" -LogOnly
     Write-Log "Deploy config JSON:" -LogOnly
-    foreach ($line in ($deployConfig | ConvertTo-Json -Depth 10) -split "`n") {
-        Write-Log $line.TrimEnd() -LogOnly
-    }
+    Write-Log ($deployConfig | ConvertTo-Json -Depth 10 -Compress) -LogOnly
     Write-Log "========================================" -LogOnly
     try { Flush-LogBuffer -Path $Common.LogPath } catch { }
 

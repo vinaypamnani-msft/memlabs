@@ -3587,8 +3587,18 @@ $global:VM_Config = {
                             }
                         }
                         elseif ($staleMins -ge $staleWarningMinutes -and ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes -ge 5) {
-                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())')" -Warning
-                            $lastStaleWarningTime = [DateTime]::UtcNow
+                            # VMs waiting on upstream sites emit identical warnings every 5 min.
+                            # After the first warning, widen the interval to 15 min for "Waiting" statuses
+                            # so the log isn't flooded with non-actionable entries.
+                            $isWaitingStatus = $currentStatus -match 'Waiting (on|for) '
+                            $sinceLastWarn = ([DateTime]::UtcNow - $lastStaleWarningTime).TotalMinutes
+                            if ($isWaitingStatus -and $lastStaleWarningTime -ne [DateTime]::MinValue -and $sinceLastWarn -lt 15) {
+                                # suppress — not enough time since last warning for a waiting status
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Status unchanged for ${staleMins}m ('$($currentStatus.Trim())')" -Warning
+                                $lastStaleWarningTime = [DateTime]::UtcNow
+                            }
                         }
                     }
 
@@ -3599,6 +3609,8 @@ $global:VM_Config = {
                         $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Get-Content "C:\ConfigMgrSetup.log" -tail 1 } -SuppressLog
                         if (-not $result.ScriptBlockFailed) {
                             $logEntry = $result.ScriptBlockOutput
+                            # Get-Content -Tail 1 can return an array; collapse to a single string
+                            if ($logEntry -is [array]) { $logEntry = $logEntry[-1] }
                             $skipProgress = $true
                             if (-not [string]::IsNullOrWhiteSpace($logEntry)) {
                                 try {
