@@ -171,7 +171,7 @@ function Start-Phase {
         return $true
     }
     $global:PhaseSkipped = $false
-    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData
+    $result = Wait-Phase -Phase $Phase -Jobs $start.Jobs -AdditionalData $start.AdditionalData -DeployConfig $deployConfig
 
     # Phase 2 builds tool zips keyed by fingerprint. Clean up any stale
     # zips from previous runs that are no longer referenced.
@@ -756,7 +756,8 @@ function Wait-Phase {
     param(
         [object]$Phase,
         $Jobs,
-        $AdditionalData
+        $AdditionalData,
+        [object]$DeployConfig
     )
     $OriginalProgressPreference = $Global:ProgressPreference
     $Global:ProgressPreference = 'SilentlyContinue'
@@ -786,6 +787,14 @@ function Wait-Phase {
         # warnings/errors from running jobs appear in real-time instead of
         # being deferred until the job completes.
         $outputDisplayed = @{}
+
+        # DSC log diagnostics: after a job runs 30+ min, peek at the
+        # guest's ConfigurationStatus folder for exceptions/failures and
+        # log them. Purely informational -- never fails the phase.
+        $dscDiagLastCheck = @{}   # VMName -> [datetime] last check
+        $dscDiagInitialMinutes = 30
+        $dscDiagIntervalMinutes = 15
+        $dscDiagSkipRoles = @('Proxy', 'LinuxServer', 'LinuxClient', 'OSDClient', 'AADClient', 'InternetClient')
 
         $FailRetry = 0
         do {
@@ -995,6 +1004,70 @@ function Wait-Phase {
 
             # End synchronized output — terminal renders all progress updates as one frame.
             [Console]::Write("$esc[?2026l")
+
+            # DSC log diagnostics for long-running jobs (phases 2-9 only).
+            # Check one VM per loop iteration to keep progress display responsive.
+            if ($Phase -ge 2 -and $Phase -le 9 -and $DeployConfig -and $runningJobs.Count -gt 0) {
+                $phaseElapsedMin = ((Get-Date) - $StartTime).TotalMinutes
+                if ($phaseElapsedMin -ge $dscDiagInitialMinutes) {
+                    :dscDiag foreach ($dscJob in $runningJobs) {
+                        if ($dscJob.Name -match '^(.+?)\s+\[(.+?)\]') {
+                            $dscVmName = $Matches[1]
+                            $dscVmRole = $Matches[2]
+                            if ($dscVmRole -in $dscDiagSkipRoles) { continue }
+                            # Skip VMs that have moved past DSC into ConfigMgr setup
+                            $dscJobStream = Get-JobStreamSource -Job $dscJob
+                            if ($dscJobStream -and $dscJobStream.Progress -and $dscJobStream.Progress.Count -gt 0) {
+                                $dscLastProgress = $dscJobStream.Progress[$dscJobStream.Progress.Count - 1]
+                                if ($dscLastProgress.StatusDescription -match 'ConfigMgrSetup\.log|Setting up ConfigMgr') {
+                                    continue
+                                }
+                            }
+                            $dscNow = Get-Date
+                            $dscLast = $dscDiagLastCheck[$dscVmName]
+                            if ($dscLast -and ($dscNow - $dscLast).TotalMinutes -lt $dscDiagIntervalMinutes) { continue }
+                            $dscDiagLastCheck[$dscVmName] = $dscNow
+                            try {
+                                $dscDiagResult = Invoke-VmCommand -VmName $dscVmName `
+                                    -VmDomainName $DeployConfig.vmOptions.domainName `
+                                    -SuppressLog -TimeoutSeconds 30 -SessionMaxRetries 1 -ScriptBlock {
+                                    $statusPath = "$env:SystemRoot\System32\Configuration\ConfigurationStatus"
+                                    if (-not (Test-Path $statusPath)) { return $null }
+                                    $files = Get-ChildItem -Path $statusPath -Filter "*.json" -ErrorAction SilentlyContinue |
+                                        Sort-Object LastWriteTime -Descending | Select-Object -First 3
+                                    $diag = @()
+                                    foreach ($f in $files) {
+                                        try {
+                                            $tail = Get-Content -Path $f.FullName -Tail 10 -ErrorAction Stop
+                                            $hits = @($tail | Where-Object {
+                                                $_ -match 'exception|"Status"\s*:\s*"Failure"|"Error"\s*:\s*".+"' })
+                                            if ($hits.Count -gt 0) {
+                                                $snippet = ($hits | ForEach-Object { $_.Trim() }) -join ' | '
+                                                if ($snippet.Length -gt 500) { $snippet = $snippet.Substring(0, 500) + '...' }
+                                                $diag += "$($f.Name): $snippet"
+                                            }
+                                        }
+                                        catch { <# file locked #> }
+                                    }
+                                    if ($diag.Count -gt 0) { return $diag }
+                                    return $null
+                                }
+                                if ($dscDiagResult.ScriptBlockOutput) {
+                                    $elapsed = [math]::Round($phaseElapsedMin, 0)
+                                    Write-Log "[Phase $Phase] DSC diagnostics for ${dscVmName} (${elapsed}m elapsed):" -LogOnly
+                                    foreach ($dscLine in $dscDiagResult.ScriptBlockOutput) {
+                                        Write-Log "[Phase $Phase]   $dscVmName - $dscLine" -LogOnly
+                                    }
+                                }
+                            }
+                            catch {
+                                Write-Log "[Phase $Phase] DSC diagnostics: failed to query $dscVmName - $_" -LogOnly -Verbose
+                            }
+                            break :dscDiag  # one VM per iteration
+                        }
+                    }
+                }
+            }
 
             # Sleep
             Start-Sleep -Milliseconds 500
