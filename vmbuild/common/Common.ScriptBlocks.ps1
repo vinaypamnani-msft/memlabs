@@ -1878,8 +1878,12 @@ $global:VM_Config = {
                     # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
                         try {
-                            & {
-                                $ProgressPreference = 'SilentlyContinue'
+                            # CIM-based cmdlets (DHCP, Hyper-V) ignore local
+                            # $ProgressPreference — they resolve it from $Global:.
+                            # Save/restore to avoid leaking into subsequent code.
+                            $savedPP = $Global:ProgressPreference
+                            $Global:ProgressPreference = 'SilentlyContinue'
+                            try {
                                 $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
                                 if ($vmnet -and $vmnet.MacAddress) {
                                     if ($currentItem.role -in "InternetClient", "AADClient") {
@@ -1891,7 +1895,10 @@ $global:VM_Config = {
                                     Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
                                     Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $validIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
                                 }
-                            } *>$null
+                            }
+                            finally {
+                                $Global:ProgressPreference = $savedPP
+                            }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                         }
                         catch {
