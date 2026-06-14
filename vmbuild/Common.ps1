@@ -2300,6 +2300,32 @@ function Test-NetworkSwitch {
             return $false
         }
 
+        # Set vEthernet adapter to Private so the host firewall is less
+        # restrictive for lab traffic. NLA classifies internal-switch adapters
+        # as Public by default.
+        $currentProfile = Get-NetConnectionProfile -InterfaceIndex $adapter.InterfaceIndex -ErrorAction SilentlyContinue
+        if ($currentProfile -and $currentProfile.NetworkCategory -ne 'Private') {
+            Write-Log "Setting '$interfaceAlias' network profile from '$($currentProfile.NetworkCategory)' to 'Private'."
+            Set-NetConnectionProfile -InterfaceIndex $adapter.InterfaceIndex -NetworkCategory Private -ErrorAction SilentlyContinue
+        }
+
+        # Ensure a single host-wide rule allows inbound ICMPv4 Echo Request
+        # from any RFC 1918 address. Windows Server disables the built-in
+        # ICMP rule even on Private profile, so VMs cannot ping the host
+        # .200 gateway without this. One rule covers all lab subnets.
+        $icmpRuleName = 'MemLabs-ICMPv4-Echo-Private'
+        $icmpRule = Get-NetFirewallRule -Name $icmpRuleName -ErrorAction SilentlyContinue
+        if (-not $icmpRule) {
+            Write-Log "Adding host firewall rule '$icmpRuleName' to allow inbound ICMPv4 Echo Request from private subnets."
+            New-NetFirewallRule -Name $icmpRuleName -DisplayName 'MemLabs - Allow ICMPv4 Echo (Private Subnets)' `
+                -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 `
+                -RemoteAddress @('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16') `
+                -Profile Any -Enabled True -ErrorAction SilentlyContinue | Out-Null
+        }
+        elseif ($icmpRule.Enabled -ne 'True') {
+            Enable-NetFirewallRule -Name $icmpRuleName -ErrorAction SilentlyContinue
+        }
+
         # ClusterV2 is a pure internal switch — no NAT needed (heartbeat only)
         if ($NetworkName -eq 'ClusterV2') {
             return $true
