@@ -607,6 +607,19 @@ $global:VM_Create = {
             $oobeRetries = 0
             $maxOobeRetries = 1  # One full delete+recreate attempt after initial failure
 
+            # AADClient: delay creation until host load settles. The sysprep
+            # specialize pass (Phase 2) is sensitive to resource pressure —
+            # CryptoSysPrep_Specialize can fail with 0x5 under I/O contention.
+            # Phase 1 OOBE also runs slower. Since AADClient has no DSC phases
+            # (3-9) and completes P1 fast, a startup delay doesn't increase
+            # overall build time — other VMs are still running longer phases.
+            if ($currentItem.role -eq "AADClient" -and $deployConfig.virtualMachines.Count -gt 5) {
+                $delaySec = [Math]::Min($deployConfig.virtualMachines.Count * 8, 180)
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring AADClient creation by ${delaySec}s to let other VMs finish disk-intensive steps." -LogOnly
+                Write-Progress2 "AADClient" -Status "Waiting ${delaySec}s for host load to settle" -force
+                Start-Sleep -Seconds $delaySec
+            }
+
             while ($true) {
                 if ($oobeRetries -gt 0) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): OOBE retry $oobeRetries/$maxOobeRetries - deleting and recreating VM from base image." -Warning -OutputStream
