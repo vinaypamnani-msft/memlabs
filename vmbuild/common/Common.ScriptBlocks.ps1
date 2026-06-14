@@ -2087,17 +2087,27 @@ $global:VM_Config = {
         $bootToOOBE = $currentItem.role -eq "AADClient"
         $oobeStarted = $false
         if ($bootToOOBE) {
-            # Run Sysprep — first run only; the oobeComplete check above
-            # ensures we never reach here on a rerun.
-            # Use /oobe /shutdown WITHOUT /generalize. The /generalize flag
-            # re-runs the specialize pass on next boot, which re-checks
-            # hardware requirements and fails on Windows 11 24H2 with
-            # "Windows Setup could not configure Windows to run on this
-            # computer's hardware." Since the VM stays on the same virtual
-            # hardware, /generalize is unnecessary — /oobe alone presents
-            # the OOBE wizard for AAD join.
+            # Run Sysprep with /generalize — needed because the base image is
+            # cloned (resets SID, hardware profile). The specialize pass on
+            # next boot re-checks hardware requirements, which fails on
+            # Windows 11 24H2 with "could not configure Windows to run on
+            # this computer's hardware." Set LabConfig bypass keys first.
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /oobe /shutdown }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                # Bypass hardware requirement checks during the specialize pass
+                $labConfig = 'HKLM:\SYSTEM\Setup\LabConfig'
+                if (-not (Test-Path $labConfig)) { New-Item -Path $labConfig -Force | Out-Null }
+                Set-ItemProperty -Path $labConfig -Name BypassTPMCheck -Value 1 -Type DWord -Force
+                Set-ItemProperty -Path $labConfig -Name BypassSecureBootCheck -Value 1 -Type DWord -Force
+                Set-ItemProperty -Path $labConfig -Name BypassRAMCheck -Value 1 -Type DWord -Force
+                Set-ItemProperty -Path $labConfig -Name BypassStorageCheck -Value 1 -Type DWord -Force
+                Set-ItemProperty -Path $labConfig -Name BypassCPUCheck -Value 1 -Type DWord -Force
+                # Also set MoSetup key for upgrade-path checks
+                $moSetup = 'HKLM:\SYSTEM\Setup\MoSetup'
+                if (-not (Test-Path $moSetup)) { New-Item -Path $moSetup -Force | Out-Null }
+                Set-ItemProperty -Path $moSetup -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -Type DWord -Force
+            }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
             }
