@@ -1930,11 +1930,11 @@ $global:VM_Config = {
                     # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
                         try {
-                            # CIM-based cmdlets (DHCP, Hyper-V) ignore local
-                            # $ProgressPreference — they resolve it from $Global:.
-                            # Save/restore to avoid leaking into subsequent code.
-                            $savedPP = $Global:ProgressPreference
-                            $Global:ProgressPreference = 'SilentlyContinue'
+                            # Suppress progress rendering while CIM cmdlets run.
+                            # Write-Progress2Impl checks $Global:SuppressProgress
+                            # and skips the -force ProgressPreference toggle that
+                            # would otherwise let CIM progress records through.
+                            $Global:SuppressProgress = $true
                             try {
                                 $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
                                 if ($vmnet -and $vmnet.MacAddress) {
@@ -1949,7 +1949,7 @@ $global:VM_Config = {
                                 }
                             }
                             finally {
-                                $Global:ProgressPreference = $savedPP
+                                $Global:SuppressProgress = $false
                             }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $validIP" -LogOnly
                         }
