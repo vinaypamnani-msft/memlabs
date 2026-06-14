@@ -376,6 +376,10 @@ function Test-ValidCmOptions {
             Add-ValidationMessage -Message "Office Validation: installOffice is set on $($officeVMs.vmName -join ', ') but no Primary site server exists to create the SCCM application deployment. Removing installOffice." -ReturnObject $ReturnObject -Warning
             foreach ($vm in $officeVMs) { $vm.installOffice = $false }
         }
+        elseif (-not $cmOptions.PrePopulateObjects) {
+            Add-ValidationMessage -Message "Office Validation: installOffice requires PrePopulateObjects (Office deployment runs during perfloading). Removing from: $($officeVMs.vmName -join ', ')." -ReturnObject $ReturnObject -Warning
+            foreach ($vm in $officeVMs) { $vm.installOffice = $false }
+        }
 
         # Reject Office on server OS
         $serverOffice = $officeVMs | Where-Object { $_.operatingSystem -like '*Server*' }
