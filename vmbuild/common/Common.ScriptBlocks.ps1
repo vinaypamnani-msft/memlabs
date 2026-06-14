@@ -2098,7 +2098,12 @@ $global:VM_Config = {
                 #    (ACCESS_DENIED). Pre-disabling makes it a no-op.
                 Disable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
 
-                # 2. Bypass hardware requirement checks during the specialize pass.
+                # 2. Disable Defender real-time protection. Defender can hold locks
+                #    on crypto stores during the specialize pass, contributing to
+                #    CryptoSysPrep_Specialize 0x5 failures.
+                Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+
+                # 3. Bypass hardware requirement checks during the specialize pass.
                 #    Windows 11 24H2 re-checks TPM/SecureBoot/etc. after /generalize.
                 $labConfig = 'HKLM:\SYSTEM\Setup\LabConfig'
                 if (-not (Test-Path $labConfig)) { New-Item -Path $labConfig -Force | Out-Null }
@@ -2111,6 +2116,12 @@ $global:VM_Config = {
                 if (-not (Test-Path $moSetup)) { New-Item -Path $moSetup -Force | Out-Null }
                 Set-ItemProperty -Path $moSetup -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -Type DWord -Force
             }
+
+            # 4. Settle delay — let services stabilize after first boot before
+            #    sysprep tears everything down.
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Waiting 90s for services to settle before sysprep..." -LogOnly
+            Start-Sleep -Seconds 90
+
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { C:\Windows\system32\sysprep\sysprep.exe /generalize /oobe /shutdown }
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to boot the VM to OOBE. $($result.ScriptBlockOutput)" -Failure -OutputStream
