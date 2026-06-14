@@ -1185,73 +1185,70 @@ finally {
         }
     }
 
-    # Request all running jobs to stop asynchronously. Stop-Job blocks if a
-    # job is stuck in blocking I/O (e.g. PSDirect Copy-Item), so use the
-    # non-blocking StopJobAsync() method and then poll with a timeout.
+    # Stop running jobs with live progress. Kill child processes early to
+    # avoid Remove-Job -Force blocking for 10+ seconds per stuck job.
     $runningJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
     $totalJobs = $runningJobs.Count
     $stopWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $blankLine = " " * 100
+    $showElapsed = { [math]::Floor($stopWatch.Elapsed.TotalSeconds) }
 
     if ($totalJobs -gt 0 -and -not $enableVerbose) {
-        Write-Host -NoNewline "`r${blankLine}`rStopping $totalJobs running job(s)..."
-        foreach ($job in $runningJobs) {
-            try { $job.StopJobAsync() } catch { }
-        }
-
-        # Poll up to 15 seconds, showing live progress with timer
-        $graceSec = 15
-        while ($stopWatch.Elapsed.TotalSeconds -lt $graceSec) {
-            $stillRunning = @(Get-Job | Where-Object { $_.State -eq 'Running' }).Count
-            if ($stillRunning -eq 0) { break }
-            $elapsed = [math]::Floor($stopWatch.Elapsed.TotalSeconds)
-            $stopped = $totalJobs - $stillRunning
-            Write-Host -NoNewline "`r${blankLine}`rStopping jobs: $stopped/$totalJobs stopped  (${elapsed}s / ${graceSec}s timeout)"
-            Start-Sleep -Milliseconds 500
-        }
-        $elapsed = [math]::Floor($stopWatch.Elapsed.TotalSeconds)
-        Write-Host -NoNewline "`r${blankLine}`rStopping jobs: grace period done (${elapsed}s)"
-    }
-    elseif ($totalJobs -eq 0) {
-        Write-Host -NoNewline "No running jobs to stop."
-    }
-
-    # Force-remove any jobs still running (stuck in blocking I/O).
-    # Remove-Job -Force can itself hang when the child process is wedged in
-    # a kernel-level PSDirect/WMI call. Kill child pwsh.exe processes first
-    # so the job infrastructure can release cleanly.
-    $stuckJobs = @(Get-Job | Where-Object { $_.State -eq 'Running' })
-    if ($stuckJobs.Count -gt 0 -and -not $enableVerbose) {
-        Write-Host -NoNewline "`r${blankLine}`rKilling $($stuckJobs.Count) stuck job process(es)..."
+        # 1) Kill child pwsh.exe processes immediately — this is what actually
+        #    unblocks stuck PSDirect/WMI I/O. Do it before StopJobAsync so
+        #    the async stop finds the process already gone.
+        Write-Host -NoNewline "`r${blankLine}`rStopping $totalJobs job(s): killing child processes... ($(& $showElapsed)s)"
         try {
-            # Start-Job spawns child pwsh.exe with "-s -NoLogo" under our PID.
-            # Kill them all — terminals are parented by Windows Terminal, not us.
             $childProcs = Get-CimInstance Win32_Process -Filter "ParentProcessId = $PID AND Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
                           Where-Object { $_.CommandLine -match '-s\s+-NoLogo' }
             foreach ($proc in $childProcs) {
-                Write-Log "Killing stuck job child process PID $($proc.ProcessId)" -LogOnly
+                Write-Log "Killing job child process PID $($proc.ProcessId)" -LogOnly
                 Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
             }
         }
         catch { }
-        Start-Sleep -Milliseconds 500
-        foreach ($job in $stuckJobs) {
-            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-        }
-    }
 
-    if (-not $global:Common.DevBranch) {
-        $remaining = @(Get-Job)
-        if ($remaining.Count -gt 0 -and -not $enableVerbose) {
-            Write-Host -NoNewline "`r${blankLine}`rCleaning up $($remaining.Count) remaining job(s)..."
-            foreach ($job in $remaining) {
+        # 2) Signal all jobs to stop (fast — processes are already dead)
+        foreach ($job in $runningJobs) {
+            try { $job.StopJobAsync() } catch { }
+        }
+
+        # 3) Poll up to 5 seconds for jobs to transition out of Running
+        $graceSec = 5
+        while ($stopWatch.Elapsed.TotalSeconds -lt $graceSec) {
+            $stillRunning = @(Get-Job | Where-Object { $_.State -eq 'Running' }).Count
+            if ($stillRunning -eq 0) { break }
+            $stopped = $totalJobs - $stillRunning
+            Write-Host -NoNewline "`r${blankLine}`rStopping jobs: $stopped/$totalJobs stopped  ($(& $showElapsed)s)"
+            Start-Sleep -Milliseconds 250
+        }
+
+        # 4) Remove jobs. Non-running jobs are instant; skip any that
+        #    would block (their process is dead, GC handles the rest).
+        Write-Host -NoNewline "`r${blankLine}`rRemoving jobs... ($(& $showElapsed)s)"
+        foreach ($job in @(Get-Job)) {
+            if ($job.State -ne 'Running') {
                 Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                # Don't call Remove-Job -Force on still-Running jobs — it
+                # blocks for 10+ seconds each. The child process is already
+                # dead; the job object will be GC'd on process exit.
+                Write-Log "Abandoning stuck job $($job.Id) (state: $($job.State), child process already killed)" -LogOnly
             }
         }
     }
+    elseif ($totalJobs -eq 0 -and -not $enableVerbose) {
+        # Still may have completed/failed jobs to clean up
+        foreach ($job in @(Get-Job)) {
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
     $stopWatch.Stop()
-    $totalElapsed = [math]::Floor($stopWatch.Elapsed.TotalSeconds)
-    Write-Host "`r${blankLine}`rJobs stopped. (${totalElapsed}s)"
+    $totalElapsed = & $showElapsed
+    if (-not $enableVerbose) {
+        Write-Host "`r${blankLine}`rJobs stopped. (${totalElapsed}s)"
+    }
     # Close PS Sessions
     foreach ($session in $global:ps_cache.Keys) {
         Write-Log "Closing PS Session $session" -Verbose
