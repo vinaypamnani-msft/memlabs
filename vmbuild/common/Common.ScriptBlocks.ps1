@@ -618,20 +618,40 @@ $global:VM_Create = {
             # causing I/O load). If the config is only AADClients, no delay.
             # Multiple AADClients are staggered by 15s each so they don't all
             # hit OOBE simultaneously.
+            #
+            # Polls every 10s and breaks early when ≥75% of other VMs have
+            # heartbeat OkApplicationsHealthy (past OOBE, load settled).
             if ($currentItem.role -eq "AADClient") {
-                $otherVmCount = @($deployConfig.virtualMachines | Where-Object { $_.role -ne "AADClient" }).Count
+                $otherVmNames = @($deployConfig.virtualMachines | Where-Object { $_.role -ne "AADClient" -and $_.role -ne "OSDClient" -and -not $_.hidden } | ForEach-Object { $_.vmName })
                 $aadClients = @($deployConfig.virtualMachines | Where-Object { $_.role -eq "AADClient" })
                 $aadIndex = 0
                 for ($ai = 0; $ai -lt $aadClients.Count; $ai++) {
                     if ($aadClients[$ai].vmName -eq $currentItem.vmName) { $aadIndex = $ai; break }
                 }
-                $baseDelay = if ($otherVmCount -gt 3) { [Math]::Min($otherVmCount * 8, 180) } else { 0 }
+                $baseDelay = if ($otherVmNames.Count -gt 3) { [Math]::Min($otherVmNames.Count * 8, 180) } else { 0 }
                 $staggerDelay = $aadIndex * 15
-                $totalDelay = $baseDelay + $staggerDelay
-                if ($totalDelay -gt 0) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring AADClient creation by ${totalDelay}s (base=${baseDelay}s for $otherVmCount other VMs + stagger=${staggerDelay}s, index $aadIndex of $($aadClients.Count))." -LogOnly
-                    Write-Progress2 "AADClient" -Status "Waiting ${totalDelay}s for host load to settle" -force
-                    Start-Sleep -Seconds $totalDelay
+                $maxDelay = $baseDelay + $staggerDelay
+                if ($maxDelay -gt 0) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Deferring AADClient creation up to ${maxDelay}s (base=${baseDelay}s for $($otherVmNames.Count) other VMs + stagger=${staggerDelay}s, index $aadIndex of $($aadClients.Count))." -LogOnly
+                    $deferSw = [System.Diagnostics.Stopwatch]::StartNew()
+                    $threshold = [Math]::Ceiling($otherVmNames.Count * 0.75)
+                    while ($deferSw.Elapsed.TotalSeconds -lt $maxDelay) {
+                        $remaining = [int]($maxDelay - $deferSw.Elapsed.TotalSeconds)
+                        Write-Progress2 "AADClient" -Status "Waiting for host load to settle (${remaining}s remaining)" -force
+                        Start-Sleep -Seconds 10
+                        # Check if enough other VMs are past OOBE
+                        $readyCount = 0
+                        foreach ($vn in $otherVmNames) {
+                            $hb = (Get-VM2 -Name $vn -ErrorAction SilentlyContinue).Heartbeat
+                            if ($hb -eq 'OkApplicationsHealthy') { $readyCount++ }
+                        }
+                        if ($readyCount -ge $threshold) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): $readyCount/$($otherVmNames.Count) VMs healthy after $([int]$deferSw.Elapsed.TotalSeconds)s — breaking early." -LogOnly
+                            break
+                        }
+                    }
+                    $deferSw.Stop()
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): AADClient defer completed after $([int]$deferSw.Elapsed.TotalSeconds)s." -LogOnly
                 }
             }
 
