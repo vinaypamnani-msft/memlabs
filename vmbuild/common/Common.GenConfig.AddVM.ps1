@@ -533,6 +533,7 @@ function Add-NewVMForRole {
                         break
                     }
                 }
+                $virtualMachine | Add-Member -MemberType NoteProperty -Name 'installOffice' -Value $false -force
             }
         }
         "DomainMember (Server)" {}
