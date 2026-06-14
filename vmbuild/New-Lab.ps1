@@ -636,6 +636,13 @@ try {
     Write-Log "ConfigFile: $($Global:configfile)" -LogOnly
     Write-Log "Domain: $domainName" -LogOnly
     Write-Log "MemLabs Version: $($Common.MemLabsVersion)" -LogOnly
+    try {
+        $gitBranch = git -C $PSScriptRoot rev-parse --abbrev-ref HEAD 2>$null
+        $gitHash   = git -C $PSScriptRoot rev-parse --short HEAD 2>$null
+        if ($gitBranch -and $gitHash) {
+            Write-Log "Git: $gitBranch @ $gitHash" -LogOnly
+        }
+    } catch { }
     Write-Log "PowerShell: $($PSVersionTable.PSVersion) (PID $PID)" -LogOnly
     Write-Log "Host PID: $PID | Parent PID: $((Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).ParentProcessId)" -LogOnly
     Write-Log "StartPhase: $StartPhase | Phase: $Phase" -LogOnly

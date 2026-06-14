@@ -5394,11 +5394,34 @@ function Build-ToolZipsForPhase2 {
         return $zipPath
     }
 
+    # --- Helper: find the most recently modified source file across entries ---
+    $getNewestSource = {
+        param([object[]]$entries)
+        $newest = $null
+        foreach ($entry in $entries) {
+            $item = Get-Item $entry.SourcePath -ErrorAction SilentlyContinue
+            if ($item -is [System.IO.DirectoryInfo]) {
+                $child = Get-ChildItem $item.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+                if ($child -and (-not $newest -or $child.LastWriteTimeUtc -gt $newest.LastWriteTimeUtc)) { $newest = $child }
+            }
+            else {
+                if ($item -and (-not $newest -or $item.LastWriteTimeUtc -gt $newest.LastWriteTimeUtc)) { $newest = $item }
+            }
+        }
+        return $newest
+    }
+
     # --- Build common zip ---
     $builtCount = 0
     $allZipNames = @()
     if ($commonEntries.Count -gt 0) {
         $commonFP = & $computeFingerprint $commonEntries
+        $zipPath = Join-Path $Common.TempPath "tools-$commonFP.zip"
+        $zipExists = Test-Path $zipPath
+        $newestFile = & $getNewestSource $commonEntries
+        $newestInfo = if ($newestFile) { "$($newestFile.Name) ($($newestFile.Length) bytes, $($newestFile.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC)" } else { "(none)" }
+        Write-Log "Build-ToolZipsForPhase2: common fingerprint=$commonFP, zipExists=$zipExists, tempPath=$($Common.TempPath), newest=$newestInfo" -LogOnly
         $null = & $buildZipLocal $commonEntries $commonFP "common tools"
         $allZipNames += "tools-$commonFP.zip"
         $builtCount++
@@ -5410,6 +5433,11 @@ function Build-ToolZipsForPhase2 {
         $extraEntries = $allExtraSets[$role]
         $extraFP = & $computeFingerprint $extraEntries
         if (-not $builtExtraFPs.ContainsKey($extraFP)) {
+            $zipPath = Join-Path $Common.TempPath "tools-$extraFP.zip"
+            $zipExists = Test-Path $zipPath
+            $newestFile = & $getNewestSource $extraEntries
+            $newestInfo = if ($newestFile) { "$($newestFile.Name) ($($newestFile.Length) bytes, $($newestFile.LastWriteTimeUtc.ToString('yyyy-MM-dd HH:mm:ss')) UTC)" } else { "(none)" }
+            Write-Log "Build-ToolZipsForPhase2: extra ($role) fingerprint=$extraFP, zipExists=$zipExists, newest=$newestInfo" -LogOnly
             $null = & $buildZipLocal $extraEntries $extraFP "extra tools ($role)"
             $allZipNames += "tools-$extraFP.zip"
             $builtExtraFPs[$extraFP] = $true
