@@ -239,10 +239,9 @@ function Start-Phase {
         # site-server desktops. No-op when no Proxy VM is in this config.
         Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
 
-        # Clean up shared fingerprint-keyed tool zips now that all Phase 2
-        # jobs have completed. Individual per-VM Install-Tools calls skip
-        # cleanup to avoid deleting zips still needed by parallel jobs.
-        Get-ChildItem -Path $Common.TempPath -Filter "tools-*.zip" -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        # Clean up stale tool zips from previous runs that are no longer
+        # referenced. Keeps current-fingerprint zips so reruns skip rebuild.
+        Clean-StaleToolZips
 
         $postPhaseTimer.Stop()
         Write-Log "[Phase 2] Post-processing (Linux DNS, Proxy config) completed. Time: $($postPhaseTimer.Elapsed.ToString("hh\:mm\:ss"))"
