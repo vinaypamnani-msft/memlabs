@@ -2087,14 +2087,19 @@ $global:VM_Config = {
         $bootToOOBE = $currentItem.role -eq "AADClient"
         $oobeStarted = $false
         if ($bootToOOBE) {
-            # Run Sysprep with /generalize — needed because the base image is
-            # cloned (resets SID, hardware profile). The specialize pass on
-            # next boot re-checks hardware requirements, which fails on
-            # Windows 11 24H2 with "could not configure Windows to run on
-            # this computer's hardware." Set LabConfig bypass keys first.
+            # Prepare the VM for sysprep /generalize /oobe /shutdown.
+            # The base image is cloned so /generalize is needed to reset the SID.
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { Set-NetFirewallProfile -All -Enabled false }
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
-                # Bypass hardware requirement checks during the specialize pass
+                # 1. Disable the built-in Administrator account before sysprep.
+                #    CryptoSysPrep_Specialize calls DisableAdministratorIfApplicable
+                #    during the specialize pass. If it actually disables the account
+                #    mid-execution, subsequent crypto operations fail with 0x5
+                #    (ACCESS_DENIED). Pre-disabling makes it a no-op.
+                Disable-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue
+
+                # 2. Bypass hardware requirement checks during the specialize pass.
+                #    Windows 11 24H2 re-checks TPM/SecureBoot/etc. after /generalize.
                 $labConfig = 'HKLM:\SYSTEM\Setup\LabConfig'
                 if (-not (Test-Path $labConfig)) { New-Item -Path $labConfig -Force | Out-Null }
                 Set-ItemProperty -Path $labConfig -Name BypassTPMCheck -Value 1 -Type DWord -Force
@@ -2102,7 +2107,6 @@ $global:VM_Config = {
                 Set-ItemProperty -Path $labConfig -Name BypassRAMCheck -Value 1 -Type DWord -Force
                 Set-ItemProperty -Path $labConfig -Name BypassStorageCheck -Value 1 -Type DWord -Force
                 Set-ItemProperty -Path $labConfig -Name BypassCPUCheck -Value 1 -Type DWord -Force
-                # Also set MoSetup key for upgrade-path checks
                 $moSetup = 'HKLM:\SYSTEM\Setup\MoSetup'
                 if (-not (Test-Path $moSetup)) { New-Item -Path $moSetup -Force | Out-Null }
                 Set-ItemProperty -Path $moSetup -Name AllowUpgradesWithUnsupportedTPMOrCPU -Value 1 -Type DWord -Force
