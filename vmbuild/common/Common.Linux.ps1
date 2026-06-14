@@ -2789,6 +2789,13 @@ echo "DNS=$DNS_OK HTTP=$HTTP_OK"
 
 http_port 3128
 
+# Human-readable log format for lab diagnostics.
+# Native squid format uses Unix epoch seconds; this uses ISO timestamps
+# and reorders fields for quick visual scanning by Windows admins.
+#   TIME  CLIENT  RESULT/STATUS  METHOD  URL  RESPONSE_MS  SIZE  MIME
+logformat memlabs %{%Y-%m-%d %H:%M:%S}tl %>a %Ss/%03>Hs %rm %ru %6tr %<st %mt
+access_log daemon:/var/log/squid/access.log memlabs
+
 # Blocklist: managed via the Proxy Admin web UI (port 8443).
 # Squid reads this file on start and on 'squid -k reconfigure'.
 acl blocklist dstdomain "/etc/squid/blocklist.txt"
@@ -2941,6 +2948,25 @@ echo "APT_CLEANUP_DONE"
     }
     else {
         Write-Log "[Proxy] $vmName`: Proxy Admin web UI listening on ${ip}:8443"
+    }
+
+    # ---- MOTD + squidlog helper ----
+    # Install a colorized squid log viewer and a login banner that
+    # advertises it so SSH sessions land with useful instructions.
+    $proxyFqdn = "$vmName.$($deployConfig.vmOptions.domainName)"
+    $squidlogContent = Get-Content -Path (Join-Path $script:LinuxScriptDir 'proxy\squidlog') -Raw
+    $squidlogB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($squidlogContent))
+
+    $motdBash = Get-LinuxScript -Name 'proxy/install-motd' -Variables @{ SQUIDLOG_B64 = $squidlogB64; PROXY_FQDN = $proxyFqdn }
+    $result3 = Invoke-LinuxVmCommand -VmName $vmName -IPAddress $ip -BashCommand $motdBash -Sudo -TimeoutSeconds 30 -DisplayName "Install MOTD + squidlog"
+    if ($result3.ScriptBlockFailed -or $result3.ExitCode -ne 0) {
+        Write-Log "[Proxy] $vmName`: MOTD install failed (ExitCode=$($result3.ExitCode))`n$($result3.ScriptBlockOutput)" -Warning
+    }
+    elseif ($result3.ScriptBlockOutput -notmatch 'MOTD_READY') {
+        Write-Log "[Proxy] $vmName`: MOTD install did not report ready`n$($result3.ScriptBlockOutput)" -Warning
+    }
+    else {
+        Write-Log "[Proxy] $vmName`: MOTD + squidlog helper installed"
     }
 
     # Mark phase complete in VM note so subsequent re-runs can short-circuit
@@ -3969,234 +3995,6 @@ function Set-WindowsClientProxyForConfig {
         Write-Log "[Proxy] Configuring $($vm.vmName) -> $proxyFqdn`:3128"
         $r = Set-WindowsClientProxy -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
                 -ProxyFqdn $proxyFqdn -BypassNetwork $bypassNet
-        if (-not $r) { $ok = $false }
-    }
-    return $ok
-}
-
-function Set-ProxyAdminAccessOnVm {
-    <#
-    .SYNOPSIS
-        Install host's memlabs ed25519 keypair on a Windows VM and create
-        Public-Desktop shortcuts for SSHing to the Proxy and tailing the
-        Squid access log.
-
-    .DESCRIPTION
-        Cloud-init already authorizes the host's ed25519 public key for
-        vmbuildadmin on every Linux VM. This drops the matching private
-        key (plus .pub) into C:\ProgramData\memlabs\ssh on the target VM
-        with admin-only ACLs so an interactive Administrator can ssh
-        without typing a password, and stamps two shortcuts on the
-        all-users desktop pointing at ssh.exe.
-
-        Idempotent. Safe to call repeatedly.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)] [string]$VmName,
-        [Parameter(Mandatory)] [string]$Domain,
-        [Parameter(Mandatory)] [string]$ProxyFqdn,
-        [Parameter(Mandatory)] [string]$PrivateKeyContent,
-        [Parameter(Mandatory)] [string]$PublicKeyContent,
-        [Parameter(Mandatory)] [string]$ProxyIP
-    )
-
-    $scriptBlock = {
-        param($privKey, $pubKey, $proxyFqdn, $proxyIP)
-        $ErrorActionPreference = 'Stop'
-        try {
-            $sshDir = 'C:\ProgramData\memlabs\ssh'
-            if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
-
-            $privPath = Join-Path $sshDir 'memlabs_ed25519'
-            $pubPath  = "$privPath.pub"
-
-            # Write LF-only (OpenSSH on Windows is happy with either, but
-            # ed25519 PEM blocks prefer LF). Use [IO.File] to avoid BOM.
-            [System.IO.File]::WriteAllText($privPath, ($privKey -replace "`r`n", "`n"))
-            [System.IO.File]::WriteAllText($pubPath, ($pubKey -replace "`r`n", "`n"))
-
-            # ACL story on the SOURCE key (C:\ProgramData\memlabs\ssh):
-            #   - Owner = BUILTIN\Administrators, FullControl for SYSTEM + Admins.
-            #   - Authenticated Users get READ. Lab-only tradeoff: any logged-in
-            #     domain user can read the private key, but it's the same key
-            #     that's already authorized for vmbuildadmin on every Linux VM
-            #     in the lab, so the exposure is bounded.
-            #
-            # Why allow Authenticated Users read: shortcuts on Public Desktop
-            # are launched by domain admins whose UAC-filtered token does NOT
-            # carry the Administrators SID. With an Admins-only ACL, ssh.exe
-            # under that token can't open() the key and falls back to a
-            # password prompt ('Load key ...: Permission denied').
-            #
-            # The wrapper (memlabs-ssh-proxy.cmd, installed below) copies the
-            # key into the caller's %LOCALAPPDATA% with a user-private ACL,
-            # then runs ssh -i on that copy. OpenSSH's strict-permissions
-            # check then sees a file owned by the current user with no other
-            # principals, which it accepts.
-            #
-            # NOTE: starting from `New-Object FileSecurity` (empty descriptor)
-            # leaves owner unset, which OpenSSH treats as untrusted and
-            # rejects the key. Always start from Get-Acl and mutate.
-            $acl = Get-Acl -Path $privPath
-            $acl.SetAccessRuleProtection($true, $false)
-            foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
-            $sysSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'         # NT AUTHORITY\SYSTEM
-            $admSid  = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'     # BUILTIN\Administrators
-            $authSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-11'         # NT AUTHORITY\Authenticated Users
-            $acl.SetOwner($admSid)
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $sysSid, 'FullControl', 'Allow')))
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $admSid, 'FullControl', 'Allow')))
-            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $authSid, 'Read', 'Allow')))
-            Set-Acl -Path $privPath -AclObject $acl
-
-            # Locate ssh.exe (built-in OpenSSH client; present on all current
-            # server SKUs by default). Fall back to Get-Command.
-            $sshExe = 'C:\Windows\System32\OpenSSH\ssh.exe'
-            if (-not (Test-Path $sshExe)) {
-                $cmd = Get-Command ssh.exe -ErrorAction SilentlyContinue
-                if ($cmd) { $sshExe = $cmd.Source }
-            }
-            if (-not (Test-Path $sshExe)) {
-                return @{ Ok = $false; Error = "ssh.exe not found on target VM" }
-            }
-
-            $desktop = 'C:\Users\Public\Desktop'
-            $shell = New-Object -ComObject WScript.Shell
-
-            # Install a wrapper that stages a user-private copy of the key
-            # under %LOCALAPPDATA%\memlabs\ssh on first use. OpenSSH on
-            # Windows requires the key file to be readable ONLY by the caller
-            # (or SYSTEM/Admins) AND owned by one of those -- the source key
-            # in ProgramData allows Authenticated Users read, which OpenSSH
-            # rejects with 'bad permissions'. Per-user copy sidesteps both
-            # the strict check and the UAC token-filtering issue (non-elevated
-            # admins don't carry the Admins SID and can't read an Admins-only
-            # ACL even though they're nominally admins).
-            $wrapperPath = Join-Path $sshDir 'memlabs-ssh-proxy.cmd'
-            $wrapper = @"
-@echo off
-setlocal
-set SRC=$privPath
-set DST=%LOCALAPPDATA%\memlabs\ssh\memlabs_ed25519
-if not exist "%LOCALAPPDATA%\memlabs\ssh" mkdir "%LOCALAPPDATA%\memlabs\ssh" >nul 2>&1
-if not exist "%DST%" (
-    copy /Y "%SRC%" "%DST%" >nul
-    icacls "%DST%" /inheritance:r >nul 2>&1
-    icacls "%DST%" /grant:r "%USERNAME%:F" >nul 2>&1
-    icacls "%DST%" /grant:r "SYSTEM:F" >nul 2>&1
-)
-"$sshExe" -i "%DST%" -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL vmbuildadmin@$proxyIP %*
-endlocal
-"@
-            [System.IO.File]::WriteAllText($wrapperPath, $wrapper)
-
-            # Interactive SSH shell. cmd.exe /k keeps the window open after
-            # ssh exits so the user can see any messages.
-            $lnk1 = Join-Path $desktop "SSH to $proxyFqdn.lnk"
-            $sc1 = $shell.CreateShortcut($lnk1)
-            $sc1.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc1.Arguments = "/k `"$wrapperPath`""
-            $sc1.WorkingDirectory = 'C:\'
-            $sc1.IconLocation = "$sshExe,0"
-            $sc1.Description = "SSH to $proxyFqdn ($proxyIP) as vmbuildadmin"
-            $sc1.Save()
-
-            # Squid access-log tail (pass tail command as wrapper args)
-            $lnk2 = Join-Path $desktop 'Squid Access Log.lnk'
-            $sc2 = $shell.CreateShortcut($lnk2)
-            $sc2.TargetPath = 'C:\Windows\System32\cmd.exe'
-            $sc2.Arguments = "/k `"$wrapperPath`" sudo tail -n 100 -F /var/log/squid/access.log"
-            $sc2.WorkingDirectory = 'C:\'
-            $sc2.IconLocation = "$sshExe,0"
-            $sc2.Description = "Tail /var/log/squid/access.log on $proxyFqdn ($proxyIP)"
-            $sc2.Save()
-
-            # Proxy Admin web UI (opens default browser)
-            $lnk3 = Join-Path $desktop "Proxy Admin - $proxyFqdn.lnk"
-            $sc3 = $shell.CreateShortcut($lnk3)
-            $sc3.TargetPath = "http://${proxyIP}:8443"
-            $sc3.Description = "Open Proxy Admin blocklist manager on $proxyFqdn ($proxyIP)"
-            $sc3.Save()
-
-            return @{ Ok = $true; SshDir = $sshDir; Shortcuts = @($lnk1, $lnk2, $lnk3) }
-        }
-        catch {
-            return @{ Ok = $false; Error = $_.ToString() }
-        }
-    }
-
-    $result = Invoke-VmCommand -VmName $VmName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $PrivateKeyContent, $PublicKeyContent, $ProxyFqdn, $ProxyIP `
-        -DisplayName "Install proxy SSH key + shortcuts"
-    if ($result.ScriptBlockFailed) {
-        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm ScriptBlockFailed: $($result.ScriptBlockOutput)" -Failure
-        return $false
-    }
-    $payload = $result.ScriptBlockOutput
-    if (-not $payload -or -not $payload.Ok) {
-        Write-Log "[Proxy] $VmName`: Set-ProxyAdminAccessOnVm failed: $($payload.Error)" -Failure
-        return $false
-    }
-    Write-Log "[Proxy] $VmName`: Installed SSH key + Public Desktop shortcuts (-> $ProxyIP)"
-    return $true
-}
-
-function Set-ProxyAdminAccessForConfig {
-    <#
-    .SYNOPSIS
-        Push the host SSH key + Squid-log shortcuts to every DC and CM
-        site-server VM in a deploy config, so operators can SSH to the
-        Proxy from those VMs without typing a password.
-
-    .DESCRIPTION
-        Scope is limited to roles that an operator routinely RDPs to
-        (DC, BDC, CAS, Primary, Secondary, SiteSystem, PassiveSite).
-        Skipped entirely if the config contains no Proxy VM.
-
-        Idempotent. Safe to call repeatedly.
-    #>
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory)] [object]$deployConfig
-    )
-
-    $proxyVm = $deployConfig.virtualMachines | Where-Object { $_.role -eq 'Proxy' } | Select-Object -First 1
-    if (-not $proxyVm) {
-        # Add-to-existing case: Proxy may live in the existing hierarchy.
-        $existingProxyName = Get-ExistingForDomain -DomainName $deployConfig.vmOptions.domainName -Role 'Proxy' | Select-Object -First 1
-        if ($existingProxyName) {
-            $proxyVm = [pscustomobject]@{ vmName = $existingProxyName; role = 'Proxy' }
-        }
-    }
-    if (-not $proxyVm) { return $true }
-
-    $adminRoles = @('DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'SiteSystem', 'PassiveSite')
-    $targets = @($deployConfig.virtualMachines | Where-Object {
-        ($_.role -in $adminRoles) -and -not $_.hidden -and -not (Test-VmIsLinux -Vm $_)
-    })
-    if (-not $targets) { return $true }
-
-    $key = Get-LinuxAdminSshKeyPair
-    $privContent = (Get-Content -Raw -Path $key.PrivateKeyPath)
-    $pubContent  = (Get-Content -Raw -Path $key.PublicKeyPath)
-
-    $proxyFqdn = "$($proxyVm.vmName).$($deployConfig.vmOptions.domainName)"
-    $proxyIP = Get-LinuxVmExpectedStaticIP -VmObject $proxyVm -DeployConfig $deployConfig
-    if (-not $proxyIP) {
-        Write-Log "[Proxy] Could not determine Proxy IP from network; skipping SSH shortcuts" -Warning
-        return $false
-    }
-
-    $ok = $true
-    foreach ($vm in $targets) {
-        Write-Log "[Proxy] Installing SSH key + shortcuts on $($vm.vmName) -> $proxyIP ($proxyFqdn)"
-        $r = Set-ProxyAdminAccessOnVm -VmName $vm.vmName -Domain $deployConfig.vmOptions.domainName `
-                -ProxyFqdn $proxyFqdn -PrivateKeyContent $privContent -PublicKeyContent $pubContent `
-                -ProxyIP $proxyIP
         if (-not $r) { $ok = $false }
     }
     return $ok

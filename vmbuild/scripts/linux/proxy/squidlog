@@ -1,0 +1,200 @@
+#!/bin/bash
+# squidlog - colorized, columnar squid access log viewer for memlabs
+#
+# Parses the memlabs logformat:
+#   %{%Y-%m-%d %H:%M:%S}tl %>a %Ss/%03>Hs %rm %ru %6tr %<st %mt
+# Example raw line:
+#   2026-06-14 19:16:01 172.19.77.10 TCP_MISS/200 GET http://example.com/path 45 1234 text/html
+#
+# Displays as:
+#   19:16:01  172.19.77.10     200  GET      45ms    1.2KB  http://example.com/path
+set -euo pipefail
+
+LOG="/var/log/squid/access.log"
+LINES=20; FOLLOW=0; FSTATUS=""; FMETHOD=""; FURL=""; SHOW_DATE=0; FILTER=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n) LINES="$2"; shift 2;;
+    -f) FOLLOW=1; shift;;
+    -s) FSTATUS="$2"; shift 2;;
+    -m) FMETHOD="$2"; shift 2;;
+    -u) FURL="$2"; shift 2;;
+    -d) SHOW_DATE=1; shift;;
+    -h|--help)
+      cat <<'EOF'
+squidlog - colorized squid access log viewer
+
+Usage: squidlog [options] [FILTER]
+  FILTER     Quick filter - matches anywhere in the log line (IP, URL,
+             status code, result code, etc.). Case-insensitive.
+  -n N       Show last N lines (default: 20)
+  -f         Follow mode (like tail -f), streams new entries
+  -s CODE    Filter by HTTP status code (e.g. 200, 403, 5xx)
+  -m METHOD  Filter by request method (GET, CONNECT, POST, etc.)
+  -u PATTERN Filter URLs matching grep pattern
+  -d         Show full date (default: time only)
+  -h         Show this help and log reference guide
+
+Examples:
+  squidlog                        Show last 20 log entries
+  squidlog microsoft              Show entries matching "microsoft"
+  squidlog 172.19.77.10           Show traffic from a specific VM
+  squidlog 403                    Show 403 forbidden responses
+  squidlog TCP_DENIED             Show blocked requests
+  squidlog -f                     Follow the log in real time
+  squidlog -f microsoft           Follow, only show microsoft traffic
+  squidlog -n 100                 Show last 100 entries
+  squidlog -f -s 4                Follow, only show 4xx errors
+  squidlog -m CONNECT             Show CONNECT (HTTPS tunnel) requests
+  squidlog -u microsoft.com       Show requests matching microsoft.com
+  squidlog -f -u windowsupdate    Follow Windows Update traffic
+  squidlog -d -n 50               Last 50 entries with full dates
+
+── Reading the output ──────────────────────────────────────────────────────────
+
+Each line shows these columns left to right:
+
+  TIME      CLIENT-IP        RESULT       STATUS  METHOD  RESP-MS  SIZE  MIME  URL
+  19:16:01  172.19.77.10     TCP_MISS     200     GET       45ms   1.2K  text/html  http://example.com/path
+
+  TIME       When the request completed (add -d for full date)
+  CLIENT-IP  Lab VM that made the request
+  RESULT     Squid cache result (see below)
+  STATUS     HTTP status code: 200=OK, 301/302=redirect, 403=blocked,
+             404=not found, 407=proxy auth needed, 502=bad gateway,
+             503=service unavailable, 504=gateway timeout
+  METHOD     HTTP method: GET, POST, CONNECT (HTTPS tunnel), etc.
+  RESP-MS    Response time in milliseconds (lower = faster)
+  SIZE       Response body size (B/K/M)
+  MIME       Content type (text/html, application/json, etc.)
+  URL        Requested URL (CONNECT shows host:443 for HTTPS)
+
+Color coding:
+  Green      2xx success
+  Cyan       3xx redirect
+  Yellow     4xx client error (including blocked requests)
+  Red        5xx server error
+
+── Squid result codes (the dimmed column) ──────────────────────────────────────
+
+  TCP_MISS          Cache miss - fetched from the internet (most common)
+  TCP_HIT           Served from Squid's cache (rarely seen, caching is off)
+  TCP_TUNNEL        HTTPS tunnel via CONNECT method
+  TCP_DENIED        Blocked by ACL (e.g. blocklist match = HTTP 403)
+  TCP_REDIRECT      Squid redirected the request
+  TCP_MISS_ABORTED  Client closed connection before transfer completed
+  TCP_REFRESH_UNMODIFIED  Revalidated, server said "not modified" (304)
+  TCP_REFRESH_MODIFIED    Revalidated, server sent a new version
+  NONE/000          Transaction failed before classification (connection
+                    refused, DNS failure, etc.)
+  NONE/503          Upstream server unavailable or DNS resolution failed
+
+── Common patterns ─────────────────────────────────────────────────────────────
+
+  Windows Update:   CONNECT slscr.update.microsoft.com:443
+                    CONNECT fe3cr.delivery.mp.microsoft.com:443
+  ConfigMgr setup:  GET http://dl.managed.datto.com/.../setupdl/...
+  Content download: GET http://*.dl.delivery.mp.microsoft.com/...
+  Blocked request:  TCP_DENIED/403 on any method
+EOF
+      exit 0;;
+    -*) echo "Unknown option: $1 (try squidlog -h)" >&2; exit 1;;
+    *) FILTER="$1"; shift;;
+  esac
+done
+
+if [[ ! -f "$LOG" ]]; then
+  echo "Squid log not found: $LOG" >&2
+  echo "Is squid installed and running? Try: sudo systemctl status squid" >&2
+  exit 1
+fi
+
+# Human-readable byte sizes
+human_size() {
+  local bytes=$1
+  if [[ -z "$bytes" || "$bytes" == "-" ]]; then echo "   -"; return; fi
+  if (( bytes < 1024 )); then
+    printf "%4dB" "$bytes"
+  elif (( bytes < 1048576 )); then
+    printf "%4.1fK" "$(echo "scale=1; $bytes/1024" | bc 2>/dev/null || echo "$((bytes/1024)).0")"
+  else
+    printf "%4.1fM" "$(echo "scale=1; $bytes/1048576" | bc 2>/dev/null || echo "$((bytes/1048576)).0")"
+  fi
+}
+
+# Format and colorize a single log line
+# Input:  2026-06-14 19:16:01 172.19.77.10 TCP_MISS/200 GET http://example.com 45 1234 text/html
+# Output: 19:16:01  172.19.77.10     200  GET      45ms    1.2K  text/html  http://example.com
+format_line() {
+  local line="$1"
+
+  # Parse fields (date and time are fields 1+2, rest follows)
+  local dt tm client result method url resptime size mime
+  read -r dt tm client result method url resptime size mime <<< "$line"
+
+  # Extract HTTP status from result (TCP_MISS/200 -> 200)
+  local status="${result##*/}"
+
+  # Time display
+  local timestamp
+  if [[ "$SHOW_DATE" = "1" ]]; then
+    timestamp="$dt $tm"
+  else
+    timestamp="$tm"
+  fi
+
+  # Human-readable size
+  local hsize
+  hsize=$(human_size "$size")
+
+  # Truncate URL for display (keep last 80 chars if too long)
+  local display_url="$url"
+  if [[ ${#display_url} -gt 90 ]]; then
+    display_url="...${display_url: -87}"
+  fi
+
+  # Default mime to - if empty
+  [[ -z "$mime" ]] && mime="-"
+
+  # Color based on status code
+  local color reset="\033[0m"
+  case "${status:-000}" in
+    2[0-9][0-9]) color="\033[32m";;  # green
+    3[0-9][0-9]) color="\033[36m";;  # cyan
+    4[0-9][0-9]) color="\033[33m";;  # yellow
+    5[0-9][0-9]) color="\033[31m";;  # red
+    *)           color="\033[37m";;  # default
+  esac
+
+  # Status column: dim the Squid result code, highlight HTTP status
+  local dim="\033[2m" nodim="\033[22m"
+  local squid_code="${result%%/*}"
+
+  # Pad method to 7 chars for alignment
+  printf "${color}%s  %-15s ${dim}%-12s${nodim}%s  %-7s %6sms %5s  ${dim}%-20s${nodim} %s${reset}\n" \
+    "$timestamp" "$client" "$squid_code" "$status" "$method" "$resptime" "$hsize" "$mime" "$display_url"
+}
+
+match_filters() {
+  local line="$1"
+  [[ -n "$FILTER" ]]  && ! echo "$line" | grep -qiE "$FILTER" && return 1
+  [[ -n "$FSTATUS" ]] && ! echo "$line" | grep -qE "/${FSTATUS}[0-9]* " && return 1
+  [[ -n "$FMETHOD" ]] && ! echo "$line" | grep -qiE " $FMETHOD " && return 1
+  [[ -n "$FURL" ]]    && ! echo "$line" | grep -qiE "$FURL" && return 1
+  return 0
+}
+
+process_lines() {
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    match_filters "$line" || continue
+    format_line "$line"
+  done
+}
+
+if [[ "$FOLLOW" = "1" ]]; then
+  tail -n "$LINES" -F "$LOG" 2>/dev/null | process_lines
+else
+  tail -n "$LINES" "$LOG" 2>/dev/null | process_lines
+fi

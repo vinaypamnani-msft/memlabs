@@ -235,10 +235,6 @@ function Start-Phase {
         # fixed (RFC 1918 allow + deny public ports), so no subnet-union
         # timing concerns exist.
 
-        # Drop the host's SSH key + Squid-log shortcuts onto DC and CM
-        # site-server desktops. No-op when no Proxy VM is in this config.
-        Set-ProxyAdminAccessForConfig -deployConfig $deployConfig | Out-Null
-
         # Clean up stale tool zips from previous runs that are no longer
         # referenced. Keeps current-fingerprint zips so reruns skip rebuild.
         Clean-StaleToolZips
