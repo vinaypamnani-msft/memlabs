@@ -4216,6 +4216,56 @@ function Wait-ForVm {
                     Write-Log "$VmName`: VM state before power-cycle: $vmState" -Warning
                     stop-vm2 -name $VmName -TurnOff
                     start-sleep -seconds 8
+
+                    # After the first power-cycle, if heartbeat was NoContact (OS never
+                    # loaded into a usable state), attempt an offline registry fix for
+                    # the "The computer restarted unexpectedly" Windows Setup error.
+                    # This happens when the specialize pass reboots at the wrong moment
+                    # (common under heavy disk I/O with many parallel VM creations).
+                    # The fix sets setup.exe ChildCompletion from 1 (in-progress) to 3
+                    # (success) so Setup skips the failed specialize step on next boot.
+                    if ($powerCycles -ge 2 -and $vmCheck -and $vmCheck.Heartbeat -eq "NoContact") {
+                        try {
+                            $osDisk = (Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*_OS.vhdx" } | Select-Object -First 1).Path
+                            if ($osDisk -and (Test-Path $osDisk)) {
+                                Write-Log "$VmName`: Heartbeat NoContact after power-cycle — attempting offline registry repair for 'unexpected restart' Setup loop" -Warning
+                                $mountResult = Mount-VHD -Path $osDisk -Passthru -ErrorAction Stop
+                                $driveLetter = ($mountResult | Get-Disk | Get-Partition | Where-Object { $_.Type -eq 'Basic' -and $_.Size -gt 1GB } | Get-Volume | Sort-Object SizeRemaining -Descending | Select-Object -First 1).DriveLetter
+                                if ($driveLetter) {
+                                    $hivePath = "${driveLetter}:\Windows\System32\config\SYSTEM"
+                                    if (Test-Path $hivePath) {
+                                        $regKey = "HKLM\VMBUILD_OFFLINE_SYSTEM"
+                                        & reg load $regKey $hivePath 2>&1 | Out-Null
+                                        try {
+                                            $childCompPath = "$regKey\Setup\Status\ChildCompletion"
+                                            $currentVal = & reg query $childCompPath /v "setup.exe" 2>&1
+                                            Write-Log "$VmName`: ChildCompletion\setup.exe current value: $($currentVal -join ' ')" -LogOnly
+                                            & reg add $childCompPath /v "setup.exe" /t REG_DWORD /d 3 /f 2>&1 | Out-Null
+                                            Write-Log "$VmName`: Set ChildCompletion\setup.exe = 3 (specialize complete)" -Warning
+                                        }
+                                        finally {
+                                            Start-Sleep -Milliseconds 500
+                                            [gc]::Collect()
+                                            & reg unload $regKey 2>&1 | Out-Null
+                                        }
+                                    }
+                                    else {
+                                        Write-Log "$VmName`: Could not find SYSTEM hive at $hivePath" -Warning
+                                    }
+                                }
+                                else {
+                                    Write-Log "$VmName`: Could not determine drive letter after mounting VHDX" -Warning
+                                }
+                                Dismount-VHD -Path $osDisk -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 2
+                            }
+                        }
+                        catch {
+                            Write-Log "$VmName`: Offline registry repair failed: $_" -Warning
+                            try { Dismount-VHD -Path $osDisk -ErrorAction SilentlyContinue } catch {}
+                        }
+                    }
+
                     Start-vm2 -name $VmName
                     Start-Sleep -Seconds 8
                     [int]$failures = 0
