@@ -729,6 +729,8 @@ $global:VM_Create = {
 
                 # Create/refresh DHCP reservation so the IP is stable across reboots.
                 try {
+                    $savedPP3 = $Global:ProgressPreference
+                    $Global:ProgressPreference = 'SilentlyContinue'
                     $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter
                     if ($vmnet) {
                         $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
@@ -739,6 +741,9 @@ $global:VM_Create = {
                 }
                 catch {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $linuxIP. $_" -Warning
+                }
+                finally {
+                    $Global:ProgressPreference = $savedPP3
                 }
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success

@@ -1128,6 +1128,8 @@ function New-LinuxVirtualMachine {
         if ($DeployConfig) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                $savedPPLinux1 = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
                     if ($vmnet -and $vmnet.MacAddress -and $vmnet.MacAddress -ne '000000000000') {
@@ -1151,6 +1153,9 @@ function New-LinuxVirtualMachine {
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+                finally {
+                    $Global:ProgressPreference = $savedPPLinux1
                 }
             }
         }
@@ -1307,6 +1312,8 @@ function New-LinuxVirtualMachine {
         if ($DeployConfig) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                $savedPPLinux2 = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet2 = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
                     if ($vmnet2 -and $vmnet2.MacAddress -and $vmnet2.MacAddress -ne '000000000000') {
@@ -1325,6 +1332,9 @@ function New-LinuxVirtualMachine {
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
+                }
+                finally {
+                    $Global:ProgressPreference = $savedPPLinux2
                 }
             }
         }
