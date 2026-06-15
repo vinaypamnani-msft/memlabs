@@ -1941,7 +1941,8 @@ $global:VM_Config = {
                 if ($resolvedIP) {
                     $existingIP = $currentItem.LastKnownIP
                     if (-not $existingIP -or $existingIP -ne $resolvedIP) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $resolvedIP via $ipSource (was: $($existingIP ?? 'unset'))" -LogOnly
+                        $wasIP = if ($existingIP) { $existingIP } else { 'unset' }
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $resolvedIP via $ipSource (was: $wasIP)" -LogOnly
                         $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $resolvedIP -Force
                     }
                 }

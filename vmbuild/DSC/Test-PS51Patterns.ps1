@@ -3,7 +3,8 @@
 # Called from .git/hooks/pre-commit for files that run inside VMs.
 
 $Files = git diff --cached --name-only --diff-filter=ACM |
-    Where-Object { $_ -match '(vmbuild/DSC/|vmbuild/common/|Common\.ScriptBlocks\.ps1|TemplateHelpDSC)' }
+    Where-Object { $_ -match '(vmbuild/DSC/|vmbuild/common/|Common\.ScriptBlocks\.ps1|TemplateHelpDSC)' } |
+    Where-Object { $_ -notmatch 'Test-PS51Patterns\.ps1' }
 
 if (-not $Files) { exit 0 }
 
@@ -34,7 +35,15 @@ foreach ($f in $Files) {
             $issues += ""
         }
 
-        # Pattern 3: $variable: with invalid scope qualifier
+        # Pattern 3: ?? null-coalescing operator (PS 7+ only)
+        if ($line -match '\?\?' -and $line -notmatch '^\s*#') {
+            $issues += "  $f  '??' null-coalescing operator -- not supported in PS 5.1."
+            $issues += "    $($line.TrimStart('+').Trim())"
+            $issues += "    Fix: if (`$var) { `$var } else { 'default' }"
+            $issues += ""
+        }
+
+        # Pattern 4: $variable: with invalid scope qualifier
         # "$attempt:" is parsed as a scope-qualified variable (like "$script:")
         # which throws 'Variable reference is not valid' at runtime.
         # Valid scopes: global, local, script, private, using, workflow, env,
