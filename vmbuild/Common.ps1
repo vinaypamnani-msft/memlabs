@@ -3251,12 +3251,16 @@ function Invoke-IsolatedCim {
     auto-forward/drain to the throwaway runspace instead, leaving the caller's
     (child job's) own .Progress stream clean so the managed bars keep rendering.
 
-    The isolated runspace is created once and cached at global scope, so the
-    DhcpServer / Hyper-V module import cost is paid only once per process. The
-    scriptblock runs in a fresh session state: it sees only native
-    cmdlets/modules and whatever is passed via -ArgumentList (declare a matching
-    param() block). It does NOT see the caller's functions (Write-Log, Get-VM2,
-    etc.) or variables.
+    The isolated runspace is created fresh for each call and disposed before
+    returning. It must NOT be cached/reused for the lifetime of the child job:
+    a persistent isolated runspace keeps a Hyper-V / DhcpServer CIM connection
+    open in-process, which interferes with the PowerShell Direct sessions
+    Phase 1 uses for disk init (the in-guest Storage cmdlets hang). The CIM
+    cmdlets here run only a handful of times per VM, so the per-call module
+    import cost is negligible. The scriptblock runs in a fresh session state:
+    it sees only native cmdlets/modules and whatever is passed via
+    -ArgumentList (declare a matching param() block). It does NOT see the
+    caller's functions (Write-Log, Get-VM2, etc.) or variables.
 
     .PARAMETER ScriptBlock
     The scriptblock to execute in isolation. Use only native cmdlets inside it.
@@ -3271,23 +3275,28 @@ function Invoke-IsolatedCim {
         [object[]] $ArgumentList
     )
 
-    # (Re)create the cached runspace if it's missing or no longer usable.
-    if (-not $global:IsolatedCimPS -or $global:IsolatedCimPS.Runspace.RunspaceStateInfo.State -ne 'Opened') {
-        if ($global:IsolatedCimPS) { try { $global:IsolatedCimPS.Dispose() } catch {} }
-        $global:IsolatedCimPS = [System.Management.Automation.PowerShell]::Create()
-    }
+    # Create a FRESH throwaway runspace for this call and dispose it in the
+    # finally below. Do NOT cache/reuse a global runspace: a lingering isolated
+    # runspace holds a Hyper-V / DhcpServer CIM connection open in-process for
+    # the whole life of the child job, and that interferes with the PowerShell
+    # Direct sessions Phase 1 uses for disk init (in-guest Storage cmdlets hang).
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    try {
+        $null = $ps.AddScript($ScriptBlock.ToString())
+        if ($ArgumentList) {
+            foreach ($arg in $ArgumentList) { $null = $ps.AddArgument($arg) }
+        }
 
-    $ps = $global:IsolatedCimPS
-    $ps.Commands.Clear()
-    $ps.Streams.ClearStreams()
-    $null = $ps.AddScript($ScriptBlock.ToString())
-    if ($ArgumentList) {
-        foreach ($arg in $ArgumentList) { $null = $ps.AddArgument($arg) }
+        # Invoke() throws for terminating errors (e.g. -ErrorAction Stop inside
+        # the scriptblock), which preserves the caller's existing try/catch
+        # semantics. The results are materialized before the finally disposes
+        # the runspace, so returning them is safe.
+        return $ps.Invoke()
     }
-
-    # Invoke() throws for terminating errors (e.g. -ErrorAction Stop inside the
-    # scriptblock), which preserves the caller's existing try/catch semantics.
-    return $ps.Invoke()
+    finally {
+        try { $ps.Runspace.Close() } catch {}
+        try { $ps.Dispose() } catch {}
+    }
 }
 
 # Return the (primary) NIC MAC for a VM, looked up in an isolated runspace so
