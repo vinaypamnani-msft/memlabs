@@ -1181,18 +1181,19 @@ $global:VM_Create = {
             }
             $isWorkgroup = $currentItem.role -in "WorkgroupMember", "InternetClient"
 
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings"
+            # -AsJob + -TimeoutSeconds so a wedged guest can't hang this step forever
+            # (same hazard as disk init below). A healthy guest finishes in well under
+            # 2 minutes.
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings" -AsJob -TimeoutSeconds 240
             if ($result.ScriptBlockFailed) {
-                # If the guest WMI/CIM server is wedged, recover it (restart winmgmt
-                # over PSDirect) and retry once before giving up on this step. This
-                # is the first place the wedged-CIM symptom usually surfaces, so
+                # If the guest WMI/CIM server is wedged the step either errors with the
+                # CIM/message-filter signature or times out silently. Either way, recover
+                # it (restart winmgmt over PSDirect, escalate to reboot) and retry once.
+                # This is the first place the wedged-guest symptom usually surfaces, so
                 # healing here keeps the later disk-init step healthy too.
-                $cfgErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
-                if ($cfgErrText -match 'Cannot connect to CIM|message filter|0x80010002') {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM settings step hit a wedged WMI/CIM server; attempting recovery." -Warning
-                    if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase) {
-                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)"
-                    }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM settings step failed; attempting guest recovery." -Warning
+                if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot) {
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)" -AsJob -TimeoutSeconds 240
                 }
             }
             if ($result.ScriptBlockFailed) {
@@ -1266,7 +1267,13 @@ $global:VM_Create = {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init attempt $diskInitAttempts/$diskInitMaxAttempts" -Warning
                         Start-Sleep -Seconds 10
                     }
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -ScriptBlock {
+                    # Run as a job with a hard timeout. A wedged guest WMI/VDS service
+                    # makes the Storage cmdlets (Get-Disk/Initialize-Disk) block forever
+                    # WITHOUT returning an error, so a synchronous call would hang the
+                    # whole Phase 1 job indefinitely (one stuck VM = the build never
+                    # finishes). -AsJob + -TimeoutSeconds surfaces the hang as a failure
+                    # so the recovery/retry logic below can run.
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -AsJob -TimeoutSeconds 240 -ScriptBlock {
                     param($entries)
                     $OriginalPref = $ProgressPreference
                     $ProgressPreference = "SilentlyContinue"
@@ -1321,19 +1328,20 @@ $global:VM_Create = {
                     elseif ($diskInitAttempts -lt $diskInitMaxAttempts) {
                         $diskErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $diskErrText" -Warning
-                        # A wedged guest WMI/CIM server makes the Storage cmdlets fail with
-                        # "Cannot connect to CIM server. Call was canceled by the message filter".
-                        # PSDirect still works, so recover the guest in-place (restart WMI, then
-                        # reboot) instead of failing the phase and rolling back every VM.
-                        if ($diskErrText -match 'Cannot connect to CIM|message filter|0x80010002') {
-                            if (-not $cimWmiRestarted) {
-                                $cimWmiRestarted = $true
-                                Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase | Out-Null
-                            }
-                            elseif (-not $cimRebooted) {
-                                $cimRebooted = $true
-                                Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot | Out-Null
-                            }
+                        # The guest's Storage stack depends on WMI/CIM/VDS. When that's
+                        # wedged the call either fails with "Cannot connect to CIM server /
+                        # message filter" or just times out silently (the -AsJob timeout
+                        # above). PSDirect still works, so recover the guest in-place
+                        # (restart WMI, then reboot) instead of failing the phase and
+                        # rolling back every VM. Escalate on ANY repeated failure, since a
+                        # silent timeout carries no CIM error text to match on.
+                        if (-not $cimWmiRestarted) {
+                            $cimWmiRestarted = $true
+                            Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase | Out-Null
+                        }
+                        elseif (-not $cimRebooted) {
+                            $cimRebooted = $true
+                            Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot | Out-Null
                         }
                     }
                 }
