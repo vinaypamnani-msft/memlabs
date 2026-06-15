@@ -920,7 +920,17 @@ function Get-RoomLeftFromCurrentPosition {
     #   3) the prompt row ("Press Enter to select...")
     #   4) one row of breathing room for the cursor / wrapped prompt
     $BottomReserve = 4
-    $WindowSizeY = ($host.UI.RawUI.WindowSize.Height - $BottomReserve)
+    # Use Get-LiveWindowSize for the height: $host.UI.RawUI.WindowSize.Height
+    # returns a stale cached value in ConPTY hosts (Windows Terminal, VS Code
+    # terminal) after a resize, just like [Console]::WindowWidth did for
+    # progress bars. A stale-large height over-estimates RoomLeft, so the
+    # layout under-paginates, the menu overflows the real (smaller) viewport
+    # and scrolls -- pushing the overflowed rows into the scrollback. Maximizing
+    # later reveals that stale scrollback as duplicated menu lines. Falls back
+    # to the cached API only if the live query fails.
+    $live = Get-LiveWindowSize
+    $winHeight = if ($live) { [int]$live.Height } else { $host.UI.RawUI.WindowSize.Height }
+    $WindowSizeY = ($winHeight - $BottomReserve)
     $CurrentPosition = $Host.UI.RawUI.CursorPosition
     # Use viewport-relative Y so scroll buffer history doesn't shrink available space.
     # CursorPosition.Y is absolute buffer row; WindowPosition.Y is the buffer row at
@@ -1426,7 +1436,13 @@ function Show-Menu {
         [Console]::Write("`e[?2026h")
 
         if (-not $NoClear) {
-            Write-Host "`e[2J`e[H"
+            Write-Host "`e[3J`e[2J`e[H"
+            # `e[3J also clears the scrollback buffer (not just the visible
+            # screen). If a prior render overflowed the viewport, the extra
+            # rows scroll into the scrollback; a plain `e[2J leaves them there
+            # so maximizing the window later reveals them as duplicated menu
+            # lines. Wiping the scrollback on each redraw guarantees stale
+            # overflowed rows can never reappear.
             # Clearing the screen wipes the help-box pixels too; invalidate the
             # cached help text so the next Update-HelpText actually redraws it
             # instead of short-circuiting on a stale "text unchanged" match.
@@ -1530,6 +1546,29 @@ function Show-Menu {
         }
         else {
             $Operation = ''
+        }
+
+        # Enforce exactly one selection arrow before drawing. A plain resize
+        # (e.g. maximizing the window) merges previously-separate pages onto
+        # one without going through the PGUP/PGDN bookkeeping that clears stale
+        # .Selected flags. Set-PointerDisplayAsPerMenu only ever updates
+        # .Selected on *displayed* items, so an item selected on a page that
+        # wasn't visible keeps its flag. When the resize makes it visible
+        # again, two arrows render (and the extra selected row looks like a
+        # duplicated line). Keep .Selected on only the first selectable item in
+        # the visible page range; clear it on every other item. If none in the
+        # visible range is selected, all flags are cleared and Start-Navigation's
+        # fallback picks the first displayed item.
+        $keptSelected = $false
+        for ($si = 0; $si -lt $menuItems.Count; $si++) {
+            $smi = $menuItems[$si]
+            if (-not $smi.Selectable -or -not $smi.Selected) { continue }
+            if (-not $keptSelected -and $si -ge $pageStartIndex -and $si -le $pageEndIndex) {
+                $keptSelected = $true
+            }
+            else {
+                $smi.Selected = $false
+            }
         }
 
         # Reset Displayed for every item, then mark the ones we actually render.
