@@ -3681,7 +3681,7 @@ function New-VirtualMachine {
                 $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress) {
+                    if ($vmnet -and $vmnet.MacAddress -and $vmnet.MacAddress -ne '000000000000') {
                         $assignedIP = $thisVmConfig.AssignedIP
                         $scopeId = if ($thisVmConfig.role -in 'InternetClient', 'AADClient') {
                             '172.31.250.0'
@@ -3862,6 +3862,46 @@ function New-VirtualMachine {
         if (-not $started) {
             Write-Log "$VmName`: VM Not Started."
             return $false
+        }
+
+        # Create DHCP reservation now that the VM is started and has a real MAC.
+        # Before Start-VM2, Hyper-V reports MAC as 000000000000 (dynamic MAC
+        # not yet assigned). After start, the real MAC is available.
+        if ($DeployConfig -and -not $OSDClient.IsPresent) {
+            $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                $savedPP2 = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
+                try {
+                    $vmnet2 = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop |
+                        Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' } |
+                        Select-Object -First 1
+                    if ($vmnet2 -and $vmnet2.MacAddress -and $vmnet2.MacAddress -ne '000000000000') {
+                        $scopeId2 = if ($thisVmConfig2.role -in 'InternetClient', 'AADClient') {
+                            '172.31.250.0'
+                        } else {
+                            if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
+                        }
+                        $existing2 = Get-DhcpServerv4Reservation -ScopeId $scopeId2 -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet2.MacAddress }
+                        if ($existing2) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $($existing2.IPAddress) (MAC=$($vmnet2.MacAddress)); keeping" -LogOnly
+                        }
+                        else {
+                            Remove-DHCPReservation -mac $vmnet2.MacAddress -vmName $VmName
+                            Add-DhcpServerv4Reservation -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -ClientId $vmnet2.MacAddress -Description "Reservation for $VmName" -ErrorAction Stop | Out-Null
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$($vmnet2.MacAddress), Scope=$scopeId2)" -LogOnly
+                        }
+                        $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
+                }
+                finally {
+                    $Global:ProgressPreference = $savedPP2
+                }
+            }
         }
 
         if ($SwitchName2) {

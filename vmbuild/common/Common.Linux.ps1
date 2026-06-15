@@ -1123,13 +1123,14 @@ function New-LinuxVirtualMachine {
 
         # Create DHCP reservation now that the MAC is available.
         # AssignedIP was stamped by Set-DeployConfigIPAddresses before Phase 1.
+        # Skip if MAC is null (VM not yet started) — will retry after Start-VM2.
         # Skip if a reservation already exists for this MAC (rerun scenario).
         if ($DeployConfig) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
                 try {
                     $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress) {
+                    if ($vmnet -and $vmnet.MacAddress -and $vmnet.MacAddress -ne '000000000000') {
                         $assignedIP = $thisVmConfig.AssignedIP
                         $scopeId = if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
                         $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
@@ -1141,7 +1142,11 @@ function New-LinuxVirtualMachine {
                             Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
                             Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $assignedIP -ClientId $vmnet.MacAddress -Description "Reservation for $VmName (Linux)" -ErrorAction Stop | Out-Null
                             Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$($vmnet.MacAddress), Scope=$scopeId)" -LogOnly
+                            $thisVmConfig | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                         }
+                    }
+                    else {
+                        Write-Log "$VmName`: MAC not yet assigned (000000000000); DHCP reservation deferred to post-start" -LogOnly
                     }
                 }
                 catch {
@@ -1296,6 +1301,32 @@ function New-LinuxVirtualMachine {
         if (-not $started) {
             Write-Log "$VmName`: Failed to start." -Failure
             return $false
+        }
+
+        # Create DHCP reservation now that VM is started and has a real MAC.
+        if ($DeployConfig) {
+            $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
+            if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
+                try {
+                    $vmnet2 = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
+                    if ($vmnet2 -and $vmnet2.MacAddress -and $vmnet2.MacAddress -ne '000000000000') {
+                        $scopeId2 = if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
+                        $existing2 = Get-DhcpServerv4Reservation -ScopeId $scopeId2 -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet2.MacAddress }
+                        if ($existing2) {
+                            Write-Log "$VmName`: DHCP reservation already exists: $($existing2.IPAddress) (MAC=$($vmnet2.MacAddress)); keeping" -LogOnly
+                        }
+                        else {
+                            Remove-DHCPReservation -mac $vmnet2.MacAddress -vmName $VmName
+                            Add-DhcpServerv4Reservation -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -ClientId $vmnet2.MacAddress -Description "Reservation for $VmName (Linux)" -ErrorAction Stop | Out-Null
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$($vmnet2.MacAddress), Scope=$scopeId2)" -LogOnly
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
+                }
+            }
         }
 
         return $true
