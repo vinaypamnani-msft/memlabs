@@ -1313,6 +1313,18 @@ function Copy-ItemSafe {
             #Write-Host "Loading common: . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose"
             . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
 
+            # Dot-sourcing Common.ps1 -InJob resets $Common.LogPath to the base
+            # VMBuild.log. Re-point it to the domain-specific log (same pattern as
+            # the phase workers in Common.ScriptBlocks.ps1) so this nested job's
+            # entries land in VMBuild.<domain>.log, not VMBuild.log.
+            $domainNameForLogging = $using:VMDomainName
+            if (-not $domainNameForLogging -or $domainNameForLogging -eq "WORKGROUP") {
+                try { $domainNameForLogging = (Get-VMNote -VMName $using:VMName).domain } catch { }
+            }
+            if ($domainNameForLogging) {
+                $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
+            }
+
             $ps = Get-VmSession -VmName $using:VMName -VmDomainName $using:VMDomainName
 
             if ($ps) {
