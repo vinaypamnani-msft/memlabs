@@ -320,24 +320,105 @@ function Start-VM2 {
                 # localized error strings on non-English hosts and
                 # wrapped exceptions.
                 if (($StopError -ne $null) -and ($vm.State -ne 'Running')) {
-                    $isFileInUse = ($StopError.Exception.Message -match 'being used by another process') -or
-                                   ($StopError.Exception.Message -match '0x80070020')
-                    $reason = if ($isFileInUse) { "file-in-use" } else { "Start-VM failed: $($StopError.Exception.Message)" }
-                    write-progress2 "Start VM" -Status "Sweeping stray host mounts for $Name ($reason)" -force
-                    try { Write-Log "${Name}: Start-VM failed ($reason); running Clear-StrayVhdMounts before retry" -LogOnly } catch {}
-                    $cleared = Clear-StrayVhdMounts -VMName $Name
-                    if ($cleared -gt 0) {
-                        try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
-                        $StopError = $null
-                        Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                    # Collapse the (often multi-line) Hyper-V error message to a
+                    # single line BEFORE it touches any progress/log surface.
+                    # Start-VM out-of-memory errors in particular come back as
+                    # "'VM' failed to start.`r`n`r`nNot enough memory in the
+                    # system...`r`n(0x8007000E)..." - feeding those embedded
+                    # CR/LFs to the cursor-positioned Write-Progress2 renderer
+                    # shoves every managed bar around and makes the host spew
+                    # "...) contains new-line" hundreds of times (corrupted UI).
+                    $errMsg = ($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim()
+
+                    $isOutOfMemory = ($errMsg -match '0x8007000E') -or ($errMsg -match 'not enough memory')
+                    if ($isOutOfMemory) {
+                        # Phase 1 starts every new VM concurrently for file
+                        # injection, so the host's committed memory peaks while
+                        # they all boot at once. A late VM can hit OOM
+                        # (0x8007000E) on that peak even though the config "fit"
+                        # the pre-flight check - the pressure is transient and
+                        # eases as earlier VMs finish OOBE and their dynamic
+                        # memory balloons back down. Back off and retry instead
+                        # of failing the whole build and rolling everything back.
+                        $oomAttempt = 0
+                        $oomMaxAttempts = 6
+                        $oomBackoffSec = 30
+                        while (($oomAttempt -lt $oomMaxAttempts) -and ($vm.State -ne 'Running')) {
+                            $oomAttempt++
+
+                            # Diagnostics: how much RAM is free, and which host
+                            # processes are holding it. We deliberately do NOT
+                            # auto-kill anything (killing the wrong host process
+                            # can corrupt a running VM or take down Hyper-V) -
+                            # we surface the top consumers so the operator can
+                            # decide what to close to relieve pressure.
+                            $availGB = $null
+                            try { $availGB = [Math]::Round((Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue / 1024, 1) } catch {}
+                            try {
+                                $allProcs = Get-Process -ErrorAction SilentlyContinue
+                                $topProcs = $allProcs |
+                                    Where-Object { $_.WorkingSet64 -gt 500MB -and $_.Name -notin @('vmms', 'vmwp', 'vmmem', 'System', 'Memory Compression', 'MsMpEng') } |
+                                    Sort-Object WorkingSet64 -Descending | Select-Object -First 5
+                                if ($topProcs) {
+                                    $procList = ($topProcs | ForEach-Object { "$($_.Name)=$([Math]::Round($_.WorkingSet64 / 1GB, 1))GB" }) -join ', '
+                                    Write-Log "${Name}: OOM reclaim hint - top non-HyperV host memory users: $procList" -LogOnly
+                                }
+                                # The Phase 1 VM_Create jobs each spawn a pwsh.exe,
+                                # so ~N concurrent workers individually fall below the
+                                # top-5 cut yet together hold a big chunk of RAM. Sum
+                                # them (plus powershell.exe) so the operator sees the
+                                # aggregate pressure the build itself is creating.
+                                $psProcs = @($allProcs | Where-Object { $_.Name -in @('pwsh', 'powershell') })
+                                if ($psProcs.Count -gt 0) {
+                                    $psTotalGB = [Math]::Round((($psProcs | Measure-Object -Property WorkingSet64 -Sum).Sum / 1GB), 1)
+                                    Write-Log "${Name}: OOM reclaim hint - $($psProcs.Count) PowerShell process(es) (pwsh/powershell) holding ${psTotalGB}GB total" -LogOnly
+                                }
+                            }
+                            catch {}
+
+                            $waitSec = $oomBackoffSec * $oomAttempt
+                            write-progress2 "Start VM" -Status "$Name : not enough host memory; ~${availGB}GB free, waiting ${waitSec}s then retry ($oomAttempt/$oomMaxAttempts)" -force
+                            try { Write-Log "${Name}: Start-VM out of memory (attempt $oomAttempt/$oomMaxAttempts); ~${availGB}GB available; backing off ${waitSec}s for concurrent VMs to finish booting before retry" -Warning } catch {}
+                            Start-Sleep -Seconds $waitSec
+
+                            $StopError = $null
+                            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                            $vm = Get-VM2 -Name $Name -Fallback
+                            if ($vm.State -eq 'Running') {
+                                $StopError = $null
+                                try { Write-Log "${Name}: VM started after OOM back-off (attempt $oomAttempt/$oomMaxAttempts)." } catch {}
+                                break
+                            }
+
+                            # If the failure mode changed to something other than
+                            # OOM, stop the memory-wait loop and let the normal
+                            # stray-mount / outer-retry handling take over.
+                            if ($StopError -and ($StopError.Exception.Message -notmatch '0x8007000E') -and ($StopError.Exception.Message -notmatch 'not enough memory')) {
+                                try { Write-Log "${Name}: Start-VM error changed from OOM to: $(($StopError.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim())" -Warning } catch {}
+                                break
+                            }
+                        }
                     }
-                    elseif ($isFileInUse) {
-                        # No ghosts to clear, but error explicitly says
-                        # the file is locked. The lock is held by something
-                        # we can't fix from here (vmms internal handle,
-                        # antivirus, etc.) - log the diagnostic and let
-                        # the outer retry loop give it another try.
-                        try { Write-Log "${Name}: file-in-use error but Clear-StrayVhdMounts found nothing to clear; lock is held externally" -Warning } catch {}
+                    else {
+                        $isFileInUse = ($errMsg -match 'being used by another process') -or
+                                       ($errMsg -match '0x80070020')
+                        $reason = if ($isFileInUse) { "file-in-use" } else { "Start-VM failed: $errMsg" }
+                        write-progress2 "Start VM" -Status "Sweeping stray host mounts for $Name ($reason)" -force
+                        try { Write-Log "${Name}: Start-VM failed ($reason); running Clear-StrayVhdMounts before retry" -LogOnly } catch {}
+                        $cleared = Clear-StrayVhdMounts -VMName $Name
+                        if ($cleared -gt 0) {
+                            try { Write-Log "${Name}: cleared $cleared stray host mount(s); retrying Start-VM" -LogOnly } catch {}
+                            $StopError = $null
+                            Start-VM -VM $vm -ErrorVariable StopError -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+                        }
+                        elseif ($isFileInUse) {
+                            # No ghosts to clear, but error explicitly says
+                            # the file is locked. The lock is held by something
+                            # we can't fix from here (vmms internal handle,
+                            # antivirus, etc.) - log the diagnostic and let
+                            # the outer retry loop give it another try.
+                            try { Write-Log "${Name}: file-in-use error but Clear-StrayVhdMounts found nothing to clear; lock is held externally" -Warning } catch {}
+                        }
                     }
                 }
                 $vm = Get-VM2 -Name $Name -Fallback
@@ -359,7 +440,10 @@ function Start-VM2 {
             }
 
             if ($StopError.Count -ne 0) {
-                Write-Log "${Name}: Failed to start the VM. $StopError" -Warning
+                # Flatten the error(s) to a single line - a raw multi-line
+                # Hyper-V message (e.g. OOM 0x8007000E) corrupts the progress UI.
+                $stopErrText = (($StopError | ForEach-Object { $_.ToString() }) -join '; ') -replace '\s*\r?\n\s*', ' '
+                Write-Log "${Name}: Failed to start the VM. $stopErrText" -Warning
                 if ($Passthru.IsPresent) {
                     return $false
                 }
