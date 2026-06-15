@@ -86,6 +86,32 @@ Function Write-ProgressElapsed {
     }
 }
 
+# Lightweight diagnostic logger for the progress-bar investigation. Gated by
+# $global:ProgressDiag so it is a no-op in normal runs. Writes to a dedicated
+# progressdiag.log (next to the build log) so it never pollutes VMBuild.log.
+# Safe to call from parent and child-job processes; concurrent-write failures
+# are swallowed since this is diagnostic-only.
+Function Write-ProgressDiagLog {
+    param([string]$Message)
+    if (-not $global:ProgressDiag) { return }
+    try {
+        $diagPath = $global:ProgressDiagPath
+        if (-not $diagPath) {
+            if ($Common -and $Common.LogPath) {
+                $base = Split-Path $Common.LogPath -Parent
+            }
+            else {
+                $base = $env:TEMP
+            }
+            $diagPath = Join-Path $base "progressdiag.log"
+            $global:ProgressDiagPath = $diagPath
+        }
+        $line = "{0} [pid:{1}] {2}`r`n" -f (Get-Date -Format "HH:mm:ss.fff"), $PID, $Message
+        [System.IO.File]::AppendAllText($diagPath, $line)
+    }
+    catch {}
+}
+
 #Main wrapper for Write-Progress.  This allows all params, and catches any errors
 Function Write-Progress2 {
 
@@ -190,8 +216,32 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
+
+                # Diagnostic: count how often the -force path runs (i.e. how often
+                # progress is rendered with ProgressPreference set to 'Continue').
+                if ($global:ProgressDiag) {
+                    if (-not $global:ProgressForceFlips) { $global:ProgressForceFlips = 0 }
+                    $global:ProgressForceFlips++
+                    Write-ProgressDiagLog ("[ForceFlip] tid={0} useLocalPref={1} Activity={2}" -f [System.Threading.Thread]::CurrentThread.ManagedThreadId, ($global:ProgressForceUseLocalPref -ne $false), $Activity)
+                }
+
+                # Root-cause fix for Phase 2 orphan progress bars: PS7 auto-renders a
+                # background job's RAW progress records whenever the PARENT session's
+                # $Global:ProgressPreference is 'Continue'. The old code flipped $Global
+                # to 'Continue' to render our managed bar, which opened a race where any
+                # child-job DataAdded callback surfaced an orphan bar (no VM-name prefix)
+                # at the bottom of the screen. Setting a FUNCTION-LOCAL $ProgressPreference
+                # instead lets the steppable Write-Progress (invoked in this scope) render
+                # our bar while $Global stays 'SilentlyContinue', so the auto-render path
+                # never fires. Set $global:ProgressForceUseLocalPref = $false to restore
+                # the old global-flip behavior (used for A/B repro of the orphan bug).
+                if ($global:ProgressForceUseLocalPref -ne $false) {
+                    $ProgressPreference = 'Continue'
+                }
+                else {
+                    $OriginalProgressPreference = $Global:ProgressPreference
+                    $Global:ProgressPreference = 'Continue'
+                }
             }
 
             $logvalue = $null
@@ -259,7 +309,11 @@ Function Write-Progress2Impl {
 
             if ($force) {
                 $steppablePipeline.Process($_)
-                $Global:ProgressPreference = $OriginalProgressPreference
+                # Only the global-flip path needs restoring; the function-local
+                # $ProgressPreference path is discarded automatically at function exit.
+                if ($global:ProgressForceUseLocalPref -eq $false) {
+                    $Global:ProgressPreference = $OriginalProgressPreference
+                }
             }
             else {
                 $steppablePipeline.Process($_)

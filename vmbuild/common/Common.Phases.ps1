@@ -11,6 +11,37 @@ function Get-JobStreamSource {
     return $Job
 }
 
+# Diagnostic (gated by $global:ProgressDiag): log the volume and last record of a
+# running job's Progress stream, throttled to ~2s per job. Tags each record
+# MANAGED (Activity carries the VM-name prefix) vs RAW (child's own ActivityId-0
+# record that PS7 may auto-render as an orphan). Used to confirm the Phase 2
+# flood vs Phase 3 trickle and pinpoint which records cause the bottom orphan.
+function Write-JobProgressDiag {
+    param($Job)
+    if (-not $global:ProgressDiag) { return }
+    try {
+        if (-not $global:ProgressDiagJobVolume) { $global:ProgressDiagJobVolume = @{} }
+        $streamSource = Get-JobStreamSource -Job $Job
+        if (-not $streamSource -or -not $streamSource.Progress) { return }
+        $now = [DateTime]::UtcNow
+        $key = $Job.Id
+        $entry = $global:ProgressDiagJobVolume[$key]
+        if ($entry -and (($now - $entry.Time).TotalSeconds -lt 2)) { return }
+        $count = $streamSource.Progress.Count
+        if ($entry) { $prevCount = $entry.Count } else { $prevCount = 0 }
+        $delta = $count - $prevCount
+        $global:ProgressDiagJobVolume[$key] = @{ Time = $now; Count = $count }
+        if ($count -gt 0) {
+            $last = $streamSource.Progress[$count - 1]
+            $vmPrefix = ($Job.Name -split " ")[0]
+            $tag = "RAW"
+            if ($last.Activity -and $last.Activity.TrimStart().StartsWith($vmPrefix)) { $tag = "MANAGED" }
+            Write-ProgressDiagLog ("[Vol] job={0} count={1} (+{2}) lastId={3} {4} act='{5}' status='{6}'" -f $Job.Name.Trim(), $count, $delta, $last.ActivityId, $tag, $last.Activity, $last.StatusDescription)
+        }
+    }
+    catch {}
+}
+
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
@@ -103,6 +134,11 @@ function Write-JobProgress {
                         # an extra bar appears without the VM name prefix.
                         $childActivityId = $lastProgress.ActivityId
                         if ($childActivityId -ne $Job.Id) {
+                            if ($global:ProgressDiag) {
+                                if (-not $global:OrphanDismissHits) { $global:OrphanDismissHits = 0 }
+                                $global:OrphanDismissHits++
+                                Write-ProgressDiagLog ("[OrphanDismiss] job={0} childActId={1} act='{2}'" -f $Job.Name.Trim(), $childActivityId, $lastProgress.Activity)
+                            }
                             Write-Progress2 -Activity $lastProgress.Activity -Id $childActivityId -Status "Completed" -Completed -force
                         }
                     }
@@ -769,6 +805,17 @@ function Wait-Phase {
         Set-PS7ProgressWidth # Refresh progress bar width in case the terminal was resized
         Write-Host -NoNewline "$hideCursor" # Reduce flickering in Progress bars
 
+        # Diagnostic (gated by $global:ProgressDiag): one-time environment snapshot.
+        # Progress auto-render behavior differs by PSStyle.Progress.View (Minimal vs
+        # Classic), so capture it along with host/version and the active prefs/switches.
+        if ($global:ProgressDiag) {
+            $pv = "n/a"; $pw = "n/a"
+            try { $pv = $PSStyle.Progress.View } catch {}
+            try { $pw = $PSStyle.Progress.MaxWidth } catch {}
+            Write-ProgressDiagLog ("[Env] Phase={0} Host={1} HostVer={2} ProgressView={3} ProgressMaxWidth={4} GlobalPref={5} PS7={6} UseLocalPref={7}" -f $Phase, $Host.Name, $Host.Version, $pv, $pw, $Global:ProgressPreference, $Common.PS7, ($global:ProgressForceUseLocalPref -ne $false))
+            $global:ProgressDiagJobVolume = @{}
+        }
+
         # Create return object
         $return = [PSCustomObject]@{
             Failed  = 0
@@ -802,6 +849,9 @@ function Wait-Phase {
 
             foreach ($job in $runningJobs) {
                 Write-JobProgress -Job $job -AdditionalData $AdditionalData
+
+                # Diagnostic: record progress-stream volume/last-record for this job.
+                Write-JobProgressDiag -Job $job
 
                 # Surface warning/error output objects from running jobs immediately.
                 $streamSource = Get-JobStreamSource -Job $job
