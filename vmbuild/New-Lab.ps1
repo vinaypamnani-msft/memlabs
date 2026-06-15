@@ -1213,28 +1213,21 @@ finally {
             try { $job.StopJobAsync() } catch { }
         }
 
-        # 3) Poll up to 5 seconds for jobs to transition out of Running
-        $graceSec = 5
-        while ($stopWatch.Elapsed.TotalSeconds -lt $graceSec) {
-            $stillRunning = @(Get-Job | Where-Object { $_.State -eq 'Running' }).Count
-            if ($stillRunning -eq 0) { break }
-            $stopped = $totalJobs - $stillRunning
-            Write-Host -NoNewline "`r${blankLine}`rStopping jobs: $stopped/$totalJobs stopped  ($(& $showElapsed)s)"
-            Start-Sleep -Milliseconds 250
-        }
+        # 3) Wait-Job actively checks child process status and transitions
+        #    jobs out of Running once it detects the process exited. The
+        #    manual Get-Job polling we had before only read cached state and
+        #    never noticed the child was dead, leaving jobs stuck in Running.
+        Write-Host -NoNewline "`r${blankLine}`rWaiting for jobs to stop... ($(& $showElapsed)s)"
+        $null = $runningJobs | Wait-Job -Timeout 10 -ErrorAction SilentlyContinue
 
-        # 4) Remove jobs. Non-running jobs are instant; skip any that
-        #    would block (their process is dead, GC handles the rest).
-        Write-Host -NoNewline "`r${blankLine}`rRemoving jobs... ($(& $showElapsed)s)"
-        foreach ($job in @(Get-Job)) {
-            if ($job.State -ne 'Running') {
+        # 4) Remove all jobs — they should be Stopped/Failed/Completed now.
+        #    Any still somehow Running get Remove-Job -Force (child is dead
+        #    so it shouldn't block).
+        $remaining = @(Get-Job)
+        if ($remaining.Count -gt 0) {
+            Write-Host -NoNewline "`r${blankLine}`rRemoving $($remaining.Count) job(s)... ($(& $showElapsed)s)"
+            foreach ($job in $remaining) {
                 Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-            }
-            else {
-                # Don't call Remove-Job -Force on still-Running jobs — it
-                # blocks for 10+ seconds each. The child process is already
-                # dead; the job object will be GC'd on process exit.
-                Write-Log "Abandoning stuck job $($job.Id) (state: $($job.State), child process already killed)" -LogOnly
             }
         }
     }
