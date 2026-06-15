@@ -1,4 +1,4 @@
-# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.ps1
 [CmdletBinding()]
 param (
@@ -3351,12 +3351,55 @@ function Set-DeployConfigIPAddresses {
     )
 
     $defaultNetwork = $DeployConfig.vmOptions.network
+    if (-not $defaultNetwork) {
+        Write-Log "Set-DeployConfigIPAddresses: No default network in vmOptions. Cannot allocate IPs." -Failure
+        return
+    }
+
+    # Verify DHCP service is running before we try to allocate
+    $dhcpService = Get-Service DHCPServer -ErrorAction SilentlyContinue
+    if (-not $dhcpService -or $dhcpService.Status -ne 'Running') {
+        Write-Log "Set-DeployConfigIPAddresses: DHCP service is not running. Starting..." -Warning
+        $dhcp = Start-DHCP
+        if (-not $dhcp) {
+            Write-Log "Set-DeployConfigIPAddresses: Could not start DHCP service. IP pre-allocation will be skipped." -Failure
+            return
+        }
+    }
+
     # Track IPs we've allocated to prevent duplicates within this run
     $allocatedIps = [System.Collections.Generic.HashSet[string]]::new()
+    $vmCount = 0
+    $skipCount = 0
+    $reuseCount = 0
+    $fixedCount = 0
+    $dynamicCount = 0
+    $failCount = 0
+
+    # Collect all scopes we'll use and verify they exist
+    $scopesNeeded = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden -or $vm.role -eq 'OSDClient') { continue }
+        $sid = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
+        $null = $scopesNeeded.Add($sid)
+    }
+    foreach ($sid in $scopesNeeded) {
+        $scope = Get-DhcpServerv4Scope -ScopeId $sid -ErrorAction SilentlyContinue
+        if (-not $scope) {
+            Write-Log "Set-DeployConfigIPAddresses: DHCP scope $sid does not exist! VMs on this scope will not get pre-assigned IPs." -Warning
+        }
+        else {
+            $stats = Get-DhcpServerv4ScopeStatistics -ScopeId $sid -ErrorAction SilentlyContinue
+            if ($stats) {
+                Write-Log "Set-DeployConfigIPAddresses: Scope $sid ($($scope.Name)): $($stats.Free) free, $($stats.InUse) in use, $($stats.Reserved) reserved" -LogOnly
+            }
+        }
+    }
 
     foreach ($vm in $DeployConfig.virtualMachines) {
-        if ($vm.hidden) { continue }
-        if ($vm.role -eq 'OSDClient') { continue }
+        if ($vm.hidden) { $skipCount++; continue }
+        if ($vm.role -eq 'OSDClient') { $skipCount++; continue }
+        $vmCount++
 
         # Determine the DHCP scope for this VM
         if ($vm.role -in 'InternetClient', 'AADClient') {
@@ -3367,7 +3410,7 @@ function Set-DeployConfigIPAddresses {
         }
         $base = ($scopeId.Split('.') | Select-Object -First 3) -join '.'
         $ip = $null
-        $ipSource = 'new'
+        $ipSource = 'none'
 
         # Check if a DHCP reservation already exists for this VM's MAC
         # (from a previous deploy). If so, reuse it instead of allocating
@@ -3384,21 +3427,32 @@ function Set-DeployConfigIPAddresses {
                     if ($reservation) {
                         $ip = $reservation.IPAddress.IPAddressToString
                         $ipSource = 'existing-reservation'
+                        $reuseCount++
+                    }
+                    else {
+                        Write-Log "$($vm.vmName): VM exists (MAC=$($vmnet.MacAddress)) but no DHCP reservation found in scope $scopeId" -LogOnly
                     }
                 }
+                else {
+                    Write-Log "$($vm.vmName): VM exists but has no domain NIC or MAC" -LogOnly
+                }
             }
-        } catch {}
+        }
+        catch {
+            Write-Log "$($vm.vmName): Error checking existing VM/reservation: $($_.Exception.Message)" -LogOnly
+        }
 
         # Fixed well-known IPs (outside the DHCP pool .20-.199)
         if (-not $ip) {
             switch ($vm.role) {
-                'DC'        { $ip = "$base.1" }
-                'BDC'       { $ip = "$base.3" }
-                'CAS'       { $ip = "$base.5" }
-                'Primary'   { $ip = "$base.10" }
-                'Secondary' { $ip = "$base.15" }
-                'Proxy'     { $ip = "$base.2" }
+                'DC'        { $ip = "$base.1"; $ipSource = 'fixed-role' }
+                'BDC'       { $ip = "$base.3"; $ipSource = 'fixed-role' }
+                'CAS'       { $ip = "$base.5"; $ipSource = 'fixed-role' }
+                'Primary'   { $ip = "$base.10"; $ipSource = 'fixed-role' }
+                'Secondary' { $ip = "$base.15"; $ipSource = 'fixed-role' }
+                'Proxy'     { $ip = "$base.2"; $ipSource = 'fixed-role' }
             }
+            if ($ipSource -eq 'fixed-role') { $fixedCount++ }
         }
 
         # Dynamic allocation from the DHCP pool
@@ -3407,22 +3461,34 @@ function Set-DeployConfigIPAddresses {
                 $freeIP = Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop
                 if ($freeIP) {
                     $ip = $freeIP.ToString()
+                    $ipSource = 'dhcp-pool'
+                    $dynamicCount++
                     # Exclude it immediately so the next call can't return the same address
                     Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $freeIP -EndRange $freeIP -ErrorAction SilentlyContinue | Out-Null
                 }
                 else {
-                    Write-Log "$($vm.vmName): Get-DhcpServerv4FreeIPAddress returned null for scope $scopeId (scope may be exhausted)" -Warning
+                    Write-Log "$($vm.vmName): DHCP scope $scopeId returned no free IPs (scope may be exhausted)" -Warning
+                    $failCount++
                     continue
                 }
             }
             catch {
-                Write-Log "$($vm.vmName): Failed to get free IP from scope $scopeId. $_" -Warning
+                Write-Log "$($vm.vmName): Failed to get free IP from scope ${scopeId}: $($_.Exception.Message)" -Warning
+                $failCount++
                 continue
             }
         }
 
-        if ($ip -and -not $allocatedIps.Add($ip)) {
-            Write-Log "$($vm.vmName): IP $ip already allocated to another VM in this deploy!" -Warning
+        # Validate the IP is well-formed
+        $parsedIP = $null
+        if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIP)) {
+            Write-Log "$($vm.vmName): IP '$ip' is not a valid IPv4 address (source=$ipSource). Skipping." -Warning
+            $failCount++
+            continue
+        }
+
+        if (-not $allocatedIps.Add($ip)) {
+            Write-Log "$($vm.vmName): DUPLICATE — IP $ip already allocated to another VM in this deploy! (source=$ipSource)" -Warning
         }
 
         $vm | Add-Member -MemberType NoteProperty -Name 'AssignedIP' -Value $ip -Force
@@ -3432,14 +3498,16 @@ function Set-DeployConfigIPAddresses {
     # Clean up exclusion ranges we added — the DHCP reservations (created
     # in New-VirtualMachine after New-VM) will prevent reuse. Exclusions
     # block the entire IP even from reservations on some DHCP versions.
+    $cleanedExclusions = 0
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden -or -not $vm.AssignedIP) { continue }
         if ($vm.role -in 'DC', 'BDC', 'CAS', 'Primary', 'Secondary', 'Proxy', 'OSDClient') { continue }
         $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($vm.network) { $vm.network } else { $defaultNetwork } }
-        Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $vm.AssignedIP -EndRange $vm.AssignedIP -ErrorAction SilentlyContinue | Out-Null
+        $removed = Remove-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $vm.AssignedIP -EndRange $vm.AssignedIP -ErrorAction SilentlyContinue -PassThru
+        if ($removed) { $cleanedExclusions++ }
     }
 
-    Write-Log "Pre-allocated IPs for $($allocatedIps.Count) VM(s)"
+    Write-Log "Pre-allocated IPs for $vmCount VM(s): $dynamicCount dynamic, $fixedCount fixed-role, $reuseCount reused, $failCount failed, $skipCount skipped. Cleaned $cleanedExclusions temp exclusions."
 }
 
 function New-VirtualMachine {
