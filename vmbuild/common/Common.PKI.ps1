@@ -1201,11 +1201,28 @@ Empty=True
             if ($rootAlreadyPublished) {
                 _Log "  Root CA cert already published to AD (thumbprint: $rootThumbprint) - skipping"
             } else {
-                & certutil.exe -dspublish -f $rootCertFile RootCA | Out-Null
-                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish RootCA exit code $LASTEXITCODE" }
-                & certutil.exe -dspublish -f $rootCertFile NTAuthCA | Out-Null
-                if ($LASTEXITCODE -ne 0) { _Log "WARNING: certutil -dspublish NTAuthCA exit code $LASTEXITCODE" }
-                _Log "  Root CA cert published to AD"
+                $publishMaxRetries = 3
+                $publishSuccess = $false
+                for ($publishAttempt = 1; $publishAttempt -le $publishMaxRetries; $publishAttempt++) {
+                    & certutil.exe -dspublish -f $rootCertFile RootCA 2>&1 | Out-Null
+                    $rcRoot = $LASTEXITCODE
+                    & certutil.exe -dspublish -f $rootCertFile NTAuthCA 2>&1 | Out-Null
+                    $rcNTAuth = $LASTEXITCODE
+                    if ($rcRoot -eq 0 -and $rcNTAuth -eq 0) {
+                        $publishSuccess = $true
+                        break
+                    }
+                    _Log "WARNING: certutil -dspublish failed (attempt $publishAttempt/$publishMaxRetries): RootCA=$rcRoot, NTAuthCA=$rcNTAuth"
+                    if ($publishAttempt -lt $publishMaxRetries) {
+                        _Log "  Waiting 15s before retry (AD replication/permissions may need time)..."
+                        Start-Sleep -Seconds 15
+                    }
+                }
+                if ($publishSuccess) {
+                    _Log "  Root CA cert published to AD"
+                } else {
+                    _Log "ERROR: certutil -dspublish failed after $publishMaxRetries attempts. Subordinate CA install will likely fail."
+                }
             }
 
             # Publish root CRL to AD (idempotent with -f flag)
