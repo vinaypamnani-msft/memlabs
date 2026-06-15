@@ -69,6 +69,23 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Warning "This harness reproduces a PS7 auto-render behavior; run it under PowerShell 7."
 }
 
+# Diagnostic log written to the mirrored logs folder so the dev box can read
+# it. Captures, per poll cycle, each job's full progress-record inventory
+# (ActivityId/Activity/Percent counts) and exactly which record + Id the
+# parent chose to render. This pinpoints why bars collapse: e.g. whether the
+# ActivityId-0 filter is selecting nothing, or PS7 is grouping every render
+# under one SourceId/line.
+$logDir = Join-Path $PSScriptRoot "..\logs"
+if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$script:ReproLog = Join-Path $logDir ("Repro-ProgressOrphan-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+function Write-ReproLog {
+    param([string]$Message)
+    $line = "{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $Message
+    Add-Content -Path $script:ReproLog -Value $line -Encoding utf8
+}
+Write-Host ("Diagnostic log: {0}" -f $script:ReproLog) -ForegroundColor DarkGray
+Write-ReproLog ("[Env] PS={0} Host={1} ProgressView={2} UseLocalPref={3} WithDhcp={4} PinChildGlobalPref={5} JobCount={6}" -f $PSVersionTable.PSVersion, $Host.Name, ($PSStyle.Progress.View), $UseLocalPref, $WithDhcp, $PinChildGlobalPref, $JobCount)
+
 # Resolve a DHCP scope to exercise the CIM-progress path. If DHCP isn't
 # available, fall back to the synthetic-only flood with a warning.
 if ($WithDhcp) {
@@ -178,8 +195,10 @@ foreach ($n in 1..$JobCount) {
 
 $deadline = (Get-Date).AddSeconds($Seconds)
 $esc = [char]27
+$script:cycle = 0
 try {
     while ((Get-Date) -lt $deadline -and ($jobs | Where-Object { $_.State -eq 'Running' })) {
+        $script:cycle++
         # Begin synchronized output, exactly like Wait-Phase: the terminal
         # buffers every progress redraw in this frame and paints them at once.
         # Without this the per-Id rows flicker and can visually collapse.
@@ -204,6 +223,25 @@ try {
                     break
                 }
             }
+
+            # Diagnostic: inventory the distinct ActivityIds present (detects
+            # CIM-injected records) and log the chosen record + render Id.
+            if ($script:cycle -le 3 -or ($script:cycle % 10 -eq 0)) {
+                $actIds = @{}
+                for ($pi = 0; $pi -lt $count; $pi++) {
+                    $aid = $src.Progress[$pi].ActivityId
+                    if (-not $actIds.ContainsKey($aid)) { $actIds[$aid] = 0 }
+                    $actIds[$aid]++
+                }
+                $actSummary = ($actIds.GetEnumerator() | Sort-Object Name | ForEach-Object { "Id$($_.Key)x$($_.Value)" }) -join ","
+                if ($last) {
+                    Write-ReproLog ("[c{0}] job={1} jobId={2} count={3} actIds=[{4}] -> render Id={2} act='{5}' pct={6}" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary, $last.Activity, $last.PercentComplete)
+                }
+                else {
+                    Write-ReproLog ("[c{0}] job={1} jobId={2} count={3} actIds=[{4}] -> NO RECORD SELECTED" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary)
+                }
+            }
+
             if ($last) {
                 # Managed bar: prefix with VM name, render under the job's own Id.
                 Invoke-ManagedRender -Id $job.Id -Activity ("{0}: {1}" -f $job.Name, $last.Activity) -Status $last.StatusDescription -Percent ([int]$last.PercentComplete) -UseLocalPref $UseLocalPref
