@@ -75,7 +75,16 @@ param(
     #   * If count GROWS after iteration N    -> CIM only drains while ongoing
     #     (fix: move all DHCP work to the parent so children do zero CIM).
     # 0 = current behavior (DHCP every iteration). Try 3 for the test.
-    [int]$DhcpFirstN = 0
+    [int]$DhcpFirstN = 0,
+    # CANDIDATE FIX. DhcpFirstN proved a single CIM call PERMANENTLY poisons the
+    # child runspace's progress routing: count stays 0 for the rest of the run
+    # even after the child stops calling DHCP. So the fix is to keep the CIM
+    # cmdlet OUT of the child's main runspace. When this is set, the child runs
+    # each Get-DhcpServerv4Reservation in a FRESH in-process [powershell]
+    # runspace (cheap -- no process spawn) so the CIM progress plumbing attaches
+    # to that throwaway runspace, never the one whose .Progress the parent reads.
+    # EXPECT: count grows, 4 clean stacked bars render.
+    [bool]$DhcpInIsolatedRunspace = $false
 )
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -176,10 +185,10 @@ function Invoke-ManagedRender {
 # sites), so the fresh runspace default 'Continue' lets the CIM progress
 # records enter the child's Progress stream -- exactly what PS7 auto-renders.
 $childScript = {
-    param($VmName, $Iterations, $WithDhcp, $ScopeId, $PinChildGlobalPref, $DhcpFirstN)
+    param($VmName, $Iterations, $WithDhcp, $ScopeId, $PinChildGlobalPref, $DhcpFirstN, $DhcpInIsolatedRunspace)
     # Emit a start marker + the child's view of its own pref so the parent can
     # log whether the child even began and what ProgressPreference it inherited.
-    "CHILD-START $VmName pref=$($Global:ProgressPreference) local=$ProgressPreference WithDhcp=$WithDhcp ScopeId=$ScopeId DhcpFirstN=$DhcpFirstN"
+    "CHILD-START $VmName pref=$($Global:ProgressPreference) local=$ProgressPreference WithDhcp=$WithDhcp ScopeId=$ScopeId DhcpFirstN=$DhcpFirstN Isolated=$DhcpInIsolatedRunspace"
     $dhcpDone = 0
     try {
         foreach ($i in 1..$Iterations) {
@@ -188,7 +197,19 @@ $childScript = {
             # the child stops issuing CIM calls.
             $doDhcp = $WithDhcp -and $ScopeId -and (($DhcpFirstN -le 0) -or ($i -le $DhcpFirstN))
             if ($doDhcp) {
-                if ($PinChildGlobalPref) {
+                if ($DhcpInIsolatedRunspace) {
+                    # Run the CIM cmdlet in a throwaway in-process runspace so its
+                    # progress plumbing never attaches to THIS runspace (whose
+                    # .Progress the parent reads). No process spawn -- much cheaper
+                    # than a nested Start-Job.
+                    $ps = [powershell]::Create()
+                    try {
+                        [void]$ps.AddScript('param($s) Get-DhcpServerv4Reservation -ScopeId $s -ErrorAction SilentlyContinue | Out-Null').AddArgument($ScopeId)
+                        [void]$ps.Invoke()
+                    }
+                    finally { $ps.Dispose() }
+                }
+                elseif ($PinChildGlobalPref) {
                     # Candidate real fix: pin the child runspace's GLOBAL pref so the
                     # DHCP CIM cmdlet emits no progress records into the stream.
                     $childOrig = $Global:ProgressPreference
@@ -231,7 +252,7 @@ $Global:ProgressPreference = 'Continue'
 $jobs = @()
 foreach ($n in 1..$JobCount) {
     $vmName = "ZZ-VM{0:D2}" -f $n
-    $jobs += Start-Job -Name $vmName -ScriptBlock $childScript -ArgumentList $vmName, ([int]($Seconds * 40)), $WithDhcp, $ScopeId, $PinChildGlobalPref, $DhcpFirstN
+    $jobs += Start-Job -Name $vmName -ScriptBlock $childScript -ArgumentList $vmName, ([int]($Seconds * 40)), $WithDhcp, $ScopeId, $PinChildGlobalPref, $DhcpFirstN, $DhcpInIsolatedRunspace
 }
 
 # Now -- AFTER the children inherited 'Continue' -- flip the parent to silent,
