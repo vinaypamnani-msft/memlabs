@@ -129,12 +129,15 @@ function Write-JobProgress {
                         # the default ActivityId (0), but the managed bar above uses
                         # $Job.Id. If PS7 surfaces the child's record at its original Id,
                         # an extra bar appears without the VM name prefix.
+                        # Use $Host.UI.WriteProgress() directly to bypass ProgressPreference
+                        # and avoid the race where toggling to 'Continue' lets PSRP
+                        # callbacks from other jobs render stray bars.
                         $childActivityId = $lastProgress.ActivityId
                         if ($childActivityId -ne $Job.Id) {
-                            $savedPref = $Global:ProgressPreference
-                            $Global:ProgressPreference = 'Continue'
-                            Write-Progress -Id $childActivityId -Activity $lastProgress.Activity -Completed
-                            $Global:ProgressPreference = $savedPref
+                            $dismissRecord = [System.Management.Automation.ProgressRecord]::new(
+                                $childActivityId, $lastProgress.Activity, "Completed")
+                            $dismissRecord.RecordType = [System.Management.Automation.ProgressRecordType]::Completed
+                            $Host.UI.WriteProgress(0, $dismissRecord)
                         }
                     }
                 }
@@ -874,10 +877,12 @@ function Wait-Phase {
             # auto-render these from the PSDataCollection before our poll picks
             # them up, producing blank/stray lines. Writing -Completed for Id 0
             # every 500ms ensures any such orphan is immediately cleared.
-            $savedPrefBlanket = $Global:ProgressPreference
-            $Global:ProgressPreference = 'Continue'
-            Write-Progress -Id 0 -Activity "." -Completed
-            $Global:ProgressPreference = $savedPrefBlanket
+            # Use $Host.UI.WriteProgress() directly to bypass ProgressPreference
+            # and avoid the race where toggling to 'Continue' lets PSRP callbacks
+            # from other jobs render stray bars during the toggle window.
+            $dismissRecord = [System.Management.Automation.ProgressRecord]::new(0, ".", "Completed")
+            $dismissRecord.RecordType = [System.Management.Automation.ProgressRecordType]::Completed
+            $Host.UI.WriteProgress(0, $dismissRecord)
 
             $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
             foreach ($job in $failedJobs) {

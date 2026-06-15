@@ -190,8 +190,12 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
+                # Don't toggle $Global:ProgressPreference here. The -force path
+                # calls $Host.UI.WriteProgress() directly in the process block,
+                # bypassing ProgressPreference entirely. Toggling to 'Continue'
+                # creates a race window where PSRP callbacks from Start-Job
+                # children see 'Continue' on a thread-pool thread and render
+                # stray progress bars at the wrong ActivityId.
             }
 
             $logvalue = $null
@@ -205,19 +209,12 @@ Function Write-Progress2Impl {
             if ($PSBoundParameters.TryGetValue('Activity', [ref]$Activityvalue)) {
                 $Activityvalue = $Activity.Trim()
                 $Activityvalue = "  " + $Activityvalue
-                # if ($Activityvalue.Contains("`n")) {
-                #     Write-Log "$Activity contains new-line"
-                # }
                 $PSBoundParameters['Activity'] = $Activityvalue
             }
 
             $StatusValue = $null
             if ($PSBoundParameters.TryGetValue('Status', [ref]$StatusValue)) {
                 $StatusValue = $StatusValue.TrimEnd()
-
-                #if ($StatusValue.Contains("`n")) {
-                #    Write-Log "$StatusValue contains new-line"
-                #}
                 $PSBoundParameters['Status'] = $StatusValue
             }
 
@@ -229,34 +226,23 @@ Function Write-Progress2Impl {
                     Write-Log "Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
                     $Global:LastStatus = $Status + $Percent
                 }
-                else {
-                    #Write-Log "Ignored Write-Status: Activity: $Activity  Status: $Status Percent: $Percent" -verbose -LogOnly
-                }
             }
 
-            $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
-            $scriptCmd = { & $wrappedCmd @PSBoundParameters }
-
-            $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
-            $steppablePipeline.Begin($PSCmdlet)
+            if (-not $force) {
+                $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
+                $scriptCmd = { & $wrappedCmd @PSBoundParameters }
+                $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
+                $steppablePipeline.Begin($PSCmdlet)
+            }
         }
         catch {
             throw
-        }
-        finally {
-            if ($force) {
-                $Global:ProgressPreference = $OriginalProgressPreference
-            }
         }
 
     }
     process {
 
         try {
-            if ($force) {
-                $OriginalProgressPreference = $Global:ProgressPreference
-                $Global:ProgressPreference = 'Continue'
-            }
             if ($Activity) {
                 $Activity = $Activity.TrimEnd()
                 if ($Activity.Contains("`n")) {
@@ -277,22 +263,37 @@ Function Write-Progress2Impl {
                 $PercentComplete = 99
             }
 
-            $steppablePipeline.Process($_)
+            if ($force) {
+                # Bypass ProgressPreference entirely by calling PSHost directly.
+                # This avoids the race where temporarily setting ProgressPreference
+                # to 'Continue' allows PSRP callbacks from other Start-Job children
+                # to render stray progress bars at the wrong position.
+                $actText = if ($Activityvalue) { $Activityvalue } else { "  $Activity" }
+                $statText = if ($StatusValue) { $StatusValue } else { if ($Status) { $Status } else { "Processing" } }
+                $idVal = if ($PSBoundParameters.ContainsKey('Id')) { $PSBoundParameters['Id'] } else { 0 }
+                $pr = [System.Management.Automation.ProgressRecord]::new($idVal, $actText, $statText)
+                $pr.PercentComplete = $PercentComplete
+                if ($Completed) { $pr.RecordType = [System.Management.Automation.ProgressRecordType]::Completed }
+                if ($SecondsRemaining -and $SecondsRemaining -gt 0) { $pr.SecondsRemaining = $SecondsRemaining }
+                if ($CurrentOperation) { $pr.CurrentOperation = $CurrentOperation }
+                if ($PSBoundParameters.ContainsKey('ParentId')) { $pr.ParentId = $ParentId }
+                $Host.UI.WriteProgress(0, $pr)
+            }
+            else {
+                $steppablePipeline.Process($_)
+            }
         }
         catch {
             throw
-        }
-        finally {
-            if ($force) {
-                $Global:ProgressPreference = $OriginalProgressPreference
-            }
         }
 
     }
     end {
 
         try {
-            $steppablePipeline.End()
+            if (-not $force) {
+                $steppablePipeline.End()
+            }
         }
         catch {
             throw
