@@ -4232,6 +4232,34 @@ function Wait-ForVm {
                                 $mountResult = Mount-VHD -Path $osDisk -Passthru -ErrorAction Stop
                                 $driveLetter = ($mountResult | Get-Disk | Get-Partition | Where-Object { $_.Type -eq 'Basic' -and $_.Size -gt 1GB } | Get-Volume | Sort-Object SizeRemaining -Descending | Select-Object -First 1).DriveLetter
                                 if ($driveLetter) {
+                                    # Capture Setup/Sysprep logs while the disk is mounted.
+                                    # These are overwritten once OOBE succeeds, so this is
+                                    # the only chance to see what went wrong.
+                                    $pantherLogs = @(
+                                        "${driveLetter}:\Windows\Panther\setuperr.log",
+                                        "${driveLetter}:\Windows\Panther\UnattendGC\setuperr.log",
+                                        "${driveLetter}:\Windows\System32\Sysprep\Panther\setuperr.log"
+                                    )
+                                    foreach ($pLog in $pantherLogs) {
+                                        if (Test-Path $pLog) {
+                                            $logLabel = $pLog.Replace("${driveLetter}:", '')
+                                            $tail = Get-Content $pLog -Tail 15 -ErrorAction SilentlyContinue
+                                            if ($tail) {
+                                                Write-Log "$VmName`: $logLabel (last 15 lines):" -Warning
+                                                foreach ($pLine in $tail) { Write-Log "  $pLine" -LogOnly }
+                                            }
+                                        }
+                                    }
+                                    # Also grab the last 5 lines of setupact.log for context
+                                    $setupActPath = "${driveLetter}:\Windows\Panther\setupact.log"
+                                    if (Test-Path $setupActPath) {
+                                        $actTail = Get-Content $setupActPath -Tail 5 -ErrorAction SilentlyContinue
+                                        if ($actTail) {
+                                            Write-Log "$VmName`: \Windows\Panther\setupact.log (last 5 lines):" -LogOnly
+                                            foreach ($aLine in $actTail) { Write-Log "  $aLine" -LogOnly }
+                                        }
+                                    }
+
                                     $hivePath = "${driveLetter}:\Windows\System32\config\SYSTEM"
                                     if (Test-Path $hivePath) {
                                         $regKey = "HKLM\VMBUILD_OFFLINE_SYSTEM"
