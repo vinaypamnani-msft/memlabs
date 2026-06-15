@@ -826,6 +826,17 @@ function Wait-Phase {
                 }
             }
 
+            # Blanket-dismiss ActivityId 0 after each poll cycle. CIM cmdlets
+            # (DHCP, Hyper-V) write progress at Id 0 in child processes. Even
+            # with $Global:ProgressPreference = 'SilentlyContinue', PS7 can
+            # auto-render these from the PSDataCollection before our poll picks
+            # them up, producing blank/stray lines. Writing -Completed for Id 0
+            # every 500ms ensures any such orphan is immediately cleared.
+            $savedPrefBlanket = $Global:ProgressPreference
+            $Global:ProgressPreference = 'Continue'
+            Write-Progress -Id 0 -Activity "." -Completed
+            $Global:ProgressPreference = $savedPrefBlanket
+
             $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
             foreach ($job in $failedJobs) {
                 $FailRetry = $FailRetry + 1
