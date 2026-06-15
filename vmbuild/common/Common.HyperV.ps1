@@ -220,6 +220,90 @@ function Clear-StrayVhdMounts {
     }
 }
 
+# Best-effort host memory reclamation, used before retrying a Start-VM that
+# failed with OOM (0x8007000E). Nothing here kills a process or touches a VM -
+# it only asks Windows to hand physical RAM back to the available pool so the
+# next Start-VM has room to back the guest's startup memory:
+#
+#   1. .NET GC in THIS host process. The parent pwsh holds the whole
+#      deployConfig, loaded modules and per-phase state; a full collect +
+#      finalize + compacting LOH collect frees managed heap.
+#   2. Trim the working set of every pwsh/powershell process (this one and the
+#      ~N concurrent VM_Create job workers). SetProcessWorkingSetSize(-1,-1)
+#      tells Windows to page each process down to its minimum resident set,
+#      pushing private committed pages out to the pagefile and returning the
+#      physical frames to the free/zeroed list. The pages fault back in on
+#      demand, so this is safe - just slower for those idle workers.
+#   3. Flush the system file cache working set (SetSystemFileCacheSize with
+#      -1,-1), releasing cached file pages that Phase 1's VHD copy/inject left
+#      resident.
+#
+# Returns the change in '\Memory\Available MBytes' (MB freed) for logging.
+function Invoke-HostMemoryReclaim {
+    [CmdletBinding()]
+    param()
+
+    $beforeMB = $null
+    try { $beforeMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+
+    # Native helpers (idempotent Add-Type; -ErrorAction SilentlyContinue so a
+    # second load in the same session is a no-op).
+    try {
+        if (-not ('MemLabs.MemReclaim' -as [type])) {
+            Add-Type -ErrorAction SilentlyContinue -Namespace 'MemLabs' -Name 'MemReclaim' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetProcessWorkingSetSize(System.IntPtr proc, System.IntPtr min, System.IntPtr max);
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetSystemFileCacheSize(System.IntPtr minSize, System.IntPtr maxSize, int flags);
+'@
+        }
+    }
+    catch {}
+
+    # 1. Managed GC in the host process.
+    try {
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        [System.GC]::Collect()
+    }
+    catch {}
+
+    # 2. Trim working sets of our PowerShell processes (host + job workers).
+    $trimmed = 0
+    try {
+        $psProcs = Get-Process -Name 'pwsh', 'powershell' -ErrorAction SilentlyContinue
+        foreach ($p in $psProcs) {
+            try {
+                if ([MemLabs.MemReclaim]::SetProcessWorkingSetSize($p.Handle, [System.IntPtr](-1), [System.IntPtr](-1))) {
+                    $trimmed++
+                }
+            }
+            catch {}
+        }
+    }
+    catch {}
+
+    # 3. Flush the system file cache working set.
+    try { [void][MemLabs.MemReclaim]::SetSystemFileCacheSize([System.IntPtr](-1), [System.IntPtr](-1), 0) } catch {}
+
+    $afterMB = $null
+    try { $afterMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+
+    $freedMB = if (($null -ne $beforeMB) -and ($null -ne $afterMB)) { [Math]::Round($afterMB - $beforeMB, 0) } else { $null }
+    try {
+        if ($null -ne $freedMB) {
+            Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache; available memory changed by ${freedMB}MB (now $([Math]::Round($afterMB,0))MB)" -LogOnly
+        }
+        else {
+            Write-Log "Invoke-HostMemoryReclaim: GC + trimmed $trimmed PowerShell working set(s) + flushed file cache" -LogOnly
+        }
+    }
+    catch {}
+
+    return $freedMB
+}
+
 function Start-VM2 {
     [CmdletBinding()]
     param (
@@ -377,8 +461,14 @@ function Start-VM2 {
                             catch {}
 
                             $waitSec = $oomBackoffSec * $oomAttempt
-                            write-progress2 "Start VM" -Status "$Name : not enough host memory; ~${availGB}GB free, waiting ${waitSec}s then retry ($oomAttempt/$oomMaxAttempts)" -force
+                            write-progress2 "Start VM" -Status "$Name : not enough host memory; ~${availGB}GB free, reclaiming + waiting ${waitSec}s then retry ($oomAttempt/$oomMaxAttempts)" -force
                             try { Write-Log "${Name}: Start-VM out of memory (attempt $oomAttempt/$oomMaxAttempts); ~${availGB}GB available; backing off ${waitSec}s for concurrent VMs to finish booting before retry" -Warning } catch {}
+
+                            # Best-effort: GC the host process, trim PowerShell
+                            # working sets, and flush the file cache so physical
+                            # RAM returns to the available pool before we retry.
+                            try { Invoke-HostMemoryReclaim | Out-Null } catch {}
+
                             Start-Sleep -Seconds $waitSec
 
                             $StopError = $null
