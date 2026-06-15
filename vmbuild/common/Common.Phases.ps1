@@ -60,12 +60,11 @@ function Write-JobProgress {
             # auto-render the child job's raw progress records as orphan bars (no VM name prefix).
             $lastProgress = $null
             $progressCount = $streamSource.Progress.Count
-            $jobNamePrefix = $job.Name.TrimEnd()
             for ($pi = $progressCount - 1; $pi -ge 0; $pi--) {
                 $candidate = $streamSource.Progress[$pi]
                 if ($candidate.Activity -ne "Preparing modules for first use." -and
                     $candidate.Activity -ne "Compress-Archive" -and
-                    $candidate.Activity.Contains($jobNamePrefix)) {
+                    $candidate.ActivityId -eq 0) {
                     $lastProgress = $candidate
                     break
                 }
