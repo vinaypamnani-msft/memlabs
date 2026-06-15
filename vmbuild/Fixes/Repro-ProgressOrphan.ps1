@@ -77,9 +77,21 @@ if ($WithDhcp) {
     }
 }
 
-# Mirror Write-Progress2Impl's -force render. When $UseLocalPref the function-local
-# $ProgressPreference is honored by Write-Progress while $Global stays Silent.
+# Faithful copy of Write-Progress2Impl's -force render path. The previous
+# simplified version called Write-Progress directly, which diverged from
+# production in three ways that broke the repro (bars collapsed onto one line
+# and the orphan only partially surfaced):
+#   1. Production renders through a STEPPABLE PIPELINE built from
+#      Microsoft.PowerShell.Utility\Write-Progress and invoked via the wrapping
+#      function's CommandOrigin. That shared CommandOrigin is the SourceId PS7's
+#      progress renderer uses to group the per-Id rows into one stacked panel.
+#      A bare Write-Progress call has a different origin and the rows fight over
+#      a single line.
+#   2. Production prepends "  " to the Activity (indent) -- mirror it so the
+#      rendered width/layout matches.
+#   3. Production clamps PercentComplete to 1..99.
 function Invoke-ManagedRender {
+    [CmdletBinding()]
     param(
         [int]$Id,
         [string]$Activity,
@@ -87,15 +99,33 @@ function Invoke-ManagedRender {
         [int]$Percent,
         [bool]$UseLocalPref
     )
+    # Clamp exactly like Write-Progress2Impl.
+    if ($Percent -le 1) { $Percent = 1 }
+    if ($Percent -ge 100) { $Percent = 99 }
+    # Indent prefix exactly like Write-Progress2Impl.
+    $Activity = "  " + $Activity.Trim()
+    $Status = $Status.TrimEnd()
+
     if ($UseLocalPref) {
+        # FIX: function-local pref; $Global stays SilentlyContinue.
         $ProgressPreference = 'Continue'
-        Microsoft.PowerShell.Utility\Write-Progress -Id $Id -Activity $Activity -Status $Status -PercentComplete $Percent
     }
     else {
-        $orig = $Global:ProgressPreference
+        # OLD: flip $Global to 'Continue' for the render window.
+        $OriginalProgressPreference = $Global:ProgressPreference
         $Global:ProgressPreference = 'Continue'
-        Microsoft.PowerShell.Utility\Write-Progress -Id $Id -Activity $Activity -Status $Status -PercentComplete $Percent
-        $Global:ProgressPreference = $orig
+    }
+
+    $wpArgs = @{ Id = $Id; Activity = $Activity; Status = $Status; PercentComplete = $Percent }
+    $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
+    $scriptCmd = { & $wrappedCmd @wpArgs }
+    $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
+    $steppablePipeline.Begin($PSCmdlet)
+    $steppablePipeline.Process($null)
+    $steppablePipeline.End()
+
+    if (-not $UseLocalPref) {
+        $Global:ProgressPreference = $OriginalProgressPreference
     }
 }
 
@@ -126,8 +156,14 @@ foreach ($n in 1..$JobCount) {
 }
 
 $deadline = (Get-Date).AddSeconds($Seconds)
+$esc = [char]27
 try {
     while ((Get-Date) -lt $deadline -and ($jobs | Where-Object { $_.State -eq 'Running' })) {
+        # Begin synchronized output, exactly like Wait-Phase: the terminal
+        # buffers every progress redraw in this frame and paints them at once.
+        # Without this the per-Id rows flicker and can visually collapse.
+        [Console]::Write("$esc[?2026h")
+
         foreach ($job in $jobs) {
             $src = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
             $count = $src.Progress.Count
@@ -137,6 +173,13 @@ try {
                 Invoke-ManagedRender -Id $job.Id -Activity ("{0}: {1}" -f $job.Name, $last.Activity) -Status $last.StatusDescription -Percent ([int]$last.PercentComplete) -UseLocalPref $UseLocalPref
             }
         }
+
+        # Blanket-dismiss ActivityId 0 after each poll cycle, exactly like
+        # Wait-Phase. CIM cmdlets (DHCP) write progress at Id 0 in the child;
+        # this clears any orphan PS7 auto-rendered from that record.
+        Invoke-ManagedRender -Id 0 -Activity "." -Status "Completed" -Percent 100 -UseLocalPref $UseLocalPref
+        Microsoft.PowerShell.Utility\Write-Progress -Id 0 -Activity "." -Completed
+
         # Parent-side DHCP CIM call, mirroring Set-DeployConfigIPAddresses /
         # Remove-DHCPReservation that overlap Wait-Phase. CIM cmdlets resolve
         # ProgressPreference from the parent's GLOBAL scope; with the old
@@ -146,6 +189,10 @@ try {
         }
         # Hold Global silent between renders, exactly like Wait-Phase.
         $Global:ProgressPreference = 'SilentlyContinue'
+
+        # End synchronized output -- terminal paints the whole frame at once.
+        [Console]::Write("$esc[?2026l")
+
         Start-Sleep -Milliseconds 200
     }
 }
