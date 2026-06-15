@@ -51,7 +51,18 @@ param(
     # PS7 can auto-render them during the parent's -force flip window.
     [bool]$WithDhcp = $true,
     # DHCP scope to read. Auto-detected from the host's first scope when blank.
-    [string]$ScopeId = ""
+    [string]$ScopeId = "",
+    # THE REAL FIX EXPERIMENT. Empirically, DHCP-off renders 4 clean stacked
+    # bars but DHCP-on collapses them onto a single overwriting line for BOTH
+    # -UseLocalPref values -- proving the function-local ProgressPreference
+    # change in the PARENT does NOT fix the DHCP breakage. The trigger is the
+    # CHILD job's DHCP CIM call: a fresh Start-Job runspace defaults
+    # $Global:ProgressPreference to 'Continue', so the CIM cmdlet emits genuine
+    # progress records that PS7 auto-renders (and that the parent's naive
+    # last-record read surfaces), corrupting the managed panel. When this is
+    # $true the child pins $Global:ProgressPreference = 'SilentlyContinue'
+    # around its DHCP call -- expected to restore the 4 clean stacked bars.
+    [bool]$PinChildGlobalPref = $false
 )
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -135,24 +146,34 @@ function Invoke-ManagedRender {
 # sites), so the fresh runspace default 'Continue' lets the CIM progress
 # records enter the child's Progress stream -- exactly what PS7 auto-renders.
 $childScript = {
-    param($VmName, $Iterations, $WithDhcp, $ScopeId)
+    param($VmName, $Iterations, $WithDhcp, $ScopeId, $PinChildGlobalPref)
     foreach ($i in 1..$Iterations) {
         if ($WithDhcp -and $ScopeId) {
-            Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
+            if ($PinChildGlobalPref) {
+                # Candidate real fix: pin the child runspace's GLOBAL pref so the
+                # DHCP CIM cmdlet emits no progress records into the stream.
+                $childOrig = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
+                Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
+                $Global:ProgressPreference = $childOrig
+            }
+            else {
+                Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
+            }
         }
         Write-Progress -Id 0 -Activity "Injecting tools" -Status "Injecting Tool $i to $VmName (Stop1 False)" -PercentComplete (($i % 100))
         Start-Sleep -Milliseconds 25
     }
 }
 
-Write-Host ("Starting {0} jobs. UseLocalPref={1} WithDhcp={2}. Watch the BOTTOM of the screen for an un-prefixed orphan bar." -f $JobCount, $UseLocalPref, $WithDhcp) -ForegroundColor Cyan
+Write-Host ("Starting {0} jobs. UseLocalPref={1} WithDhcp={2} PinChildGlobalPref={3}. Watch the BOTTOM of the screen for an un-prefixed orphan bar." -f $JobCount, $UseLocalPref, $WithDhcp, $PinChildGlobalPref) -ForegroundColor Cyan
 
 $Global:ProgressPreference = 'SilentlyContinue'
 
 $jobs = @()
 foreach ($n in 1..$JobCount) {
     $vmName = "ZZ-VM{0:D2}" -f $n
-    $jobs += Start-Job -Name $vmName -ScriptBlock $childScript -ArgumentList $vmName, ([int]($Seconds * 40)), $WithDhcp, $ScopeId
+    $jobs += Start-Job -Name $vmName -ScriptBlock $childScript -ArgumentList $vmName, ([int]($Seconds * 40)), $WithDhcp, $ScopeId, $PinChildGlobalPref
 }
 
 $deadline = (Get-Date).AddSeconds($Seconds)
@@ -167,8 +188,23 @@ try {
         foreach ($job in $jobs) {
             $src = if ($job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
             $count = $src.Progress.Count
-            if ($count -gt 0) {
-                $last = $src.Progress[$count - 1]
+            # Select the last record the same way Write-JobProgress does:
+            # iterate backward and take the first ActivityId-0 record that
+            # isn't job-init noise. The naive last-record read surfaced the
+            # child's raw DHCP CIM records as managed bars, which corrupted
+            # the panel. This filter keeps the managed bar tied to the
+            # synthetic 'Injecting tools' record like production.
+            $last = $null
+            for ($pi = $count - 1; $pi -ge 0; $pi--) {
+                $cand = $src.Progress[$pi]
+                if ($cand.ActivityId -eq 0 -and
+                    $cand.Activity -ne "Preparing modules for first use." -and
+                    $cand.Activity -ne "Compress-Archive") {
+                    $last = $cand
+                    break
+                }
+            }
+            if ($last) {
                 # Managed bar: prefix with VM name, render under the job's own Id.
                 Invoke-ManagedRender -Id $job.Id -Activity ("{0}: {1}" -f $job.Name, $last.Activity) -Status $last.StatusDescription -Percent ([int]$last.PercentComplete) -UseLocalPref $UseLocalPref
             }
