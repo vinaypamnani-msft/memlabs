@@ -3526,6 +3526,41 @@ function Set-DeployConfigIPAddresses {
         }
     }
 
+    # Seed SQLAO virtual IPs (cluster + AG listener) so Get-DhcpServerv4FreeIPAddress
+    # can't hand them out to another VM on rerun. The SQLAO 2nd-NIC code adds these
+    # exclusions at allocation time, but Common.Remove.ps1 strips them when a SQLAO
+    # VM is removed, and a partial rebuild can leave stale ClusterIPAddress/AGIPAddress
+    # values in deployConfig / VM Notes with no matching DHCP exclusion. Re-asserting
+    # them here ensures the IP isn't leased out before Phase 5 tries to bring the
+    # cluster online.
+    $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+            $val = $sqlaoVm.$prop
+            if ($val) { $null = $sqlaoIps.Add(($val -replace '/.+$', '')) }
+        }
+        try {
+            $note = Get-VMNote -VMName $sqlaoVm.vmName -ErrorAction SilentlyContinue
+            if ($note) {
+                foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+                    $val = $note.$prop
+                    if ($val) { $null = $sqlaoIps.Add(($val -replace '/.+$', '')) }
+                }
+            }
+        }
+        catch {}
+    }
+    foreach ($sqlaoIp in $sqlaoIps) {
+        $parsed = $null
+        if (-not [System.Net.IPAddress]::TryParse($sqlaoIp, [ref]$parsed)) { continue }
+        $sqlaoScope = ($sqlaoIp.Split('.') | Select-Object -First 3) -join '.'
+        $sqlaoScope = "$sqlaoScope.0"
+        if (-not $scopesNeeded.Contains($sqlaoScope)) { continue }
+        Add-DhcpServerv4ExclusionRange -ScopeId $sqlaoScope -StartRange $sqlaoIp -EndRange $sqlaoIp -ErrorAction SilentlyContinue | Out-Null
+        $null = $allocatedIps.Add($sqlaoIp)
+        Write-Log "Set-DeployConfigIPAddresses: Reserved SQLAO virtual IP $sqlaoIp on scope $sqlaoScope" -LogOnly
+    }
+
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden) { $skipCount++; continue }
         if ($vm.role -eq 'OSDClient') { $skipCount++; continue }
