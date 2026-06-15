@@ -9,6 +9,9 @@ $global:Phase10Job = {
         [boolean] $Dummy2,
         [string] $ScriptRoot
     ) 
+    # Suppress CIM cmdlet progress in child process (see VM_Create comment).
+    # Safe for ThreadJob too: Write-Progress2 -force overrides when needed.
+    $Global:ProgressPreference = 'SilentlyContinue'
        
     try {
         $global:ScriptBlockName = "Phase10Job"
@@ -74,6 +77,8 @@ $global:Phase11Job = {
         [boolean] $Dummy2,
         [string] $ScriptRoot
     )
+    # Suppress CIM cmdlet progress (see VM_Create comment).
+    $Global:ProgressPreference = 'SilentlyContinue'
 
     try {
         $global:ScriptBlockName = "Phase11Job"
@@ -254,6 +259,13 @@ $global:Initialize_Disk = {
 
 # Create VM script block
 $global:VM_Create = {
+
+    # Suppress all progress in this child process. CIM cmdlets (Hyper-V,
+    # DHCP) write progress records that leak through Start-Job's
+    # PSDataCollection auto-renderer and produce blank lines in the
+    # parent's terminal. Write-Progress2 -force overrides this for
+    # our managed progress bars.
+    $Global:ProgressPreference = 'SilentlyContinue'
 
     try {
         $global:ScriptBlockName = "VM_Create"
@@ -1474,6 +1486,9 @@ $global:VM_Create = {
 }
 
 $global:VM_Config = {
+    # Suppress CIM cmdlet progress in child process (see VM_Create comment).
+    $Global:ProgressPreference = 'SilentlyContinue'
+
     try {
         $global:ScriptBlockName = "VM_Config"
         #try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
@@ -4104,6 +4119,9 @@ $global:VM_Config = {
 # inside the same Wait-Phase tracking loop as the Windows VM_Config jobs so
 # progress and elapsed time render consistently with the rest of Phase 2.
 $global:Proxy_Install = {
+    # Suppress CIM cmdlet progress (see VM_Create comment).
+    $Global:ProgressPreference = 'SilentlyContinue'
+
     try {
         $global:ScriptBlockName = "Proxy_Install"
         $rootPath = Split-Path $using:PSScriptRoot -Parent
@@ -4156,6 +4174,9 @@ $global:Proxy_Install = {
 # the long apt-get installs run in parallel with Windows DSC instead of
 # serializing into cloud-init first boot.
 $global:Linux_Configure = {
+    # Suppress CIM cmdlet progress (see VM_Create comment).
+    $Global:ProgressPreference = 'SilentlyContinue'
+
     try {
         $global:ScriptBlockName = "Linux_Configure"
         $rootPath = Split-Path $using:PSScriptRoot -Parent
