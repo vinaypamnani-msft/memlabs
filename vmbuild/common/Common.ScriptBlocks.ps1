@@ -2448,7 +2448,21 @@ $global:VM_Config = {
                     }
                 }
                 if (-not $writeOk) {
-                    throw "Could not write to $log after 5 attempts. $writeErr"
+                    # The canonical DSC_Init.log is durably locked or unwritable.
+                    # Don't abort the phase over a log write -- fall back to a
+                    # timestamped alternate and continue. Every later write in
+                    # this scriptblock uses $log, so re-pointing it keeps them
+                    # flowing to the fallback file.
+                    $fallbackLog = $log -replace "DSC_Init\.log", ("DSC_Init_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time (fallback; '$log' unwritable after 5 attempts: $writeErr)`r`n=====" | Out-File $fallbackLog -Append -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Even the fallback could not be created; continue
+                        # without a log rather than fail the DSC phase. Later
+                        # Out-File calls are best-effort against this path.
+                    }
+                    $log = $fallbackLog
                 }
 
                 # Remove stale flag (idempotent)
@@ -2664,7 +2678,21 @@ $global:VM_Config = {
                     }
                 }
                 if (-not $writeOk) {
-                    throw "Could not write to $log after 5 attempts. $writeErr"
+                    # The canonical DSC_Init.log is durably locked or unwritable.
+                    # Don't abort the phase over a log write -- fall back to a
+                    # timestamped alternate and continue. Every later write in
+                    # this scriptblock uses $log, so re-pointing it keeps them
+                    # flowing to the fallback file.
+                    $fallbackLog = $log -replace "DSC_Init\.log", ("DSC_Init_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time (fallback; '$log' unwritable after 5 attempts: $writeErr)`r`n=====" | Out-File $fallbackLog -Append -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Even the fallback could not be created; continue
+                        # without a log rather than fail the DSC phase. Later
+                        # Out-File calls are best-effort against this path.
+                    }
+                    $log = $fallbackLog
                 }
 
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
@@ -2831,7 +2859,21 @@ $global:VM_Config = {
                     }
                 }
                 if (-not $writeOk) {
-                    throw "Could not write to $log after 5 attempts. $writeErr"
+                    # The canonical DSC_Init.log is durably locked or unwritable.
+                    # Don't abort the phase over a log write -- fall back to a
+                    # timestamped alternate and continue. Every later write in
+                    # this scriptblock uses $log, so re-pointing it keeps them
+                    # flowing to the fallback file.
+                    $fallbackLog = $log -replace "DSC_Init\.log", ("DSC_Init_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time (fallback; '$log' unwritable after 5 attempts: $writeErr)`r`n=====" | Out-File $fallbackLog -Append -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Even the fallback could not be created; continue
+                        # without a log rather than fail the DSC phase. Later
+                        # Out-File calls are best-effort against this path.
+                    }
+                    $log = $fallbackLog
                 }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
@@ -2938,7 +2980,21 @@ $global:VM_Config = {
                     }
                 }
                 if (-not $writeOk) {
-                    throw "Could not write to $log after 5 attempts. $writeErr"
+                    # The canonical DSC_Init.log is durably locked or unwritable.
+                    # Don't abort the phase over a log write -- fall back to a
+                    # timestamped alternate and continue. Every later write in
+                    # this scriptblock uses $log, so re-pointing it keeps them
+                    # flowing to the fallback file.
+                    $fallbackLog = $log -replace "DSC_Init\.log", ("DSC_Init_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time (fallback; '$log' unwritable after 5 attempts: $writeErr)`r`n=====" | Out-File $fallbackLog -Append -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Even the fallback could not be created; continue
+                        # without a log rather than fail the DSC phase. Later
+                        # Out-File calls are best-effort against this path.
+                    }
+                    $log = $fallbackLog
                 }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
@@ -3078,7 +3134,21 @@ $global:VM_Config = {
                     }
                 }
                 if (-not $writeOk) {
-                    throw "Could not write to $log after 5 attempts. $writeErr"
+                    # The canonical DSC_Init.log is durably locked or unwritable.
+                    # Don't abort the phase over a log write -- fall back to a
+                    # timestamped alternate and continue. Every later write in
+                    # this scriptblock uses $log, so re-pointing it keeps them
+                    # flowing to the fallback file.
+                    $fallbackLog = $log -replace "DSC_Init\.log", ("DSC_Init_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time (fallback; '$log' unwritable after 5 attempts: $writeErr)`r`n=====" | Out-File $fallbackLog -Append -Force -ErrorAction Stop
+                    }
+                    catch {
+                        # Even the fallback could not be created; continue
+                        # without a log rather than fail the DSC phase. Later
+                        # Out-File calls are best-effort against this path.
+                    }
+                    $log = $fallbackLog
                 }
 
 
