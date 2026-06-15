@@ -2423,11 +2423,32 @@ $global:VM_Config = {
 
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+
+                # C:\staging\DSC must exist for the write to succeed; if a
+                # prior phase's copy was interrupted the folder may be absent.
+                # Create it (idempotent), then retry the initial write to
+                # absorb a transient lock on DSC_Init.log (a tail/reader or a
+                # previous run's handle not yet released). A persisted failure
+                # still throws.
+                $logDir = Split-Path -Path $log -Parent
+                if (-not (Test-Path -LiteralPath $logDir)) {
+                    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                catch {
-                    throw "Could not write to $log"
+                $writeOk = $false
+                $writeErr = $null
+                for ($writeAttempt = 1; $writeAttempt -le 5; $writeAttempt++) {
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+                        $writeOk = $true
+                        break
+                    }
+                    catch {
+                        $writeErr = $_
+                        Start-Sleep -Seconds 3
+                    }
+                }
+                if (-not $writeOk) {
+                    throw "Could not write to $log after 5 attempts. $writeErr"
                 }
 
                 # Remove stale flag (idempotent)
@@ -2618,11 +2639,32 @@ $global:VM_Config = {
 
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+
+                # C:\staging\DSC must exist for the write to succeed; if a
+                # prior phase's copy was interrupted the folder may be absent.
+                # Create it (idempotent), then retry the initial write to
+                # absorb a transient lock on DSC_Init.log (a tail/reader or a
+                # previous run's handle not yet released). A persisted failure
+                # still throws.
+                $logDir = Split-Path -Path $log -Parent
+                if (-not (Test-Path -LiteralPath $logDir)) {
+                    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                catch {
-                    throw "Could not write to $log"
+                $writeOk = $false
+                $writeErr = $null
+                for ($writeAttempt = 1; $writeAttempt -le 5; $writeAttempt++) {
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+                        $writeOk = $true
+                        break
+                    }
+                    catch {
+                        $writeErr = $_
+                        Start-Sleep -Seconds 3
+                    }
+                }
+                if (-not $writeOk) {
+                    throw "Could not write to $log after 5 attempts. $writeErr"
                 }
 
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
@@ -2764,11 +2806,32 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+
+                # C:\staging\DSC must exist for the write to succeed; if a
+                # prior phase's copy was interrupted the folder may be absent.
+                # Create it (idempotent), then retry the initial write to
+                # absorb a transient lock on DSC_Init.log (a tail/reader or a
+                # previous run's handle not yet released). A persisted failure
+                # still throws.
+                $logDir = Split-Path -Path $log -Parent
+                if (-not (Test-Path -LiteralPath $logDir)) {
+                    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                catch {
-                    throw "Could not write to $log"
+                $writeOk = $false
+                $writeErr = $null
+                for ($writeAttempt = 1; $writeAttempt -le 5; $writeAttempt++) {
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+                        $writeOk = $true
+                        break
+                    }
+                    catch {
+                        $writeErr = $_
+                        Start-Sleep -Seconds 3
+                    }
+                }
+                if (-not $writeOk) {
+                    throw "Could not write to $log after 5 attempts. $writeErr"
                 }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
@@ -2850,11 +2913,32 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+
+                # C:\staging\DSC must exist for the write to succeed; if a
+                # prior phase's copy was interrupted the folder may be absent.
+                # Create it (idempotent), then retry the initial write to
+                # absorb a transient lock on DSC_Init.log (a tail/reader or a
+                # previous run's handle not yet released). A persisted failure
+                # still throws.
+                $logDir = Split-Path -Path $log -Parent
+                if (-not (Test-Path -LiteralPath $logDir)) {
+                    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                catch {
-                    throw "Could not write to $log"
+                $writeOk = $false
+                $writeErr = $null
+                for ($writeAttempt = 1; $writeAttempt -le 5; $writeAttempt++) {
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+                        $writeOk = $true
+                        break
+                    }
+                    catch {
+                        $writeErr = $_
+                        Start-Sleep -Seconds 3
+                    }
+                }
+                if (-not $writeOk) {
+                    throw "Could not write to $log after 5 attempts. $writeErr"
                 }
                 "Running as $env:USERDOMAIN\$env:USERNAME`r`n" | Out-File $log -Append
                 "Current Item = $currentItem" | Out-File $log -Append
@@ -2969,11 +3053,32 @@ $global:VM_Config = {
                 # Update init log
                 $log = "C:\staging\DSC\DSC_Init.log"
                 $time = Get-Date -Format 'MM/dd/yyyy HH:mm:ss'
-                try {
-                    "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force                
+
+                # C:\staging\DSC must exist for the write to succeed; if a
+                # prior phase's copy was interrupted the folder may be absent.
+                # Create it (idempotent), then retry the initial write to
+                # absorb a transient lock on DSC_Init.log (a tail/reader or a
+                # previous run's handle not yet released). A persisted failure
+                # still throws.
+                $logDir = Split-Path -Path $log -Parent
+                if (-not (Test-Path -LiteralPath $logDir)) {
+                    New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
                 }
-                catch {
-                    throw "Could not write to $log"
+                $writeOk = $false
+                $writeErr = $null
+                for ($writeAttempt = 1; $writeAttempt -le 5; $writeAttempt++) {
+                    try {
+                        "`r`n=====`r`n$($global:ScriptBlockName): Started at $time`r`n=====" | Out-File $log -Append -Force
+                        $writeOk = $true
+                        break
+                    }
+                    catch {
+                        $writeErr = $_
+                        Start-Sleep -Seconds 3
+                    }
+                }
+                if (-not $writeOk) {
+                    throw "Could not write to $log after 5 attempts. $writeErr"
                 }
 
 
