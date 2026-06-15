@@ -192,6 +192,49 @@ function Start-Phase {
     # config gets an AssignedIP that New-VirtualMachine uses to create
     # the reservation immediately after creating the NIC.
     if ($Phase -eq 1) {
+
+        # Memory pre-flight. Phase 1 starts every new VM concurrently for file
+        # injection, so the host has to hold ALL their startup memory at once
+        # on top of the OS/Hyper-V baseline and the ~N concurrent VM_Create job
+        # processes that mount and inject VHDs. The static validation check uses
+        # only an 8GB buffer against total physical RAM, which is thinner than a
+        # loaded host's real baseline, so a config that "fits" (sum < total) can
+        # still OOM mid-phase and force a full rollback (seen on
+        # wacky.sandwich.lab: ZZ-TURNIP, the 25th VM, failed to start with
+        # 0x8007000E at ~93GB committed on a 128GB host). Re-check here against
+        # REAL available memory and let the user bail before any VM is created.
+        # Default is "continue" so unattended runs are never blocked.
+        try {
+            $existingVmNames = (Get-List -Type VM -SmartUpdate).vmName
+            $newVMs = @($deployConfig.virtualMachines | Where-Object { -not $_.hidden -and $_.vmName -notin $existingVmNames })
+            if ($newVMs.Count -gt 0) {
+                $newStartupGB = [Math]::Round((($newVMs.memory | ForEach-Object { $_ / 1 } | Measure-Object -Sum).Sum) / 1GB, 1)
+                $availMB = $null
+                try { $availMB = (Get-Counter '\Memory\Available MBytes' -ErrorAction Stop).CounterSamples[0].CookedValue } catch {}
+                if ($availMB) {
+                    $availGB = [Math]::Round($availMB / 1024, 1)
+                    # Reserve headroom for Hyper-V root-partition per-VM overhead
+                    # and the concurrent Phase 1 job processes injecting VHDs.
+                    $hostReserveGB = 8
+                    $needGB = [Math]::Round($newStartupGB + $hostReserveGB, 1)
+                    if ($needGB -gt $availGB) {
+                        Write-OrangePoint "[Phase 1] Memory pre-flight: creating $($newVMs.Count) VM(s) needs ~$($newStartupGB)GB startup + $($hostReserveGB)GB host reserve = $($needGB)GB, but only $($availGB)GB is currently available. The build may run out of memory mid-phase and roll back." -WriteLog
+                        $memResp = Read-YesOrNoWithTimeout -timeout 30 -prompt "Continue Phase 1 anyway? (Y/n)" -Default "y"
+                        if ($memResp -and $memResp.ToString().ToLower() -eq "n") {
+                            Write-RedX "[Phase 1] Aborted by user: insufficient available memory (~$($needGB)GB needed, $($availGB)GB available)." -WriteLog
+                            return $false
+                        }
+                    }
+                    else {
+                        Write-Log "[Phase 1] Memory pre-flight OK: ~$($newStartupGB)GB startup + $($hostReserveGB)GB reserve = $($needGB)GB <= $($availGB)GB available." -LogOnly
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Log "[Phase 1] Memory pre-flight check skipped (non-fatal): $_" -LogOnly
+        }
+
         Set-DeployConfigIPAddresses -DeployConfig $deployConfig
     }
 
