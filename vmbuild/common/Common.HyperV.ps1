@@ -790,6 +790,85 @@ function Restart-UnresponsiveVm {
     return $false
 }
 
+function Repair-VmCimServer {
+    # Recovers a guest whose WMI/CIM server is wedged (Storage and many other
+    # cmdlets fail with "Cannot connect to CIM server. Call was canceled by the
+    # message filter"). PowerShell Direct (used by Invoke-VmCommand) runs over
+    # VMBus and keeps working even when the guest CIM/DCOM stack is hung, so we
+    # can restart winmgmt in-place and, if that is not enough, reboot the VM.
+    # Returns $true when a follow-up CIM probe succeeds.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VmName,
+        [Parameter(Mandatory = $true)]
+        [string]$VmDomainName,
+        [Parameter(Mandatory = $false)]
+        [int]$Phase = 1,
+        [Parameter(Mandatory = $false)]
+        [switch]$AllowReboot
+    )
+
+    # Step 1: restart the WMI service inside the guest via PSDirect.
+    Write-Log "[Phase $Phase]: ${VmName}: Guest WMI/CIM server unresponsive. Restarting winmgmt in-guest..." -Warning
+    $restart = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Restart guest WMI (winmgmt)" -TimeoutSeconds 120 -ScriptBlock {
+        try {
+            # -Force also restarts winmgmt's dependent services.
+            Restart-Service -Name Winmgmt -Force -ErrorAction Stop
+            Start-Sleep -Seconds 5
+            # The Storage stack also leans on the Virtual Disk Service.
+            try { Restart-Service -Name vds -Force -ErrorAction SilentlyContinue } catch {}
+            Start-Sleep -Seconds 3
+            # Probe CIM to confirm the provider is answering again.
+            $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+
+    if ($restart -and -not $restart.ScriptBlockFailed -and ($restart.ScriptBlockOutput -eq $true)) {
+        Write-Log "[Phase $Phase]: ${VmName}: WMI restart succeeded; CIM probe OK."
+        return $true
+    }
+
+    Write-Log "[Phase $Phase]: ${VmName}: WMI restart did not recover the CIM server." -Warning
+    if (-not $AllowReboot) {
+        return $false
+    }
+
+    # Step 2: reboot the VM and wait for it to come back.
+    Write-Log "[Phase $Phase]: ${VmName}: Rebooting VM to clear wedged WMI/CIM server..." -Warning
+    Stop-VM2 -Name $VmName -Force -TurnOff -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 5
+    Start-VM2 -Name $VmName -ErrorAction SilentlyContinue
+
+    $connected = Wait-ForVm -VmName $VmName -OobeComplete -TimeoutMinutes 15 -VmDomainName $VmDomainName -Quiet
+    if (-not $connected) {
+        Write-Log "[Phase $Phase]: ${VmName}: VM did not become ready after reboot." -Warning
+        return $false
+    }
+
+    # Probe CIM again after the reboot.
+    $probe = Invoke-VmCommand -VmName $VmName -VmDomainName $VmDomainName -SuppressLog -DisplayName "Probe guest CIM after reboot" -TimeoutSeconds 120 -ScriptBlock {
+        try {
+            $null = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+
+    if ($probe -and -not $probe.ScriptBlockFailed -and ($probe.ScriptBlockOutput -eq $true)) {
+        Write-Log "[Phase $Phase]: ${VmName}: CIM server healthy after reboot."
+        return $true
+    }
+
+    Write-Log "[Phase $Phase]: ${VmName}: CIM server still unresponsive after reboot." -Warning
+    return $false
+}
+
 function Stop-VM2 {
     [CmdletBinding()]
     param (

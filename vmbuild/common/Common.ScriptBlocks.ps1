@@ -1183,6 +1183,19 @@ $global:VM_Create = {
 
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings"
             if ($result.ScriptBlockFailed) {
+                # If the guest WMI/CIM server is wedged, recover it (restart winmgmt
+                # over PSDirect) and retry once before giving up on this step. This
+                # is the first place the wedged-CIM symptom usually surfaces, so
+                # healing here keeps the later disk-init step healthy too.
+                $cfgErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
+                if ($cfgErrText -match 'Cannot connect to CIM|message filter|0x80010002') {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): VM settings step hit a wedged WMI/CIM server; attempting recovery." -Warning
+                    if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase) {
+                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)"
+                    }
+                }
+            }
+            if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to configure new VM settings." -Warning -OutputStream
                 $skipVersionUpdate = $true
             }
@@ -1243,13 +1256,15 @@ $global:VM_Create = {
 
             if ($diskEntries.Count -gt 0) {
                 $diskInitAttempts = 0
-                $diskInitMaxAttempts = 3
+                $diskInitMaxAttempts = 5
                 $diskInitSuccess = $false
+                $cimWmiRestarted = $false
+                $cimRebooted = $false
                 while (-not $diskInitSuccess -and $diskInitAttempts -lt $diskInitMaxAttempts) {
                     $diskInitAttempts++
                     if ($diskInitAttempts -gt 1) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init attempt $diskInitAttempts/$diskInitMaxAttempts (waiting 15s for CIM service)" -Warning
-                        Start-Sleep -Seconds 15
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init attempt $diskInitAttempts/$diskInitMaxAttempts" -Warning
+                        Start-Sleep -Seconds 10
                     }
                     $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -ScriptBlock {
                     param($entries)
@@ -1304,7 +1319,22 @@ $global:VM_Create = {
                         $diskInitSuccess = $true
                     }
                     elseif ($diskInitAttempts -lt $diskInitMaxAttempts) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $($result.ScriptBlockOutput)" -Warning
+                        $diskErrText = "$($result.ScriptBlockOutput) $($result.ErrorDetails -join ' ')"
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $diskErrText" -Warning
+                        # A wedged guest WMI/CIM server makes the Storage cmdlets fail with
+                        # "Cannot connect to CIM server. Call was canceled by the message filter".
+                        # PSDirect still works, so recover the guest in-place (restart WMI, then
+                        # reboot) instead of failing the phase and rolling back every VM.
+                        if ($diskErrText -match 'Cannot connect to CIM|message filter|0x80010002') {
+                            if (-not $cimWmiRestarted) {
+                                $cimWmiRestarted = $true
+                                Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase | Out-Null
+                            }
+                            elseif (-not $cimRebooted) {
+                                $cimRebooted = $true
+                                Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot | Out-Null
+                            }
+                        }
                     }
                 }
                 if (-not $diskInitSuccess) {
