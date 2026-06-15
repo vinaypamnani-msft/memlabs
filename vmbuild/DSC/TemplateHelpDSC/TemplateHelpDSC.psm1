@@ -3220,8 +3220,14 @@ class TestDomainJoin {
     # to AD with a broken secure channel.
     #
     # Self-heal strategy:
-    #   1. Reset-ComputerMachinePassword against the named DC (no reboot needed).
-    #   2. If still broken, full Remove-Computer + Add-Computer + reboot.
+    #   0. Verify DNS + DC connectivity first. If the DC is unreachable, the
+    #      secure channel test is meaningless — fix DNS and retry before
+    #      anything destructive.
+    #   1. Test-ComputerSecureChannel -Repair (resets password, no reboot).
+    #   2. Reset-ComputerMachinePassword against the named DC.
+    #   3. Only as absolute last resort: Remove-Computer + reboot.
+    #      This is destructive (breaks SPNs, Kerberos, cluster membership)
+    #      and should almost never be needed.
     [DscProperty(Key)]
     [string] $DomainName
 
@@ -3261,8 +3267,81 @@ class TestDomainJoin {
         $_DCName = $this.DCName
         $_credential = $this.Credential
 
-        # Step 1: try Reset-ComputerMachinePassword. Cheap, no reboot.
-        Write-Status "Secure channel to $_DomainName is broken. Resetting machine password against $_DCName."
+        # Step 0: Verify we can actually reach the DC before attempting any
+        # repair. A broken secure channel test when DNS is wrong or the DC
+        # is unreachable is a false positive — the machine account is fine,
+        # it's just a connectivity issue. Doing Remove-Computer in that
+        # state would be catastrophically wrong.
+        $dcReachable = $false
+        Write-Status "Verifying DC connectivity before secure channel repair."
+        for ($attempt = 1; $attempt -le 6; $attempt++) {
+            # Try DNS flush + re-register on each attempt
+            try {
+                ipconfig /flushdns 2>&1 | Out-Null
+                ipconfig /registerdns 2>&1 | Out-Null
+            } catch {}
+
+            # Check if DC resolves and is reachable on LDAP (389)
+            try {
+                $dcIP = [System.Net.Dns]::GetHostAddresses($_DCName) |
+                    Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+                    Select-Object -First 1
+                if ($dcIP) {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $tcp.Connect($dcIP.IPAddressToString, 389)
+                        if ($tcp.Connected) {
+                            $dcReachable = $true
+                            Write-Status "DC '$_DCName' reachable at $($dcIP.IPAddressToString):389 (attempt $attempt)."
+                        }
+                    }
+                    catch {
+                        Write-Status "DC '$_DCName' resolved to $($dcIP.IPAddressToString) but LDAP port 389 unreachable (attempt $attempt)."
+                    }
+                    finally { $tcp.Dispose() }
+                }
+                else {
+                    Write-Status "DC '$_DCName' DNS resolution returned no IPv4 addresses (attempt $attempt)."
+                }
+            }
+            catch {
+                Write-Status "DC '$_DCName' DNS resolution failed (attempt $attempt): $($_.Exception.Message)"
+            }
+
+            if ($dcReachable) { break }
+            if ($attempt -lt 6) {
+                $delay = $attempt * 10
+                Write-Status "Waiting ${delay}s before retry..."
+                Start-Sleep -Seconds $delay
+            }
+        }
+
+        if (-not $dcReachable) {
+            Write-Status "DC '$_DCName' is not reachable after 6 attempts. Secure channel cannot be verified or repaired. Requesting reboot to reset network stack."
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
+            $global:DSCMachineStatus = 1
+            return
+        }
+
+        # Step 1: Test-ComputerSecureChannel -Repair. This does a password
+        # reset in one call and is the simplest fix.
+        Write-Status "Secure channel to $_DomainName is broken. Attempting -Repair."
+        for ($i = 1; $i -le 2; $i++) {
+            try {
+                if (Test-ComputerSecureChannel -Repair -Credential $_credential -ErrorAction Stop) {
+                    Write-Status "Test-ComputerSecureChannel -Repair succeeded (attempt $i)."
+                    return
+                }
+            }
+            catch {
+                $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
+                Write-Status "Test-ComputerSecureChannel -Repair attempt $i failed: $msg"
+            }
+            if ($i -lt 2) { Start-Sleep -Seconds 10 }
+        }
+
+        # Step 2: Reset-ComputerMachinePassword against the named DC.
+        Write-Status "Repair failed. Trying Reset-ComputerMachinePassword against $_DCName."
         for ($i = 1; $i -le 3; $i++) {
             try {
                 Reset-ComputerMachinePassword -Server $_DCName -Credential $_credential -ErrorAction Stop
@@ -3279,23 +3358,17 @@ class TestDomainJoin {
             if ($i -lt 3) { Start-Sleep -Seconds 15 }
         }
 
-        # Step 2: full unjoin + rejoin. Requires reboot, but avoids leaving the
-        # node wedged with a broken secret that every later phase will trip on.
-        Write-Status "Reset failed. Performing full Remove-Computer + Add-Computer cycle."
+        # Step 3: Last resort — Remove-Computer + reboot. This is destructive
+        # (breaks SPNs, Kerberos tickets, cluster membership, SQL AG) and
+        # should almost never fire if Steps 0-2 are working correctly.
+        Write-Status "WARNING: All non-destructive repairs failed. Performing Remove-Computer + reboot (rejoin on next DSC pass). This will break SPNs and cluster membership."
         try {
             Remove-Computer -UnjoinDomainCredential $_credential -PassThru -Force -ErrorAction Stop | Out-Null
+            Write-Status "Remove-Computer succeeded. Requesting reboot so JoinDomain can re-add."
         }
         catch {
             $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
-            Write-Status "Remove-Computer failed (continuing to Add-Computer anyway): $msg"
-        }
-        try {
-            Add-Computer -DomainName $_DomainName -Credential $_credential -Force -ErrorAction Stop
-            Write-Status "Add-Computer succeeded. Rebooting to complete rejoin."
-        }
-        catch {
-            $msg = ($_.Exception.Message -replace '\s+', ' ').Trim()
-            Write-Status "Add-Computer failed during self-heal: $msg"
+            Write-Status "Remove-Computer failed: $msg"
             throw
         }
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
