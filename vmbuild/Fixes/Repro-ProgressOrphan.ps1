@@ -164,22 +164,33 @@ function Invoke-ManagedRender {
 # records enter the child's Progress stream -- exactly what PS7 auto-renders.
 $childScript = {
     param($VmName, $Iterations, $WithDhcp, $ScopeId, $PinChildGlobalPref)
-    foreach ($i in 1..$Iterations) {
-        if ($WithDhcp -and $ScopeId) {
-            if ($PinChildGlobalPref) {
-                # Candidate real fix: pin the child runspace's GLOBAL pref so the
-                # DHCP CIM cmdlet emits no progress records into the stream.
-                $childOrig = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
-                Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
-                $Global:ProgressPreference = $childOrig
+    # Emit a start marker + the child's view of its own pref so the parent can
+    # log whether the child even began and what ProgressPreference it inherited.
+    "CHILD-START $VmName pref=$($Global:ProgressPreference) local=$ProgressPreference WithDhcp=$WithDhcp ScopeId=$ScopeId"
+    $dhcpDone = 0
+    try {
+        foreach ($i in 1..$Iterations) {
+            if ($WithDhcp -and $ScopeId) {
+                if ($PinChildGlobalPref) {
+                    # Candidate real fix: pin the child runspace's GLOBAL pref so the
+                    # DHCP CIM cmdlet emits no progress records into the stream.
+                    $childOrig = $Global:ProgressPreference
+                    $Global:ProgressPreference = 'SilentlyContinue'
+                    Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
+                    $Global:ProgressPreference = $childOrig
+                }
+                else {
+                    Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
+                }
+                $dhcpDone++
+                if ($dhcpDone -eq 1) { "CHILD-FIRSTDHCP-OK $VmName" }
             }
-            else {
-                Get-DhcpServerv4Reservation -ScopeId $ScopeId -ErrorAction SilentlyContinue | Out-Null
-            }
+            Write-Progress -Id 0 -Activity "Injecting tools" -Status "Injecting Tool $i to $VmName (Stop1 False)" -PercentComplete (($i % 100))
+            Start-Sleep -Milliseconds 25
         }
-        Write-Progress -Id 0 -Activity "Injecting tools" -Status "Injecting Tool $i to $VmName (Stop1 False)" -PercentComplete (($i % 100))
-        Start-Sleep -Milliseconds 25
+    }
+    catch {
+        "CHILD-ERROR $VmName $($_.Exception.GetType().Name): $($_.Exception.Message)"
     }
 }
 
@@ -250,11 +261,24 @@ try {
                     $actIds[$aid]++
                 }
                 $actSummary = ($actIds.GetEnumerator() | Sort-Object Name | ForEach-Object { "Id$($_.Key)x$($_.Value)" }) -join ","
+                # Also capture job state, the child's Error stream, and any
+                # Output markers (CHILD-START / CHILD-FIRSTDHCP-OK / CHILD-ERROR)
+                # so we can tell whether the child died, blocked on DHCP, or
+                # never wrote progress at all.
+                $errCount = 0; $errMsg = ""
+                try {
+                    $errCount = $src.Error.Count
+                    if ($errCount -gt 0) { $errMsg = ($src.Error[$errCount - 1]).ToString() }
+                } catch {}
+                $outMarkers = ""
+                try {
+                    $outMarkers = (@($src.Output) | Where-Object { $_ -is [string] -and $_ -like 'CHILD-*' } | Select-Object -Last 2) -join " | "
+                } catch {}
                 if ($last) {
-                    Write-ReproLog ("[c{0}] job={1} jobId={2} count={3} actIds=[{4}] -> render Id={2} act='{5}' pct={6}" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary, $last.Activity, $last.PercentComplete)
+                    Write-ReproLog ("[c{0}] job={1} jobId={2} state={7} count={3} actIds=[{4}] err={8}({9}) out=[{10}] -> render Id={2} act='{5}' pct={6}" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary, $last.Activity, $last.PercentComplete, $job.State, $errCount, $errMsg, $outMarkers)
                 }
                 else {
-                    Write-ReproLog ("[c{0}] job={1} jobId={2} count={3} actIds=[{4}] -> NO RECORD SELECTED" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary)
+                    Write-ReproLog ("[c{0}] job={1} jobId={2} state={5} count={3} actIds=[{4}] err={6}({7}) out=[{8}] -> NO RECORD SELECTED" -f $script:cycle, $job.Name, $job.Id, $count, $actSummary, $job.State, $errCount, $errMsg, $outMarkers)
                 }
             }
 
