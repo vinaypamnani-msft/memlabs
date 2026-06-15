@@ -4879,12 +4879,19 @@ function Invoke-VmCommand {
         $ps = $null
         $sessionDiag = @{ ChannelBroken = $false }
         $localOnlySession = $SkipDomainFallback.IsPresent
+        # When -SuppressLog is set the caller is polling for VM readiness (OOBE /
+        # SMB / path checks in tight do/until loops), so a session that can't be
+        # created yet is expected, not a failure. Route Get-VmSession's per-attempt
+        # warning and final-failure message to -LogOnly -Verbose (recorded for
+        # diagnostics, never on screen) instead of letting it emit type=3 errors
+        # that make the phase look broken. -ShowVMSessionError still overrides this.
+        $quietSession = $SuppressLog.IsPresent -and -not $ShowVMSessionError.IsPresent
         if ($VmDomainAccount) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -VmDomainAccount $VmDomainAccount -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         if (-not $ps) {
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $VmDomainName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -LocalOnly:$localOnlySession -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         if (-not $ps -and $VmDomainName -eq "WORKGROUP" -and -not $SkipDomainFallback) {
@@ -4894,7 +4901,7 @@ function Invoke-VmCommand {
             if (-not $adminName) {
                 $adminName = "admin"
             }
-            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -Diagnostics $sessionDiag
+            $ps = Get-VmSession -VmName $VmName -VmDomainName $domain2 -VmDomainAccount $adminName -ShowVMSessionError:$ShowVMSessionError -MaxRetries $SessionMaxRetries -Diagnostics $sessionDiag -Quiet:$quietSession
         }
 
         $failed = ($null -eq $ps)
