@@ -65,7 +65,7 @@ function Write-JobProgress {
                 $candidate = $streamSource.Progress[$pi]
                 if ($candidate.Activity -ne "Preparing modules for first use." -and
                     $candidate.Activity -ne "Compress-Archive" -and
-                    $candidate.Activity -like "*$jobNamePrefix*") {
+                    $candidate.Activity.Contains($jobNamePrefix)) {
                     $lastProgress = $candidate
                     break
                 }
