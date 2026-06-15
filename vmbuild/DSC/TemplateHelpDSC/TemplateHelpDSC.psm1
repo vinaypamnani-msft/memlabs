@@ -3153,6 +3153,11 @@ class JoinDomain {
         $_credential = $this.Credential
         $_DomainName = $this.DomainName
         $_retryCount = 80
+
+        # Pre-flight: detect network problems that make domain join impossible.
+        # Catching these early avoids a 20-minute blind retry loop.
+        $this.DiagnoseNetwork($_DomainName)
+
         try {
             Write-Status "Joining computer to Domain $_DomainName"
             Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Stop
@@ -3163,11 +3168,19 @@ class JoinDomain {
             $CurrentDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
             $count = 0
             Write-Status "Failed to join into the domain $_DomainName, retry $count/$_retryCount"
+            $lastDiag = [datetime]::MinValue
             $flag = $false
             while ($CurrentDomain -ne $_DomainName) {
                 if ($count -lt $_retryCount) {
                     $count++
                     Write-Status "Current Domain of $CurrentDomain does not match $_DomainName. Retry count: $count/$_retryCount"
+
+                    # Re-run diagnostics every 5 minutes during retry loop
+                    if (([datetime]::Now - $lastDiag).TotalMinutes -ge 5) {
+                        $this.DiagnoseNetwork($_DomainName)
+                        $lastDiag = [datetime]::Now
+                    }
+
                     Start-Sleep -Seconds 15
                     Add-Computer -DomainName $_DomainName -Credential $_credential -ErrorAction Ignore
 
@@ -3179,6 +3192,8 @@ class JoinDomain {
                 }
             }
             if ($flag) {
+                # Final diagnostic before last-ditch attempt
+                $this.DiagnoseNetwork($_DomainName)
                 Write-Status "Failed too many times.  Rebooting, then Rejoining domain."
                 Add-Computer -DomainName $_DomainName -Credential $_credential
             }
@@ -3189,6 +3204,62 @@ class JoinDomain {
         }
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUserDeclaredVarsMoreThanAssignments', '', Scope = 'Function')]
         $global:DSCMachineStatus = 1
+    }
+
+    [void] DiagnoseNetwork([string] $domainName) {
+        # Check for APIPA or duplicate IP — the two most common causes of
+        # domain join failure that waste 20 minutes in a blind retry loop.
+        try {
+            $adapters = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.InterfaceAlias -notmatch 'Loopback' }
+            foreach ($a in $adapters) {
+                $ip = $a.IPAddress
+                $iface = $a.InterfaceAlias
+                if ($ip.StartsWith('169.254')) {
+                    Write-Status "WARNING: $iface has APIPA address $ip - no DHCP lease. Domain join will fail until this is resolved."
+                }
+                # Check for DAD (Duplicate Address Detection) state
+                if ($a.AddressState -eq 'Duplicate') {
+                    Write-Status "ERROR: $iface has DUPLICATE IP $ip - another device owns this address. This is likely a cluster/AG virtual IP assigned as a DHCP reservation by mistake. Domain join is impossible until the reservation is fixed on the DHCP server."
+                }
+            }
+            # Check DNS resolution
+            try {
+                $dcAddrs = [System.Net.Dns]::GetHostAddresses($domainName) |
+                    Where-Object { $_.AddressFamily -eq 'InterNetwork' }
+                if ($dcAddrs) {
+                    Write-Status "DNS: $domainName resolves to $($dcAddrs.IPAddressToString -join ', ')"
+                }
+                else {
+                    Write-Status "WARNING: DNS resolution for $domainName returned no IPv4 addresses."
+                }
+            }
+            catch {
+                Write-Status "WARNING: DNS resolution for $domainName failed: $($_.Exception.Message)"
+            }
+            # Check LDAP port on the first resolved DC
+            try {
+                $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.ServerAddresses.Count -gt 0 } | Select-Object -First 1).ServerAddresses[0]
+                if ($dnsServer) {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    try {
+                        $tcp.Connect($dnsServer, 389)
+                        if ($tcp.Connected) {
+                            Write-Status "LDAP: DC at $dnsServer`:389 is reachable."
+                        }
+                    }
+                    catch {
+                        Write-Status "WARNING: LDAP port 389 on DC $dnsServer is not reachable: $($_.Exception.Message)"
+                    }
+                    finally { $tcp.Dispose() }
+                }
+            }
+            catch {}
+        }
+        catch {
+            Write-Status "Network diagnostic failed: $($_.Exception.Message)"
+        }
     }
 
     [bool] Test() {
