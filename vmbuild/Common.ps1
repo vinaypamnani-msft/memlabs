@@ -3004,7 +3004,10 @@ function Get-VMNote {
     $vm = Get-VM2 -Name $VMName -Fallback
 
     if (-not $vm) {
-        Write-Log "$VMName`: Failed to get VM from Hyper-V. Error: $_"
+        # VM not found is a normal condition (e.g. Phase 1 pre-allocation queries
+        # notes for VMs that don't exist yet). Log quietly without a bogus
+        # "Error:" suffix -- there's no exception in scope here, so $_ is blank.
+        Write-Log "$VMName`: VM not found in Hyper-V; no VM Note to read." -Verbose -LogOnly
         return $null
     }
 
