@@ -60,6 +60,17 @@ function Write-JobProgress {
             # auto-render the child job's raw progress records as orphan bars (no VM name prefix).
             $lastProgress = $null
             $progressCount = $streamSource.Progress.Count
+            # One-time diagnostic: log the last few progress records to understand
+            # what ActivityIds and Activity text the child process actually writes.
+            if (-not $global:JobProgressDiagDone) { $global:JobProgressDiagDone = @{} }
+            if ($progressCount -gt 0 -and -not $global:JobProgressDiagDone.ContainsKey($Job.Id)) {
+                $global:JobProgressDiagDone[$Job.Id] = $true
+                $diagStart = [Math]::Max(0, $progressCount - 5)
+                for ($di = $diagStart; $di -lt $progressCount; $di++) {
+                    $dp = $streamSource.Progress[$di]
+                    Write-Log "[ProgressDiag] Job $($Job.Id) '$($Job.Name)' record[$di]: ActivityId=$($dp.ActivityId) Activity='$($dp.Activity)' Status='$($dp.StatusDescription)' Pct=$($dp.PercentComplete)" -LogOnly
+                }
+            }
             for ($pi = $progressCount - 1; $pi -ge 0; $pi--) {
                 $candidate = $streamSource.Progress[$pi]
                 if ($candidate.Activity -ne "Preparing modules for first use." -and
