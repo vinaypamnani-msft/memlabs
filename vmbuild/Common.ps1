@@ -1420,7 +1420,7 @@ function Copy-ItemSafe {
                 if ($stallSeconds -ge $stallTimeoutSeconds -and $secsSinceHeartbeat -ge $guestHeartbeatIntervalSeconds) {
                     $lastGuestHeartbeatTime = Get-Date
                     try {
-                        $checkSession = Get-VmSession -VmName $VMName -VmDomainName $VMDomainName -MaxRetries 1
+                        $checkSession = Get-VmSession -VmName $VMName -VmDomainName $VMDomainName -MaxRetries 1 -Quiet
                         if ($checkSession) {
                             $currentGuestSize = Invoke-Command -Session $checkSession -ScriptBlock {
                                 param($p)
@@ -5144,6 +5144,8 @@ function Get-VmSession {
         [int]$MaxRetries = 3,
         [Parameter(Mandatory = $false, HelpMessage = "Only try local/primary credentials. Skip domain-lookup fallback.")]
         [switch]$LocalOnly,
+        [Parameter(Mandatory = $false, HelpMessage = "Suppress the final 'Could not create session' type=3 failure log. Use for best-effort liveness probes (e.g. Copy-ItemSafe heartbeat) where a miss during OOBE is expected and not an error.")]
+        [switch]$Quiet,
         [Parameter(Mandatory = $false, HelpMessage = "Hashtable populated with channel diagnostics: ChannelBroken = true when PSDirect timed out or returned a VMBus error.")]
         [hashtable]$Diagnostics
     )
@@ -5320,8 +5322,12 @@ function Get-VmSession {
         }
 
         $triedList = $triedNames -join ', '
-        if ($ShowVMSessionError.IsPresent -or ($failCount -eq $MaxRetries)) {
+        if (-not $Quiet -and ($ShowVMSessionError.IsPresent -or ($failCount -eq $MaxRetries))) {
             Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning
+        }
+        elseif ($Quiet) {
+            # Quiet probe: keep it in the log for diagnostics but never on screen.
+            Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose -LogOnly
         }
         else {
             Write-Log "$VmName`: Failed to establish a session (attempt $failCount/$MaxRetries). Tried: $triedList" -Warning -Verbose
@@ -5331,7 +5337,17 @@ function Get-VmSession {
     if ($Diagnostics -and $sawChannelBroken) {
         $Diagnostics.ChannelBroken = $true
     }
-    Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
+    # Best-effort probes (e.g. Copy-ItemSafe heartbeat, MaxRetries=1) routinely
+    # miss while the guest is still in OOBE; that is expected, not a failure.
+    # -Quiet downgrades this from a type=3 error (which makes Phase 1 look
+    # broken) to a log-only verbose entry: it's recorded in the log for
+    # diagnostics but never spews the console.
+    if ($Quiet) {
+        Write-Log "$VmName`: Could not create session after $MaxRetries retries (quiet probe)." -LogOnly -Verbose
+    }
+    else {
+        Write-Log "$VmName`: Could not create session after $MaxRetries retries." -Failure
+    }
 }
 
 

@@ -510,7 +510,7 @@ $global:VM_Create = {
                 }
 
                 $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
-                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem -VmCount $deployConfig.virtualMachines.Count
                 $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
                     $waitMin = [int]($waitTimeout / 60)
@@ -715,7 +715,7 @@ $global:VM_Create = {
             # to Invoke-VmCommand. Probe over SSH instead.
             if (Test-VmIsLinux -Vm $currentItem) {
                 $expectedIp = Get-LinuxVmExpectedStaticIP -VmObject $currentItem -DeployConfig $deployConfig
-                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem
+                $waitTimeout = Get-LinuxVmWaitTimeout -VmObject $currentItem -VmCount $deployConfig.virtualMachines.Count
                 $linuxIP = Wait-LinuxVmReady -VmName $currentItem.vmName -TimeoutSeconds $waitTimeout -ExpectedIPAddress $expectedIp
                 if (-not $linuxIP) {
                     $waitMin = [int]($waitTimeout / 60)

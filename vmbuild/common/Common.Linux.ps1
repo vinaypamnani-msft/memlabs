@@ -1520,6 +1520,13 @@ function Wait-LinuxVmReady {
     $sshErrLogIntervalSec = 30
     $restartAttempted = $false
     $restartAfterSec = [int]($TimeoutSeconds * 0.53)  # ~53% of total; 900s→477s, 1800s→954s
+    # Track whether the guest has shown any sign of life (sshd accepted a
+    # TCP/22 connection at least once). A VM that is merely slow to finish
+    # cloud-init under heavy host I/O load looks "stuck" to the restart
+    # heuristic, but power-cycling it just discards boot progress and
+    # restarts the cold-boot clock — exactly the wrong move under load.
+    # We only power-cycle VMs that have NEVER shown sshd listening.
+    $sawSignOfLife = $false
     while ((Get-Date) -lt $deadline) {
         $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
         $ip = Get-LinuxVmIPAddress -VmName $VmName
@@ -1555,6 +1562,7 @@ function Wait-LinuxVmReady {
             }
             catch { }
             $tcpLabel = $(if ($tcpProbeOk) { 'tcp/22 open' } else { 'tcp/22 closed' })
+            if ($tcpProbeOk) { $sawSignOfLife = $true }
             write-progress2 "Wait for Linux VM" -Status "$VmName`: IP $ip ($ipSource), $tcpLabel, probing SSH (elapsed ${elapsed}s / ${TimeoutSeconds}s)" -force
 
             # One-time per IP: scrub any stale known_hosts entries for this
@@ -1677,21 +1685,29 @@ function Wait-LinuxVmReady {
         # it once and use the remaining ~7 minutes for the retry.
         if (-not $restartAttempted -and $elapsed -ge $restartAfterSec) {
             $restartAttempted = $true
-            Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s — restarting VM and retrying" -Warning
-            write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
-            try {
-                Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
-                Start-Sleep -Seconds 3
-                Start-VM -Name $VmName -ErrorAction Stop
-                Write-Log "$VmName`: VM restarted; resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
+            if ($sawSignOfLife) {
+                # sshd has accepted TCP/22 at least once, so the guest is
+                # alive and booting — just slow (heavy host I/O contention).
+                # Restarting would throw away that progress. Keep waiting.
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s, but sshd has accepted TCP/22 at least once — guest is alive but slow; NOT restarting, continuing to wait." -Warning
             }
-            catch {
-                Write-Log "$VmName`: VM restart failed: $($_.Exception.Message)" -Warning
+            else {
+                Write-Log "$VmName`: SSH not ready after ${restartAfterSec}s — restarting VM and retrying" -Warning
+                write-progress2 "Wait for Linux VM" -Status "$VmName`: restarting VM (no SSH after ${restartAfterSec}s)..." -force
+                try {
+                    Stop-VM -Name $VmName -TurnOff -Force -ErrorAction Stop
+                    Start-Sleep -Seconds 3
+                    Start-VM -Name $VmName -ErrorAction Stop
+                    Write-Log "$VmName`: VM restarted; resuming SSH poll with $([int](($deadline - (Get-Date)).TotalSeconds))s remaining"
+                }
+                catch {
+                    Write-Log "$VmName`: VM restart failed: $($_.Exception.Message)" -Warning
+                }
+                # Reset tracking so the loop re-discovers the IP cleanly
+                $lastReportedIp = $null
+                $loggedKnownHostsForIp = $null
+                $lastHeartbeatSec = $elapsed
             }
-            # Reset tracking so the loop re-discovers the IP cleanly
-            $lastReportedIp = $null
-            $loggedKnownHostsForIp = $null
-            $lastHeartbeatSec = $elapsed
         }
 
         Start-Sleep -Seconds $PollIntervalSeconds
