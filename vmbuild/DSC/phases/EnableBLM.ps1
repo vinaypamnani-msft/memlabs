@@ -288,13 +288,64 @@ END
     Write-DscStatus "$Tag Checking if BitLocker policy '$blmPolicyName' exists..."
     $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
     if (-not $blmPolicy) {
-        Write-DscStatus "$Tag Policy not found, creating '$blmPolicyName' with $($blmPolicies.Count) sub-policies..."
-        try {
-            $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy" -Policies $blmPolicies -ErrorAction Stop
-            Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
-        }
-        catch {
-            Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed: $($_.Exception.Message)"
+        # New-CMBlmSetting can throw a bare System.Management.ManagementException
+        # immediately after EnableMBAMRecoveryService is set, because the SMS
+        # Provider connection was established before the feature was enabled and
+        # hasn't picked up the BLM policy classes yet. Retry with a short backoff,
+        # logging full exception details and the exact command line on each failure.
+        $blmCmd = "New-CMBlmSetting -Name '$blmPolicyName' -Description 'MEMLABS auto created BitLocker management policy' -Policies <$($blmPolicies.Count) policy objects: XtsAes256, TpmOnly, OsEnforce0d, FdvAutoUnlock, FddEnforce0d, ClientCheck5m> -ErrorAction Stop"
+        $blmMaxRetries = 5
+        $blmRetryDelay = 30
+        for ($blmAttempt = 1; $blmAttempt -le $blmMaxRetries; $blmAttempt++) {
+            Write-DscStatus "$Tag Policy not found, creating '$blmPolicyName' with $($blmPolicies.Count) sub-policies (attempt $blmAttempt/$blmMaxRetries)..."
+            try {
+                $blmPolicy = New-CMBlmSetting -Name $blmPolicyName -Description "MEMLABS auto created BitLocker management policy" -Policies $blmPolicies -ErrorAction Stop
+                Write-DscStatus "$Tag Created BitLocker policy: $blmPolicyName"
+                break
+            }
+            catch {
+                $ex = $_.Exception
+                $exType = $ex.GetType().FullName
+                $exMsg = $ex.Message
+                # Surface inner exception (the ManagementException usually wraps the real provider error here)
+                $innerMsg = ""
+                $inner = $ex.InnerException
+                $innerDepth = 0
+                while ($inner -and $innerDepth -lt 5) {
+                    $innerMsg += " | inner[$($inner.GetType().FullName)]: $($inner.Message)"
+                    $inner = $inner.InnerException
+                    $innerDepth++
+                }
+                # WMI/SMS Provider errors carry an ErrorCode on the ManagementException
+                $wmiCode = ""
+                try { if ($ex.ErrorCode) { $wmiCode = " ErrorCode=$($ex.ErrorCode)" } } catch {}
+                $catInfo = ""
+                try { if ($_.CategoryInfo) { $catInfo = " Category=$($_.CategoryInfo.Category)/$($_.CategoryInfo.Reason)" } } catch {}
+                $fqeid = ""
+                try { if ($_.FullyQualifiedErrorId) { $fqeid = " FQEID=$($_.FullyQualifiedErrorId)" } } catch {}
+                $scriptPos = ""
+                try { if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) { $scriptPos = ($_.InvocationInfo.PositionMessage -replace "\r?\n", " ").Trim() } } catch {}
+
+                Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed (attempt $blmAttempt/$blmMaxRetries)"
+                Write-DscStatus "$Tag   Command : $blmCmd"
+                Write-DscStatus "$Tag   Type    : $exType$wmiCode$catInfo$fqeid"
+                Write-DscStatus "$Tag   Message : $exMsg$innerMsg"
+                if ($scriptPos) { Write-DscStatus "$Tag   At      : $scriptPos" }
+
+                if ($blmAttempt -lt $blmMaxRetries) {
+                    Write-DscStatus "$Tag   Retrying in $blmRetryDelay s (refreshing SMS Provider connection)..."
+                    Start-Sleep -Seconds $blmRetryDelay
+                    # Re-check in case a prior attempt actually created the policy despite throwing
+                    $blmPolicy = Get-CMBlmSetting -Name $blmPolicyName -ErrorAction SilentlyContinue
+                    if ($blmPolicy) {
+                        Write-DscStatus "$Tag Policy '$blmPolicyName' now present after attempt $blmAttempt; continuing."
+                        break
+                    }
+                }
+                else {
+                    Write-DscStatus "$Tag ERROR: New-CMBlmSetting failed after $blmMaxRetries attempts. Policy not created."
+                }
+            }
         }
     }
     else {
