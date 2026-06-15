@@ -359,6 +359,7 @@ function Start-NormalJobs {
             $job_created_no++
         }
         else {
+            Suppress-JobAutoProgress -Job $job
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
@@ -630,6 +631,7 @@ function Start-PhaseJobs {
                 $job_created_no++
             }
             else {
+                Suppress-JobAutoProgress -Job $job
                 Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Proxy_Install)" -LogOnly
                 $jobs += $job
                 $job_created_yes++
@@ -650,6 +652,7 @@ function Start-PhaseJobs {
                 $job_created_no++
             }
             else {
+                Suppress-JobAutoProgress -Job $job
                 Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Linux_Configure)" -LogOnly
                 $jobs += $job
                 $job_created_yes++
@@ -745,6 +748,7 @@ function Start-PhaseJobs {
             $job_created_no++
         }
         else {
+            Suppress-JobAutoProgress -Job $job
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
