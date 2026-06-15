@@ -11,6 +11,35 @@ function Get-JobStreamSource {
     return $Job
 }
 
+function Suppress-JobAutoProgress {
+    param($Job)
+    # PS7's host subscribes to DataAdded on Start-Job child process Progress
+    # streams and auto-renders progress bars, bypassing $ProgressPreference.
+    # This produces blank/stray lines in the terminal scroll region that
+    # persist in the scroll buffer and can't be erased.
+    #
+    # We read progress ourselves via direct indexing in Write-JobProgress,
+    # so the auto-render handler is unnecessary. Remove it by clearing the
+    # DataAdded event's backing field via reflection.
+    #
+    # ThreadJobs share the parent runspace and respect $ProgressPreference,
+    # so this is only needed for process-based Start-Job.
+    if (-not $Job -or -not $Job.ChildJobs -or $Job.ChildJobs.Count -eq 0) { return }
+    $childJob = $Job.ChildJobs[0]
+    if (-not $childJob -or -not $childJob.Progress) { return }
+    try {
+        $bindingFlags = [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic
+        $field = [System.Management.Automation.PSDataCollection[System.Management.Automation.ProgressRecord]].GetField(
+            'DataAdded', $bindingFlags)
+        if ($field) {
+            $field.SetValue($childJob.Progress, $null)
+        }
+    }
+    catch {
+        # Reflection may fail on future PS7 builds; cosmetic-only impact
+    }
+}
+
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
@@ -785,6 +814,15 @@ function Wait-Phase {
         # warnings/errors from running jobs appear in real-time instead of
         # being deferred until the job completes.
         $outputDisplayed = @{}
+
+        # Suppress PS7 auto-rendering of child job progress records. The host
+        # subscribes to DataAdded on Start-Job's Progress stream and renders
+        # bars that bypass $ProgressPreference, producing blank lines in the
+        # scroll region. We read progress ourselves in Write-JobProgress via
+        # direct indexing, so the auto-render handler is unnecessary.
+        foreach ($j in $Jobs) {
+            Suppress-JobAutoProgress -Job $j
+        }
 
         # DSC log diagnostics: after a job runs 30+ min, peek at the
         # guest's ConfigurationStatus folder for exceptions/failures and
