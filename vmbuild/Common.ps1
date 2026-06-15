@@ -2439,10 +2439,14 @@ function Test-Networks {
         $invalidNetworks += $internetSubnet
     }
 
+    # ClusterV2 is a pure internal switch (heartbeat only) — no NAT needed.
+    # Remove any stale NAT left over from previous runs that incorrectly
+    # created one; do not recreate it.
     $clusterNetwork = "10.250.250.0"
-    $valid = Test-NetworkNat -NetworkSubnet $clusterNetwork
-    if (-not $valid) {
-        $invalidNetworks += $clusterNetwork
+    $staleClusterNat = Get-NetNat -Name $clusterNetwork -ErrorAction SilentlyContinue
+    if ($staleClusterNat) {
+        Write-Log "Removing stale NAT '$clusterNetwork' (cluster network does not use NAT)." -Warning
+        Remove-NetNat -Name $clusterNetwork -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     if ($invalidNetworks.Count -gt 0) {
