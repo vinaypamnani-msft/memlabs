@@ -3404,9 +3404,16 @@ function Set-DeployConfigIPAddresses {
         # Dynamic allocation from the DHCP pool
         if (-not $ip) {
             try {
-                $ip = (Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop).IPAddressToString
-                # Exclude it immediately so the next call can't return the same address
-                Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $ip -EndRange $ip -ErrorAction SilentlyContinue | Out-Null
+                $freeIP = Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop
+                if ($freeIP) {
+                    $ip = $freeIP.ToString()
+                    # Exclude it immediately so the next call can't return the same address
+                    Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $freeIP -EndRange $freeIP -ErrorAction SilentlyContinue | Out-Null
+                }
+                else {
+                    Write-Log "$($vm.vmName): Get-DhcpServerv4FreeIPAddress returned null for scope $scopeId (scope may be exhausted)" -Warning
+                    continue
+                }
             }
             catch {
                 Write-Log "$($vm.vmName): Failed to get free IP from scope $scopeId. $_" -Warning
