@@ -1747,7 +1747,22 @@ $global:VM_Config = {
                 Start-Sleep -Seconds 2
                 try {
                     Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue | Out-Null
-                    Stop-DscConfiguration -Force -ErrorAction SilentlyContinue | Out-Null
+                    # Bound this second stop. Killing WmiPrvSE above already
+                    # force-terminated the stuck LCM; this call is belt-and-
+                    # suspenders, but run synchronously it re-attaches to the
+                    # LCM (respawning WmiPrvSE) and can block indefinitely on a
+                    # config that's mid-apply. Unbounded, it blew past the
+                    # caller's 60s Invoke-VmCommand timeout, so the host marked
+                    # the whole stop FAILED and escalated to a full VM reboot --
+                    # even though the WMI kill had already cleared the LCM. Run
+                    # it as a job with a short timeout and kill it if it hangs,
+                    # so the scriptblock always returns well within 60s.
+                    $stopJob2 = Stop-DscConfiguration -Force -AsJob
+                    $wait2 = Wait-Job -Timeout 15 $stopJob2
+                    if (-not $wait2 -or $wait2.State -ne "Completed") {
+                        Stop-Job $stopJob2 -ErrorAction SilentlyContinue
+                    }
+                    get-job | remove-job -Force -ErrorAction SilentlyContinue
                 } catch {}
             }
 
