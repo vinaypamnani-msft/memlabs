@@ -2695,6 +2695,40 @@ $global:VM_Config = {
                     $log = $fallbackLog
                 }
 
+                # Remove DSC_Status.txt EARLY, and only once DSC is confirmed
+                # stopped. The DC's multi-node monitoring loop treats this
+                # file's disappearance as the signal that this node has cleared
+                # its previous status and is ready for the new config push. The
+                # original removal sat near the end of this scriptblock, behind
+                # several Rename-Item (-ErrorAction Stop) calls; if any of those
+                # threw (locked file, etc.) the scriptblock aborted before the
+                # removal and the DC dead-waited the full 150 attempts. Do it up
+                # front so a later failure can't strand the orchestrator -- but
+                # gate it on the LCM not being Busy so we never signal "ready"
+                # while a configuration is still actively running on this node.
+                $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+                $lcmStopped = $false
+                try {
+                    $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+                    if ($lcmState -ne 'Busy') { $lcmStopped = $true }
+                }
+                catch {
+                    # LCM unreadable (Stop_RunningDSC just killed WmiPrvSE, or
+                    # no LCM). The explicit stop already ran, so treat DSC as
+                    # stopped rather than strand the DC's monitoring loop.
+                    $lcmState = 'Unknown'
+                    $lcmStopped = $true
+                }
+                if ($lcmStopped) {
+                    if (Test-Path $dscStatus) {
+                        "Removing $dscStatus (LCM='$lcmState')" | Out-File $log -Append -ErrorAction SilentlyContinue
+                        Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction SilentlyContinue
+                    }
+                }
+                else {
+                    "Deferring DSC_Status.txt removal; LCM is Busy (DSC still running)" | Out-File $log -Append -ErrorAction SilentlyContinue
+                }
+
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
                 $jsonPath = Join-Path "C:\staging\DSC" "DSC_Events.json"
                 if (Test-Path $jsonPath) {
@@ -2746,12 +2780,9 @@ $global:VM_Config = {
                 }
 
 
-                # Remove DSC_Status file, if exists
-                $dscStatus = "C:\staging\DSC\DSC_Status.txt"
-                if (Test-Path $dscStatus) {
-                    "Removing $dscStatus" | Out-File $log -Append
-                    Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction Stop
-                }
+                # DSC_Status.txt is removed early (and LCM-gated) near the top
+                # of this scriptblock so a rename failure above cannot strand
+                # the DC's multi-node monitoring loop.
 
                 # Write config to file
                 $deployConfig = $using:deployConfig
