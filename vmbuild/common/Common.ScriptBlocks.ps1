@@ -1864,17 +1864,85 @@ $global:VM_Config = {
                 }
             }
 
-            # Persist the first valid (non-APIPA) IP as LastKnownIP on the VM
-            # so it flows into the Hyper-V VM Note via New-VmNote. The background
-            # IP refresh job only runs outside of deploy, so this is the earliest
-            # opportunity to record a guest-confirmed IP for Windows VMs.
+            # Persist the VM's real IP as LastKnownIP. Priority:
+            # 1. DHCP reservation (authoritative — created by us in Phase 1)
+            # 2. AssignedIP from deployConfig (set before Phase 1)
+            # 3. GetIPs from guest, filtered to exclude SQLAO virtual IPs
+            # LastKnownIP from a previous run is NOT used here — it may
+            # itself have been poisoned by a virtual IP (the bug we're fixing).
             if ($success -and $IPAddress.ScriptBlockOutput) {
-                $validIP = $IPAddress.ScriptBlockOutput | Where-Object { $_ -and -not $_.StartsWith("169.254") } | Select-Object -First 1
-                if ($validIP) {
+                $resolvedIP = $null
+                $ipSource = 'none'
+
+                # 1. DHCP reservation — most authoritative
+                try {
+                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter |
+                        Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
+                        Select-Object -First 1
+                    if ($vmnet -and $vmnet.MacAddress) {
+                        $scopeId = if ($currentItem.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network } }
+                        $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        if ($reservation) {
+                            $resolvedIP = $reservation.IPAddress.IPAddressToString
+                            $ipSource = 'DHCP'
+                        }
+                    }
+                } catch {}
+
+                # 2. AssignedIP from pre-Phase-1 allocation
+                if (-not $resolvedIP -and $currentItem.AssignedIP) {
+                    $resolvedIP = $currentItem.AssignedIP
+                    $ipSource = 'AssignedIP'
+                }
+
+                # 3. GetIPs result, filtered for SQLAO virtual IPs
+                if (-not $resolvedIP) {
+                    # Build exclusion set from SQLAO virtual IPs in deployConfig
+                    $sqlaoExclude = [System.Collections.Generic.HashSet[string]]::new()
+                    foreach ($sqlaoVm in ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                        if ($sqlaoVm.ClusterIPAddress)    { $null = $sqlaoExclude.Add(($sqlaoVm.ClusterIPAddress -replace '/\d+$','')) }
+                        if ($sqlaoVm.AGIPAddress)         { $null = $sqlaoExclude.Add(($sqlaoVm.AGIPAddress -replace '/\d+$','')) }
+                        if ($sqlaoVm.ClusterHeartbeatIP)  { $null = $sqlaoExclude.Add($sqlaoVm.ClusterHeartbeatIP) }
+                    }
+                    # Also check VM Notes for the IPs (available on reruns)
+                    if ($sqlaoExclude.Count -eq 0 -and $currentItem.role -eq 'SQLAO') {
+                        try {
+                            foreach ($sqlaoVm in ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                                $note = Get-VMNote -VMName $sqlaoVm.vmName
+                                if ($note) {
+                                    if ($note.ClusterIPAddress)    { $null = $sqlaoExclude.Add(($note.ClusterIPAddress -replace '/\d+$','')) }
+                                    if ($note.AGIPAddress)         { $null = $sqlaoExclude.Add(($note.AGIPAddress -replace '/\d+$','')) }
+                                    if ($note.ClusterHeartbeatIP)  { $null = $sqlaoExclude.Add($note.ClusterHeartbeatIP) }
+                                }
+                            }
+                        } catch {}
+                    }
+
+                    $filteredIPs = @($IPAddress.ScriptBlockOutput | Where-Object {
+                        $_ -and
+                        -not $_.StartsWith("169.254") -and
+                        -not $sqlaoExclude.Contains($_)
+                    })
+                    if ($filteredIPs.Count -gt 0) {
+                        $resolvedIP = $filteredIPs[0]
+                        $ipSource = 'GetIPs'
+                        if ($filteredIPs.Count -gt 1 -or $sqlaoExclude.Count -gt 0) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): GetIPs returned $($IPAddress.ScriptBlockOutput -join ', '); after filtering ($($sqlaoExclude.Count) SQLAO IPs): $($filteredIPs -join ', ')" -LogOnly
+                        }
+                    }
+                    else {
+                        # Last resort: take first non-APIPA even if it might be virtual
+                        $resolvedIP = $IPAddress.ScriptBlockOutput | Where-Object { $_ -and -not $_.StartsWith("169.254") } | Select-Object -First 1
+                        if ($resolvedIP) { $ipSource = 'GetIPs-unfiltered' }
+                    }
+                }
+
+                if ($resolvedIP) {
                     $existingIP = $currentItem.LastKnownIP
-                    if (-not $existingIP -or $existingIP -ne $validIP) {
-                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $validIP (was: $($existingIP ?? 'unset'))" -LogOnly
-                        $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $validIP -Force
+                    if (-not $existingIP -or $existingIP -ne $resolvedIP) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Setting LastKnownIP to $resolvedIP via $ipSource (was: $($existingIP ?? 'unset'))" -LogOnly
+                        $currentItem | Add-Member -NotePropertyName LastKnownIP -NotePropertyValue $resolvedIP -Force
                     }
                 }
             }

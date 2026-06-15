@@ -365,6 +365,19 @@ function Test-DCFunctionality {
             if ($sqlaoVm.ClusterIPAddress) { $null = $virtualIps.Add(($sqlaoVm.ClusterIPAddress -replace '/\d+$','')) }
             if ($sqlaoVm.AGIPAddress)      { $null = $virtualIps.Add(($sqlaoVm.AGIPAddress -replace '/\d+$','')) }
         }
+        # On reruns (-StartPhase 2+), ClusterIPAddress/AGIPAddress may not be
+        # on the deployConfig objects. Check VM Notes as fallback.
+        if ($virtualIps.Count -eq 0) {
+            foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                try {
+                    $note = Get-VMNote -VMName $sqlaoVm.vmName
+                    if ($note) {
+                        if ($note.ClusterIPAddress) { $null = $virtualIps.Add(($note.ClusterIPAddress -replace '/\d+$','')) }
+                        if ($note.AGIPAddress)      { $null = $virtualIps.Add(($note.AGIPAddress -replace '/\d+$','')) }
+                    }
+                } catch {}
+            }
+        }
         if ($virtualIps.Count -gt 0) {
             Write-Log "[Phase $Phase] ${VMName}: SQLAO virtual IPs to exclude: $($virtualIps -join ', ')" -LogOnly
         }
