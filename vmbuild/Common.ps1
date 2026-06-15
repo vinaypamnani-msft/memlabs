@@ -78,11 +78,11 @@ Function Write-ProgressElapsed {
         if ($FailCount) {
             $msg = $msg + " Failed $FailCount / $FailCountMax"
         }
-        Write-Progress2 $msg -Status $text -PercentComplete $percent
+        Write-Progress2 $msg -Status $text -PercentComplete $percent -force
     }
     catch {
         Write-Exception $_
-        Write-Progress2 "Exception" -Status $_
+        Write-Progress2 "Exception" -Status $_ -force
     }
 }
 
@@ -4123,7 +4123,7 @@ function Wait-ForVm {
             try {
                 $vmTest = Get-VM2 -Name $VmName -Fallback
                 if (-not $vmTest) {
-                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+                    Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed -force
                     Write-Log -Failure "Could not find VM $VMName"
                     return
                 }
@@ -4415,7 +4415,7 @@ function Wait-ForVm {
             start-sleep -seconds 15
         }
         if (-not $vmTest) {
-            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed
+            Write-Progress2 -Activity  "Could not find VM" -Status "Could not find VM" -PercentComplete 100 -Completed -force
             Write-Log -Failure "Could not find VM $VMName"
             return
         }
@@ -4553,11 +4553,11 @@ function Wait-ForVm {
 
 
     if ($ready) {
-        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Wait complete." -Completed -force
         if (-not $Quiet.IsPresent) { Write-Log "$VmName`: VM is now available." -Success }
     }
     else {
-        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed
+        Write-Progress2 -Activity "Waiting for virtual machine" -Status "Timer expired while waiting for VM" -Completed -force
         Write-Log "$VmName`: Timer expired while waiting for VM" -Warning
     }
 
@@ -6030,7 +6030,7 @@ function Copy-ToolToVM {
     }
 
     Write-Log "$vmName`: Copying tools bundle (${totalSizeMB} MB, $totalItems items) to VM..."
-    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log
+    Write-Progress2 "Injecting tools" -Status "Copying tools bundle (${totalSizeMB} MB) to $VMName" -Log -force
 
     # --- Copy each zip to the VM and expand ---
     $success = $true

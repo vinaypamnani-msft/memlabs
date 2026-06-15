@@ -1292,7 +1292,7 @@ $global:VM_Create = {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
-                Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log
+                Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log -force
             }
             # Copy SQL files to VM
             if ($currentItem.sqlVersion -and $createVM) {
@@ -1331,7 +1331,7 @@ $global:VM_Create = {
 
                 # Eject ISO from guest
                 Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Done" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Done" -Completed -force
             }
             #Copy CM to the VM
             if ($currentItem.CMInstallDir -and $createVM) {
@@ -1386,7 +1386,7 @@ $global:VM_Create = {
 
                     # Eject ISO from guest
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Done" -Completed
+                    Write-Progress2 -Activity "$($currentItem.vmName): Copying ConfigMgr installation files" -Status "Done" -Completed -force
                 }
                 else {
                      Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying CM installation files : Not needed. $currentItem"
@@ -1469,7 +1469,7 @@ $global:VM_Create = {
 
                     Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
                 }
-                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed
+                Write-Progress2 -Activity "$($currentItem.vmName): Pre-populating OSD content" -Status "Done" -Completed -force
         }
 
         if ($createVM) {
@@ -2224,7 +2224,7 @@ $global:VM_Config = {
                     if ($started) {
                         $oobeStarted = Wait-ForVm -VmName $currentItem.vmName -VmDomainName $domainName -OobeStarted -TimeoutMinutes 45
                         if ($oobeStarted) {
-                            Write-Progress2 -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed
+                            Write-Progress2 -Activity "Wait for VM to start OOBE" -Status "Complete!" -Completed -force
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Configuration completed successfully for $($currentItem.role). VM is at OOBE." -OutputStream -Success
                         }
                         else {
@@ -3070,7 +3070,7 @@ $global:VM_Config = {
                     $allNodesReady = $true
                     $nonReadyNodes = $nodeList.Clone()
                     $percent = [Math]::Min($attempts, $maxAttempts)
-                    Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent
+                    Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent -force
 
                     # Periodically check DSC_Init.log to see if DSC_ClearStatus started/progressed.
                     # Do NOT read DSC_Status.txt here - it contains stale content from the previous
@@ -3107,11 +3107,11 @@ $global:VM_Config = {
                         else {
                             $nodeList.Remove($node) | Out-Null
                             if ($nodeList.Count -eq 0) {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -status "All nodes are ready" -PercentComplete 100
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -status "All nodes are ready" -PercentComplete 100 -force
                                 $allNodesReady = $true
                             }
                             else {
-                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent
+                                Write-Progress2 "Waiting for all nodes. Attempt #$attempts/$maxAttempts" -Status "Waiting for [$($nodeList -join ',')] to be ready." -PercentComplete $percent -force
                             }
                         }
                     }
@@ -3137,7 +3137,7 @@ $global:VM_Config = {
                             else {
                                 Write-Log "[Phase $Phase]: Node $node pre-reboot: Could not retrieve diagnostics (VM unreachable)" -Warning
                             }
-                            Write-Progress2 "Restarting $node" -PercentComplete $percent
+                            Write-Progress2 "Restarting $node" -PercentComplete $percent -force
                             Stop-Vm2 -Name $node
                             Start-Sleep -seconds 20
                             Start-VM2 -Name $node
@@ -3179,7 +3179,7 @@ $global:VM_Config = {
                             Write-Log "[Phase $Phase]: Node ${node}: Could not retrieve diagnostics: $errDetail" -Failure
                         }
                     }
-                    Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase."
+                    Write-Progress2 "Failed waiting on VMs [$($nodeList -join ',')].  Please cancel and retry this phase." -force
                     write-log "[Phase $Phase]: Node [$($nodeList -join ',')] is NOT ready after $maxAttempts attempts." -failure -OutputStream
                     return $false
                 }
@@ -3187,14 +3187,14 @@ $global:VM_Config = {
             }
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Finished waiting on all nodes"
 
-            Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0
+            Write-Progress2 "Creating DSC" -status "Invoking DSC_CreateConfig" -PercentComplete 0 -force
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_CreateConfig -ArgumentList $DscFolder -DisplayName "DSC: Create $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to create $($currentItem.role) configuration. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
 
-            Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50
+            Write-Progress2 "Starting DSC" -status "Invoking DSC_StartConfig" -PercentComplete 50 -force
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_StartConfig -ArgumentList $DscFolder -DisplayName "DSC: Start $($currentItem.role) Configuration"
             if ($result.ScriptBlockFailed) {
                 Start-Sleep -Seconds 15
@@ -3215,7 +3215,7 @@ $global:VM_Config = {
                                         
                 }
             }
-            Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100
+            Write-Progress2 "Starting DSC" -status "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration." -PercentComplete 100 -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Started DSC for $($currentItem.role) configuration."
         }
 
@@ -3878,7 +3878,7 @@ $global:VM_Config = {
         catch {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Monitoring Exception (See Logs): $_" -Failure -OutputStream
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Trace: $($_.ScriptStackTrace)" -LogOnly
-            Write-Progress2 "Exception" -Status "Failed end $_"
+            Write-Progress2 "Exception" -Status "Failed end $_" -force
             return
         }
 
@@ -4104,7 +4104,7 @@ $global:VM_Config = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName)  [$($currentItem.role)] : Failed after $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Failure
         }
         else {
-            Write-Progress2 "$($currentItem.role) Configuration completed in $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -Completed
+            Write-Progress2 "$($currentItem.role) Configuration completed in $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -Status $status.ScriptBlockOutput -Completed -force
             Write-Log "[Phase $Phase]: $($currentItem.vmName)  [$($currentItem.role)] : Completed in $($stopWatch.Elapsed.ToString("hh\:mm\:ss"))" -OutputStream -Success
         }
     }
@@ -4157,7 +4157,7 @@ $global:Proxy_Install = {
             }
         } catch {}
 
-        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Squid install complete" -Completed
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Squid install complete" -Completed -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Squid install complete." -OutputStream -Success
     }
     catch {
@@ -4211,7 +4211,7 @@ $global:Linux_Configure = {
             }
         } catch {}
 
-        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Linux configuration complete" -Completed
+        Write-Progress2 -Activity "$($currentItem.vmName) [$($currentItem.role)]" -Status "Linux configuration complete" -Completed -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux configuration complete." -OutputStream -Success
     }
     catch {
