@@ -1238,15 +1238,15 @@ finally {
             }
         }
     }
-    elseif ($totalJobs -eq 0 -and -not $enableVerbose) {
+    elseif ($totalJobs -eq 0) {
         # Still may have completed/failed jobs to clean up
         foreach ($job in @(Get-Job)) {
             Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
         }
     }
     $stopWatch.Stop()
-    $totalElapsed = & $showElapsed
-    if (-not $enableVerbose) {
+    if ($totalJobs -gt 0 -and -not $enableVerbose) {
+        $totalElapsed = & $showElapsed
         Write-Host "`r${blankLine}`rJobs stopped. (${totalElapsed}s)"
     }
     # Close PS Sessions
