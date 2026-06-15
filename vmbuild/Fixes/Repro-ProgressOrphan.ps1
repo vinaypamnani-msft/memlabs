@@ -190,6 +190,14 @@ $childScript = {
     # log whether the child even began and what ProgressPreference it inherited.
     "CHILD-START $VmName pref=$($Global:ProgressPreference) local=$ProgressPreference WithDhcp=$WithDhcp ScopeId=$ScopeId DhcpFirstN=$DhcpFirstN Isolated=$DhcpInIsolatedRunspace"
     $dhcpDone = 0
+    # Create ONE isolated runspace per child and reuse it for every DHCP call.
+    # The previous create+dispose-per-call version re-imported the DhcpServer
+    # module on every iteration (~2-3s each), which is what made the run crawl.
+    # Reusing a single runspace imports the module once, then each call is cheap.
+    # This is also the production shape: a child does only a handful of DHCP
+    # calls, so a persistent per-job runspace amortizes the one-time import.
+    $isoPs = $null
+    if ($DhcpInIsolatedRunspace) { $isoPs = [powershell]::Create() }
     try {
         foreach ($i in 1..$Iterations) {
             # When DhcpFirstN > 0, only call DHCP for the first N iterations so
@@ -198,16 +206,12 @@ $childScript = {
             $doDhcp = $WithDhcp -and $ScopeId -and (($DhcpFirstN -le 0) -or ($i -le $DhcpFirstN))
             if ($doDhcp) {
                 if ($DhcpInIsolatedRunspace) {
-                    # Run the CIM cmdlet in a throwaway in-process runspace so its
-                    # progress plumbing never attaches to THIS runspace (whose
-                    # .Progress the parent reads). No process spawn -- much cheaper
-                    # than a nested Start-Job.
-                    $ps = [powershell]::Create()
-                    try {
-                        [void]$ps.AddScript('param($s) Get-DhcpServerv4Reservation -ScopeId $s -ErrorAction SilentlyContinue | Out-Null').AddArgument($ScopeId)
-                        [void]$ps.Invoke()
-                    }
-                    finally { $ps.Dispose() }
+                    # Reuse the single isolated runspace: the CIM cmdlet's progress
+                    # plumbing attaches to THAT runspace, never the one whose
+                    # .Progress the parent reads. Module import happens once.
+                    $isoPs.Commands.Clear()
+                    [void]$isoPs.AddScript('param($s) Get-DhcpServerv4Reservation -ScopeId $s -ErrorAction SilentlyContinue | Out-Null').AddArgument($ScopeId)
+                    [void]$isoPs.Invoke()
                 }
                 elseif ($PinChildGlobalPref) {
                     # Candidate real fix: pin the child runspace's GLOBAL pref so the
@@ -230,6 +234,9 @@ $childScript = {
     }
     catch {
         "CHILD-ERROR $VmName $($_.Exception.GetType().Name): $($_.Exception.Message)"
+    }
+    finally {
+        if ($isoPs) { $isoPs.Dispose() }
     }
 }
 
