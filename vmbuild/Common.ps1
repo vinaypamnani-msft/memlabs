@@ -3228,6 +3228,114 @@ function Get-DhcpScopeDescription {
     }
 }
 
+function Invoke-IsolatedCim {
+    <#
+    .SYNOPSIS
+    Runs a scriptblock containing CIM-based cmdlets (DhcpServer, Hyper-V) in a
+    reused, throwaway in-process runspace, isolated from the caller's runspace.
+
+    .DESCRIPTION
+    PowerShell 7 begins auto-forwarding (and draining) a Start-Job child's
+    Progress stream the instant a CIM cmdlet that emits progress (e.g. the
+    DhcpServer CDXML cmdlets) runs in that child's runspace. Once that happens
+    the child's .Progress collection stops accumulating the managed per-VM
+    progress records that Write-JobProgress renders in Wait-Phase, so the
+    per-VM progress bars collapse into a single forwarded bar. The damage is
+    permanent for the lifetime of the runspace -- even synthetic Write-Progress
+    records stop accumulating after a single CIM call.
+
+    Running the CIM cmdlet in a SEPARATE in-process runspace attaches that
+    auto-forward/drain to the throwaway runspace instead, leaving the caller's
+    (child job's) own .Progress stream clean so the managed bars keep rendering.
+
+    The isolated runspace is created once and cached at global scope, so the
+    DhcpServer / Hyper-V module import cost is paid only once per process. The
+    scriptblock runs in a fresh session state: it sees only native
+    cmdlets/modules and whatever is passed via -ArgumentList (declare a matching
+    param() block). It does NOT see the caller's functions (Write-Log, Get-VM2,
+    etc.) or variables.
+
+    .PARAMETER ScriptBlock
+    The scriptblock to execute in isolation. Use only native cmdlets inside it.
+
+    .PARAMETER ArgumentList
+    Positional arguments passed to the scriptblock's param() block.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock] $ScriptBlock,
+        [object[]] $ArgumentList
+    )
+
+    # (Re)create the cached runspace if it's missing or no longer usable.
+    if (-not $global:IsolatedCimPS -or $global:IsolatedCimPS.Runspace.RunspaceStateInfo.State -ne 'Opened') {
+        if ($global:IsolatedCimPS) { try { $global:IsolatedCimPS.Dispose() } catch {} }
+        $global:IsolatedCimPS = [System.Management.Automation.PowerShell]::Create()
+    }
+
+    $ps = $global:IsolatedCimPS
+    $ps.Commands.Clear()
+    $ps.Streams.ClearStreams()
+    $null = $ps.AddScript($ScriptBlock.ToString())
+    if ($ArgumentList) {
+        foreach ($arg in $ArgumentList) { $null = $ps.AddArgument($arg) }
+    }
+
+    # Invoke() throws for terminating errors (e.g. -ErrorAction Stop inside the
+    # scriptblock), which preserves the caller's existing try/catch semantics.
+    return $ps.Invoke()
+}
+
+# Return the (primary) NIC MAC for a VM, looked up in an isolated runspace so
+# the Hyper-V CIM query never poisons the caller's progress stream. When
+# -ExcludeCluster is set, SQLAO Cluster heartbeat NICs are filtered out.
+function Get-VMMacIsolated {
+    param(
+        [Parameter(Mandatory = $true)][string] $VmName,
+        [switch] $ExcludeCluster
+    )
+    return Invoke-IsolatedCim -ArgumentList $VmName, $ExcludeCluster.IsPresent -ScriptBlock {
+        param($vmName, $excludeCluster)
+        $nic = Get-VM -Name $vmName -ErrorAction Stop | Get-VMNetworkAdapter
+        if ($excludeCluster) {
+            $nic = $nic | Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' }
+        }
+        $nic = $nic | Select-Object -First 1
+        if ($nic) { [string]$nic.MacAddress } else { $null }
+    }
+}
+
+# Return the IP of an existing DHCP reservation matching $Mac in $ScopeId, or
+# $null. Runs the DhcpServer CIM query in an isolated runspace.
+function Get-DHCPReservationIPForMac {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScopeId,
+        [Parameter(Mandatory = $true)][string] $Mac
+    )
+    return Invoke-IsolatedCim -ArgumentList $ScopeId, $Mac -ScriptBlock {
+        param($scopeId, $mac)
+        $r = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
+            Where-Object { ($_.ClientId -replace '-', '') -eq $mac }
+        if ($r) { [string]$r.IPAddress.IPAddressToString } else { $null }
+    }
+}
+
+# Create a DHCP reservation, running the DhcpServer CIM cmdlet in an isolated
+# runspace. Throws on failure (matches the prior -ErrorAction Stop behavior).
+function Add-DHCPReservationIsolated {
+    param(
+        [Parameter(Mandatory = $true)][string] $ScopeId,
+        [Parameter(Mandatory = $true)][string] $IPAddress,
+        [Parameter(Mandatory = $true)][string] $Mac,
+        [string] $Description
+    )
+    Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
+        param($scopeId, $ip, $mac, $desc)
+        Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
+    } | Out-Null
+}
+
 function Remove-DHCPReservation {
     param(
         [string] $ip,
@@ -3235,75 +3343,53 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
 
-    # Suppress CIM cmdlet progress to avoid corrupting managed progress bars
-    $savedPP = $Global:ProgressPreference
-    $Global:ProgressPreference = 'SilentlyContinue'
-    try {
+    # The DhcpServer CDXML cmdlets emit CIM progress that permanently poisons
+    # the calling runspace's Progress stream (collapsing the managed per-VM
+    # progress bars when this runs inside a Phase job). Run the entire
+    # lookup/removal in an isolated in-process runspace so the poison lands on
+    # the throwaway runspace instead. Removal is synchronous here (the prior
+    # -AsJob was itself a progress-isolation workaround that's now unnecessary).
+    $logLines = Invoke-IsolatedCim -ArgumentList $ip, $mac, $vmName -ScriptBlock {
+        param($ip, $mac, $vmName)
+        $out = @()
+        $scopes = (Get-DhcpServerv4Scope).ScopeID
 
-    $job = $null
-    $scopes = (Get-DhcpServerv4Scope).ScopeID
-
-    if ($ip) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $ip")
-        if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
-            Write-Log -Verbose ($VmName + " Removing Reservation for $ip")
-            $job = Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue -AsJob
-        }
-    }
-
-    if ($mac) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
-        foreach ($scope in  $scopes) {
-            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue
-
-            if ($reservation) {
-                Write-Log -Verbose ($VmName + " Removing Reservation for $mac")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -AsJob
-                break;
+        if ($ip) {
+            $out += "$vmName Checking for Reservation for $ip"
+            if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
+                $out += "$vmName Removing Reservation for $ip"
+                Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue
             }
         }
-    }
 
-    if (-not $ip -and -not $mac) {
-        Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
-        foreach ($scope in $scopes) {
-            $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
-
-            if ($reservation) {
-                Write-Log -Verbose ($VmName + " Removing Reservation for $vmName")
-                $job = Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IpAddress -AsJob
-                break;
-            }
-        }
-    }
-
-    if ($job) {
-        try {
-            $wait = Wait-Job -Timeout 60 -Job $job
-            if ($wait.State -eq "Running") {
-                Stop-Job $job | out-null
-                remove-job -job $job | out-null
-            }
-            else {
-                if ($wait.State -eq "Completed") {
-                    $result = Receive-Job $job
-                    write-log -logonly "[DHCP] returned: $result"
-                    remove-job $job | out-null
-                }
-                else {
-                    write-log -logonly "[DHCP] State = $($wait.State)" -logonly
-                    Stop-Job $job | out-null
-                    remove-job $job | out-null
+        if ($mac) {
+            $out += "$vmName Checking for Reservation for $mac"
+            foreach ($scope in $scopes) {
+                $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                if ($reservation) {
+                    $out += "$vmName Removing Reservation for $mac"
+                    Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                    break
                 }
             }
         }
-        catch {
-            Write-Log -LogOnly "Failed to remove job $_"
+
+        if (-not $ip -and -not $mac) {
+            $out += "$vmName Checking for Reservation for $vmName"
+            foreach ($scope in $scopes) {
+                $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+                if ($reservation) {
+                    $out += "$vmName Removing Reservation for $vmName"
+                    Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
+                    break
+                }
+            }
         }
+        return $out
     }
 
-    } finally {
-        $Global:ProgressPreference = $savedPP
+    foreach ($line in $logLines) {
+        Write-Log -Verbose $line
     }
 }
 
@@ -3713,14 +3799,12 @@ function New-VirtualMachine {
         if ($DeployConfig -and -not $OSDClient.IsPresent) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
-                # Suppress CIM cmdlet progress during DHCP operations.
-                # These write to the job's Progress stream and corrupt
-                # the managed progress bars in Wait-Phase.
-                $savedPP = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
+                # DHCP CIM cmdlets run in an isolated runspace (Invoke-IsolatedCim
+                # via the Get-VMMacIsolated / *DHCPReservation* helpers) so their
+                # CIM progress never poisons this job's managed progress bars.
                 try {
-                    $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress -and $vmnet.MacAddress -ne '000000000000') {
+                    $vmMac = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac -and $vmMac -ne '000000000000') {
                         $assignedIP = $thisVmConfig.AssignedIP
                         $scopeId = if ($thisVmConfig.role -in 'InternetClient', 'AADClient') {
                             '172.31.250.0'
@@ -3728,23 +3812,19 @@ function New-VirtualMachine {
                             if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
                         }
                         # Check if a reservation already exists for this MAC
-                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
                         if ($existing) {
-                            Write-Log "$VmName`: DHCP reservation already exists: $($existing.IPAddress) (MAC=$($vmnet.MacAddress)); keeping" -LogOnly
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
                         }
                         else {
-                            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
-                            Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $assignedIP -ClientId $vmnet.MacAddress -Description "Reservation for $VmName" -ErrorAction Stop | Out-Null
-                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$($vmnet.MacAddress), Scope=$scopeId)" -LogOnly
+                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName"
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                         }
                     }
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
-                }
-                finally {
-                    $Global:ProgressPreference = $savedPP
                 }
             }
         }
@@ -3909,36 +3989,30 @@ function New-VirtualMachine {
         if ($DeployConfig -and -not $OSDClient.IsPresent) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
-                $savedPP2 = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
+                # DHCP/Hyper-V CIM cmdlets run isolated (see Get-VMMacIsolated /
+                # *DHCPReservation* helpers) so they don't poison the managed bars.
                 try {
-                    $vmnet2 = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop |
-                        Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' } |
-                        Select-Object -First 1
-                    if ($vmnet2 -and $vmnet2.MacAddress -and $vmnet2.MacAddress -ne '000000000000') {
+                    $vmMac2 = Get-VMMacIsolated -VmName $VmName -ExcludeCluster
+                    if ($vmMac2 -and $vmMac2 -ne '000000000000') {
                         $scopeId2 = if ($thisVmConfig2.role -in 'InternetClient', 'AADClient') {
                             '172.31.250.0'
                         } else {
                             if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
                         }
-                        $existing2 = Get-DhcpServerv4Reservation -ScopeId $scopeId2 -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet2.MacAddress }
+                        $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
                         if ($existing2) {
-                            Write-Log "$VmName`: DHCP reservation already exists: $($existing2.IPAddress) (MAC=$($vmnet2.MacAddress)); keeping" -LogOnly
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
                         }
                         else {
-                            Remove-DHCPReservation -mac $vmnet2.MacAddress -vmName $VmName
-                            Add-DhcpServerv4Reservation -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -ClientId $vmnet2.MacAddress -Description "Reservation for $VmName" -ErrorAction Stop | Out-Null
-                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$($vmnet2.MacAddress), Scope=$scopeId2)" -LogOnly
+                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName"
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                         $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                     }
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
-                }
-                finally {
-                    $Global:ProgressPreference = $savedPP2
                 }
             }
         }

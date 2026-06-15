@@ -728,22 +728,20 @@ $global:VM_Create = {
                 Set-VMNote -vmName $currentItem.vmName -vmNote ([pscustomobject]@{ LastKnownIP = $linuxIP })
 
                 # Create/refresh DHCP reservation so the IP is stable across reboots.
+                # DHCP/Hyper-V CIM calls run isolated (Get-VMMacIsolated /
+                # *DHCPReservation* helpers) so their progress doesn't poison the
+                # managed per-VM bars.
                 try {
-                    $savedPP3 = $Global:ProgressPreference
-                    $Global:ProgressPreference = 'SilentlyContinue'
-                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter
-                    if ($vmnet) {
+                    $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
+                    if ($vmMac) {
                         $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
-                        Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                        Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $linuxIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName) (Linux)" -ErrorAction Stop | Out-Null
+                        Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
+                        Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $linuxIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName) (Linux)"
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $linuxIP" -LogOnly
                     }
                 }
                 catch {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $linuxIP. $_" -Warning
-                }
-                finally {
-                    $Global:ProgressPreference = $savedPP3
                 }
 
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): Existing VM Preparation completed successfully for $($currentItem.role) (Linux, IP $linuxIP)." -OutputStream -Success
@@ -1945,25 +1943,20 @@ $global:VM_Config = {
                 $resolvedIP = $null
                 $ipSource = 'none'
 
-                # 1. DHCP reservation — most authoritative
-                $savedPP2 = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
+                # 1. DHCP reservation — most authoritative.
+                # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                 try {
-                    $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter |
-                        Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
-                        Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress) {
+                    $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName -ExcludeCluster
+                    if ($vmMac) {
                         $scopeId = if ($currentItem.role -in 'InternetClient', 'AADClient') { '172.31.250.0' } else { if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network } }
-                        $reservation = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
-                        if ($reservation) {
-                            $resolvedIP = $reservation.IPAddress.IPAddressToString
+                        $reservationIP = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
+                        if ($reservationIP) {
+                            $resolvedIP = $reservationIP
                             $ipSource = 'DHCP'
                         }
                     }
                 }
                 catch {}
-                finally { $Global:ProgressPreference = $savedPP2 }
 
                 # 2. AssignedIP from pre-Phase-1 allocation
                 if (-not $resolvedIP -and $currentItem.AssignedIP) {
@@ -2025,28 +2018,23 @@ $global:VM_Config = {
                     # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
                     # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
-                        # Suppress CIM cmdlet progress to avoid corrupting managed bars
-                        $savedPP = $Global:ProgressPreference
-                        $Global:ProgressPreference = 'SilentlyContinue'
+                        # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                         try {
-                            $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
-                            if ($vmnet -and $vmnet.MacAddress) {
+                            $vmMac = Get-VMMacIsolated -VmName $currentItem.vmName
+                            if ($vmMac) {
                                 if ($currentItem.role -in "InternetClient", "AADClient") {
                                     $realnetwork = "172.31.250.0"
                                 }
                                 else {
                                     $realnetwork = if ($currentItem.network) { $currentItem.network } else { $deployConfig.vmOptions.network }
                                 }
-                                Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $currentItem.vmName
-                                Add-DhcpServerv4Reservation -ScopeId $realnetwork -IPAddress $resolvedIP -ClientId $vmnet.MacAddress -Description "Reservation for $($currentItem.vmName)" -ErrorAction Stop
+                                Remove-DHCPReservation -mac $vmMac -vmName $currentItem.vmName
+                                Add-DHCPReservationIsolated -ScopeId $realnetwork -IPAddress $resolvedIP -Mac $vmMac -Description "Reservation for $($currentItem.vmName)"
                             }
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): DHCP reservation created for $resolvedIP" -LogOnly
                         }
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $resolvedIP. $_" -Warning
-                        }
-                        finally {
-                            $Global:ProgressPreference = $savedPP
                         }
                     }
                 }

@@ -1128,22 +1128,21 @@ function New-LinuxVirtualMachine {
         if ($DeployConfig) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
-                $savedPPLinux1 = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
+                # DHCP/Hyper-V CIM calls run isolated (Get-VMMacIsolated /
+                # *DHCPReservation* helpers) so their progress doesn't poison the bars.
                 try {
-                    $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-                    if ($vmnet -and $vmnet.MacAddress -and $vmnet.MacAddress -ne '000000000000') {
+                    $vmMac = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac -and $vmMac -ne '000000000000') {
                         $assignedIP = $thisVmConfig.AssignedIP
                         $scopeId = if ($thisVmConfig.network) { $thisVmConfig.network } else { $DeployConfig.vmOptions.network }
-                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet.MacAddress }
+                        $existing = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $vmMac
                         if ($existing) {
-                            Write-Log "$VmName`: DHCP reservation already exists: $($existing.IPAddress) (MAC=$($vmnet.MacAddress)); keeping" -LogOnly
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing (MAC=$vmMac); keeping" -LogOnly
                         }
                         else {
-                            Remove-DHCPReservation -mac $vmnet.MacAddress -vmName $VmName
-                            Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $assignedIP -ClientId $vmnet.MacAddress -Description "Reservation for $VmName (Linux)" -ErrorAction Stop | Out-Null
-                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$($vmnet.MacAddress), Scope=$scopeId)" -LogOnly
+                            Remove-DHCPReservation -mac $vmMac -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId -IPAddress $assignedIP -Mac $vmMac -Description "Reservation for $VmName (Linux)"
+                            Write-Log "$VmName`: DHCP reservation created: $assignedIP (MAC=$vmMac, Scope=$scopeId)" -LogOnly
                             $thisVmConfig | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                         }
                     }
@@ -1153,9 +1152,6 @@ function New-LinuxVirtualMachine {
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
-                }
-                finally {
-                    $Global:ProgressPreference = $savedPPLinux1
                 }
             }
         }
@@ -1312,29 +1308,24 @@ function New-LinuxVirtualMachine {
         if ($DeployConfig) {
             $thisVmConfig2 = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig2 -and $thisVmConfig2.AssignedIP -and -not $thisVmConfig2.ReservationCreated) {
-                $savedPPLinux2 = $Global:ProgressPreference
-                $Global:ProgressPreference = 'SilentlyContinue'
+                # DHCP/Hyper-V CIM calls run isolated so they don't poison the bars.
                 try {
-                    $vmnet2 = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
-                    if ($vmnet2 -and $vmnet2.MacAddress -and $vmnet2.MacAddress -ne '000000000000') {
+                    $vmMac2 = Get-VMMacIsolated -VmName $VmName
+                    if ($vmMac2 -and $vmMac2 -ne '000000000000') {
                         $scopeId2 = if ($thisVmConfig2.network) { $thisVmConfig2.network } else { $DeployConfig.vmOptions.network }
-                        $existing2 = Get-DhcpServerv4Reservation -ScopeId $scopeId2 -ErrorAction SilentlyContinue |
-                            Where-Object { ($_.ClientId -replace '-','') -eq $vmnet2.MacAddress }
+                        $existing2 = Get-DHCPReservationIPForMac -ScopeId $scopeId2 -Mac $vmMac2
                         if ($existing2) {
-                            Write-Log "$VmName`: DHCP reservation already exists: $($existing2.IPAddress) (MAC=$($vmnet2.MacAddress)); keeping" -LogOnly
+                            Write-Log "$VmName`: DHCP reservation already exists: $existing2 (MAC=$vmMac2); keeping" -LogOnly
                         }
                         else {
-                            Remove-DHCPReservation -mac $vmnet2.MacAddress -vmName $VmName
-                            Add-DhcpServerv4Reservation -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -ClientId $vmnet2.MacAddress -Description "Reservation for $VmName (Linux)" -ErrorAction Stop | Out-Null
-                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$($vmnet2.MacAddress), Scope=$scopeId2)" -LogOnly
+                            Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)"
+                            Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                     }
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
-                }
-                finally {
-                    $Global:ProgressPreference = $savedPPLinux2
                 }
             }
         }
