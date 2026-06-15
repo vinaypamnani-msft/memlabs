@@ -185,13 +185,29 @@ $childScript = {
 
 Write-Host ("Starting {0} jobs. UseLocalPref={1} WithDhcp={2} PinChildGlobalPref={3}. Watch the BOTTOM of the screen for an un-prefixed orphan bar." -f $JobCount, $UseLocalPref, $WithDhcp, $PinChildGlobalPref) -ForegroundColor Cyan
 
-$Global:ProgressPreference = 'SilentlyContinue'
-
+# CRITICAL ORDERING (matches production): start the jobs while the parent's
+# $Global:ProgressPreference is still its default 'Continue'. PowerShell 7
+# PROPAGATES the parent's preference variables into Start-Job children, so a
+# child started while the parent is 'SilentlyContinue' inherits that and emits
+# ZERO progress records -- the parent then has nothing to render and only PS7's
+# auto-forwarded merged child bar shows (the single-bar collapse). Production
+# starts jobs in Start-PhaseJobs (parent pref still 'Continue') and only flips
+# the parent to 'SilentlyContinue' later in Wait-Phase, so the children inherit
+# 'Continue' and their progress (incl. the DHCP CIM flood) buffers -- which is
+# the real orphan mechanism.
+#
+# Explicitly assert 'Continue' here so a same-session rerun (where a prior run
+# left Global silent) still reproduces the production precondition.
+$Global:ProgressPreference = 'Continue'
 $jobs = @()
 foreach ($n in 1..$JobCount) {
     $vmName = "ZZ-VM{0:D2}" -f $n
     $jobs += Start-Job -Name $vmName -ScriptBlock $childScript -ArgumentList $vmName, ([int]($Seconds * 40)), $WithDhcp, $ScopeId, $PinChildGlobalPref
 }
+
+# Now -- AFTER the children inherited 'Continue' -- flip the parent to silent,
+# exactly like Wait-Phase does once the jobs are already running.
+$Global:ProgressPreference = 'SilentlyContinue'
 
 $deadline = (Get-Date).AddSeconds($Seconds)
 $esc = [char]27
