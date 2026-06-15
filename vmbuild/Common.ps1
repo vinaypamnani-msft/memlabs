@@ -190,19 +190,8 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
-                # When SuppressProgress is set, skip the ProgressPreference
-                # toggle entirely. CIM cmdlets (DHCP, Hyper-V) resolve from
-                # $Global:ProgressPreference — the brief window where -force
-                # sets it to 'Continue' lets their progress records through,
-                # causing blank lines in Minimal view. The flag holder sets
-                # it before calling CIM cmdlets and clears it after.
-                if ($Global:SuppressProgress) {
-                    $force = $false
-                }
-                else {
-                    $OriginalProgressPreference = $Global:ProgressPreference
-                    $Global:ProgressPreference = 'Continue'
-                }
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
             }
 
             $logvalue = $null
