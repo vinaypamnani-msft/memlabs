@@ -190,12 +190,8 @@ Function Write-Progress2Impl {
             if ($force -or $PSBoundParameters.TryGetValue('force', [ref]$forcevalue)) {
                 $PSBoundParameters.remove("force")
                 $force = $true
-                # Don't toggle $Global:ProgressPreference here. The -force path
-                # calls $Host.UI.WriteProgress() directly in the process block,
-                # bypassing ProgressPreference entirely. Toggling to 'Continue'
-                # creates a race window where PSRP callbacks from Start-Job
-                # children see 'Continue' on a thread-pool thread and render
-                # stray progress bars at the wrong ActivityId.
+                $OriginalProgressPreference = $Global:ProgressPreference
+                $Global:ProgressPreference = 'Continue'
             }
 
             $logvalue = $null
@@ -228,12 +224,10 @@ Function Write-Progress2Impl {
                 }
             }
 
-            if (-not $force) {
-                $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
-                $scriptCmd = { & $wrappedCmd @PSBoundParameters }
-                $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
-                $steppablePipeline.Begin($PSCmdlet)
-            }
+            $wrappedCmd = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Progress', [System.Management.Automation.CommandTypes]::Cmdlet)
+            $scriptCmd = { & $wrappedCmd @PSBoundParameters }
+            $steppablePipeline = $scriptCmd.GetSteppablePipeline($myInvocation.CommandOrigin)
+            $steppablePipeline.Begin($PSCmdlet)
         }
         catch {
             throw
@@ -264,20 +258,8 @@ Function Write-Progress2Impl {
             }
 
             if ($force) {
-                # Bypass ProgressPreference entirely by calling PSHost directly.
-                # This avoids the race where temporarily setting ProgressPreference
-                # to 'Continue' allows PSRP callbacks from other Start-Job children
-                # to render stray progress bars at the wrong position.
-                $actText = if ($Activityvalue) { $Activityvalue } else { "  $Activity" }
-                $statText = if ($StatusValue) { $StatusValue } else { if ($Status) { $Status } else { "Processing" } }
-                $idVal = if ($PSBoundParameters.ContainsKey('Id')) { $PSBoundParameters['Id'] } else { 0 }
-                $pr = [System.Management.Automation.ProgressRecord]::new($idVal, $actText, $statText)
-                $pr.PercentComplete = $PercentComplete
-                if ($Completed) { $pr.RecordType = [System.Management.Automation.ProgressRecordType]::Completed }
-                if ($SecondsRemaining -and $SecondsRemaining -gt 0) { $pr.SecondsRemaining = $SecondsRemaining }
-                if ($CurrentOperation) { $pr.CurrentOperation = $CurrentOperation }
-                if ($PSBoundParameters.ContainsKey('ParentId')) { $pr.ParentId = $ParentId }
-                $Host.UI.WriteProgress(0, $pr)
+                $steppablePipeline.Process($_)
+                $Global:ProgressPreference = $OriginalProgressPreference
             }
             else {
                 $steppablePipeline.Process($_)
@@ -291,9 +273,7 @@ Function Write-Progress2Impl {
     end {
 
         try {
-            if (-not $force) {
-                $steppablePipeline.End()
-            }
+            $steppablePipeline.End()
         }
         catch {
             throw

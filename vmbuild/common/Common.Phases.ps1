@@ -11,35 +11,6 @@ function Get-JobStreamSource {
     return $Job
 }
 
-function Suppress-JobAutoProgress {
-    param($Job)
-    # PS7's host subscribes to DataAdded on Start-Job child process Progress
-    # streams and auto-renders progress bars, bypassing $ProgressPreference.
-    # This produces blank/stray lines in the terminal scroll region that
-    # persist in the scroll buffer and can't be erased.
-    #
-    # We read progress ourselves via direct indexing in Write-JobProgress,
-    # so the auto-render handler is unnecessary. Remove it by clearing the
-    # DataAdded event's backing field via reflection.
-    #
-    # ThreadJobs share the parent runspace and respect $ProgressPreference,
-    # so this is only needed for process-based Start-Job.
-    if (-not $Job -or -not $Job.ChildJobs -or $Job.ChildJobs.Count -eq 0) { return }
-    $childJob = $Job.ChildJobs[0]
-    if (-not $childJob -or -not $childJob.Progress) { return }
-    try {
-        $bindingFlags = [System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic
-        $field = [System.Management.Automation.PSDataCollection[System.Management.Automation.ProgressRecord]].GetField(
-            'DataAdded', $bindingFlags)
-        if ($field) {
-            $field.SetValue($childJob.Progress, $null)
-        }
-    }
-    catch {
-        # Reflection may fail on future PS7 builds; cosmetic-only impact
-    }
-}
-
 function Write-JobProgress {
     param($Job, $AdditionalData)
 
@@ -60,17 +31,6 @@ function Write-JobProgress {
             # auto-render the child job's raw progress records as orphan bars (no VM name prefix).
             $lastProgress = $null
             $progressCount = $streamSource.Progress.Count
-            # One-time diagnostic: log the last few progress records to understand
-            # what ActivityIds and Activity text the child process actually writes.
-            if (-not $global:JobProgressDiagDone) { $global:JobProgressDiagDone = @{} }
-            if ($progressCount -gt 0 -and -not $global:JobProgressDiagDone.ContainsKey($Job.Id)) {
-                $global:JobProgressDiagDone[$Job.Id] = $true
-                $diagStart = [Math]::Max(0, $progressCount - 5)
-                for ($di = $diagStart; $di -lt $progressCount; $di++) {
-                    $dp = $streamSource.Progress[$di]
-                    Write-Log "[ProgressDiag] Job $($Job.Id) '$($Job.Name)' record[$di]: ActivityId=$($dp.ActivityId) Activity='$($dp.Activity)' Status='$($dp.StatusDescription)' Pct=$($dp.PercentComplete)" -LogOnly
-                }
-            }
             for ($pi = $progressCount - 1; $pi -ge 0; $pi--) {
                 $candidate = $streamSource.Progress[$pi]
                 if ($candidate.Activity -ne "Preparing modules for first use." -and
@@ -141,15 +101,9 @@ function Write-JobProgress {
                         # the default ActivityId (0), but the managed bar above uses
                         # $Job.Id. If PS7 surfaces the child's record at its original Id,
                         # an extra bar appears without the VM name prefix.
-                        # Use $Host.UI.WriteProgress() directly to bypass ProgressPreference
-                        # and avoid the race where toggling to 'Continue' lets PSRP
-                        # callbacks from other jobs render stray bars.
                         $childActivityId = $lastProgress.ActivityId
                         if ($childActivityId -ne $Job.Id) {
-                            $dismissRecord = [System.Management.Automation.ProgressRecord]::new(
-                                $childActivityId, $lastProgress.Activity, "Completed")
-                            $dismissRecord.RecordType = [System.Management.Automation.ProgressRecordType]::Completed
-                            $Host.UI.WriteProgress(0, $dismissRecord)
+                            Write-Progress2 -Activity $lastProgress.Activity -Id $childActivityId -Status "Completed" -Completed -force
                         }
                     }
                 }
@@ -374,7 +328,6 @@ function Start-NormalJobs {
             $job_created_no++
         }
         else {
-            Suppress-JobAutoProgress -Job $job
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
@@ -646,7 +599,6 @@ function Start-PhaseJobs {
                 $job_created_no++
             }
             else {
-                Suppress-JobAutoProgress -Job $job
                 Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Proxy_Install)" -LogOnly
                 $jobs += $job
                 $job_created_yes++
@@ -667,7 +619,6 @@ function Start-PhaseJobs {
                 $job_created_no++
             }
             else {
-                Suppress-JobAutoProgress -Job $job
                 Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName) (Linux_Configure)" -LogOnly
                 $jobs += $job
                 $job_created_yes++
@@ -763,7 +714,6 @@ function Start-PhaseJobs {
             $job_created_no++
         }
         else {
-            Suppress-JobAutoProgress -Job $job
             Write-Log "[Phase $Phase] Created job $($job.Id) for VM $($currentItem.vmName)" -LogOnly
             $jobs += $job
             $job_created_yes++
@@ -834,15 +784,6 @@ function Wait-Phase {
         # being deferred until the job completes.
         $outputDisplayed = @{}
 
-        # Suppress PS7 auto-rendering of child job progress records. The host
-        # subscribes to DataAdded on Start-Job's Progress stream and renders
-        # bars that bypass $ProgressPreference, producing blank lines in the
-        # scroll region. We read progress ourselves in Write-JobProgress via
-        # direct indexing, so the auto-render handler is unnecessary.
-        foreach ($j in $Jobs) {
-            Suppress-JobAutoProgress -Job $j
-        }
-
         # DSC log diagnostics: after a job runs 30+ min, peek at the
         # guest's ConfigurationStatus folder for exceptions/failures and
         # log them. Purely informational -- never fails the phase.
@@ -889,12 +830,7 @@ function Wait-Phase {
             # auto-render these from the PSDataCollection before our poll picks
             # them up, producing blank/stray lines. Writing -Completed for Id 0
             # every 500ms ensures any such orphan is immediately cleared.
-            # Use $Host.UI.WriteProgress() directly to bypass ProgressPreference
-            # and avoid the race where toggling to 'Continue' lets PSRP callbacks
-            # from other jobs render stray bars during the toggle window.
-            $dismissRecord = [System.Management.Automation.ProgressRecord]::new(0, ".", "Completed")
-            $dismissRecord.RecordType = [System.Management.Automation.ProgressRecordType]::Completed
-            $Host.UI.WriteProgress(0, $dismissRecord)
+            Write-Progress2 -Activity "." -Id 0 -Status "Completed" -Completed -force
 
             $failedJobs = $jobs | Where-Object { $_.State -eq "Failed" } | Sort-Object -Property Id
             foreach ($job in $failedJobs) {
