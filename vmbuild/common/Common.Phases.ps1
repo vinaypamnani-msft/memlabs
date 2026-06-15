@@ -894,6 +894,19 @@ function Wait-Phase {
             }
             $completedJobs = $jobs | Where-Object { $_.State -eq "Completed" } | Sort-Object -Property Id
             foreach ($job in $completedJobs) {
+                # Diagnostic: log unique progress activities to identify CIM cmdlet leaks
+                $streamSource2 = Get-JobStreamSource -Job $job
+                if ($streamSource2 -and $streamSource2.Progress -and $streamSource2.Progress.Count -gt 0) {
+                    $acts = @{}
+                    foreach ($pr in $streamSource2.Progress) {
+                        $k = "$($pr.ActivityId)|$($pr.Activity)"
+                        if (-not $acts.ContainsKey($k)) { $acts[$k] = 0 }
+                        $acts[$k]++
+                    }
+                    $diagLines = $acts.GetEnumerator() | ForEach-Object { "$($_.Key) x$($_.Value)" }
+                    Write-Log "[Diag] $($job.Name) progress: $($diagLines -join '; ')" -LogOnly
+                }
+
                 Write-Progress2 -Id $job.Id -Activity $job.Name -Completed -force
                 #Write-JobProgress -Job $job -AdditionalData $AdditionalData
                 $jobName = $job | Select-Object -ExpandProperty Name
