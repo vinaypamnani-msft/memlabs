@@ -1875,6 +1875,8 @@ $global:VM_Config = {
                 $ipSource = 'none'
 
                 # 1. DHCP reservation — most authoritative
+                $savedPP2 = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter |
                         Where-Object { $_.SwitchName -and $_.SwitchName -notmatch 'Cluster' } |
@@ -1888,7 +1890,9 @@ $global:VM_Config = {
                             $ipSource = 'DHCP'
                         }
                     }
-                } catch {}
+                }
+                catch {}
+                finally { $Global:ProgressPreference = $savedPP2 }
 
                 # 2. AssignedIP from pre-Phase-1 allocation
                 if (-not $resolvedIP -and $currentItem.AssignedIP) {
@@ -1950,6 +1954,9 @@ $global:VM_Config = {
                     # CAS/Primary/Secondary get fixed-IP reservations in Phase 1.
                     # Linux VMs get theirs during Phase 1 creation. OSDClient has no network.
                     if ($currentItem.role -notin "CAS", "Primary", "Secondary", "OSDClient" -and -not (Test-VmIsLinux -Vm $currentItem)) {
+                        # Suppress CIM cmdlet progress to avoid corrupting managed bars
+                        $savedPP = $Global:ProgressPreference
+                        $Global:ProgressPreference = 'SilentlyContinue'
                         try {
                             $vmnet = Get-VM2 -Name $currentItem.vmName -ErrorAction Stop | Get-VMNetworkAdapter | Select-Object -First 1
                             if ($vmnet -and $vmnet.MacAddress) {
@@ -1966,6 +1973,9 @@ $global:VM_Config = {
                         }
                         catch {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): Could not create DHCP reservation for $resolvedIP. $_" -Warning
+                        }
+                        finally {
+                            $Global:ProgressPreference = $savedPP
                         }
                     }
                 }

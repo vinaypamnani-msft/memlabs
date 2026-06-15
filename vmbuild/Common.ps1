@@ -3196,6 +3196,11 @@ function Remove-DHCPReservation {
         [string] $vmName
     )
 
+    # Suppress CIM cmdlet progress to avoid corrupting managed progress bars
+    $savedPP = $Global:ProgressPreference
+    $Global:ProgressPreference = 'SilentlyContinue'
+    try {
+
     $job = $null
     $scopes = (Get-DhcpServerv4Scope).ScopeID
 
@@ -3210,8 +3215,6 @@ function Remove-DHCPReservation {
     if ($mac) {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $mac")
         foreach ($scope in  $scopes) {
-            #write-Host $scope.ScopeId
-            #Get-DhcpServerv4Reservation -scope $scope.ScopeID
             $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue
 
             if ($reservation) {
@@ -3225,8 +3228,6 @@ function Remove-DHCPReservation {
     if (-not $ip -and -not $mac) {
         Write-Log -Verbose ($VmName + " Checking for Reservation for $vmName")
         foreach ($scope in $scopes) {
-            #write-Host $scope.ScopeId
-            #Get-DhcpServerv4Reservation -scope $scope.ScopeID
             $reservation = Get-DhcpServerv4Reservation -scope $scope -ClientId $mac -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
 
             if ($reservation) {
@@ -3260,6 +3261,10 @@ function Remove-DHCPReservation {
         catch {
             Write-Log -LogOnly "Failed to remove job $_"
         }
+    }
+
+    } finally {
+        $Global:ProgressPreference = $savedPP
     }
 }
 
@@ -3669,6 +3674,11 @@ function New-VirtualMachine {
         if ($DeployConfig -and -not $OSDClient.IsPresent) {
             $thisVmConfig = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VmName } | Select-Object -First 1
             if ($thisVmConfig -and $thisVmConfig.AssignedIP) {
+                # Suppress CIM cmdlet progress during DHCP operations.
+                # These write to the job's Progress stream and corrupt
+                # the managed progress bars in Wait-Phase.
+                $savedPP = $Global:ProgressPreference
+                $Global:ProgressPreference = 'SilentlyContinue'
                 try {
                     $vmnet = Get-VMNetworkAdapter -VMName $VmName -ErrorAction Stop | Select-Object -First 1
                     if ($vmnet -and $vmnet.MacAddress) {
@@ -3693,6 +3703,9 @@ function New-VirtualMachine {
                 }
                 catch {
                     Write-Log "$VmName`: Could not create DHCP reservation for $($thisVmConfig.AssignedIP). $_" -Warning
+                }
+                finally {
+                    $Global:ProgressPreference = $savedPP
                 }
             }
         }
