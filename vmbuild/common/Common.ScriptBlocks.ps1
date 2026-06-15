@@ -1790,23 +1790,63 @@ $global:VM_Config = {
                 }
             }
             catch {}
+
+            # 4. Verify the LCM actually stopped and report it back. The bounded
+            #    stops above can be killed while still hung, so a bare "the
+            #    scriptblock returned" is NOT proof the LCM is idle -- a still-
+            #    Busy LCM means an old config is mid-apply and could leak forward
+            #    into the new push. Return the real state so the host escalates
+            #    to a reboot (the guaranteed way to clear an in-memory apply)
+            #    only when DSC genuinely did not stop.
+            $lcmState = 'Unknown'
+            $stopped = $true
+            try {
+                $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+                # Busy = a configuration is actively applying. Anything else
+                # (Idle, PendingConfiguration, Ready) means no apply is running.
+                $stopped = ($lcmState -ne 'Busy')
+            }
+            catch {
+                # LCM unreadable right after we killed WmiPrvSE -- the provider
+                # host was just terminated, so there is no running apply. Treat
+                # as stopped (matches DSC_ClearStatus's LCM-gate logic).
+                $lcmState = 'Unknown'
+                $stopped = $true
+            }
+            return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState }
         }
 
         Write-Progress2 $Activity -Status "Stopping DSCs" -percentcomplete 5 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName): Stopping any previously running DSC Configurations."
-        $result = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-        if ($result.ScriptBlockFailed) {
+        # Scale the stop timeout with lab size. After the bounded in-guest stop,
+        # the scriptblock always returns in ~47s regardless of VM count; only the
+        # WinRM/PSDirect transport setup grows with lab size under host CPU/disk
+        # contention. Add 10s per VM over 10, capped at 180s so a genuinely dead
+        # VM still escalates to the reboot that actually fixes it.
+        $stopVmCount = @($deployConfig.virtualMachines).Count
+        $stopTimeout = if ($stopVmCount -gt 10) { [Math]::Min(180, 60 + 10 * ($stopVmCount - 10)) } else { 60 }
+        $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+        # Escalate not only on a job timeout/failure, but also when the in-guest
+        # stop reported the LCM is still Busy (a bounded stop that got killed
+        # while hung). Either way the LCM is not confirmed idle, so we must not
+        # let an old DSC leak forward into the new push.
+        $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
+        if ($stopFailed) {
             Write-Progress2 $Activity -Status "Retry Stopping DSCs" -percentcomplete 5 -force
-            $result = Invoke-VmCommand -AsJob -TimeoutSeconds 60 -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-            if ($result.ScriptBlockFailed) {
+            $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+            $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
+            if ($stopFailed) {
+                $lcmInfo = if ($result.ScriptBlockOutput -and $result.ScriptBlockOutput.LCMState) { " (LCM='$($result.ScriptBlockOutput.LCMState)')" } else { "" }
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC did not stop$lcmInfo; rebooting VM to clear the running configuration." -Warning
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
                 Stop-vm2 -name $currentItem.vmName
                 Start-Sleep -Seconds 10
                 start-vm2 -name  $currentItem.vmName
                 Write-Progress2 $Activity -Status "Restarting VM then Stopping DSCs" -percentcomplete 5 -force
                 Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
-                $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
-                if ($result.ScriptBlockFailed) {
+                $result = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's"
+                $stopFailed = $result.ScriptBlockFailed -or ($result.ScriptBlockOutput -and ($result.ScriptBlockOutput.Stopped -eq $false))
+                if ($stopFailed) {
                     Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to stop any running DSC's. $($result.ScriptBlockOutput)" -Warning -OutputStream
                 }
             }
