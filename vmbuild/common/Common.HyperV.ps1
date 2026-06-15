@@ -18,6 +18,29 @@ function Install-HyperV {
         }
         catch {}
     }
+
+    # Fast pre-check: the vmms service is registered when the Hyper-V role is
+    # installed and the Hyper-V PowerShell module ships with Hyper-V-PowerShell.
+    # Both checks are local-registry lookups (sub-millisecond) — far faster
+    # than Get-WindowsFeature, which goes through ServerManager/CIM and can
+    # stall for minutes when WMI is busy or the system is under load.
+    # Skip the slow CIM call entirely when both signals say "installed".
+    if (-not $hvInstalled) {
+        $vmmsRegistered = [bool](Get-Service -Name vmms -ErrorAction SilentlyContinue)
+        $hvModuleAvailable = [bool](Get-Command -Name Get-VM -Module Hyper-V -ErrorAction SilentlyContinue)
+        if ($vmmsRegistered -and $hvModuleAvailable) {
+            $hvInstalled = $true
+            Write-Log "Install-HyperV: Hyper-V detected via vmms service + Hyper-V module (skipped Get-WindowsFeature)." -LogOnly
+            try {
+                [PSCustomObject]@{
+                    CheckedUtc = (Get-Date).ToUniversalTime().ToString("o")
+                    Installed  = $true
+                } | ConvertTo-Json | Set-Content -Path $hvCacheFile -Encoding UTF8
+            }
+            catch {}
+        }
+    }
+
     if (-not $hvInstalled) {
         Write-Log "Install-HyperV: Calling Get-WindowsFeature Hyper-V (CIM — may be slow)..." -LogOnly
         if ((Get-WindowsFeature -Name Hyper-V).InstallState -ne 'Installed') {
