@@ -19,9 +19,12 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 #region Run from temp copy (when already elevated but launched from the original path)
 $tempDir = Join-Path $env:TEMP "Read-DSCLog"
 $tempScript = Join-Path $tempDir "Read-DSCLog.ps1"
-if ($PSCommandPath -ne $tempScript) {
+# Resolve to long paths to avoid 8.3 short name mismatches (e.g. VMBUIL~1 vs VMBUILDADMIN)
+$normalizedCurrent = if (Test-Path $PSCommandPath) { (Get-Item $PSCommandPath).FullName } else { $PSCommandPath }
+$normalizedTemp = if (Test-Path $tempScript) { (Get-Item $tempScript).FullName } else { $tempScript }
+if ($normalizedCurrent -ne $normalizedTemp) {
     if (-not (Test-Path $tempDir)) { New-Item -ItemType Directory -Path $tempDir -Force | Out-Null }
-    Copy-Item -Path $PSCommandPath -Destination $tempScript -Force
+    Copy-Item -Path $PSCommandPath -Destination $tempScript -Force -ErrorAction Stop
     & $tempScript
     exit
 }
