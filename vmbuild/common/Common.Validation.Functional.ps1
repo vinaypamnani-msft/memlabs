@@ -2690,6 +2690,17 @@ function Test-BLMFunctionality {
         $blmPolicy = Get-CMBlmSetting -Name $policyName -ErrorAction SilentlyContinue
         if (-not $blmPolicy) {
             $results.Details.Add("WARN: BitLocker policy '$policyName' not found — deployment may still be processing")
+            # Pull EnableBLM log lines for diagnostics
+            try {
+                $blmLog = Get-Content "C:\staging\DSC\InstallCMLog.log" -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match '\[EnableBLM\]' } | Select-Object -Last 10
+                if ($blmLog) {
+                    $results.Details.Add("DIAG: Last EnableBLM log entries:")
+                    foreach ($bl in $blmLog) { $results.Details.Add("  $($bl.Trim())") }
+                } else {
+                    $results.Details.Add("DIAG: No [EnableBLM] entries found in InstallCMLog.log")
+                }
+            } catch {}
             Pop-Location
             return $results
         }
