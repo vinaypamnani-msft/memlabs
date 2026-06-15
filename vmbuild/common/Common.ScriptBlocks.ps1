@@ -254,7 +254,7 @@ $global:Initialize_Disk = {
     $ProgressPreference = $OriginalPref  
 
     # Create NO_SMS_ON_DRIVE.SMS
-    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue | Out-Null
 }
 
 # Create VM script block
@@ -1239,7 +1239,16 @@ $global:VM_Create = {
             }
 
             if ($diskEntries.Count -gt 0) {
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -ScriptBlock {
+                $diskInitAttempts = 0
+                $diskInitMaxAttempts = 3
+                $diskInitSuccess = $false
+                while (-not $diskInitSuccess -and $diskInitAttempts -lt $diskInitMaxAttempts) {
+                    $diskInitAttempts++
+                    if ($diskInitAttempts -gt 1) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init attempt $diskInitAttempts/$diskInitMaxAttempts (waiting 15s for CIM service)" -Warning
+                        Start-Sleep -Seconds 15
+                    }
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -ScriptBlock {
                     param($entries)
                     $OriginalPref = $ProgressPreference
                     $ProgressPreference = "SilentlyContinue"
@@ -1284,12 +1293,19 @@ $global:VM_Create = {
                     }
 
                     # Create NO_SMS_ON_DRIVE.SMS
-                    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue
+                    New-Item "$env:systemdrive\NO_SMS_ON_DRIVE.SMS" -ItemType File -Force -ErrorAction SilentlyContinue | Out-Null
 
                     $ProgressPreference = $OriginalPref
                 } -ArgumentList @(, $diskEntries)
-                if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                    if (-not $result.ScriptBlockFailed) {
+                        $diskInitSuccess = $true
+                    }
+                    elseif ($diskInitAttempts -lt $diskInitMaxAttempts) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Disk init failed (attempt $diskInitAttempts): $($result.ScriptBlockOutput)" -Warning
+                    }
+                }
+                if (-not $diskInitSuccess) {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed to initialize disks after $diskInitMaxAttempts attempts. $($result.ScriptBlockOutput)" -Failure -OutputStream
                     return
                 }
                 Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log -force
