@@ -1183,17 +1183,44 @@ $global:VM_Create = {
 
             # -AsJob + -TimeoutSeconds so a wedged guest can't hang this step forever
             # (same hazard as disk init below). A healthy guest finishes in well under
-            # 2 minutes.
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings" -AsJob -TimeoutSeconds 240
+            # 2 minutes, but when 15+ guests finish OOBE at once they all run this
+            # PSDirect step simultaneously and a slow-but-healthy VM can exceed a
+            # fixed 240s. Scale the timeout with lab size (same pattern as the DSC
+            # stop): +10s per VM over 10, capped at 480s, floor 240s.
+            $settingsVmCount = @($deployConfig.virtualMachines).Count
+            $settingsTimeout = if ($settingsVmCount -gt 10) { [Math]::Min(480, 240 + 10 * ($settingsVmCount - 10)) } else { 240 }
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings" -AsJob -TimeoutSeconds $settingsTimeout
             if ($result.ScriptBlockFailed) {
-                # If the guest WMI/CIM server is wedged the step either errors with the
-                # CIM/message-filter signature or times out silently. Either way, recover
-                # it (restart winmgmt over PSDirect, escalate to reboot) and retry once.
-                # This is the first place the wedged-guest symptom usually surfaces, so
-                # healing here keeps the later disk-init step healthy too.
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM settings step failed; attempting guest recovery." -Warning
-                if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot) {
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)" -AsJob -TimeoutSeconds 240
+                # The step can fail two very different ways:
+                #   1. Genuinely wedged guest WMI/CIM server (CIM/message-filter
+                #      error, or a silent -AsJob timeout) - needs winmgmt restart /
+                #      reboot recovery.
+                #   2. A slow-but-healthy guest that just ran out of time under a
+                #      concurrent-boot load spike - a reboot here is wasteful and
+                #      adds minutes.
+                # Probe liveness with a trivial PSDirect command (short timeout). If
+                # the guest answers quickly it was only slow, so just retry the
+                # idempotent settings step. Only when the probe fails (truly
+                # unresponsive) do we escalate to Repair-VmCimServer's winmgmt
+                # restart + reboot.
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): VM settings step failed; probing guest liveness before escalating." -Warning
+                $liveProbe = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock { $env:COMPUTERNAME } -DisplayName "Liveness probe" -AsJob -TimeoutSeconds 60 -SuppressLog
+                if (-not $liveProbe.ScriptBlockFailed) {
+                    # Guest is responsive over PSDirect - it was just slow. Retry the
+                    # idempotent step once with the scaled timeout before any reboot.
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest responded to liveness probe; retrying settings step (no recovery needed)." -Warning
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (retry)" -AsJob -TimeoutSeconds $settingsTimeout
+                }
+                if ($result.ScriptBlockFailed) {
+                    # Either the probe failed (truly wedged) or the lightweight retry
+                    # still didn't finish - now recover the guest in-place (restart
+                    # winmgmt over PSDirect, escalate to reboot) and retry once. This
+                    # is the first place the wedged-guest symptom usually surfaces, so
+                    # healing here keeps the later disk-init step healthy too.
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): Guest still failing; attempting CIM/WMI recovery." -Warning
+                    if (Repair-VmCimServer -VmName $currentItem.vmName -VmDomainName $domainName -Phase $Phase -AllowReboot) {
+                        $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Fix_NewVmSettings -ArgumentList @($timeZone, $domainNameForLogging, $isWorkgroup) -DisplayName "Configure new VM settings (post-recovery retry)" -AsJob -TimeoutSeconds $settingsTimeout
+                    }
                 }
             }
             if ($result.ScriptBlockFailed) {
@@ -1272,8 +1299,10 @@ $global:VM_Create = {
                     # WITHOUT returning an error, so a synchronous call would hang the
                     # whole Phase 1 job indefinitely (one stuck VM = the build never
                     # finishes). -AsJob + -TimeoutSeconds surfaces the hang as a failure
-                    # so the recovery/retry logic below can run.
-                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -AsJob -TimeoutSeconds 240 -ScriptBlock {
+                    # so the recovery/retry logic below can run. Reuse the lab-size
+                    # scaled timeout so a slow-but-healthy guest under concurrent-boot
+                    # load isn't misread as wedged (same rationale as the settings step).
+                    $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Initialize $($diskEntries.Count) disk(s)" -AsJob -TimeoutSeconds $settingsTimeout -ScriptBlock {
                     param($entries)
                     $OriginalPref = $ProgressPreference
                     $ProgressPreference = "SilentlyContinue"
