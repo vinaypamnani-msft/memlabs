@@ -156,6 +156,76 @@ function Write-JobProgress {
     }
 }
 
+# Returns the host path to the SQL ISO for a given VM (resolved from the Azure
+# file list by sqlVersion), or $null if it can't be resolved.
+function Get-SqlIsoPathForVm {
+    param([object]$VirtualMachine)
+
+    if (-not $VirtualMachine.sqlVersion) { return $null }
+    $azureFileList = if ($Common) { $Common.AzureFileList } else { $null }
+    if (-not $azureFileList) { return $null }
+
+    $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $VirtualMachine.sqlVersion }
+    $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
+    if (-not $sqlIso) { return $null }
+
+    return (Join-Path $Common.AzureFilesPath $sqlIso)
+}
+
+# Mounts the SQL ISO to the DVD drive of every SQL VM in the config, just before
+# Phase 4 installs SQL directly from it. Idempotent: if the correct ISO is
+# already mounted (e.g. a -StartPhase 4 retry after a failed run left it
+# attached), the VM is skipped. The single DVD drive is free by Phase 4 because
+# the create-time CM/OSD copies (Common.ScriptBlocks.ps1) eject when done.
+function Mount-SqlIsoForPhase {
+    param([object]$deployConfig)
+
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden }
+    foreach ($vm in $sqlVMs) {
+        $sqlIsoPath = Get-SqlIsoPathForVm -VirtualMachine $vm
+        if (-not $sqlIsoPath) {
+            Write-Log "[Phase 4]: $($vm.vmName): Could not resolve SQL ISO path for '$($vm.sqlVersion)'; skipping mount." -Warning
+            continue
+        }
+
+        # Already mounted with the correct ISO -> no-op (idempotent re-run).
+        $existing = Get-VMDvdDrive -VMName $vm.vmName -ErrorAction SilentlyContinue
+        if ($existing -and $existing.Path -eq $sqlIsoPath) {
+            Write-Log "[Phase 4]: $($vm.vmName): SQL ISO already mounted ($sqlIsoPath)."
+            continue
+        }
+
+        Write-Log "[Phase 4]: $($vm.vmName): Mounting SQL ISO $sqlIsoPath as a DVD drive"
+        $dvd = Set-VMDvdDrive -VMName $vm.vmName -Path $sqlIsoPath -Passthru
+        if (-not $dvd) {
+            Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO. Retrying after eject."
+            Get-VMDvdDrive -VMName $vm.vmName | Set-VMDvdDrive -Path $null
+            Start-Sleep -Seconds 20
+            $dvd = Set-VMDvdDrive -VMName $vm.vmName -Path $sqlIsoPath -Passthru
+        }
+        if (-not $dvd) {
+            Write-Log "[Phase 4]: $($vm.vmName): Failed mounting SQL ISO $sqlIsoPath as a DVD drive" -Failure -OutputStream
+        }
+    }
+}
+
+# Ejects the SQL ISO from every SQL VM in the config. Called after a SUCCESSFUL
+# Phase 4 so nothing is mounted at rest (avoids baking a host ISO path into
+# checkpoints / .memlabs exports). On a failed Phase 4 the ISO is deliberately
+# left mounted for debugging.
+function Dismount-SqlIsoForPhase {
+    param([object]$deployConfig)
+
+    $sqlVMs = $deployConfig.virtualMachines | Where-Object { $_.sqlVersion -and -not $_.hidden }
+    foreach ($vm in $sqlVMs) {
+        $dvd = Get-VMDvdDrive -VMName $vm.vmName -ErrorAction SilentlyContinue
+        if ($dvd -and $dvd.Path) {
+            Write-Log "[Phase 4]: $($vm.vmName): Ejecting SQL ISO from DVD drive"
+            $dvd | Set-VMDvdDrive -Path $null
+        }
+    }
+}
+
 function Start-Phase {
 
     param(
@@ -248,6 +318,13 @@ function Start-Phase {
         Build-ToolZipsForPhase2 -deployConfig $deployConfig
     }
 
+    # Mount the SQL ISO to each SQL VM just before Phase 4 installs SQL from it.
+    # The single DVD drive is free here because the create-time CM/OSD copies
+    # already ejected. Idempotent on -StartPhase 4 reruns.
+    if ($Phase -eq 4) {
+        Mount-SqlIsoForPhase -deployConfig $deployConfig
+    }
+
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
     if (-not $start.Applicable) {
@@ -262,6 +339,12 @@ function Start-Phase {
     # zips from previous runs that are no longer referenced.
     if ($Phase -eq 2) {
         Clean-StaleToolZips
+    }
+
+    # Eject the SQL ISO after a SUCCESSFUL Phase 4. On failure leave it mounted
+    # so the VM can be inspected; a -StartPhase 4 retry re-mounts idempotently.
+    if ($Phase -eq 4 -and $result.Failed -eq 0) {
+        Dismount-SqlIsoForPhase -deployConfig $deployConfig
     }
 
     Write-Log "[Phase $Phase] Jobs completed; $($result.Success) success, $($result.Warning) warnings, $($result.Failed) failures. Time: $($result.Elapsed)"

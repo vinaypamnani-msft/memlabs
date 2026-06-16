@@ -1412,45 +1412,11 @@ $global:VM_Create = {
                 }
                 Write-Progress2 -Activity "$($currentItem.vmName): Initializing disks" -Status "Done" -Completed -Log -force
             }
-            # Copy SQL files to VM
-            if ($currentItem.sqlVersion -and $createVM) {
-
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying SQL installation files to the VM."
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Mounting ISO" -force
-
-                # Determine which SQL version files should be used
-                $sqlFiles = $azureFileList.ISO | Where-Object { $_.id -eq $currentItem.sqlVersion }
-
-                # SQL Iso Path
-                $sqlIso = $sqlFiles.filename | Where-Object { $_.ToLowerInvariant().EndsWith(".iso") }
-                $sqlIsoPath = Join-Path $Common.AzureFilesPath $sqlIso
-
-                # Add SQL ISO to guest
-                Set-VMDvdDrive -VMName $currentItem.vmName -Path $sqlIsoPath
-
-                # Create directories and copy files from DVD in one call
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Copying from DVD" -force
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Create SQL directories and copy from CD-ROM" -ScriptBlock {
-                    New-Item -Path "C:\temp\SQL" -ItemType Directory -Force | Out-Null
-                    New-Item -Path "C:\temp\SQL_CU" -ItemType Directory -Force | Out-Null
-                    $cd = Get-Volume | Where-Object { $_.DriveType -eq "CD-ROM" }
-                    Copy-Item -Path "$($cd.DriveLetter):\*" -Destination "C:\temp\SQL" -Recurse -Force -Confirm:$false
-                }
-                if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                    return
-                }
-
-                $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -DisplayName "Test SQL Files" -ScriptBlock { get-item "c:\temp\SQL_CU"; get-item "c:\temp\SQL\setup.exe" }
-                if ($result.ScriptBlockFailed) {
-                    Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to copy SQL installation files to the VM. $($result.ScriptBlockOutput)" -Failure -OutputStream
-                    return
-                }
-
-                # Eject ISO from guest
-                Get-VMDvdDrive -VMName $currentItem.vmName | Set-VMDvdDrive -Path $null
-                Write-Progress2 -Activity "$($currentItem.vmName): Copying SQL installation files" -Status "Done" -Completed -force
-            }
+            # SQL installation media is no longer copied to the VM at create time.
+            # The SQL ISO is mounted to the VM's DVD drive by the host just before
+            # Phase 4 (Mount-SqlIsoForPhase in Common.Phases.ps1) and Phase 4 DSC
+            # installs SQL directly from it (drive letter S:). See plan: mount-
+            # install-eject, single DVD reused after the create-time CM/OSD copies.
             #Copy CM to the VM
             if ($currentItem.CMInstallDir -and $createVM) {
 

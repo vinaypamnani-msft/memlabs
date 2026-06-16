@@ -187,6 +187,14 @@ function Test-VmFunctionality {
         $testsPassed = Test-SSMSInstall -VMName $VMName -Domain $domain
     }
 
+    # SQL ISO must not be left mounted after a successful build (host-side check).
+    # Phase 4 mounts the SQL ISO and ejects it on success; by Phase 11 a healthy
+    # SQL VM should have an empty DVD drive.
+    if ($testsPassed -and $CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SQL ISO is not mounted"
+        $testsPassed = Test-SqlIsoNotMounted -VMName $VMName -CurrentItem $CurrentItem -DeployConfig $DeployConfig
+    }
+
     # SMS Provider role check (remote SMS provider, not on the site server itself)
     if ($testsPassed -and $CurrentItem.InstallSMSProv -and $role -ne 'CAS' -and $role -ne 'Primary') {
         Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying SMS Provider"
@@ -1233,6 +1241,43 @@ function Test-SQLFunctionality {
         -DisplayName "Phase11-SQL-Test" -SuppressLog
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQL' -Result $result)
+}
+
+function Test-SqlIsoNotMounted {
+    <#
+    .SYNOPSIS
+        Host-side check that the SQL ISO is not left mounted on a SQL VM after
+        the build completes.
+    .DESCRIPTION
+        Phase 4 mounts the SQL ISO to install SQL, then the host ejects it on a
+        successful phase (Dismount-SqlIsoForPhase). On a failed Phase 4 the ISO
+        is deliberately left mounted for debugging. By Phase 11 a healthy SQL VM
+        should have an empty DVD drive; a still-attached ISO indicates the eject
+        was skipped (e.g. a prior failed run that was never re-run cleanly).
+        Buffers a FAIL line into $script:Phase11OutputBuffer like the other
+        host-side Phase 11 tests, and returns $true when the DVD is empty.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][object]$CurrentItem,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $label = 'SQL-ISO'
+
+    $dvd = Get-VMDvdDrive -VMName $VMName -ErrorAction SilentlyContinue
+    $mountedPath = ($dvd | Where-Object { $_.Path } | Select-Object -First 1).Path
+
+    if ($mountedPath) {
+        $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: $VMName still has an ISO mounted ($mountedPath); SQL ISO should be ejected after Phase 4"; Level = 'Failure' })
+        Write-Log "[Phase $Phase] [$label]: $VMName has ISO still mounted: $mountedPath" -Failure -LogOnly
+        return $false
+    }
+
+    Write-Log "[Phase $Phase] [$label]: $VMName DVD drive is empty (SQL ISO not mounted)" -LogOnly
+    return $true
 }
 
 function Test-SQLAOFunctionality {

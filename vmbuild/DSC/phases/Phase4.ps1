@@ -64,6 +64,19 @@
                 DependsOn = $nextDepend
             }
             $nextDepend = '[RebootNow]RebootNow'
+
+            # SQL media is no longer copied to C:\temp\SQL at VM create time; the
+            # SQL ISO is mounted by the host before Phase 4 and assigned drive
+            # letter S: below. C:\temp\SQL_CU still holds the downloaded CU and
+            # must exist before DownloadSQLCU writes into it.
+            File SqlCuDir {
+                Type            = 'Directory'
+                DestinationPath = 'C:\temp\SQL_CU'
+                Ensure          = 'Present'
+                DependsOn       = $nextDepend
+            }
+            $nextDepend = '[File]SqlCuDir'
+
             if ($sqlUpdateEnabled) {
 
                 WriteStatus DownloadSQLCU {
@@ -131,6 +144,36 @@
             }
             $nextDepend = '[Script]RestoreSqlNcliSource'
 
+            # The host mounts the SQL ISO to this VM's DVD drive before Phase 4.
+            # Assign it the deterministic letter S: so SqlSetup -SourcePath is
+            # stable (raw CD-ROM letters float, and a reboot happened above).
+            Script AssignSqlIsoDriveLetter {
+                GetScript  = { @{ Result = '' } }
+                TestScript = { Test-Path 'S:\setup.exe' }
+                SetScript  = {
+                    # Find the optical volume holding the SQL media (setup.exe at
+                    # its root) and relabel it S:. DriveType 5 = CD-ROM, which is
+                    # how a mounted ISO presents.
+                    $assigned = $false
+                    foreach ($vol in (Get-CimInstance -ClassName Win32_Volume -Filter 'DriveType = 5' -ErrorAction SilentlyContinue)) {
+                        if (-not $vol.DriveLetter) { continue }
+                        if (Test-Path (Join-Path "$($vol.DriveLetter)\" 'setup.exe')) {
+                            if ($vol.DriveLetter -ne 'S:') {
+                                $vol.DriveLetter = 'S:'
+                                Set-CimInstance -InputObject $vol -ErrorAction Stop
+                            }
+                            $assigned = $true
+                            break
+                        }
+                    }
+                    if (-not $assigned) {
+                        throw "SQL ISO not found on any CD-ROM volume (expected setup.exe at the optical drive root). The host should have mounted it before Phase 4."
+                    }
+                }
+                DependsOn  = $nextDepend
+            }
+            $nextDepend = '[Script]AssignSqlIsoDriveLetter'
+
             WriteStatus InstallSQL {
                 DependsOn = $nextDepend
                 Status    = "Installing '$($ThisVM.sqlVersion)' ($SQLInstanceName instance)"
@@ -146,7 +189,7 @@
                 InstanceDir         = $SQLInstanceDir
                 SQLCollation        = 'SQL_Latin1_General_CP1_CI_AS'
                 Features            = $features
-                SourcePath          = 'C:\temp\SQL'
+                SourcePath          = 'S:\'
                 UpdateEnabled       = $sqlUpdateEnabled
                 UpdateSource        = "C:\temp\SQL_CU"
                 SQLSysAdminAccounts = $SQLSysAdminAccounts

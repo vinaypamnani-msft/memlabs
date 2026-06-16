@@ -796,13 +796,19 @@ function Test-ValidVmDisks {
 
     # Additional Disks
     if ($VM.additionalDisks) {
-        $validLetters = 69..89 | ForEach-Object { [char]$_ }    # Letters E-Y
+        # S is reserved for the SQL ISO mount (Phase 4 SqlSetup SourcePath), so
+        # it is excluded from the valid additional-disk letters.
+        $validLetters = 69..89 | ForEach-Object { [char]$_ } | Where-Object { $_ -ne 'S' }    # Letters E-Y excluding S
         $disks = $VM.additionalDisks
         $disks | Get-Member -MemberType NoteProperty | ForEach-Object {
 
+            # S is reserved for the SQL ISO mount
+            if ($_.Name -eq 'S') {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains additional disk [S]; S: is reserved for the SQL ISO mount and cannot be used as a data disk." -ReturnObject $ReturnObject -Failure
+            }
             # valid drive letter
-            if ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
-                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must have a single drive letter between E and Y." -ReturnObject $ReturnObject -Failure
+            elseif ($_.Name.Length -ne 1 -or $validLetters -notcontains $_.Name) {
+                Add-ValidationMessage -Message "$vmRole Validation: [$vmName] contains invalid additional disks [$disks]; Disks must have a single drive letter between E and Y (excluding S)." -ReturnObject $ReturnObject -Failure
             }
 
             $size = $($vm.additionalDisks."$($_.Name)")
