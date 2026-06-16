@@ -756,7 +756,7 @@ function Restart-UnresponsiveVm {
             $vm = Get-VM2 -Name $VmName
             if ($vm.State -ne 'Off') {
                 Write-Log "Forcing stop of $VmName..."
-                Stop-VM2 -Name $VmName -Force -TurnOff
+                Stop-VM2 -Name $VmName -TurnOff
                 Start-Sleep -Seconds 5
             }
             
@@ -839,7 +839,7 @@ function Repair-VmCimServer {
 
     # Step 2: reboot the VM and wait for it to come back.
     Write-Log "[Phase $Phase]: ${VmName}: Rebooting VM to clear wedged WMI/CIM server..." -Warning
-    Stop-VM2 -Name $VmName -Force -TurnOff -ErrorAction SilentlyContinue
+    Stop-VM2 -Name $VmName -TurnOff -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 5
     Start-VM2 -Name $VmName -ErrorAction SilentlyContinue
 
