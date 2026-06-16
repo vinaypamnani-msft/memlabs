@@ -348,38 +348,6 @@
       "dynamicMinRam": "1GB"
     },
     {
-      "vmName": "TURNIP",
-      "role": "DomainMember",
-      "operatingSystem": "Server 2016 February 2018",
-      "memory": "4GB",
-      "virtualProcs": 4,
-      "tpmEnabled": true,
-      "installSSMS": true,
-      "sqlVersion": "SQL Server 2016",
-      "sqlInstanceName": "PARSNIP",
-      "sqlInstanceDir": "E:\\SQL",
-      "sqlPort": "2433",
-      "additionalDisks": {
-        "E": "250GB"
-      }
-    },
-    {
-      "vmName": "BEET",
-      "role": "DomainMember",
-      "operatingSystem": "Server 2019",
-      "memory": "4GB",
-      "virtualProcs": 4,
-      "tpmEnabled": true,
-      "installSSMS": true,
-      "sqlVersion": "SQL Server 2017",
-      "sqlInstanceName": "RADISH",
-      "sqlInstanceDir": "G:\\SQL",
-      "sqlPort": "3433",
-      "additionalDisks": {
-        "G": "250GB"
-      }
-    },
-    {
       "vmName": "PICKLE",
       "role": "DomainMember",
       "operatingSystem": "Server 2022",
