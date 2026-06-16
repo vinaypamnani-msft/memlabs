@@ -1679,6 +1679,35 @@ function Test-Configuration {
                     Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] does not have a SiteCode." -ReturnObject $return -Failure
                 }
 
+                # Determine if this WSUS/SUP will use the Windows Internal Database (WID).
+                # Mirrors Phase6.ps1: WID is used unless a SQL database server is specified
+                # (explicit wsusDataBaseServer other than WID, a local sqlVersion, a
+                # remoteSQLVM, or a resolved WSUSSqlServer).
+                $usesWid = $false
+                if ($vm.wsusDataBaseServer) {
+                    $usesWid = ($vm.wsusDataBaseServer -eq "WID")
+                }
+                else {
+                    $usesWid = -not ($vm.sqlVersion -or $vm.remoteSQLVM -or $vm.thisParams.WSUSSqlServer)
+                }
+
+                if ($usesWid) {
+                    # WID co-located with WSUS is memory-hungry: during the first full
+                    # catalog sync the WsusPool IIS app pool plus the WID sqlservr.exe
+                    # can exceed 4-5GB. On an undersized VM the pool hits its memory
+                    # recycle cap mid-Categories, returns 503, and the sync is killed /
+                    # restarts forever. Require at least 8GB so the first sync survives.
+                    $memGB = $null
+                    if ($vm.memory -is [string]) {
+                        $m = $vm.memory.ToUpperInvariant()
+                        if ($m.EndsWith("GB")) { $memGB = [int]$m.Replace("GB", "") }
+                        elseif ($m.EndsWith("MB")) { $memGB = [math]::Floor([int]$m.Replace("MB", "") / 1024) }
+                    }
+                    if ($null -ne $memGB -and $memGB -lt 8) {
+                        Add-ValidationMessage -Message "$vmRole Validation: VM [$vmName] uses WID for the WSUS database and has only [$($vm.memory)] memory. WID + WSUS catalog sync needs at least 8GB or the first sync gets OOM/recycle-killed mid-sync. Increase memory to 8GB or more, or use a remote SQL server." -ReturnObject $return -Failure
+                    }
+                }
+
                 if ($vm.InstallSUP) {                  
                     $property = $vm
                     if ($property.ParentSiteCode -or $property.SiteCode) {
