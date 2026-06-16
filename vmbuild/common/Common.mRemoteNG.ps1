@@ -3,6 +3,180 @@
 ### mRemoteNG Functions    ###
 ##############################
 
+# ============================================================================
+# mRemoteNG password-audit diagnostics (ALWAYS-ON)
+# ----------------------------------------------------------------------------
+# These exist to root-cause the recurring "password corrupted (decrypt failed:
+# Decryption failed)" loop where EVERY password is re-flagged and "Repaired" on
+# every build but the file never converges. Hypothesis: the audit decrypts with
+# the provider's default KeyDerivationIterations while mRemoteNG.exe rewrites the
+# file's KdfIterations to a different value on its side, so the derived key never
+# matches across the script <-> GUI handoff.
+#
+# They run UNCONDITIONALLY for now so the very next build captures the failure
+# window (the prior log didn't reach the mRemoteNG step). All output is -LogOnly
+# so there is zero added console noise, and no password plaintext is ever logged
+# (only blob lengths/prefixes, SHA256 file hashes, and iteration counts).
+#
+# TODO(mrng-diag): once the root cause is confirmed and the KDF-iteration fix is
+# in, RE-GATE all of this behind a switch (e.g. $global:MRNGDiag mirroring
+# $global:ProgressDiag, or env var MEMLABS_MRNG_DIAG=1) and make Write-MRNGDiag a
+# no-op when the gate is off.
+# ============================================================================
+
+function Write-MRNGDiag {
+    param([string]$Message)
+    # TODO(mrng-diag): add early-return gate here once root cause is resolved.
+    try {
+        Write-Log "[MRNGDiag] $Message" -LogOnly
+    }
+    catch {}
+}
+
+# Read a member value (public or non-public property/field) via reflection.
+# Used to inspect the AeadCryptographyProvider's iteration/cipher settings,
+# which are not guaranteed to be public.
+function Get-MRNGMemberValue {
+    param($Object, [string]$Name)
+    if (-not $Object) { return $null }
+    $flags = [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
+    $t = $Object.GetType()
+    try {
+        $prop = $t.GetProperty($Name, $flags)
+        if ($prop) { return $prop.GetValue($Object, $null) }
+    }
+    catch {}
+    try {
+        $field = $t.GetField($Name, $flags)
+        if ($field) { return $field.GetValue($Object) }
+    }
+    catch {}
+    return $null
+}
+
+# Set a member value (public or non-public property/field) via reflection.
+# Returns $true on success. Used by the non-destructive decrypt probe to point a
+# throwaway provider at the file's declared KdfIterations.
+function Set-MRNGMemberValue {
+    param($Object, [string]$Name, $Value)
+    if (-not $Object) { return $false }
+    $flags = [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
+    $t = $Object.GetType()
+    try {
+        $prop = $t.GetProperty($Name, $flags)
+        if ($prop -and $prop.CanWrite) { $prop.SetValue($Object, $Value, $null); return $true }
+    }
+    catch {}
+    try {
+        $field = $t.GetField($Name, $flags)
+        if ($field) { $field.SetValue($Object, $Value); return $true }
+    }
+    catch {}
+    return $false
+}
+
+# Snapshot the crypto provider's effective key-derivation settings so we can
+# compare them against the file's declared KdfIterations.
+function Get-MRNGProviderSnapshot {
+    param($Provider)
+    $snap = @{ KeyDerivationIterations = "n/a"; BlockCipherMode = "n/a"; EncryptionEngine = "n/a" }
+    if (-not $Provider) { return $snap }
+    foreach ($propName in @("KeyDerivationIterations", "BlockCipherMode", "EncryptionEngine")) {
+        $val = Get-MRNGMemberValue -Object $Provider -Name $propName
+        if ($null -ne $val) { $snap[$propName] = "$val" }
+    }
+    return $snap
+}
+
+# Fingerprint the connection file on disk: SHA256, byte length, last-write time,
+# the root encryption attributes (KdfIterations etc.), and how many nodes carry a
+# password. Never reads or logs any password plaintext. Returns a hashtable, or
+# $null when the file is absent.
+function Get-MRNGFileFingerprint {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path) -or -not (Test-Path $Path)) { return $null }
+    $fp = @{
+        Path          = $Path
+        Sha256        = $null
+        Length        = $null
+        LastWriteUtc  = $null
+        RootAttrs     = @{}
+        PasswordNodes = 0
+    }
+    try {
+        $item = Get-Item -Path $Path -ErrorAction Stop
+        $fp.Length = $item.Length
+        $fp.LastWriteUtc = $item.LastWriteTimeUtc.ToString("o")
+    }
+    catch {}
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        $hashBytes = $sha.ComputeHash($bytes)
+        $fp.Sha256 = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+        $sha.Dispose()
+    }
+    catch {}
+    try {
+        [xml]$x = Get-Content -Path $Path -ErrorAction Stop
+        $rootEl = $x.DocumentElement
+        foreach ($attrName in @("EncryptionEngine", "BlockCipherMode", "KdfIterations", "FullFileEncryption", "Protected")) {
+            $val = $rootEl.GetAttribute($attrName)
+            if ($attrName -eq "Protected" -and $val -and $val.Length -gt 12) {
+                $val = $val.Substring(0, 12) + "..."
+            }
+            $fp.RootAttrs[$attrName] = $val
+        }
+        $fp.PasswordNodes = @($x.SelectNodes("//Node") | Where-Object { -not [string]::IsNullOrEmpty($_.GetAttribute("Password")) }).Count
+    }
+    catch {}
+    return $fp
+}
+
+# Render a fingerprint (from Get-MRNGFileFingerprint) to a single log line.
+function Format-MRNGFingerprint {
+    param($Fingerprint)
+    if (-not $Fingerprint) { return "<no file>" }
+    $ra = $Fingerprint.RootAttrs
+    return ("sha256={0} len={1} lastWriteUtc={2} KdfIterations={3} EncryptionEngine={4} BlockCipherMode={5} FullFileEncryption={6} Protected={7} pwdNodes={8}" -f `
+            $Fingerprint.Sha256, $Fingerprint.Length, $Fingerprint.LastWriteUtc, $ra["KdfIterations"], $ra["EncryptionEngine"], $ra["BlockCipherMode"], $ra["FullFileEncryption"], $ra["Protected"], $Fingerprint.PasswordNodes)
+}
+
+# Non-destructive probe: try to decrypt a password blob using the FILE's declared
+# KdfIterations on a throwaway provider. If it succeeds where the default-iteration
+# audit failed, that is the smoking gun confirming the iteration mismatch is the
+# root cause. Does not modify the document or the real audit provider.
+function Test-MRNGDecryptWithFileIterations {
+    param(
+        [string]$EncryptedPassword,
+        $Key,
+        [string]$FileKdfIterations,
+        [string]$ExpectedPlaintext
+    )
+    if ([string]::IsNullOrEmpty($FileKdfIterations)) { return "skipped (no file KdfIterations)" }
+    $iters = 0
+    if (-not [int]::TryParse($FileKdfIterations, [ref]$iters)) { return "skipped (unparseable KdfIterations '$FileKdfIterations')" }
+    $probeProvider = $null
+    try {
+        $probeProvider = New-Object mRemoteNG.Security.SymmetricEncryption.AeadCryptographyProvider
+    }
+    catch {
+        return "error (cannot create probe provider: $($_.Exception.Message))"
+    }
+    $set = Set-MRNGMemberValue -Object $probeProvider -Name "KeyDerivationIterations" -Value $iters
+    if (-not $set) { return "skipped (could not set KeyDerivationIterations=$iters on probe provider)" }
+    try {
+        $decrypted = $probeProvider.Decrypt($EncryptedPassword, $Key)
+        if ($decrypted -ceq $ExpectedPlaintext) {
+            return "SUCCESS with $iters iterations -- confirms iteration mismatch is the root cause"
+        }
+        return "decrypted but value mismatch (len=$($decrypted.Length)) with $iters iterations"
+    }
+    catch {
+        return "still FAILED with $iters iterations: $($_.Exception.Message)"
+    }
+}
+
 function Install-MRemoteNG {
     # Check standard install paths
     $mRemoteNGExe = $null
@@ -433,6 +607,18 @@ function Repair-MRemoteNGPasswords {
         return $false
     }
 
+    # ALWAYS-ON diagnostics: capture the provider's effective iteration count and
+    # the file's declared KdfIterations up front. A mismatch here is the prime
+    # suspect for the recurring "Decryption failed" loop.
+    # TODO(mrng-diag): re-gate behind a switch once root cause is resolved.
+    $providerSnapshot = Get-MRNGProviderSnapshot -Provider $cp
+    $providerIterations = $providerSnapshot["KeyDerivationIterations"]
+    $fileKdfIterations = $null
+    try { $fileKdfIterations = $Doc.DocumentElement.GetAttribute("KdfIterations") } catch {}
+    $iterationMismatch = ("$providerIterations" -ne "$fileKdfIterations")
+    Write-MRNGDiag ("audit start: provider KeyDerivationIterations=$providerIterations BlockCipherMode=$($providerSnapshot['BlockCipherMode']) EncryptionEngine=$($providerSnapshot['EncryptionEngine'])")
+    Write-MRNGDiag ("audit iteration check: file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch")
+
     $repaired = $false
     $checkedCount = 0
     $nodes = $Doc.SelectNodes("//Node")
@@ -442,16 +628,31 @@ function Repair-MRemoteNGPasswords {
 
         $checkedCount++
         $nodeName = $node.GetAttribute("Name")
+        $pwdLen = $pwd.Length
+        $pwdPrefix = if ($pwdLen -ge 8) { $pwd.Substring(0, 8) } else { $pwd }
+        Write-MRNGDiag ("node '$nodeName': blobLen=$pwdLen blobPrefix=$pwdPrefix")
         try {
             $decrypted = $cp.Decrypt($pwd, $key)
             if ($decrypted -cne $expectedPlaintext) {
                 Write-Log "mRemoteNG password audit: '$nodeName' decrypts to wrong value. Repairing." -Warning
+                Write-MRNGDiag ("node '$nodeName' decrypt WRONG-VALUE: decryptedLen=$($decrypted.Length) expectedLen=$($expectedPlaintext.Length) file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch")
                 $node.SetAttribute("Password", $FreshEncryptedPassword)
                 $repaired = $true
+            }
+            else {
+                Write-MRNGDiag ("node '$nodeName' decrypt OK")
             }
         }
         catch {
             Write-Log "mRemoteNG password audit: '$nodeName' password corrupted (decrypt failed: $_). Repairing." -Warning
+            # ALWAYS-ON diag: full exception detail + non-destructive decrypt probe
+            # using the file's own KdfIterations. TODO(mrng-diag): re-gate once fixed.
+            $exType = $_.Exception.GetType().FullName
+            $exMsg = $_.Exception.Message
+            $innerMsg = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { "<none>" }
+            Write-MRNGDiag ("node '$nodeName' decrypt FAILED: file=$fileKdfIterations provider=$providerIterations mismatch=$iterationMismatch exType=$exType exMsg=$exMsg innerMsg=$innerMsg")
+            $probeResult = Test-MRNGDecryptWithFileIterations -EncryptedPassword $pwd -Key $key -FileKdfIterations $fileKdfIterations -ExpectedPlaintext $expectedPlaintext
+            Write-MRNGDiag ("node '$nodeName' decrypt-with-file-iterations probe: $probeResult")
             $node.SetAttribute("Password", $FreshEncryptedPassword)
             $repaired = $true
         }
@@ -1007,6 +1208,42 @@ function New-MRemoteNGFileFromHyperV {
     $Activity = -not $NoActivity.IsPresent
     Write-Log "Updating mRemoteNG connection file" -Activity:$Activity
 
+    # ALWAYS-ON diagnostics: fingerprint the file exactly as we found it (i.e. after
+    # the previous run AND after any mRemoteNG.exe edits on its last close), then
+    # compare it to the fingerprint we persisted at the end of our last run. A
+    # 'changed-since-last-exit: yes' with a different KdfIterations is the smoking gun
+    # that mRemoteNG.exe rewrote the file (and bumped iterations) between builds,
+    # which is what makes the next audit fail to decrypt every password.
+    # TODO(mrng-diag): re-gate behind a switch (e.g. $global:MRNGDiag / MEMLABS_MRNG_DIAG)
+    # once the root cause is confirmed and the iteration fix is in.
+    $mrngDiagEntryFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+    Write-MRNGDiag ("entry fingerprint: " + (Format-MRNGFingerprint -Fingerprint $mrngDiagEntryFp))
+    $mrngDiagLastExitPath = $null
+    try {
+        $mrngLogDir = Split-Path $Common.LogPath -Parent
+        $mrngDiagLastExitPath = Join-Path $mrngLogDir "mrng-diag-last.json"
+    }
+    catch {}
+    if ($mrngDiagLastExitPath -and (Test-Path $mrngDiagLastExitPath)) {
+        try {
+            $lastExit = Get-Content -Path $mrngDiagLastExitPath -Raw | ConvertFrom-Json
+            $changed = $true
+            if ($mrngDiagEntryFp -and $lastExit.Sha256 -and ($lastExit.Sha256 -eq $mrngDiagEntryFp.Sha256)) { $changed = $false }
+            $lastKdf = $null
+            if ($lastExit.RootAttrs) { $lastKdf = $lastExit.RootAttrs.KdfIterations }
+            $entryKdf = $null
+            if ($mrngDiagEntryFp) { $entryKdf = $mrngDiagEntryFp.RootAttrs["KdfIterations"] }
+            $changedText = if ($changed) { "yes" } else { "no" }
+            Write-MRNGDiag ("changed-since-last-exit: $changedText; lastExitSha256=$($lastExit.Sha256) lastExitKdfIterations=$lastKdf entryKdfIterations=$entryKdf")
+        }
+        catch {
+            Write-MRNGDiag "could not read last-exit fingerprint: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-MRNGDiag "no prior last-exit fingerprint found (first instrumented run)"
+    }
+
     # Bulk-fetch all VM network adapters in one WMI call so per-VM cache
     # lookups during Get-VMFromHyperV are instant instead of ~3s each.
     Invoke-VMNetworkBulkWarmup
@@ -1076,6 +1313,9 @@ function New-MRemoteNGFileFromHyperV {
     foreach ($kvp in $expectedRootAttrs.GetEnumerator()) {
         if ($root.GetAttribute($kvp.Key) -ne $kvp.Value) {
             Write-Log "mRemoteNG: resetting root attribute $($kvp.Key) from '$($root.GetAttribute($kvp.Key))' to '$($kvp.Value)'" -LogOnly -Verbose
+            # ALWAYS-ON diag: surface every root-attribute reset (esp. KdfIterations
+            # being forced back to 1000). TODO(mrng-diag): re-gate once fixed.
+            Write-MRNGDiag ("root-attr reset: $($kvp.Key) from '$($root.GetAttribute($kvp.Key))' to '$($kvp.Value)'")
             $root.SetAttribute($kvp.Key, $kvp.Value)
             $shouldSave = $true
         }
@@ -1594,6 +1834,22 @@ function New-MRemoteNGFileFromHyperV {
         Write-Log "No Changes. Not updating $MRemoteNGFile" -Success -Verbose
     }
 
+    # ALWAYS-ON diag: fingerprint what WE just wrote (or the unchanged file) and
+    # persist it to logs\mrng-diag-last.json so the NEXT run's entry fingerprint can
+    # detect whether mRemoteNG.exe rewrote the file (esp. KdfIterations) in between.
+    # This persisted record is the decisive run-to-run comparison.
+    # TODO(mrng-diag): re-gate once root cause is resolved.
+    $mrngDiagExitFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+    Write-MRNGDiag ("script-written fingerprint (shouldSave=$shouldSave): " + (Format-MRNGFingerprint -Fingerprint $mrngDiagExitFp))
+    if ($mrngDiagLastExitPath -and $mrngDiagExitFp) {
+        try {
+            $mrngDiagExitFp | ConvertTo-Json -Depth 5 | Out-File -FilePath $mrngDiagLastExitPath -Encoding utf8 -Force
+        }
+        catch {
+            Write-MRNGDiag "could not persist exit fingerprint: $($_.Exception.Message)"
+        }
+    }
+
     # Restart mRemoteNG if we stopped it (or start it fresh after saving)
     if ($killed -or $shouldSave) {
         $mRNGExe = $null
@@ -1647,6 +1903,22 @@ function New-MRemoteNGFileFromHyperV {
         }
         else {
             Write-GreenCheck "Updated $MRemoteNGFile" -ForegroundColor ForestGreen
+        }
+    }
+
+    # ALWAYS-ON diag: re-read the file shortly after relaunching mRemoteNG.exe and
+    # compare to the fingerprint we just wrote. mRemoteNG usually only rewrites on
+    # close (so this often matches), but if it rewrites on load this catches it
+    # immediately. The decisive signal remains next-run entry vs this run's persisted
+    # script-written fingerprint. TODO(mrng-diag): re-gate once root cause is resolved.
+    if ($killed -or $shouldSave) {
+        Start-Sleep -Milliseconds 500
+        $mrngDiagPostGuiFp = Get-MRNGFileFingerprint -Path $MRemoteNGFile
+        Write-MRNGDiag ("post-GUI fingerprint: " + (Format-MRNGFingerprint -Fingerprint $mrngDiagPostGuiFp))
+        if ($mrngDiagExitFp -and $mrngDiagPostGuiFp) {
+            $postChanged = ($mrngDiagExitFp.Sha256 -ne $mrngDiagPostGuiFp.Sha256)
+            $postChangedText = if ($postChanged) { "yes" } else { "no" }
+            Write-MRNGDiag ("post-GUI changed-vs-script-written: $postChangedText; scriptKdf=$($mrngDiagExitFp.RootAttrs['KdfIterations']) postGuiKdf=$($mrngDiagPostGuiFp.RootAttrs['KdfIterations'])")
         }
     }
 
