@@ -3550,6 +3550,91 @@ function Set-DeployConfigIPAddresses {
         }
     }
 
+    # Sweep orphaned DHCP reservations for THIS domain before allocating anything.
+    #
+    # A reservation goes orphaned when its VM is deleted (failed Phase 1 VM that was
+    # removed, or a prior teardown whose DHCP cleanup didn't run) or recreated with a
+    # new MAC. Get-DhcpServerv4FreeIPAddress treats a reservation with no active lease
+    # as FREE, so it can hand a stale-reservation IP to a new VM, whose own reservation
+    # Add then fails (the IP is already reserved) -- the same collision class that broke
+    # Phase 5 SQLAO. Clearing orphans up front frees those IPs for clean reuse.
+    #
+    # Ownership is scoped strictly to this domain so we never touch another domain's or
+    # a manually-created reservation: a reservation is removable only when its MAC is
+    # NOT held by any live VM AND it is positively attributable to this domain (FQDN
+    # ending in .<domain>, a hostname/Description naming one of this domain's VMs, or --
+    # for the domain's own exclusive subnet -- a MemLabs 'Reservation for X' signature).
+    $domainName = $DeployConfig.vmOptions.domainName
+    if ($domainName) {
+        $validMacs = [System.Collections.Generic.HashSet[string]]::new()
+        $domainVmNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        $existingDomainVMs = @()
+        try { $existingDomainVMs = @(Get-List -Type VM -DomainName $domainName -SmartUpdate) } catch {}
+        foreach ($evm in $existingDomainVMs) {
+            if ($evm.vmName) { $null = $domainVmNames.Add($evm.vmName) }
+        }
+        foreach ($cvm in $DeployConfig.virtualMachines) {
+            if ($cvm.vmName) { $null = $domainVmNames.Add($cvm.vmName) }
+        }
+
+        # Live NIC MACs for VMs that still exist (the only legitimate reservation owners).
+        foreach ($evm in $existingDomainVMs) {
+            try {
+                $liveVm = Get-VM2 -Name $evm.vmName -ErrorAction SilentlyContinue
+                if (-not $liveVm) { continue }
+                foreach ($nic in ($liveVm | Get-VMNetworkAdapter -ErrorAction SilentlyContinue)) {
+                    if ($nic.MacAddress -and $nic.MacAddress -ne '000000000000') {
+                        $null = $validMacs.Add(($nic.MacAddress -replace '-', '').ToUpper())
+                    }
+                }
+            }
+            catch {}
+        }
+
+        $orphansRemoved = 0
+        foreach ($sid in $scopesNeeded) {
+            $isSharedScope = ($sid -eq '172.31.250.0')
+            $resv = @()
+            try { $resv = @(Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue) } catch {}
+            foreach ($r in $resv) {
+                $rMac = ($r.ClientId -replace '-', '').ToUpper()
+                if (-not $rMac) { continue }
+                if ($validMacs.Contains($rMac)) { continue }   # held by a live VM -- keep
+
+                $rName = [string]$r.Name
+                $rDesc = [string]$r.Description
+                $rHost = if ($rName) { ($rName -split '\.')[0] } else { '' }
+
+                $ownedByDomain = $false
+                if ($rName -and $rName -like "*.$domainName") {
+                    # FQDN registered into this domain -- strongest signal, safe even on
+                    # the shared internet scope.
+                    $ownedByDomain = $true
+                }
+                elseif (-not $isSharedScope) {
+                    # The domain's own /24 is exclusive to this domain, so a MemLabs
+                    # reservation here that no live VM owns is ours to clear.
+                    if ($rHost -and $domainVmNames.Contains($rHost)) {
+                        $ownedByDomain = $true
+                    }
+                    elseif ($rDesc -match '^Reservation for (.+)$' -and $domainVmNames.Contains($Matches[1].Trim())) {
+                        $ownedByDomain = $true
+                    }
+                }
+                if (-not $ownedByDomain) { continue }   # unknown / other domain -- never touch
+
+                $rIp = $r.IPAddress.IPAddressToString
+                Write-Log "Set-DeployConfigIPAddresses: Removing orphaned DHCP reservation $rIp (Name='$rName', MAC=$rMac, scope $sid) -- no live VM owns this MAC" -LogOnly
+                Remove-DhcpServerv4Reservation -ScopeId $sid -IPAddress $rIp -ErrorAction SilentlyContinue
+                $orphansRemoved++
+            }
+        }
+        if ($orphansRemoved -gt 0) {
+            Write-Log "Set-DeployConfigIPAddresses: Cleaned up $orphansRemoved orphaned DHCP reservation(s) for domain $domainName"
+        }
+    }
+
     # Pre-allocate SQLAO virtual IPs (cluster VIP + AG listener) up front, alongside
     # every other VM, so they are reserved BEFORE the per-VM free-IP picks below.
     #
@@ -3563,30 +3648,46 @@ function Set-DeployConfigIPAddresses {
     # collision (seen on wacky.sandwich.lab: ZZ-FRIES ClusterIP 172.19.77.83 collided
     # with ZZ-TURNIP's AssignedIP .83).
     #
-    # Allocating here -- with the same allocator + dedup set used for every VM, and an
-    # exclusion that is NOT torn down (these are virtual IPs with no VM reservation to
-    # protect them) -- closes that race. On rerun, existing values in deployConfig or
-    # the VM Note are restored and re-excluded instead of being reallocated.
+    # Allocating here -- single-threaded, before any Phase 1 job starts, and seeding
+    # the shared dedup set used for every VM -- closes that race. Cluster/AG IPs are
+    # drawn from .201-.254, ABOVE the DHCP pool, so the pool allocator can never
+    # collide with them. On rerun, existing values in deployConfig or the VM Note are
+    # restored and kept instead of being reallocated.
 
-    # Allocate a free IP from a scope, excluding it immediately and seeding the dedup
-    # set so neither the next SQLAO pick nor the per-VM loop can return it again.
+    # Allocate a SQLAO cluster/AG virtual IP from the TOP of the subnet (.201-.254),
+    # ABOVE the DHCP dynamic pool (.20-.199) and the .200 gateway. Keeping cluster
+    # virtual IPs out of the pool means Get-DhcpServerv4FreeIPAddress (which only
+    # ever returns pool addresses) can NEVER hand a regular VM an address that is
+    # also a cluster VIP -- structurally eliminating the Phase 5 'IP Address is
+    # already used' collision class. The chosen IP is seeded into the dedup set so
+    # neither the next cluster's pick nor the per-VM pool loop can return it again.
     function Get-SqlaoFreeIP {
         param([string]$ScopeId, [string]$VmName, [string]$Label)
-        try {
-            $free = Get-DhcpServerv4FreeIPAddress -ScopeId $ScopeId -ErrorAction Stop
+        $base = (($ScopeId.Split('.') | Select-Object -First 3) -join '.')
+
+        # Walk the cluster range .201-.254 (ABOVE the .20-.199 pool) and return the
+        # first address not already taken. $allocatedIps holds every IP claimed this
+        # run -- pool picks plus every cluster/AG IP seeded from existing clusters in
+        # step 2 -- so this naturally skips IPs owned by other clusters in the domain.
+        # No DHCP exclusion is added: these IPs are outside the scope's lease range,
+        # so the pool allocator can never return them and an exclusion can't even be
+        # created there.
+        for ($octet = 201; $octet -le 254; $octet++) {
+            $candidate = "$base.$octet"
+            if ($allocatedIps.Contains($candidate)) { continue }
+            # Defensive: a reservation should never exist above the .199 pool, but
+            # skip the address if one somehow does.
+            $existingResv = $null
+            try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $ScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
+            if ($existingResv) { continue }
+
+            $null = $allocatedIps.Add($candidate)
+            $null = $sqlaoIps.Add($candidate)
+            return $candidate
         }
-        catch {
-            Write-Log "$VmName`: SQLAO: Failed to get free $Label IP from scope ${ScopeId}: $($_.Exception.Message)" -Warning
-            return $null
-        }
-        if (-not $free) {
-            Write-Log "$VmName`: SQLAO: scope $ScopeId returned no free IP for $Label (scope may be exhausted)" -Warning
-            return $null
-        }
-        $free = $free.ToString()
-        Add-DhcpServerv4ExclusionRange -ScopeId $ScopeId -StartRange $free -EndRange $free -ErrorAction SilentlyContinue | Out-Null
-        $null = $allocatedIps.Add($free)
-        return $free
+
+        Write-Log "$VmName`: SQLAO: No free $Label IP in $base.201-.254 (cluster IP range exhausted)" -Warning
+        return $null
     }
 
     $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
@@ -3607,15 +3708,41 @@ function Set-DeployConfigIPAddresses {
         }
     }
 
-    # 2. Exclude + seed every known cluster/AG IP so the per-VM loop can't hand it out.
+    # 1b. Pull in cluster/AG IPs from every OTHER cluster already in the domain
+    #     (existing SQLAO VMs not part of this deployConfig). A new cluster must not
+    #     reuse an IP a pre-existing cluster already owns.
+    if ($DeployConfig.vmOptions.domainName) {
+        $existingSqlaoVMs = @()
+        try { $existingSqlaoVMs = @(Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' }) } catch {}
+        foreach ($evm in $existingSqlaoVMs) {
+            foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+                if ($evm.$prop) { $null = $sqlaoIps.Add(($evm.$prop -replace '/.+$', '')) }
+            }
+        }
+    }
+
+    # 2. Seed every known cluster/AG IP into the shared dedup set so neither another
+    #    cluster's allocation nor the per-VM pool loop can hand it out again. These
+    #    live ABOVE the DHCP pool (.201-.254), so no exclusion is needed -- and one
+    #    can't be created (an exclusion must fall inside the scope's lease range).
+    #    The lone exception: a legacy cluster IP from before this scheme that still
+    #    sits inside the .20-.199 pool DOES need an exclusion so a regular VM's
+    #    free-IP pick can't grab it.
     foreach ($sqlaoIp in $sqlaoIps) {
         $parsed = $null
         if (-not [System.Net.IPAddress]::TryParse($sqlaoIp, [ref]$parsed)) { continue }
-        $sqlaoScope = (($sqlaoIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
-        if (-not $scopesNeeded.Contains($sqlaoScope)) { continue }
-        Add-DhcpServerv4ExclusionRange -ScopeId $sqlaoScope -StartRange $sqlaoIp -EndRange $sqlaoIp -ErrorAction SilentlyContinue | Out-Null
         $null = $allocatedIps.Add($sqlaoIp)
-        Write-Log "Set-DeployConfigIPAddresses: Reserved SQLAO virtual IP $sqlaoIp on scope $sqlaoScope" -LogOnly
+        $lastOctet = [int]($sqlaoIp.Split('.')[-1])
+        if ($lastOctet -ge 20 -and $lastOctet -le 199) {
+            $sqlaoScope = (($sqlaoIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
+            if ($scopesNeeded.Contains($sqlaoScope)) {
+                Add-DhcpServerv4ExclusionRange -ScopeId $sqlaoScope -StartRange $sqlaoIp -EndRange $sqlaoIp -ErrorAction SilentlyContinue | Out-Null
+                Write-Log "Set-DeployConfigIPAddresses: Excluded legacy in-pool SQLAO IP $sqlaoIp on scope $sqlaoScope" -LogOnly
+            }
+        }
+        else {
+            Write-Log "Set-DeployConfigIPAddresses: Reserved SQLAO virtual IP $sqlaoIp (above pool, no exclusion needed)" -LogOnly
+        }
     }
 
     # 3. For each cluster-owner node still missing a cluster/AG IP, allocate one now
@@ -4213,9 +4340,9 @@ function New-VirtualMachine {
                     $domainScopeId = $DeployConfig.vmOptions.network
 
                     # Prefer the cluster/AG IPs pre-allocated by Set-DeployConfigIPAddresses
-                    # (reserved up front, alongside every other VM, with a DHCP exclusion that
-                    # is NOT torn down). Only fall back to a live free-IP pick if they're
-                    # missing -- e.g. an older note or a path that skipped the pre-pass.
+                    # (reserved up front from .201-.254, above the DHCP pool, alongside every
+                    # other VM). Only fall back to a live pick if they're missing -- e.g. an
+                    # older note or a path that skipped the pre-pass.
                     $clusterIP = if ($currentItem.ClusterIPAddress) { $currentItem.ClusterIPAddress -replace '/.+$', '' } else { $null }
                     $AGIP = if ($currentItem.AGIPAddress) { $currentItem.AGIPAddress -replace '/.+$', '' } else { $null }
 
@@ -4224,13 +4351,48 @@ function New-VirtualMachine {
                         write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (pre-allocated, domain scope $domainScopeId)"
                     }
                     else {
-                        $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
-                        # Exclude the cluster IP immediately so the next call can't return the same address
-                        Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | Out-Null
-                        $AGIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
+                        # Fallback only -- pre-allocation normally fills these in. Allocate
+                        # from the TOP of the subnet (.201-.254), ABOVE the DHCP pool
+                        # (.20-.199) and the .200 gateway, so a cluster virtual IP can never
+                        # collide with a regular VM's pool reservation.
+                        $domainPrefix = ($domainScopeId -replace '\.\d+$', '.')
+
+                        # Build the set of cluster/AG IPs already taken by ANY cluster in
+                        # the domain (existing VMs + this deployConfig) so the next 2 free
+                        # addresses we pick don't collide. These IPs are above the DHCP pool
+                        # (.201-.254), so no exclusion is needed or possible -- collision
+                        # avoidance is purely this in-memory check.
+                        $sqlaoTaken = @{}
+                        try {
+                            foreach ($evm in (Get-List -Type VM -DomainName $DeployConfig.vmOptions.domainName -SmartUpdate | Where-Object { $_.role -eq 'SQLAO' })) {
+                                foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
+                                    if ($evm.$p) { $sqlaoTaken[($evm.$p -replace '/.+$', '')] = $true }
+                                }
+                            }
+                        }
+                        catch {}
+                        foreach ($cvm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+                            foreach ($p in 'ClusterIPAddress', 'AGIPAddress') {
+                                if ($cvm.$p) { $sqlaoTaken[($cvm.$p -replace '/.+$', '')] = $true }
+                            }
+                        }
+
+                        $clusterIP = $null
+                        $AGIP = $null
+                        for ($octet = 201; $octet -le 254; $octet++) {
+                            $candidate = "$domainPrefix$octet"
+                            if ($sqlaoTaken.ContainsKey($candidate)) { continue }
+                            $existingResv = $null
+                            try { $existingResv = Get-DhcpServerv4Reservation -ScopeId $domainScopeId -IPAddress $candidate -ErrorAction SilentlyContinue } catch {}
+                            if ($existingResv) { continue }
+                            $sqlaoTaken[$candidate] = $true
+                            if (-not $clusterIP) { $clusterIP = $candidate; continue }
+                            $AGIP = $candidate
+                            break
+                        }
 
                         Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (domain scope $domainScopeId)"
+                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (domain scope $domainScopeId, .201-.254 range)"
                     }
 
                     if ($clusterIP) {
@@ -4264,8 +4426,15 @@ function New-VirtualMachine {
                     $currentItem | Add-Member -MemberType NoteProperty -Name "ClusterIPAddress" -Value $clusterIP -Force
                     $currentItem | Add-Member -MemberType NoteProperty -Name "AGIPAddress" -Value $AGIP -Force
 
-                    Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | out-null
-                    Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $AGIP -EndRange $AGIP -ErrorAction SilentlyContinue | out-null
+                    # Cluster/AG IPs normally live above the pool (.201-.254) where a DHCP
+                    # exclusion is neither needed nor allowed. Only a legacy in-pool IP
+                    # (.20-.199) needs an exclusion so the pool can't lease it to a VM.
+                    foreach ($vip in @($clusterIP, $AGIP)) {
+                        $vipOctet = [int]($vip.Split('.')[-1])
+                        if ($vipOctet -ge 20 -and $vipOctet -le 199) {
+                            Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $vip -EndRange $vip -ErrorAction SilentlyContinue | out-null
+                        }
+                    }
                 }
             }
             catch {
