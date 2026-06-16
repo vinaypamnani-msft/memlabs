@@ -30,8 +30,12 @@ param (
     [Parameter()]
     [switch]$DisableInitContextCache,
     [Parameter()]
-    [ValidateRange(1, 1440)]
-    [int]$InitContextCacheMinutes = 30,
+    # IsAzureVM / CorpNet detection effectively never changes for a given host,
+    # so cache it for 30 days (43200 min). A short TTL caused Phase 10 child
+    # jobs (InJob path) to read an expired cache, default IsAzureVM to $false,
+    # and silently drop Azure-gated fixes like Fix_ActivateWindows.
+    [ValidateRange(1, 525600)]
+    [int]$InitContextCacheMinutes = 43200,
     [Parameter()]
     [switch]$DisableHotfixCache,
     [Parameter()]
@@ -7914,9 +7918,17 @@ if (-not $Common.Initialized) {
                     }
 
                     if (-not $effectiveSkipEnvironmentDetection) {
+                        # The 10.1.0.4 NIC check is specific to one Azure
+                        # environment's address plan; other environments use a
+                        # different gateway/subnet, so it can't be the sole
+                        # signal. IMDS is the authoritative, environment-agnostic
+                        # probe -- always fall back to it when the NIC check
+                        # doesn't match. ($meta must be cleared first so a stale
+                        # value from a failed call can't be misread as success.)
                         if (Get-NetIPAddress -AddressFamily IPV4 | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
                         if (-not $isAzureVM) {
-                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -Timeout 2 -ErrorAction Stop }
+                            $meta = $null
+                            try { $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop }
                             catch {}
                             if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) {
                                 $isAzureVM = $true
@@ -7949,6 +7961,27 @@ if (-not $Common.Initialized) {
                 if ($envProbeJob) {
                     try { Remove-Job -Job $envProbeJob -Force -ErrorAction SilentlyContinue | Out-Null } catch {}
                     $envProbeJob = $null
+                }
+            }
+        }
+        elseif (-not $loadedInitContextCache) {
+            # InJob path: child jobs (e.g. Phase 10 maintenance) get IsAzureVM
+            # only from the on-disk cache above -- the inline probe lives in the
+            # -not $InJob branch and never runs here. If the cache is missing or
+            # stale, fall back to a cheap inline probe so Azure-gated work (e.g.
+            # Fix_ActivateWindows) still registers instead of silently defaulting
+            # IsAzureVM to $false and dropping the fix.
+            if (-not $effectiveSkipEnvironmentDetection) {
+                try {
+                    if (Get-NetIPAddress -AddressFamily IPV4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq "10.1.0.4" }) { $isAzureVM = $true }
+                }
+                catch {}
+                if (-not $isAzureVM) {
+                    try {
+                        $meta = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -Headers @{ Metadata = "true" } -TimeoutSec 2 -ErrorAction Stop
+                        if ($meta -and $meta.compute -and $null -ne $meta.compute.azEnvironment) { $isAzureVM = $true }
+                    }
+                    catch {}
                 }
             }
         }
