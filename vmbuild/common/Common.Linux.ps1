@@ -3548,6 +3548,16 @@ function Set-WindowsClientProxy {
             New-ItemProperty -Path $key -Name 'ProxySettingsPerUser' -PropertyType DWord -Value 0 -Force | Out-Null
 
             $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+            # ProxySettingsPerUser=0 on the REGULAR IE key (not just the Policies
+            # key above) is the switch WinINET actually reads to force machine-
+            # wide proxy for every user + SYSTEM. Without it, WinINET stays in
+            # per-user mode: the HKLM ProxyServer string is only a template and
+            # Windows consumes/blanks it into the per-machine
+            # DefaultConnectionSettings blob on the next reboot (seen on
+            # ZZ-MOCHI: HKLM IE ProxyServer = '' after a Phase 10 reboot while
+            # WinHTTP still pointed at :3128). Setting it here makes the HKLM
+            # ProxyServer authoritative and persistent across reboots.
+            New-ItemProperty -Path $ieKey -Name 'ProxySettingsPerUser' -PropertyType DWord -Value 0 -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 1 -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyServer' -PropertyType String -Value $proxyServer -Force | Out-Null
             New-ItemProperty -Path $ieKey -Name 'ProxyOverride' -PropertyType String -Value $bypassList -Force | Out-Null
@@ -3823,6 +3833,10 @@ function Remove-WindowsClientProxy {
             New-ItemProperty -Path $ieKey -Name 'ProxyEnable' -PropertyType DWord -Value 0 -Force | Out-Null
             Remove-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue
             Remove-ItemProperty -Path $ieKey -Name 'ProxyOverride' -ErrorAction SilentlyContinue
+            # Restore per-user proxy mode (reverse of the machine-wide enforce
+            # in Set-WindowsClientProxy) so a de-proxied VM goes back to the
+            # Windows default of per-user settings.
+            Remove-ItemProperty -Path $ieKey -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue
             & $writeConnBlob $ieKey '' '' $false
 
             # 3a-edge) Edge browser policy

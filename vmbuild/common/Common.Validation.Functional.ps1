@@ -5792,9 +5792,12 @@ function Test-WindowsProxyConfig {
     .SYNOPSIS
         Verifies an opted-in Windows VM is pointed at the lab Squid proxy.
     .DESCRIPTION
-        Checks BOTH `netsh winhttp show proxy` and the per-machine IE
-        ProxyServer registry value (HKLM Internet Settings, since
-        Set-WindowsClientProxy writes there). Either source matching
+        Checks `netsh winhttp show proxy` (authoritative, hard FAIL gate) and
+        the per-machine WinINET proxy enforcement: ProxySettingsPerUser=0
+        (machine-wide proxy for all users + SYSTEM) plus the machine proxy
+        value, read from the HKLM IE ProxyServer string with a fallback to the
+        DefaultConnectionSettings blob (Windows consumes the plain string into
+        the blob across reboots in machine-wide mode). Either source matching
         `<proxyFqdn>:3128` (or its IP form) is acceptable.
     #>
     [CmdletBinding()]
@@ -5846,18 +5849,63 @@ function Test-WindowsProxyConfig {
             $results.Details.Add("FAIL: netsh winhttp show proxy threw: $($_.Exception.Message)")
         }
 
-        # IE / WinINET per-machine. Set-WindowsClientProxy writes ProxyServer
-        # to the regular IE key (HKLM:\SOFTWARE\Microsoft\...) and writes
-        # ProxySettingsPerUser to the Policies key. Read from the right place.
+        # IE / WinINET per-machine enforcement. Set-WindowsClientProxy forces
+        # machine-wide proxy by writing ProxySettingsPerUser=0 to the regular
+        # IE key, plus ProxyServer (a plain REG_SZ) and the authoritative
+        # DefaultConnectionSettings binary blob. After a reboot in machine-wide
+        # mode Windows can consume the plain ProxyServer string into the blob,
+        # so read BOTH: the plain value first, then parse the blob as a
+        # fallback. Also confirm the machine-wide switch is actually on.
         $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+        $policyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+
+        # Parse the proxy server string out of a DefaultConnectionSettings blob.
+        # Layout: [0..3] counter, [4..7] flags, [8..11] proxy-len, then proxy
+        # bytes (ASCII). Returns '' if absent/unparseable.
+        $proxyFromBlob = {
+            param($blob)
+            if (-not $blob -or $blob.Length -lt 12) { return '' }
+            try {
+                $len = [BitConverter]::ToInt32($blob, 8)
+                if ($len -le 0 -or (12 + $len) -gt $blob.Length) { return '' }
+                return [Text.Encoding]::ASCII.GetString($blob, 12, $len)
+            }
+            catch { return '' }
+        }
+
         try {
+            # Machine-wide enforcement switch (read regular IE key, then Policies)
+            $perUser = $null
+            if (Test-Path $ieKey) {
+                $perUser = (Get-ItemProperty -Path $ieKey -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue).ProxySettingsPerUser
+            }
+            if ($null -eq $perUser -and (Test-Path $policyKey)) {
+                $perUser = (Get-ItemProperty -Path $policyKey -Name 'ProxySettingsPerUser' -ErrorAction SilentlyContinue).ProxySettingsPerUser
+            }
+            if ($perUser -eq 0) {
+                $results.Details.Add("OK: ProxySettingsPerUser=0 (machine-wide proxy enforced)")
+            }
+            else {
+                $results.Details.Add("WARN: ProxySettingsPerUser='$perUser' (machine-wide enforcement not set; expected 0)")
+            }
+
+            # Authoritative machine proxy: plain ProxyServer, else the blob.
             if (Test-Path $ieKey) {
                 $ieProxy = (Get-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+                $proxySource = 'HKLM IE ProxyServer'
+                if (-not (& $matchesProxy $ieProxy)) {
+                    $blob = (Get-ItemProperty -Path (Join-Path $ieKey 'Connections') -Name 'DefaultConnectionSettings' -ErrorAction SilentlyContinue).DefaultConnectionSettings
+                    $blobProxy = & $proxyFromBlob $blob
+                    if (& $matchesProxy $blobProxy) {
+                        $ieProxy = $blobProxy
+                        $proxySource = 'HKLM DefaultConnectionSettings blob'
+                    }
+                }
                 if (& $matchesProxy $ieProxy) {
-                    $results.Details.Add("OK: HKLM IE ProxyServer = '$ieProxy'")
+                    $results.Details.Add("OK: $proxySource = '$ieProxy'")
                 }
                 else {
-                    $results.Details.Add("WARN: HKLM IE ProxyServer = '$ieProxy' (does not contain :3128)")
+                    $results.Details.Add("WARN: HKLM machine proxy not set to :3128 (ProxyServer='$ieProxy'; blob also has none)")
                 }
             }
             else {
@@ -5865,7 +5913,7 @@ function Test-WindowsProxyConfig {
             }
         }
         catch {
-            $results.Details.Add("WARN: Reading HKLM IE ProxyServer failed: $($_.Exception.Message)")
+            $results.Details.Add("WARN: Reading HKLM machine proxy failed: $($_.Exception.Message)")
         }
 
         return $results
