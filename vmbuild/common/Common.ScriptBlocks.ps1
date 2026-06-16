@@ -925,6 +925,34 @@ $global:VM_Create = {
             param([String]$timezone, [String]$domainName, [bool]$isWorkgroup)
             $warnings = @()
 
+            # Some CIM/DCOM-backed cmdlets (Get-Service, Get/Disable-ScheduledTask,
+            # Get-WmiObject) intermittently throw transient busy faults while ~20
+            # VMs are configured in parallel during Phase 1 -- most commonly
+            # "Cannot connect to CIM server. Call was canceled by the message
+            # filter." (RPC_E_CALL_CANCELED 0x80010002) and "RPC server is too
+            # busy" (0x800706BB). These are not real failures; the call succeeds
+            # on a retry once the server drains. Run the operation through this
+            # helper so a transient fault recovers silently instead of surfacing
+            # as a warning. Non-transient errors are rethrown to the caller's catch.
+            function Invoke-WithCimRetry {
+                param([scriptblock]$Action, [int]$MaxAttempts = 4, [int]$DelaySeconds = 3)
+                for ($cimAttempt = 1; $cimAttempt -le $MaxAttempts; $cimAttempt++) {
+                    try {
+                        & $Action
+                        return
+                    }
+                    catch {
+                        $cimMsg = "$_"
+                        $isTransient = $cimMsg -match 'message filter|Cannot connect to CIM server|RPC server is (too )?busy|call was canceled|0x80010002|0x800706BB|0x800706BA'
+                        if ($isTransient -and $cimAttempt -lt $MaxAttempts) {
+                            Start-Sleep -Seconds $DelaySeconds
+                            continue
+                        }
+                        throw
+                    }
+                }
+            }
+
             # Fix Default Profile (sysprep issue)
             try {
                 $path1 = "C:\Users\Default\AppData\Local\Microsoft\Windows\WebCache"
@@ -1023,6 +1051,7 @@ $global:VM_Create = {
             # reboots at Phase 2 start (MicrosoftEdgeUpdate.exe.old, EdgeUpdate
             # folder deletions). Disable the services and scheduled tasks.
             try {
+                Invoke-WithCimRetry {
                 foreach ($svc in @('edgeupdate', 'edgeupdatem', 'MicrosoftEdgeElevationService')) {
                     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($s) {
@@ -1033,11 +1062,13 @@ $global:VM_Create = {
                 Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue |
                     Where-Object { $_.TaskName -match 'MicrosoftEdgeUpdate' } |
                     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+                }
             } catch { $warnings += "Disable Edge Update: $_" }
 
             # Suppress telemetry, diagnostics, and background tasks that
             # generate network traffic, disk I/O, or PendingFileRename entries.
             try {
+                Invoke-WithCimRetry {
                 foreach ($svc in @('DiagTrack', 'dmwappushservice')) {
                     $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
                     if ($s) {
@@ -1106,6 +1137,7 @@ $global:VM_Create = {
                 Get-ScheduledTask -TaskPath '\Microsoft\Windows\.NET Framework\' -ErrorAction SilentlyContinue |
                     Where-Object { $_.TaskName -match 'NGEN' } |
                     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+                }
             } catch { $warnings += "Disable telemetry/tasks: $_" }
 
             # Visual performance: "Adjust for best performance" + disable
