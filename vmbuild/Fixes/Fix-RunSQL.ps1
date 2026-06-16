@@ -18,15 +18,36 @@ $Fix_RunSQL = {
     }
 
     $ran = 0; $errs = @()
+    $maxAttempts = 3
     foreach ($instance in $instances) {
         $sqlInstanceName = if ($instance -eq 'MSSQLSERVER') { '.' } else { ".\$instance" }
-        Write-FixLog "Running SQLFix-Compat.sql against $sqlInstanceName"
-        try {
-            sqlcmd -S $sqlInstanceName -i $SqlFilePath -C 1>$null 2>$null
-            $ran++
+        $succeeded = $false
+        $lastDetail = ''
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-FixLog "Running SQLFix-Compat.sql against $sqlInstanceName (attempt $attempt/$maxAttempts)"
+            try {
+                # sqlcmd reports failures via exit code, not exceptions, so check
+                # $LASTEXITCODE rather than relying on catch. -b makes sqlcmd return
+                # a non-zero exit on SQL errors (severity >= 11). Capture stderr for
+                # diagnostics. SQL may still be starting at Phase 10, so retry
+                # transient connection failures with backoff.
+                $sqlOutput = & sqlcmd -S $sqlInstanceName -i $SqlFilePath -C -b 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $ran++
+                    $succeeded = $true
+                    break
+                }
+                $lastDetail = ($sqlOutput | Out-String).Trim()
+                Write-FixLog "sqlcmd exit=$LASTEXITCODE on ${sqlInstanceName} attempt ${attempt}: $lastDetail" -Level Warning
+            }
+            catch {
+                $lastDetail = $_.Exception.Message
+                Write-FixLog "sqlcmd threw on ${sqlInstanceName} attempt ${attempt}: $lastDetail" -Level Warning
+            }
+            if ($attempt -lt $maxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
         }
-        catch {
-            $errs += "sqlcmd failed on ${sqlInstanceName}: $($_.Exception.Message)"
+        if (-not $succeeded) {
+            $errs += "sqlcmd failed on ${sqlInstanceName} after $maxAttempts attempts: $lastDetail"
             Write-FixLog $errs[-1] -Level Failure
         }
     }
@@ -39,7 +60,7 @@ $Fix_RunSQL = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-RunSQL"
-    FixVersion        = "260117"
+    FixVersion        = "260616"
     AppliesToNew      = $true
     AppliesToExisting = $true
     AppliesToRoles    = @()
