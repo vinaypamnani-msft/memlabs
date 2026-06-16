@@ -183,8 +183,9 @@ Write-DscStatus "$Tag Starting perfloading"
         }
     }
 
-    #region Microsoft 365 Apps deployment via ODT
+    #region Microsoft 365 Apps deployment via ODT (background download)
     # Check if any VMs have installOffice configured
+    $officeDownloadJob = $null
     $officeVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
     if ($officeVMs.Count -gt 0) {
 
@@ -210,36 +211,47 @@ Write-DscStatus "$Tag Starting perfloading"
                 'SemiAnnual'        = 'SemiAnnualPreview'
             }
 
-            # Download ODT setup.exe if not present
-            if (-not (Test-Path "$odtPath\setup.exe")) {
-                Write-DscStatus "$Tag Downloading Office Deployment Tool"
-                New-Item -ItemType Directory -Path $odtPath -Force | Out-Null
-                $odtUrl = "https://officecdn.microsoft.com/pr/wsus/setup.exe"
+            # Kick off the ODT bootstrapper + Office source download (~2-4 GB per
+            # channel) as a background job. This is pure filesystem work with no
+            # ConfigMgr dependency, so it overlaps with the boot image / OSD / task
+            # sequence / baseline work that follows. The matching join + ConfigMgr
+            # application creation happens after the baseline section below.
+            $officeDownloadScript = {
+                param($jobChannels, $jobChannelMap, $jobSourceRoot, $jobOdtPath)
+
+                $messages = New-Object System.Collections.Generic.List[string]
+                $channelResults = @{}
+                $odtOk = $false
+
                 try {
-                    Invoke-WebRequest -Uri $odtUrl -OutFile "$odtPath\setup.exe" -UseBasicParsing -ErrorAction Stop
-                    Write-DscStatus "$Tag ODT downloaded successfully"
-                }
-                catch {
-                    Write-DscStatus "$Tag WARNING: Failed to download ODT: $_. Office deployment will be skipped."
-                    $officeVMs = @()
-                }
-            }
-
-            if ($officeVMs.Count -gt 0 -and (Test-Path "$odtPath\setup.exe")) {
-
-                # For each unique channel, download source files and create an application
-                foreach ($channel in $channels) {
-                    $odtChannel = $channelMap[$channel]
-                    if (-not $odtChannel) {
-                        Write-DscStatus "$Tag WARNING: Unknown Office channel '$channel', defaulting to Current"
-                        $odtChannel = 'Current'
+                    if (-not (Test-Path "$jobOdtPath\setup.exe")) {
+                        $messages.Add("Downloading Office Deployment Tool")
+                        New-Item -ItemType Directory -Path $jobOdtPath -Force | Out-Null
+                        $odtUrl = "https://officecdn.microsoft.com/pr/wsus/setup.exe"
+                        try {
+                            Invoke-WebRequest -Uri $odtUrl -OutFile "$jobOdtPath\setup.exe" -UseBasicParsing -ErrorAction Stop
+                            $messages.Add("ODT downloaded successfully")
+                        }
+                        catch {
+                            $messages.Add("WARNING: Failed to download ODT: $_. Office deployment will be skipped.")
+                        }
                     }
 
-                    $channelSourcePath = Join-Path $officeSourceRoot $channel
-                    New-Item -ItemType Directory -Path $channelSourcePath -Force | Out-Null
+                    if (Test-Path "$jobOdtPath\setup.exe") {
+                        $odtOk = $true
 
-                    # Generate download configuration.xml
-                    $downloadXml = @"
+                        foreach ($channel in $jobChannels) {
+                            $odtChannel = $jobChannelMap[$channel]
+                            if (-not $odtChannel) {
+                                $messages.Add("WARNING: Unknown Office channel '$channel', defaulting to Current")
+                                $odtChannel = 'Current'
+                            }
+
+                            $channelSourcePath = Join-Path $jobSourceRoot $channel
+                            New-Item -ItemType Directory -Path $channelSourcePath -Force | Out-Null
+
+                            # Generate download configuration.xml
+                            $downloadXml = @"
 <Configuration>
   <Add SourcePath="$channelSourcePath" OfficeClientEdition="64" Channel="$odtChannel">
     <Product ID="O365ProPlusRetail">
@@ -248,11 +260,11 @@ Write-DscStatus "$Tag Starting perfloading"
   </Add>
 </Configuration>
 "@
-                    $downloadXmlPath = Join-Path $channelSourcePath "download.xml"
-                    $downloadXml | Set-Content -Path $downloadXmlPath -Encoding UTF8 -Force
+                            $downloadXmlPath = Join-Path $channelSourcePath "download.xml"
+                            $downloadXml | Set-Content -Path $downloadXmlPath -Encoding UTF8 -Force
 
-                    # Generate install configuration.xml
-                    $installXml = @"
+                            # Generate install configuration.xml
+                            $installXml = @"
 <Configuration>
   <Add OfficeClientEdition="64" Channel="$odtChannel">
     <Product ID="O365ProPlusRetail">
@@ -266,11 +278,11 @@ Write-DscStatus "$Tag Starting perfloading"
   <RemoveMSI />
 </Configuration>
 "@
-                    $installXmlPath = Join-Path $channelSourcePath "install.xml"
-                    $installXml | Set-Content -Path $installXmlPath -Encoding UTF8 -Force
+                            $installXmlPath = Join-Path $channelSourcePath "install.xml"
+                            $installXml | Set-Content -Path $installXmlPath -Encoding UTF8 -Force
 
-                    # Generate uninstall configuration.xml
-                    $uninstallXml = @"
+                            # Generate uninstall configuration.xml
+                            $uninstallXml = @"
 <Configuration>
   <Remove>
     <Product ID="O365ProPlusRetail">
@@ -281,86 +293,45 @@ Write-DscStatus "$Tag Starting perfloading"
   <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
 </Configuration>
 "@
-                    $uninstallXmlPath = Join-Path $channelSourcePath "uninstall.xml"
-                    $uninstallXml | Set-Content -Path $uninstallXmlPath -Encoding UTF8 -Force
+                            $uninstallXmlPath = Join-Path $channelSourcePath "uninstall.xml"
+                            $uninstallXml | Set-Content -Path $uninstallXmlPath -Encoding UTF8 -Force
 
-                    # Copy ODT setup.exe into the channel source folder
-                    Copy-Item "$odtPath\setup.exe" -Destination $channelSourcePath -Force
+                            # Copy ODT setup.exe into the channel source folder
+                            Copy-Item "$jobOdtPath\setup.exe" -Destination $channelSourcePath -Force
 
-                    # Download Office source files (this pulls ~2-4 GB from officecdn.microsoft.com)
-                    if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
-                        Write-DscStatus "$Tag Downloading Office source files for channel '$channel' (this may take several minutes)..."
-                        $downloadProcess = Start-Process -FilePath "$channelSourcePath\setup.exe" -ArgumentList "/download `"$downloadXmlPath`"" -Wait -PassThru -NoNewWindow
-                        if ($downloadProcess.ExitCode -eq 0) {
-                            Write-DscStatus "$Tag Office source download complete for channel '$channel'"
+                            # Download Office source files (this pulls ~2-4 GB from officecdn.microsoft.com)
+                            if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
+                                $messages.Add("Downloading Office source files for channel '$channel' (this may take several minutes)...")
+                                $downloadProcess = Start-Process -FilePath "$channelSourcePath\setup.exe" -ArgumentList "/download `"$downloadXmlPath`"" -Wait -PassThru -NoNewWindow
+                                if ($downloadProcess.ExitCode -eq 0) {
+                                    $messages.Add("Office source download complete for channel '$channel'")
+                                    $channelResults[$channel] = $true
+                                }
+                                else {
+                                    $messages.Add("WARNING: ODT download for channel '$channel' exited with code $($downloadProcess.ExitCode)")
+                                    $channelResults[$channel] = $false
+                                }
+                            }
+                            else {
+                                $messages.Add("Office source files already present for channel '$channel', skipping download")
+                                $channelResults[$channel] = $true
+                            }
                         }
-                        else {
-                            Write-DscStatus "$Tag WARNING: ODT download for channel '$channel' exited with code $($downloadProcess.ExitCode)"
-                        }
-                    }
-                    else {
-                        Write-DscStatus "$Tag Office source files already present for channel '$channel', skipping download"
                     }
                 }
-
-                # Create SMB share for Office source
-                if (-not (Get-SmbShare -Name $officeShareName -ErrorAction SilentlyContinue)) {
-                    New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
+                catch {
+                    $messages.Add("WARNING: Office download job exception: $_")
                 }
 
-                # Create one CM Application per channel
-                foreach ($channel in $channels) {
-                    $channelSourcePath = Join-Path $officeSourceRoot $channel
-                    $channelAppName = if ($channels.Count -eq 1) { $officeAppName } else { "$officeAppName-$channel" }
-                    $contentUNC = "\\$ThisMachineName\$officeShareName\$channel"
-
-                    if (Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue) {
-                        Write-DscStatus "$Tag Application '$channelAppName' already exists, skipping"
-                        continue
-                    }
-
-                    Write-DscStatus "$Tag Creating application '$channelAppName'"
-                    New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -ErrorAction SilentlyContinue
-
-                    # Script deployment type: ODT install/uninstall with registry detection
-                    $installCmd = "setup.exe /configure install.xml"
-                    $uninstallCmd = "setup.exe /configure uninstall.xml"
-                    $detectScript = @'
-$ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
-if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
-'@
-                    Add-CMScriptDeploymentType -ApplicationName $channelAppName `
-                        -DeploymentTypeName "ODT Install ($channel)" `
-                        -ContentLocation $contentUNC `
-                        -InstallCommand $installCmd `
-                        -UninstallCommand $uninstallCmd `
-                        -ScriptLanguage PowerShell `
-                        -ScriptText $detectScript `
-                        -LogonRequirementType WhetherOrNotUserLoggedOn `
-                        -UserInteractionMode Hidden `
-                        -InstallationBehaviorType InstallForSystem `
-                        -MaximumRuntimeMins 120 `
-                        -EstimatedRuntimeMins 30 `
-                        -Force `
-                        -ErrorAction SilentlyContinue
-
-                    Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
-                    Start-CMContentDistribution -ApplicationName $channelAppName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
-
-                    # Deploy as Required to target VMs
-                    $officeCollectionName = "MEMLABS-Office Install Targets"
-                    Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
-                    New-CMApplicationDeployment -ApplicationName $channelAppName `
-                        -CollectionName $officeCollectionName `
-                        -DeployAction Install `
-                        -DeployPurpose Required `
-                        -UserNotification DisplayAll `
-                        -ErrorAction SilentlyContinue
-
-                    Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
+                return [PSCustomObject]@{
+                    OdtOk          = $odtOk
+                    ChannelResults = $channelResults
+                    Messages       = $messages
                 }
             }
+
+            $officeDownloadJob = Start-Job -Name "OfficeODTDownload" -ScriptBlock $officeDownloadScript -ArgumentList $channels, $channelMap, $officeSourceRoot, $odtPath
+            Write-DscStatus "$Tag Started background Office source download job (runs during OSD/TS/baseline setup)"
         }
     }
     #endregion Microsoft 365 Apps deployment via ODT
@@ -853,6 +824,97 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
     } # end if baselineFolder exists
+
+    #region Microsoft 365 Apps — join background download + create applications
+    # The Office source download was started as a background job at the top of the
+    # apps/packages section so it could run concurrently with the OSD/TS/baseline
+    # work above. Join it now and create the ConfigMgr applications. Guarded to
+    # Primary/standalone (non-CAS) — matching where the job was started.
+    if ($CurrentRole -ne "CAS" -and $officeDownloadJob) {
+        Write-DscStatus "$Tag Waiting for background Office source download job to complete..."
+        Wait-Job -Job $officeDownloadJob | Out-Null
+        $officeDownloadResult = Receive-Job -Job $officeDownloadJob
+        Remove-Job -Job $officeDownloadJob -Force -ErrorAction SilentlyContinue
+
+        # Replay the job's log messages through Write-DscStatus (the job ran silently)
+        if ($officeDownloadResult -and $officeDownloadResult.Messages) {
+            foreach ($officeMsg in $officeDownloadResult.Messages) {
+                Write-DscStatus "$Tag $officeMsg"
+            }
+        }
+
+        if ($officeDownloadResult -and $officeDownloadResult.OdtOk) {
+
+            # Create SMB share for Office source
+            if (-not (Get-SmbShare -Name $officeShareName -ErrorAction SilentlyContinue)) {
+                New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
+                Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
+            }
+
+            # Create one CM Application per channel
+            foreach ($channel in $channels) {
+                $channelSourcePath = Join-Path $officeSourceRoot $channel
+
+                # Only create the application if the source files actually downloaded
+                if (-not (Test-Path (Join-Path $channelSourcePath "Office\Data"))) {
+                    Write-DscStatus "$Tag WARNING: Office source files missing for channel '$channel' — skipping application creation"
+                    continue
+                }
+
+                $channelAppName = if ($channels.Count -eq 1) { $officeAppName } else { "$officeAppName-$channel" }
+                $contentUNC = "\\$ThisMachineName\$officeShareName\$channel"
+
+                if (Get-CMApplication -Name $channelAppName -Fast -ErrorAction SilentlyContinue) {
+                    Write-DscStatus "$Tag Application '$channelAppName' already exists, skipping"
+                    continue
+                }
+
+                Write-DscStatus "$Tag Creating application '$channelAppName'"
+                New-CMApplication -Name $channelAppName -Description "Microsoft 365 Apps ($channel channel)" -Publisher "Microsoft" -SoftwareVersion "Latest" -ErrorAction SilentlyContinue
+
+                # Script deployment type: ODT install/uninstall with registry detection
+                $installCmd = "setup.exe /configure install.xml"
+                $uninstallCmd = "setup.exe /configure uninstall.xml"
+                $detectScript = @'
+$ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
+'@
+                Add-CMScriptDeploymentType -ApplicationName $channelAppName `
+                    -DeploymentTypeName "ODT Install ($channel)" `
+                    -ContentLocation $contentUNC `
+                    -InstallCommand $installCmd `
+                    -UninstallCommand $uninstallCmd `
+                    -ScriptLanguage PowerShell `
+                    -ScriptText $detectScript `
+                    -LogonRequirementType WhetherOrNotUserLoggedOn `
+                    -UserInteractionMode Hidden `
+                    -InstallationBehaviorType InstallForSystem `
+                    -MaximumRuntimeMins 120 `
+                    -EstimatedRuntimeMins 30 `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+
+                Write-DscStatus "$Tag Distributing '$channelAppName' to all DPs"
+                Start-CMContentDistribution -ApplicationName $channelAppName -DistributionPointGroupName "ALL DPS" -ErrorAction SilentlyContinue
+
+                # Deploy as Required to target VMs
+                $officeCollectionName = "MEMLABS-Office Install Targets"
+                Write-DscStatus "$Tag Deploying '$channelAppName' as Required to collection '$officeCollectionName'"
+                New-CMApplicationDeployment -ApplicationName $channelAppName `
+                    -CollectionName $officeCollectionName `
+                    -DeployAction Install `
+                    -DeployPurpose Required `
+                    -UserNotification DisplayAll `
+                    -ErrorAction SilentlyContinue
+
+                Write-DscStatus "$Tag Office application '$channelAppName' deployment complete"
+            }
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Office source download did not complete; skipping Office application creation"
+        }
+    }
+    #endregion Microsoft 365 Apps — join background download + create applications
 
     #we have to make powershell bypass for the baselines to work as expected
     # Custom client settings — top-level site only (replicate to child sites)

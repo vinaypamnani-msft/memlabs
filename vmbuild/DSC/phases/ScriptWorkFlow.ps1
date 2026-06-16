@@ -588,6 +588,23 @@ else {
     }
 }
 
+# Kick off remote SMS Provider installs (InstallProvider.ps1) as a background
+# job BEFORE perfloading so the per-provider setupwpf.exe runs (~5-15 min each)
+# overlap the long perfloading work instead of running dead-last/sequentially.
+# InstallProvider.ps1 only needs the site installed (roles done by here in both
+# the standalone and hierarchy paths) and is idempotent via SMS_ProviderLocation.
+# The matching join is below, where the inline call used to be. When perfloading
+# doesn't run (CAS, or PrePopulate=false) the job starts then immediately joins,
+# so behavior is no worse than today.
+$installProviderJob = Start-Job -Name "InstallProvider" -ScriptBlock {
+    param($jobConfigFilePath, $jobLogPath, $jobScriptRoot)
+    # Dot-source ScriptFunctions.ps1 so InstallProvider.ps1 can call Write-DscStatus.
+    . (Join-Path -Path $jobScriptRoot -ChildPath "ScriptFunctions.ps1")
+    Set-Location $jobLogPath
+    & (Join-Path -Path $jobScriptRoot -ChildPath "InstallProvider.ps1") -ConfigFilePath $jobConfigFilePath -LogPath $jobLogPath
+} -ArgumentList $ConfigFilePath, $LogPath, $PSScriptRoot
+Write-DscStatus "Started background InstallProvider.ps1 job (overlaps perfloading)"
+
 if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateObjects -eq $true) {
     Write-DScStatus "Loading object pre-population for MEMLABS"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "Perfloading.ps1"
@@ -601,12 +618,15 @@ if (($CurrentRole -eq "Primary" -or $TopLevelSiteServer) -and $cmo.PrePopulateOb
 
 }
 
-  # Install Providers
-  Write-DscStatus "Running InstallProvider.ps1"
-  $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "InstallProvider.ps1"
-  Set-Location $LogPath
+  # Install Providers — join the background job started before perfloading.
+  Write-DscStatus "Waiting for background InstallProvider.ps1 job to complete"
   try {
-      Invoke-DotSource -Script $ScriptFile -Arguments $ConfigFilePath, $LogPath
+      Wait-Job -Job $installProviderJob | Out-Null
+      # Write-DscStatus writes status/log to disk from the job runspace, so the
+      # pipeline output isn't needed here; discard it. A terminating failure in
+      # the job still rethrows on Receive-Job and is caught below.
+      Receive-Job -Job $installProviderJob | Out-Null
+      Remove-Job -Job $installProviderJob -Force -ErrorAction SilentlyContinue
   }
   catch {
       Write-DscStatus "InstallProvider.ps1 failed: $_" -Warning
