@@ -1097,16 +1097,23 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         catch {
             Write-DscStatus "$Tag Could not restart SMS_EXECUTIVE: $_"
         }
-        # Now trigger a fresh sync
-        Invoke-FullSync
+        # Now trigger a fresh sync. Force the drop: the pool restart above just
+        # aborted any in-flight sync, so CM's lingering 'running' state is stale
+        # and the freshness guard must not suppress this re-trigger.
+        Invoke-FullSync -Force
     }
 
     function Invoke-FullSync {
         # Skip if a sync is genuinely running — dropping full.syn during an
         # active sync is harmless but pointless. However, if the "running" state
         # is stale (>15 min unchanged), the sync is dead and we should proceed.
+        # -Force bypasses the freshness guard: callers that just restarted the
+        # WsusPool (Repair-WsusSync) have already killed any in-flight sync, so
+        # CM's lingering 'running' state is stale-by-definition and a fresh
+        # trigger MUST be dropped regardless of the reported timestamp.
+        param([switch]$Force)
         $currentSync = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $siteCode } | Select-Object -First 1
-        if ($currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+        if (-not $Force -and $currentSync.LastSyncState -in @(6701, 6704, 6705, 6706)) {
             $syncStateNames = @{ 6701='Started'; 6704='Syncing WSUS'; 6705='Syncing DB'; 6706='Syncing Internet WSUS' }
             $stateName = $syncStateNames[$currentSync.LastSyncState]
             $stateAge = (Get-Date) - $currentSync.LastSyncStateTime
