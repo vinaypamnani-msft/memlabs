@@ -922,7 +922,8 @@ function Test-DCFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites) `
-        -DisplayName "Phase11-$label-Test" -SuppressLog
+        -DisplayName "Phase11-$label-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     $dcPassed = Format-TestResult -VMName $VMName -RoleLabel $label -Result $result
 
@@ -1129,7 +1130,8 @@ function Repair-StoppedSQLServices {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-SQL-Service-Sweep" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-SQL-Service-Sweep" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQL-Services' -Result $result)
 }
@@ -1249,7 +1251,8 @@ function Test-SQLFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $instanceName, $sqlPort, $isSQLAO `
-        -DisplayName "Phase11-SQL-Test" -SuppressLog
+        -DisplayName "Phase11-SQL-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQL' -Result $result)
 }
@@ -2427,7 +2430,8 @@ function Test-WSUSFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-WSUS-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-WSUS-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'WSUS' -Result $result)
 }
@@ -3020,7 +3024,8 @@ function Test-BLMFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
-        -DisplayName "Phase11-BLM-Test" -SuppressLog
+        -DisplayName "Phase11-BLM-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel "BLM" -Result $result)
 }
@@ -3177,7 +3182,8 @@ function Test-SecondaryFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $sqlInstanceName, $secSiteCode `
-        -DisplayName "Phase11-Secondary-Test" -SuppressLog
+        -DisplayName "Phase11-Secondary-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 600
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Secondary' -Result $result)
 }
@@ -3302,7 +3308,8 @@ function Test-SiteSystemFunctionality {
         }
 
         $mpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog
+            -ScriptBlock $mpScript -DisplayName "Phase11-MP-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'MP' -Result $mpResult)) {
             $allPassed = $false
@@ -3346,7 +3353,8 @@ function Test-SiteSystemFunctionality {
             return $results
         }
         $localDpResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog
+            -ScriptBlock $localDpScript -DisplayName "Phase11-DPLocal-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'DP' -Result $localDpResult)) {
             $allPassed = $false
         }
@@ -3430,7 +3438,8 @@ function Test-SiteSystemFunctionality {
         }
 
         $supResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $supScript -DisplayName "Phase11-SUP-Test" -SuppressLog
+            -ScriptBlock $supScript -DisplayName "Phase11-SUP-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
 
         if (-not (Format-TestResult -VMName $VMName -RoleLabel 'SUP' -Result $supResult)) {
             $allPassed = $false
@@ -3529,7 +3538,8 @@ function Test-ReportingFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-RP-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     $allPassed = Format-TestResult -VMName $VMName -RoleLabel 'RP' -Result $result
 
@@ -3601,7 +3611,8 @@ function Test-ReportingFunctionality {
 
             $rpRoleResult = Invoke-VmCommand -VmName $cmVmName -VmDomainName $Domain `
                 -ScriptBlock $rpRoleScript -ArgumentList $siteCode, $rpVmName `
-                -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog
+                -DisplayName "Phase11-RP-CMRole-Test" -SuppressLog `
+                -AsJob -TimeoutSeconds 300
 
             if (-not (Format-TestResult -VMName $VMName -RoleLabel 'RP-CMRole' -Result $rpRoleResult)) {
                 $allPassed = $false
@@ -3659,7 +3670,8 @@ function Test-FileServerFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-FileServer-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-FileServer-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'FileServer' -Result $result)
 }
@@ -3908,7 +3920,8 @@ function Test-CAFunctionality {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -ArgumentList $Standalone.IsPresent -DisplayName "Phase11-CA-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -ArgumentList $Standalone.IsPresent -DisplayName "Phase11-CA-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     $label = if ($Standalone) { 'StandaloneCA' } else { 'CA' }
     return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
@@ -4112,7 +4125,8 @@ function Test-PKICertificatesOnVM {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock -ArgumentList $isPrimaryFlag `
-        -DisplayName "Phase11-PKI-Certs-Test" -SuppressLog
+        -DisplayName "Phase11-PKI-Certs-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'PKI-Certs' -Result $result)
 }
@@ -4159,7 +4173,8 @@ function Test-MaintenanceTasks {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-Maintenance-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
 }
@@ -4256,7 +4271,8 @@ function Test-UserProfilePreCreation {
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
         -ScriptBlock $scriptBlock `
         -ArgumentList @($Domain, $adminName, $adminPassword) `
-        -DisplayName "Phase11-ProfilePreCreate" -SuppressLog
+        -DisplayName "Phase11-ProfilePreCreate" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'ProfilePreCreate' -Result $result)
 }
@@ -4329,7 +4345,8 @@ function Test-PassiveSiteFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $passiveScript -ArgumentList $siteCode `
-        -DisplayName "Phase11-PassiveSite-Test" -SuppressLog
+        -DisplayName "Phase11-PassiveSite-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 600
 
     $localOk = Format-TestResult -VMName $VMName -RoleLabel 'PassiveSite' -Result $result
     if (-not $localOk) { return $false }
@@ -4367,7 +4384,8 @@ function Test-PassiveSiteFunctionality {
 
     $parentResult = Invoke-VmCommand -VmName $activeVM.vmName -VmDomainName $domain `
         -ScriptBlock $parentScript -ArgumentList $siteCode, $VMName `
-        -DisplayName "Phase11-PassiveSite-Parent-Test" -SuppressLog
+        -DisplayName "Phase11-PassiveSite-Parent-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'PassiveSite-Parent' -Result $parentResult)
 }
@@ -4669,7 +4687,8 @@ function Test-DomainMemberFunctionality {
     $checkPkiCert = ($usePKI -and $pushExpected)
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $domain, $checkPkiCert `
-        -DisplayName "Phase11-DomainMember-Test" -SuppressLog
+        -DisplayName "Phase11-DomainMember-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     # If the guest reported NeedsPushCheck, enrich with deploy config context.
     if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.NeedsPushCheck) {
@@ -4708,7 +4727,8 @@ function Test-DomainMemberFunctionality {
             return $officeResults
         }
         $officeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-            -ScriptBlock $officeCheckBlock -DisplayName "Phase11-DomainMember-OfficeCheck" -SuppressLog
+            -ScriptBlock $officeCheckBlock -DisplayName "Phase11-DomainMember-OfficeCheck" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
         if ($officeResult.ScriptBlockOutput -is [hashtable] -and $officeResult.ScriptBlockOutput.Details) {
             foreach ($detail in $officeResult.ScriptBlockOutput.Details) {
                 $result.ScriptBlockOutput.Details.Add($detail)
@@ -4776,7 +4796,8 @@ function Test-WorkgroupMemberFunctionality {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
-        -DisplayName "Phase11-WorkgroupMember-Test" -SuppressLog
+        -DisplayName "Phase11-WorkgroupMember-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'WorkgroupMember' -Result $result)
 }
@@ -4843,7 +4864,8 @@ function Test-InternetClientFunctionality {
     $pkiFlag = if ($usePKI) { '1' } else { '0' }
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $pkiFlag `
-        -DisplayName "Phase11-InternetClient-Test" -SuppressLog
+        -DisplayName "Phase11-InternetClient-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'InternetClient' -Result $result)
 }
@@ -4878,7 +4900,8 @@ function Test-SSMSInstall {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-SSMS-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-SSMS-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SSMS' -Result $result)
 }
@@ -4946,7 +4969,8 @@ function Test-SMSProviderRole {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode `
-        -DisplayName "Phase11-SMSProv-Test" -SuppressLog
+        -DisplayName "Phase11-SMSProv-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SMSProv' -Result $result)
 }
@@ -5050,7 +5074,8 @@ function Test-PullDPConfiguration {
 
     $result = Invoke-VmCommand -VmName $parentVM.vmName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $siteCode, $VMName, "$VMName.$domain", $expectedSource `
-        -DisplayName "Phase11-PullDP-Test" -SuppressLog
+        -DisplayName "Phase11-PullDP-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'PullDP' -Result $result)
 }
@@ -5118,7 +5143,8 @@ function Test-AdditionalDisks {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList (($disks -join ',')) `
-        -DisplayName "Phase11-Disks-Test" -SuppressLog
+        -DisplayName "Phase11-Disks-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Disks' -Result $result)
 }
@@ -5193,7 +5219,8 @@ function Test-BitLockerProtection {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-BitLocker-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-BitLocker-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'BitLocker' -Result $result)
 }
@@ -5791,7 +5818,8 @@ function Test-WindowsProxyConfig {
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $proxyFqdn, $proxyVm.vmName `
-        -DisplayName "Phase11-ProxyClient-Test" -SuppressLog
+        -DisplayName "Phase11-ProxyClient-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
 }
@@ -5842,7 +5870,8 @@ function Test-InternetBlocked {
     }
 
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
-        -ScriptBlock $scriptBlock -DisplayName "Phase11-ProxyBlock-Test" -SuppressLog
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-ProxyBlock-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     $formatted = Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result
 
@@ -5972,7 +6001,8 @@ function Test-CMSiteRoleProxy {
 
     $result = Invoke-VmCommand -VmName $targetVM -VmDomainName $domain `
         -ScriptBlock $scriptBlock -ArgumentList $fqdn `
-        -DisplayName "Phase11-CMRoleProxy-Test" -SuppressLog
+        -DisplayName "Phase11-CMRoleProxy-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel $RoleLabel -Result $result)
 }
