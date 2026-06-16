@@ -3354,6 +3354,64 @@ function Get-DHCPReservationIPForMac {
     }
 }
 
+# Return a hashtable of vmName -> domain-NIC MAC for EVERY VM on the host, all
+# in ONE isolated runspace (single Hyper-V module import). This is the batched
+# counterpart to Get-VMMacIsolated: callers that need MACs for many VMs (e.g.
+# the Phase 11 DHCP audit) should use this instead of calling Get-VMMacIsolated
+# in a loop, which spawns a fresh runspace -- and re-imports the Hyper-V module
+# (~seconds) -- per VM. When -ExcludeCluster is set, SQLAO Cluster heartbeat
+# NICs are filtered out, matching Get-VMMacIsolated. MACs are projected to plain
+# strings inside the isolated runspace so no type adapter is needed by the
+# caller.
+function Get-AllVMMacsIsolated {
+    param(
+        [switch] $ExcludeCluster
+    )
+    $results = Invoke-IsolatedCim -ArgumentList $ExcludeCluster.IsPresent -ScriptBlock {
+        param($excludeCluster)
+        $out = @()
+        foreach ($vm in (Get-VM -ErrorAction SilentlyContinue)) {
+            $nic = $vm | Get-VMNetworkAdapter
+            if ($excludeCluster) {
+                $nic = $nic | Where-Object { -not $_.SwitchName -or $_.SwitchName -notmatch 'Cluster' }
+            }
+            $nic = $nic | Select-Object -First 1
+            if ($nic) { $mac = [string]$nic.MacAddress } else { $mac = $null }
+            $out += [pscustomobject]@{ VmName = [string]$vm.Name; Mac = $mac }
+        }
+        $out
+    }
+    $map = @{}
+    foreach ($r in $results) { $map[$r.VmName] = $r.Mac }
+    return $map
+}
+
+# Return every DHCP reservation across every scope as an array of objects with
+# ScopeId / Mac (dashes stripped) / Ip, all in ONE isolated runspace (single
+# DhcpServer module import). This is the batched counterpart to
+# Get-DHCPReservationIPForMac: callers verifying many VMs (e.g. the Phase 11
+# audit) should build a lookup from this once instead of calling
+# Get-DHCPReservationIPForMac per VM, which re-imports the DhcpServer module in
+# a fresh runspace each time. Ip is projected to a plain string inside the
+# isolated runspace (the CDXML .IPAddress type adapter is NOT applied there --
+# see Get-DHCPReservationIPForMac for the full rationale).
+function Get-AllDHCPReservationsIsolated {
+    return Invoke-IsolatedCim -ScriptBlock {
+        $out = @()
+        foreach ($scope in (Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)) {
+            $sid = [string]$scope.ScopeId
+            foreach ($r in (Get-DhcpServerv4Reservation -ScopeId $sid -ErrorAction SilentlyContinue)) {
+                $out += [pscustomobject]@{
+                    ScopeId = $sid
+                    Mac     = ($r.ClientId -replace '-', '')
+                    Ip      = [string]$r.IPAddress
+                }
+            }
+        }
+        $out
+    }
+}
+
 # Create a DHCP reservation, running the DhcpServer CIM cmdlet in an isolated
 # runspace. Throws on failure (matches the prior -ErrorAction Stop behavior).
 function Add-DHCPReservationIsolated {

@@ -971,6 +971,28 @@ function Test-DhcpReservations {
     # IP -> list of vmNames, to detect an IP reserved for more than one VM.
     $ipOwners = @{}
 
+    # Batch the two CIM lookups instead of spawning a fresh isolated runspace
+    # per VM. Calling Get-VMMacIsolated + Get-DHCPReservationIPForMac in the
+    # loop creates 2 throwaway [PowerShell]::Create() runspaces per VM, each
+    # re-importing the Hyper-V / DhcpServer module (~seconds). On a 24-VM lab
+    # that's ~48 spawns and dominates Phase 11. Fetch all VM MACs in one
+    # isolated runspace and all DHCP reservations in another (2 spawns total),
+    # then match on the host (fully-typed runspace, no CDXML adapter concerns).
+    $macMap = @{}
+    try { $macMap = Get-AllVMMacsIsolated -ExcludeCluster }
+    catch { Write-Log "[Phase $Phase] [$label]: failed to batch-read VM MACs: $_" -LogOnly }
+
+    # Build "scopeId|mac" -> ip from every live reservation. Hashtable keys are
+    # case-insensitive, so the upper/lower MAC mismatch between Hyper-V's
+    # MacAddress and the reservation ClientId resolves automatically.
+    $resvMap = @{}
+    try {
+        foreach ($r in (Get-AllDHCPReservationsIsolated)) {
+            if ($r.Mac) { $resvMap["$($r.ScopeId)|$($r.Mac)"] = $r.Ip }
+        }
+    }
+    catch { Write-Log "[Phase $Phase] [$label]: failed to batch-read DHCP reservations: $_" -LogOnly }
+
     foreach ($vm in $DeployConfig.virtualMachines) {
         if ($vm.hidden) { continue }
         if ($vm.domain -and $vm.domain -ne $Domain) { continue }
@@ -987,25 +1009,14 @@ function Test-DhcpReservations {
             if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
         }
 
-        try {
-            $mac = Get-VMMacIsolated -VmName $vm.vmName -ExcludeCluster
-        }
-        catch {
-            $mac = $null
-        }
+        $mac = $macMap[$vm.vmName]
         if (-not $mac -or $mac -eq '000000000000') {
             Write-Log "[Phase $Phase] [$label]: $($vm.vmName): could not resolve domain-NIC MAC; skipping reservation check" -LogOnly
             $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: WARN: $($vm.vmName) has no resolvable MAC; reservation not verified"; Level = 'Warning' })
             continue
         }
 
-        $reservedIp = $null
-        try {
-            $reservedIp = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $mac
-        }
-        catch {
-            $reservedIp = $null
-        }
+        $reservedIp = $resvMap["$scopeId|$mac"]
 
         if (-not $reservedIp) {
             $passed = $false
