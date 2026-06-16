@@ -5438,6 +5438,66 @@ class ConfigureWSUS {
             & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' configuressl $_HTTPSurl
 
         }
+
+        # Harden the WsusPool IIS app pool so it survives the first full
+        # Microsoft Update sync. Runs regardless of HTTP/HTTPS.
+        $this.HardenWsusPool()
+    }
+
+    # The first full Microsoft Update sync pulls the entire modern category
+    # taxonomy in a single ServerSync call. With the default WsusPool recycle
+    # cap (~1.8 GB private memory) and queueLength (1000), IIS recycles the pool
+    # mid-sync; the in-flight ServerSync/GetSubscriptionState dies with HTTP 503,
+    # the sync never reaches state 6702, and the catalog stays empty
+    # (GetStatus().UpdateCount = 0). Sync 1 then re-runs forever. Uncapping
+    # memory + raising the queue + disabling periodic/request recycles lets the
+    # pool survive the first big sync. Idempotent — safe to re-run.
+    [void] HardenWsusPool() {
+        Write-Status "Hardening WsusPool app pool to survive first full WSUS sync"
+        $savedVP = $global:VerbosePreference
+        $global:VerbosePreference = 'SilentlyContinue'
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+        }
+        catch {
+            Write-Status "WsusPool hardening skipped — WebAdministration unavailable: $_"
+            $global:VerbosePreference = $savedVP
+            return
+        }
+        $global:VerbosePreference = $savedVP
+
+        $poolPath = 'IIS:\AppPools\WsusPool'
+        if (-not (Test-Path $poolPath)) {
+            Write-Status "WsusPool not found at $poolPath — skipping hardening"
+            return
+        }
+
+        $settings = @(
+            @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+            @{ Name = 'queueLength'; Value = 25000 }
+            @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+            @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+            @{ Name = 'failure.rapidFailProtection'; Value = $false }
+        )
+        foreach ($s in $settings) {
+            try {
+                Set-ItemProperty -Path $poolPath -Name $s.Name -Value $s.Value -ErrorAction Stop
+                Write-Verbose "WsusPool $($s.Name) = $($s.Value)"
+            }
+            catch {
+                Write-Status "WsusPool: failed to set $($s.Name): $_"
+            }
+        }
+
+        try {
+            Restart-WebAppPool -Name 'WsusPool' -ErrorAction Stop
+            Write-Status "WsusPool hardened and restarted (privateMemory uncapped, queueLength=25000)"
+        }
+        catch {
+            Write-Status "WsusPool: restart after hardening failed: $_"
+        }
     }
 
     [bool] Test() {
