@@ -3341,7 +3341,16 @@ function Get-DHCPReservationIPForMac {
         param($scopeId, $mac)
         $r = Get-DhcpServerv4Reservation -ScopeId $scopeId -ErrorAction SilentlyContinue |
             Where-Object { ($_.ClientId -replace '-', '') -eq $mac }
-        if ($r) { [string]$r.IPAddress.IPAddressToString } else { $null }
+        # Do NOT use $r.IPAddress.IPAddressToString here. In the fresh
+        # [PowerShell]::Create() runspace the DhcpServer CDXML cmdlet is
+        # visible but its types.ps1xml adapter (which turns .IPAddress into a
+        # [System.Net.IPAddress]) is not applied, so .IPAddress is the raw CIM
+        # string "x.x.x.x" and .IPAddressToString is $null -> empty string.
+        # That made the Phase 11 audit see an empty IP and flag EVERY VM as
+        # "no DHCP reservation". [string]$r.IPAddress is correct whether
+        # .IPAddress is an [ipaddress] (ToString gives the dotted quad) or a
+        # plain string.
+        if ($r) { [string]$r.IPAddress } else { $null }
     }
 }
 
