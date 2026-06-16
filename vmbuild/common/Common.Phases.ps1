@@ -582,6 +582,17 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
+    # Per-run readiness token for the multi-node DSC handshake. Every VM_Config
+    # job dispatched below captures this same GUID via $using:phaseRunGuid.
+    # Members write it to C:\staging\DSC\RunGuid.txt as the LAST step of
+    # DSC_ClearStatus (only after DSC is confirmed stopped and DSC_Status.txt
+    # is cleared); the DC's node-ready loop treats a node as ready only when
+    # RunGuid.txt equals THIS guid. A positive, per-run token can't be
+    # satisfied by stale prior-run state or by self-recovery re-creating
+    # DSC_Status.txt -- both of which defeated the old "DSC_Status.txt absent"
+    # readiness signal and dead-waited the loop.
+    $phaseRunGuid = [guid]::NewGuid().ToString()
+
     $global:preparePhasePercent = 50
     Write-Progress2 "Preparing Phase $Phase" -Status "Updating VM List" -PercentComplete $global:preparePhasePercent
 

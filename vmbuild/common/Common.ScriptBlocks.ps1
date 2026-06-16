@@ -1585,6 +1585,7 @@ $global:VM_Config = {
         $multiNodeDsc = $using:multiNodeDsc
         $reservation = $using:reservation
         $alreadyCopiedDSC = $using:alreadyCopiedDSC
+        $phaseRunGuid = $using:phaseRunGuid
         # Dot source common
         $rootPath = Split-Path $using:PSScriptRoot -Parent
         . $rootPath\Common.ps1 -InJob -VerboseEnabled:$using:enableVerbose -DevBranch:$using:Common.DevBranch
@@ -2722,7 +2723,8 @@ $global:VM_Config = {
 
         $DSC_ClearStatus = {
             param(
-                [String]$DscFolder
+                [String]$DscFolder,
+                [String]$RunGuid
             )
 
             try {
@@ -2789,6 +2791,7 @@ $global:VM_Config = {
                 # gate it on the LCM not being Busy so we never signal "ready"
                 # while a configuration is still actively running on this node.
                 $dscStatus = "C:\staging\DSC\DSC_Status.txt"
+                $runGuidPath = "C:\staging\DSC\RunGuid.txt"
                 $lcmStopped = $false
                 try {
                     $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
@@ -2806,9 +2809,24 @@ $global:VM_Config = {
                         "Removing $dscStatus (LCM='$lcmState')" | Out-File $log -Append -ErrorAction SilentlyContinue
                         Remove-Item -Path $dscStatus -Force -Confirm:$false -ErrorAction SilentlyContinue
                     }
+                    # Ready signal: write this run's GUID to RunGuid.txt as the
+                    # LAST step of clearing, ONLY after DSC is confirmed stopped
+                    # and DSC_Status.txt is cleared. The DC's node-ready loop
+                    # treats this node as ready iff RunGuid.txt == the current
+                    # run's GUID. Because the token is unique per run, neither
+                    # stale prior-run state nor a self-recovery that later
+                    # re-creates DSC_Status.txt can produce a false "ready".
+                    if ($RunGuid) {
+                        "Writing ready token to $runGuidPath (RunGuid=$RunGuid)" | Out-File $log -Append -ErrorAction SilentlyContinue
+                        Set-Content -Path $runGuidPath -Value $RunGuid -Force -Encoding ASCII -ErrorAction SilentlyContinue
+                    }
                 }
                 else {
+                    # Not ready: LCM still applying a config. Don't signal ready.
+                    # Remove any stale RunGuid.txt so a leftover token from a
+                    # prior run can't be mistaken for this run's ready signal.
                     "Deferring DSC_Status.txt removal; LCM is Busy (DSC still running)" | Out-File $log -Append -ErrorAction SilentlyContinue
+                    Remove-Item -Path $runGuidPath -Force -Confirm:$false -ErrorAction SilentlyContinue
                 }
 
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
@@ -2902,10 +2920,10 @@ $global:VM_Config = {
 
         Write-Progress2 $Activity -Status "Clearing DSC Status" -percentcomplete 65 -force
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
-        $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+        $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
             start-sleep -seconds 20
-            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder -DisplayName "DSC: Clear Old Status"
+            $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
@@ -3425,7 +3443,15 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Starting DSC" -percentcomplete 75 -force
             if ($multiNodeDsc) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC for $($currentItem.role) Starting"
-                # Check if DSC_Status.txt file has been removed on all nodes before continuing. This is to ensure that Stop-Dsc doesn't run after DC has started DSC.
+                # Wait until every member node has written THIS run's GUID to
+                # RunGuid.txt before the DC pushes the multi-node config. A node
+                # writes the token as the LAST step of DSC_ClearStatus, only
+                # after its old DSC is stopped and DSC_Status.txt is cleared, so
+                # a matching token positively proves the node stopped + cleared
+                # and is ready for the push. (The old signal -- DSC_Status.txt
+                # absent -- was defeated both by stale prior-run files and by a
+                # member's self-recovery re-creating DSC_Status.txt, which
+                # dead-waited this loop the full 150 attempts.)
                 $nodeList = New-Object System.Collections.ArrayList
                 $nonReadyNodes = New-Object System.Collections.ArrayList
                 foreach ($node in ($ConfigurationData.AllNodes.NodeName | Where-Object { $_ -ne "*" })) {
@@ -3443,16 +3469,24 @@ $global:VM_Config = {
                     Write-Progress2 "Waiting for all nodes. Attempt #$attempts/100" -Status "Waiting for [$($nonReadyNodes -join ',')] to be ready." -PercentComplete $percent -force
 
                     # Periodically check DSC_Init.log to see if DSC_ClearStatus started/progressed.
-                    # Do NOT read DSC_Status.txt here - it contains stale content from the previous
-                    # phase until DSC_ClearStatus deletes it, which is exactly what this loop waits for.
+                    # Readiness itself is keyed off RunGuid.txt == this run's GUID (written last by
+                    # DSC_ClearStatus), so a self-recovery that re-creates DSC_Status.txt no longer
+                    # blocks the loop.
                     $detailedCheck = ($attempts -ge 15 -and ($attempts % 15) -eq 0)
 
                     foreach ($node in $nonReadyNodes) {
                         if (-not $node) {
                             continue
                         }
-                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock { Test-Path "C:\staging\DSC\DSC_Status.txt" } -DisplayName "DSC: Check Nodes Ready"
-                        if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -eq $true)) {
+                        $result = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -CommandReturnsBool -ScriptBlock {
+                            param($expectedGuid)
+                            $f = "C:\staging\DSC\RunGuid.txt"
+                            if (-not (Test-Path $f)) { return $false }
+                            $content = Get-Content $f -ErrorAction SilentlyContinue | Select-Object -First 1
+                            if ($content) { $content = $content.Trim() }
+                            return ($content -eq $expectedGuid)
+                        } -ArgumentList $phaseRunGuid -DisplayName "DSC: Check Nodes Ready"
+                        if ($result.ScriptBlockFailed -or ($result.ScriptBlockOutput -ne $true)) {
                             if ($result.ScriptBlockFailed) {
                                 $errDetail = if ($result.ErrorDetails) { $result.ErrorDetails -join '; ' } else { 'No session / VM unreachable' }
                                 Write-Log "[Phase $Phase]: Node $node is NOT ready. Command failed: $errDetail" -Warning
@@ -3470,7 +3504,7 @@ $global:VM_Config = {
                                 }
                             }
                             else {
-                                Write-Log "[Phase $Phase]: Node $node is NOT ready. File Exists: $($result.ScriptBlockOutput) (attempt $attempts)" -LogOnly
+                                Write-Log "[Phase $Phase]: Node $node is NOT ready. RunGuid match: $($result.ScriptBlockOutput) (attempt $attempts)" -LogOnly
                             }
                             $allNodesReady = $false
                         }
@@ -3527,6 +3561,7 @@ $global:VM_Config = {
                         $diagResult = Invoke-VmCommand -VmName $node -VmDomainName $deployConfig.vmOptions.domainName -SuppressLog -ScriptBlock {
                             $info = @{}
                             $info.StatusContent = Get-Content "C:\staging\DSC\DSC_Status.txt" -ErrorAction SilentlyContinue
+                            $info.RunGuidContent = Get-Content "C:\staging\DSC\RunGuid.txt" -ErrorAction SilentlyContinue
                             $info.InitLogTail = Get-Content "C:\staging\DSC\DSC_Init.log" -Tail 20 -ErrorAction SilentlyContinue
                             $info.LcmState = try { (Get-DscLocalConfigurationManager).LCMState } catch { 'Unknown' }
                             $info.LastDscStatus = try { (Get-DscConfigurationStatus -ErrorAction SilentlyContinue).Status } catch { 'Unknown' }
@@ -3536,6 +3571,7 @@ $global:VM_Config = {
                         } -DisplayName "DSC: Final Diagnostics"
                         if (-not $diagResult.ScriptBlockFailed -and $diagResult.ScriptBlockOutput) {
                             $diag = $diagResult.ScriptBlockOutput
+                            Write-Log "[Phase $Phase]: Node ${node}: RunGuid.txt = '$($diag.RunGuidContent)' (expected '$phaseRunGuid')" -Failure
                             Write-Log "[Phase $Phase]: Node ${node}: DSC_Status.txt = '$($diag.StatusContent)'" -Failure
                             Write-Log "[Phase $Phase]: Node ${node}: LCM State = $($diag.LcmState), Last DSC Status = $($diag.LastDscStatus), Reboot Pending = $($diag.PendingReboot)" -Failure
                             Write-Log "[Phase $Phase]: Node ${node}: Staging files: $($diag.StagingFiles)" -LogOnly
