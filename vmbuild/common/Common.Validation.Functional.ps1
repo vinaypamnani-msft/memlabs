@@ -4736,6 +4736,61 @@ function Test-DomainMemberFunctionality {
         }
     }
 
+    # Windows activation check (Azure client OS only). On Azure, client-OS VMs
+    # are KMS-activated against the Azure public KMS by Fix_ActivateWindows
+    # (Phase 10). Verify the activation actually took so an expired evaluation
+    # timer doesn't silently slip through. Warn-not-fail: activation can lag
+    # behind the fix (KMS reachability / replication), so this never fails the
+    # phase. Gated on $Common.IsAzureVM because Azure KMS is unreachable from
+    # home labs.
+    $isClientOS = $CurrentItem.operatingSystem -and $CurrentItem.operatingSystem -like "Windows 1*" -and $CurrentItem.operatingSystem -notlike "*Server*"
+    if ($Common.IsAzureVM -and $isClientOS -and $result.ScriptBlockOutput -is [hashtable]) {
+        $activationCheckBlock = {
+            $actResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
+            try {
+                # Windows application family GUID; only the entry with an
+                # installed product key (PartialProductKey) is the active SKU.
+                $winProducts = Get-CimInstance -ClassName SoftwareLicensingProduct -ErrorAction Stop |
+                    Where-Object { $_.ApplicationId -eq '55c92734-d682-4d71-983e-d6ec3f16059f' -and $_.PartialProductKey }
+                $win = $winProducts | Select-Object -First 1
+                if (-not $win) {
+                    $actResults.Details.Add("WARN: Could not find a Windows licensing product with an installed key (cannot confirm activation)")
+                    return $actResults
+                }
+                # LicenseStatus: 0 Unlicensed, 1 Licensed, 2 OOBGrace, 3 OOTGrace,
+                # 4 NonGenuineGrace, 5 Notification, 6 ExtendedGrace.
+                $statusText = switch ([int]$win.LicenseStatus) {
+                    0 { 'Unlicensed' }
+                    1 { 'Licensed' }
+                    2 { 'Out-of-Box Grace' }
+                    3 { 'Out-of-Tolerance Grace' }
+                    4 { 'Non-Genuine Grace' }
+                    5 { 'Notification' }
+                    6 { 'Extended Grace' }
+                    default { "Unknown ($($win.LicenseStatus))" }
+                }
+                if ([int]$win.LicenseStatus -eq 1) {
+                    $actResults.Details.Add("OK: Windows is activated (Status=Licensed, SKU='$($win.Name)')")
+                }
+                else {
+                    $actResults.Details.Add("WARN: Windows is NOT activated (Status=$statusText, SKU='$($win.Name)'). On Azure, Fix_ActivateWindows (Phase 10) should KMS-activate Pro/Enterprise client OS; re-run Phase 10 or check azkms.core.windows.net:1688 reachability.")
+                }
+            }
+            catch {
+                $actResults.Details.Add("WARN: Could not query Windows activation status: $($_.Exception.Message)")
+            }
+            return $actResults
+        }
+        $activationResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $activationCheckBlock -DisplayName "Phase11-DomainMember-ActivationCheck" -SuppressLog `
+            -AsJob -TimeoutSeconds 120
+        if ($activationResult.ScriptBlockOutput -is [hashtable] -and $activationResult.ScriptBlockOutput.Details) {
+            foreach ($detail in $activationResult.ScriptBlockOutput.Details) {
+                $result.ScriptBlockOutput.Details.Add($detail)
+            }
+        }
+    }
+
     return (Format-TestResult -VMName $VMName -RoleLabel 'DomainMember' -Result $result)
 }
 
