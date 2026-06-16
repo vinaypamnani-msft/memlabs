@@ -916,7 +916,125 @@ function Test-DCFunctionality {
         -ScriptBlock $scriptBlock -ArgumentList $Domain, ([string]$IsBDC.IsPresent), $expectedDnsCsv, ([string]$hasCmSites) `
         -DisplayName "Phase11-$label-Test" -SuppressLog
 
-    return (Format-TestResult -VMName $VMName -RoleLabel $label -Result $result)
+    $dcPassed = Format-TestResult -VMName $VMName -RoleLabel $label -Result $result
+
+    # Host-side DHCP reservation audit. DHCP runs on the HOST (not the DC), so
+    # this runs against the local DHCP server, not inside the guest. Anchored to
+    # the primary DC's Phase 11 test so it runs exactly once per domain. The BDC
+    # run is skipped to avoid auditing the same scope twice.
+    $reservationsPassed = $true
+    if (-not $IsBDC -and $DeployConfig) {
+        $reservationsPassed = Test-DhcpReservations -Domain $Domain -DeployConfig $DeployConfig
+    }
+
+    return ($dcPassed -and $reservationsPassed)
+}
+
+function Test-DhcpReservations {
+    <#
+    .SYNOPSIS
+        Host-side audit that every VM expected to have a DHCP reservation
+        actually has one, pointing at the right IP, with no IP claimed by
+        more than one VM.
+    .DESCRIPTION
+        Runs on the host (DHCP server is local, not on the DC). For each
+        non-hidden VM in the domain that gets a reservation in Phase 1
+        (all roles except OSDClient, which is skipped there), it:
+          - resolves the VM's domain-NIC MAC (Get-VMMacIsolated -ExcludeCluster)
+          - looks up the live reservation for that MAC in the VM's scope
+          - confirms the reservation exists and its IP matches AssignedIP
+          - flags any IP held by more than one reservation (the collision class
+            that broke Phase 5 SQLAO cluster creation)
+        Buffers FAIL/WARN lines into $script:Phase11OutputBuffer like the other
+        Phase 11 tests, and returns $true only when every expected reservation
+        is present and correct.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Domain,
+        [Parameter(Mandatory)][object]$DeployConfig
+    )
+
+    $Phase = 11
+    $label = 'DHCP'
+    $passed = $true
+    $checked = 0
+
+    # IP -> list of vmNames, to detect an IP reserved for more than one VM.
+    $ipOwners = @{}
+
+    foreach ($vm in $DeployConfig.virtualMachines) {
+        if ($vm.hidden) { continue }
+        if ($vm.domain -and $vm.domain -ne $Domain) { continue }
+        # OSDClient never gets a reservation (Phase 1 skips it via -OSDClient).
+        if ($vm.role -eq 'OSDClient') { continue }
+        # A VM with no pre-assigned IP had no reservation created for it.
+        if (-not $vm.AssignedIP) { continue }
+
+        $checked++
+        $expectedIp = ($vm.AssignedIP -replace '/.+$', '')
+        $scopeId = if ($vm.role -in 'InternetClient', 'AADClient') {
+            '172.31.250.0'
+        } else {
+            if ($vm.network) { $vm.network } else { $DeployConfig.vmOptions.network }
+        }
+
+        try {
+            $mac = Get-VMMacIsolated -VmName $vm.vmName -ExcludeCluster
+        }
+        catch {
+            $mac = $null
+        }
+        if (-not $mac -or $mac -eq '000000000000') {
+            Write-Log "[Phase $Phase] [$label]: $($vm.vmName): could not resolve domain-NIC MAC; skipping reservation check" -LogOnly
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: WARN: $($vm.vmName) has no resolvable MAC; reservation not verified"; Level = 'Warning' })
+            continue
+        }
+
+        $reservedIp = $null
+        try {
+            $reservedIp = Get-DHCPReservationIPForMac -ScopeId $scopeId -Mac $mac
+        }
+        catch {
+            $reservedIp = $null
+        }
+
+        if (-not $reservedIp) {
+            $passed = $false
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: $($vm.vmName) has no DHCP reservation in scope $scopeId (expected $expectedIp, MAC=$mac)"; Level = 'Failure' })
+            continue
+        }
+
+        if ($reservedIp -ne $expectedIp) {
+            $passed = $false
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: $($vm.vmName) reservation is $reservedIp but AssignedIP is $expectedIp (scope $scopeId, MAC=$mac)"; Level = 'Failure' })
+            continue
+        }
+
+        if (-not $ipOwners.ContainsKey($reservedIp)) {
+            $ipOwners[$reservedIp] = New-Object System.Collections.Generic.List[string]
+        }
+        $ipOwners[$reservedIp].Add($vm.vmName)
+
+        Write-Log "[Phase $Phase] [$label]: $($vm.vmName): reservation OK $reservedIp (scope $scopeId)" -LogOnly
+    }
+
+    # Flag any IP that resolved to a reservation for more than one VM.
+    foreach ($ip in $ipOwners.Keys) {
+        if ($ipOwners[$ip].Count -gt 1) {
+            $passed = $false
+            $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] [$label]: FAIL: IP $ip is reserved for multiple VMs: $($ipOwners[$ip] -join ', ')"; Level = 'Failure' })
+        }
+    }
+
+    if ($passed) {
+        Write-Log "[Phase $Phase] [$label]: All $checked DHCP reservation(s) verified" -LogOnly
+    }
+    else {
+        Write-Log "[Phase $Phase] [$label]: DHCP reservation audit found problems ($checked checked)" -Failure -LogOnly
+    }
+
+    return $passed
 }
 
 function Repair-StoppedSQLServices {
