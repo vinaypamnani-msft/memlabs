@@ -1518,23 +1518,27 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
     }
 
-    # Office Install Targets collection: direct membership for VMs with installOffice
+    # Office Install Targets collection: query membership for VMs with installOffice.
+    # A query rule (keyed on VM name) auto-evaluates on the collection schedule and
+    # tolerates ResourceID changes, so a VM that is re-discovered or that appears in
+    # CM after this collection is created still becomes a member without a rebuild.
+    # The previous direct-membership-by-ResourceID approach captured each device's
+    # ResourceID once at creation time: VMs not yet discovered were silently skipped,
+    # and a later delete/re-discover left a stale rule pointing at a gone resource,
+    # so the collection never populated and Office never deployed.
     $officeCollectionName = "MEMLABS-Office Install Targets"
     $officeTargetVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
     if ($officeTargetVMs.Count -gt 0 -and -not (Get-CMDeviceCollection -Name $officeCollectionName -ErrorAction SilentlyContinue)) {
         try {
             $officeCol = New-CMDeviceCollection -Name $officeCollectionName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install"
             Write-DscStatus "$Tag Created collection: $officeCollectionName"
-            foreach ($ovm in $officeTargetVMs) {
-                $device = Get-CMDevice -Name $ovm.vmName -ErrorAction SilentlyContinue
-                if ($device) {
-                    Add-CMDeviceCollectionDirectMembershipRule -CollectionId $officeCol.CollectionID -ResourceId $device.ResourceID -ErrorAction SilentlyContinue
-                    Write-DscStatus "$Tag Added $($ovm.vmName) to Office Install Targets collection"
-                }
-                else {
-                    Write-DscStatus "$Tag WARNING: Device '$($ovm.vmName)' not found in CM — it may not have been discovered yet. Office deployment will target it once it appears."
-                }
-            }
+
+            # Build a WQL 'Name in (...)' membership query from the office VM names.
+            $officeNameList = ($officeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
+            $officeQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Name in ($officeNameList)"
+            Add-CMDeviceCollectionQueryMembershipRule -CollectionId $officeCol.CollectionID -QueryExpression $officeQuery -RuleName "Office Install Targets Rule" -ErrorAction Stop
+            Write-DscStatus "$Tag Added query membership rule for: $(($officeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+
             Invoke-CMCollectionUpdate -CollectionId $officeCol.CollectionID -ErrorAction SilentlyContinue
             Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $officeCol.CollectionID -ErrorAction SilentlyContinue
             Write-DscStatus "$Tag Moved collection '$officeCollectionName' under MEMLABS folder"
