@@ -293,10 +293,10 @@ function Start-VMMaintenance {
     }
 
     if ($ApplyNewOnly.IsPresent) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..." -force
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance..." -force
     }
 
     if ($ApplyNewOnly.IsPresent) {
@@ -309,7 +309,7 @@ function Start-VMMaintenance {
     $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
 
     if ($worked) {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully." -force
 
         # If a user is logged in, start any AtLogOn scheduled tasks directly
         # so they run immediately instead of waiting for the next logon cycle.
@@ -363,7 +363,7 @@ function Start-VMFixes {
         [switch] $ApplyNewOnly
     )
 
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Applying fixes to the virtual machine."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Applying fixes to the virtual machine." -force
 
     $success = $false
     $toStop = @()
@@ -510,7 +510,7 @@ function Start-VMFixesBatched {
     }
 
     # Start the VM
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting $VMName for batched maintenance." -force
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $VMDomain -WaitForConnect -Quiet
     if ($status.StartedVM) { $return.VMsToStop += $VMName }
     if ($status.StartFailed) { return $return }
@@ -546,7 +546,7 @@ function Start-VMFixesBatched {
                     continue
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..."
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM..." -force
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $allInjectTools) {
@@ -557,7 +557,7 @@ function Start-VMFixesBatched {
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..." -force
                     $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $VMDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
                     if ($copyResult -eq $false) {
                         throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
@@ -676,7 +676,7 @@ function Start-VMFixesBatched {
             return $return
         }
 
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Executing $($groupFixes.Count) fixes in batch (account: $(if ($key -eq '__default__') {'default'} else {$key}))..." -force
 
         try {
             $rawOutput = Invoke-Command -Session $ps -ScriptBlock $batchRunner -ArgumentList $fixDefsJson -ErrorVariable batchErr -ErrorAction SilentlyContinue
@@ -731,7 +731,7 @@ function Start-VMFixesBatched {
             Get-VMFixTranscript -VMName $VMName -VMDomain $VMDomain -FixName $fixDisplayName -VMDomainAccount $accountForTranscript
 
             if ($r.Success) {
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied."
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixDisplayName' ($($matchingFix.FixVersion)) applied." -force
                 $groupApplied += $matchingFix
                 $return.AppliedCount++
             }
@@ -808,7 +808,7 @@ function Start-VMFix {
         return $return
     }
 
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is applicable. Applying fix now."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) is applicable. Applying fix now." -force
 
     # Start dependent VM's
     if ($vmFix.DependentVMs) {
@@ -827,7 +827,7 @@ function Start-VMFix {
             }
         }
     }
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName."
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting $VMName." -force
     # Start VM to apply fix
     $status = Start-VMIfNotRunning -VMName $VMName -VMDomain $vmDomain -WaitForConnect -Quiet
     if ($status.StartedVM) {
@@ -855,7 +855,7 @@ function Start-VMFix {
     }
 
     start-sleep -Milliseconds 200
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName"
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Connecting to $VMName" -force
     if ($vmFix.InjectFiles -or $vmFix.InjectTools) {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
@@ -884,7 +884,7 @@ function Start-VMFix {
                     continue
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
-                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..."
+                Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying $file to the VM [$targetPathInVM]..." -force
                 Copy-Item -ToSession $ps -Path $sourcePath -Destination $targetPathInVM -Force -ErrorAction Stop
             }
             foreach ($toolFolder in $vmFix.InjectTools) {
@@ -895,7 +895,7 @@ function Start-VMFix {
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "tools\$toolFolder"
                 if (Test-Path $sourcePath) {
-                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..."
+                    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Copying tool '$toolFolder' to the VM..." -force
                     $copyResult = Copy-ItemSafe -VMName $VMName -VmDomainName $vmDomain -Path $sourcePath -Destination "C:\tools" -Recurse -Container -Force
                     if ($copyResult -eq $false) {
                         throw "Copy-ItemSafe failed copying tool '$toolFolder' to VM"
@@ -911,7 +911,7 @@ function Start-VMFix {
     }
 
     start-sleep -Milliseconds 200
-    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName"
+    Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' Starting ScriptBlock on $VMName" -force
 
     # Wrap the fix body so we get a structured return + transcript on the VM
     $HashArguments.ScriptBlock = New-VMFixScriptBlock -FixName $fixName -Body $vmFix.ScriptBlock
@@ -957,7 +957,7 @@ function Start-VMFix {
         $return.Success = $false
     }
     else {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Fix '$fixName' ($fixVersion) applied." -force
         Set-VMNote -vmName $VMName -FixApplied $fixName -FixAppliedVersion $fixVersion
         $return.Success = $true
         $return.Applied = $true
@@ -998,7 +998,7 @@ function Start-VMIfNotRunning {
     }
 
     if ($vm.State -ne "Running") {
-        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting VM for maintenance and waiting for it to be ready to connect."
+        Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Starting VM for maintenance and waiting for it to be ready to connect." -force
         $started = Start-VM2 -Name $VMName -Passthru
         if ($started) {
             $return.StartedVM = $true
