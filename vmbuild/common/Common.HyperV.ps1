@@ -881,7 +881,14 @@ function Stop-VM2 {
         [Parameter(Mandatory = $false)]
         [int]$RetrySeconds = 10,
         [Parameter(Mandatory = $false)]
-        [switch]$TurnOff
+        [switch]$TurnOff,
+        # Accepted but intentionally ignored. Stop-VM2 always force-stops
+        # internally (see $force below), so callers that assume a -Force
+        # switch exists (mirroring Hyper-V's Stop-VM) bind cleanly instead
+        # of throwing "A parameter cannot be found that matches parameter
+        # name 'Force'."
+        [Parameter(Mandatory = $false)]
+        [switch]$Force
     )
 
     try {
