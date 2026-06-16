@@ -345,8 +345,18 @@ if ($configureSUP) {
                     }
                 }
  
-                Sync-CMSoftwareUpdate
-                Write-DscStatus "SUM Component Sync started."
+                # Guard against re-runs: if a sync (especially a long Categories
+                # sync) is already in progress from a prior build attempt, don't
+                # restart it - triggering a new sync cancels the running one and
+                # forces a full restart. Only kick off a sync when none is running.
+                $preSyncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+                if ($preSyncState -and $preSyncState.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                    Write-DscStatus "SUM sync already in progress (state $($preSyncState.LastSyncState)) on re-run - not restarting. Waiting for it to complete."
+                }
+                else {
+                    Sync-CMSoftwareUpdate
+                    Write-DscStatus "SUM Component Sync started."
+                }
 
 
                 $i = 0
@@ -400,7 +410,15 @@ if ($configureSUP) {
             }
             #Start a 2nd Sync, or an initial sync if not top-level
             start-sleep -seconds 30
-            Sync-CMSoftwareUpdate
+            # Same re-run guard: never restart a sync that WSUS/CM still reports
+            # as running (a Categories sync can legitimately sit for many minutes).
+            $secondSyncState = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
+            if ($secondSyncState -and $secondSyncState.LastSyncState -in @(6701, 6704, 6705, 6706)) {
+                Write-DscStatus "Sync already in progress (state $($secondSyncState.LastSyncState)) - skipping 2nd sync trigger."
+            }
+            else {
+                Sync-CMSoftwareUpdate
+            }
         }
         catch { 
             Write-DscStatus "SUM Component Sync failed $_"
