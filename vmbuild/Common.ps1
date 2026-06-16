@@ -3550,39 +3550,101 @@ function Set-DeployConfigIPAddresses {
         }
     }
 
-    # Seed SQLAO virtual IPs (cluster + AG listener) so Get-DhcpServerv4FreeIPAddress
-    # can't hand them out to another VM on rerun. The SQLAO 2nd-NIC code adds these
-    # exclusions at allocation time, but Common.Remove.ps1 strips them when a SQLAO
-    # VM is removed, and a partial rebuild can leave stale ClusterIPAddress/AGIPAddress
-    # values in deployConfig / VM Notes with no matching DHCP exclusion. Re-asserting
-    # them here ensures the IP isn't leased out before Phase 5 tries to bring the
-    # cluster online.
-    $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
-    foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
-        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
-            $val = $sqlaoVm.$prop
-            if ($val) { $null = $sqlaoIps.Add(($val -replace '/.+$', '')) }
-        }
+    # Pre-allocate SQLAO virtual IPs (cluster VIP + AG listener) up front, alongside
+    # every other VM, so they are reserved BEFORE the per-VM free-IP picks below.
+    #
+    # These were previously allocated lazily in New-VirtualMachine's 2nd-NIC code
+    # during Phase 1. That allocator runs in a parallel child job and only consults
+    # live DHCP (active leases + exclusions). A regular VM's pre-assigned IP is held
+    # only by a temporary exclusion that THIS function removes at the end -- its
+    # durable DHCP reservation isn't created until the VM is started, seconds later.
+    # In that window a SQLAO node's cluster allocator could pick a regular VM's
+    # in-flight IP (and vice-versa), producing a Phase 5 'IP Address is already used'
+    # collision (seen on wacky.sandwich.lab: ZZ-FRIES ClusterIP 172.19.77.83 collided
+    # with ZZ-TURNIP's AssignedIP .83).
+    #
+    # Allocating here -- with the same allocator + dedup set used for every VM, and an
+    # exclusion that is NOT torn down (these are virtual IPs with no VM reservation to
+    # protect them) -- closes that race. On rerun, existing values in deployConfig or
+    # the VM Note are restored and re-excluded instead of being reallocated.
+
+    # Allocate a free IP from a scope, excluding it immediately and seeding the dedup
+    # set so neither the next SQLAO pick nor the per-VM loop can return it again.
+    function Get-SqlaoFreeIP {
+        param([string]$ScopeId, [string]$VmName, [string]$Label)
         try {
-            $note = Get-VMNote -VMName $sqlaoVm.vmName -ErrorAction SilentlyContinue
-            if ($note) {
-                foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
-                    $val = $note.$prop
-                    if ($val) { $null = $sqlaoIps.Add(($val -replace '/.+$', '')) }
-                }
+            $free = Get-DhcpServerv4FreeIPAddress -ScopeId $ScopeId -ErrorAction Stop
+        }
+        catch {
+            Write-Log "$VmName`: SQLAO: Failed to get free $Label IP from scope ${ScopeId}: $($_.Exception.Message)" -Warning
+            return $null
+        }
+        if (-not $free) {
+            Write-Log "$VmName`: SQLAO: scope $ScopeId returned no free IP for $Label (scope may be exhausted)" -Warning
+            return $null
+        }
+        $free = $free.ToString()
+        Add-DhcpServerv4ExclusionRange -ScopeId $ScopeId -StartRange $free -EndRange $free -ErrorAction SilentlyContinue | Out-Null
+        $null = $allocatedIps.Add($free)
+        return $free
+    }
+
+    $sqlaoIps = [System.Collections.Generic.HashSet[string]]::new()
+
+    # 1. Collect every cluster/AG IP already known (deployConfig + VM Notes, all nodes).
+    #    For owner nodes, restore note values back onto the config object so a rerun
+    #    keeps the original IPs instead of picking new ones in step 3.
+    foreach ($sqlaoVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' })) {
+        $note = $null
+        try { $note = Get-VMNote -VMName $sqlaoVm.vmName -ErrorAction SilentlyContinue } catch {}
+        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+            if ($sqlaoVm.OtherNode -and -not $sqlaoVm.$prop -and $note -and $note.$prop) {
+                $sqlaoVm | Add-Member -MemberType NoteProperty -Name $prop -Value ($note.$prop) -Force
+            }
+            foreach ($src in @($sqlaoVm.$prop, $note.$prop)) {
+                if ($src) { $null = $sqlaoIps.Add(($src -replace '/.+$', '')) }
             }
         }
-        catch {}
     }
+
+    # 2. Exclude + seed every known cluster/AG IP so the per-VM loop can't hand it out.
     foreach ($sqlaoIp in $sqlaoIps) {
         $parsed = $null
         if (-not [System.Net.IPAddress]::TryParse($sqlaoIp, [ref]$parsed)) { continue }
-        $sqlaoScope = ($sqlaoIp.Split('.') | Select-Object -First 3) -join '.'
-        $sqlaoScope = "$sqlaoScope.0"
+        $sqlaoScope = (($sqlaoIp.Split('.') | Select-Object -First 3) -join '.') + '.0'
         if (-not $scopesNeeded.Contains($sqlaoScope)) { continue }
         Add-DhcpServerv4ExclusionRange -ScopeId $sqlaoScope -StartRange $sqlaoIp -EndRange $sqlaoIp -ErrorAction SilentlyContinue | Out-Null
         $null = $allocatedIps.Add($sqlaoIp)
         Write-Log "Set-DeployConfigIPAddresses: Reserved SQLAO virtual IP $sqlaoIp on scope $sqlaoScope" -LogOnly
+    }
+
+    # 3. For each cluster-owner node still missing a cluster/AG IP, allocate one now
+    #    from the domain scope. Both IPs must live on the domain subnet so they are
+    #    reachable by clients (the heartbeat network is cluster-only / Role 1).
+    foreach ($ownerVm in ($DeployConfig.virtualMachines | Where-Object { $_.role -eq 'SQLAO' -and $_.OtherNode -and -not $_.hidden })) {
+        $domainScopeId = $defaultNetwork
+        if (-not $scopesNeeded.Contains($domainScopeId)) {
+            Write-Log "$($ownerVm.vmName): SQLAO: domain scope $domainScopeId not available; cluster/AG IPs will be allocated in Phase 1." -Warning
+            continue
+        }
+        foreach ($prop in 'ClusterIPAddress', 'AGIPAddress') {
+            $existing = $ownerVm.$prop
+            if ($existing) {
+                # Already set (config or restored from note) -- keep it, strip any /suffix.
+                $clean = $existing -replace '/.+$', ''
+                if ($clean -ne $existing) { $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $clean -Force }
+                continue
+            }
+            $label = if ($prop -eq 'ClusterIPAddress') { 'Cluster' } else { 'AG listener' }
+            $newIp = Get-SqlaoFreeIP -ScopeId $domainScopeId -VmName $ownerVm.vmName -Label $label
+            if (-not $newIp) { continue }
+            $null = $sqlaoIps.Add($newIp)
+            $ownerVm | Add-Member -MemberType NoteProperty -Name $prop -Value $newIp -Force
+            Write-Log "$($ownerVm.vmName): SQLAO: Pre-assigned $label IP $newIp (domain scope $domainScopeId)" -LogOnly
+        }
+        if ($ownerVm.ClusterIPAddress -and $ownerVm.AGIPAddress -and $ownerVm.ClusterIPAddress -eq $ownerVm.AGIPAddress) {
+            Write-Log "$($ownerVm.vmName): SQLAO: Cluster and AG IP are identical ($($ownerVm.ClusterIPAddress)). Domain scope $domainScopeId may be exhausted." -Failure
+        }
     }
 
     foreach ($vm in $DeployConfig.virtualMachines) {
@@ -4149,13 +4211,27 @@ function New-VirtualMachine {
                     # set to Role 1 (cluster-only), so virtual IPs on that subnet can't
                     # come online (WSFC refuses client access on Role 1 networks).
                     $domainScopeId = $DeployConfig.vmOptions.network
-                    $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
-                    # Exclude the cluster IP immediately so the next call can't return the same address
-                    Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | Out-Null
-                    $AGIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
 
-                    Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
-                    write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (domain scope $domainScopeId)"
+                    # Prefer the cluster/AG IPs pre-allocated by Set-DeployConfigIPAddresses
+                    # (reserved up front, alongside every other VM, with a DHCP exclusion that
+                    # is NOT torn down). Only fall back to a live free-IP pick if they're
+                    # missing -- e.g. an older note or a path that skipped the pre-pass.
+                    $clusterIP = if ($currentItem.ClusterIPAddress) { $currentItem.ClusterIPAddress -replace '/.+$', '' } else { $null }
+                    $AGIP = if ($currentItem.AGIPAddress) { $currentItem.AGIPAddress -replace '/.+$', '' } else { $null }
+
+                    if ($clusterIP -and $AGIP) {
+                        Write-Log "$VmName`: SQLAO: Setting pre-allocated ClusterIPAddress and AG IPAddress" -LogOnly
+                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (pre-allocated, domain scope $domainScopeId)"
+                    }
+                    else {
+                        $clusterIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
+                        # Exclude the cluster IP immediately so the next call can't return the same address
+                        Add-DhcpServerv4ExclusionRange -ScopeId $domainScopeId -StartRange $clusterIP -EndRange $clusterIP -ErrorAction SilentlyContinue | Out-Null
+                        $AGIP = Get-DhcpServerv4FreeIPAddress -ScopeId $domainScopeId -ErrorAction Stop
+
+                        Write-Log "$VmName`: SQLAO: Setting New ClusterIPAddress and AG IPAddress" -LogOnly
+                        write-log "$VmName`: ClusterIP: $clusterIP  AGIP: $AGIP (domain scope $domainScopeId)"
+                    }
 
                     if ($clusterIP) {
                         Remove-DHCPReservation -ip $clusterIP -vmName $VmName
