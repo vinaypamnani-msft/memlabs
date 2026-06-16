@@ -1136,11 +1136,86 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         }
     }
 
+    function Get-WsusSyncLiveness {
+        # Probe WSUS-native signals to decide whether a sync that CM reports as
+        # "running" is GENUINELY alive, vs a zombie (CM stuck at 6704 while the
+        # WSUS engine underneath is dead). Never throws. Returns:
+        #   PoolUp         : WsusPool is Started AND a w3wp worker is alive. The
+        #                    classic root-cause fault is the pool recycling at its
+        #                    memory cap mid-sync, so a down pool is a hard fault.
+        #   WsusRunning    : WSUS subscription is actively synchronizing (Running).
+        #                    When this is true AND the pool is up, the sync is
+        #                    alive and must NEVER be restarted.
+        #   Phase          : NotProcessing / Categories / Updates (current phase).
+        #   TotalItems /   : sync progress. Per the WSUS source (spSetSubscription-
+        #   ProcessedItems   Progress), these ONLY advance during the Updates phase
+        #                    -- they are pinned at 0 for the entire Categories phase
+        #                    BY DESIGN, so a stalled count is NOT evidence of a hang.
+        #   LastResult     : result of the last completed sync
+        #                    (Succeeded/Failed/Canceled/NotProcessing).
+        #   UpdateCount    : SUSDB update count (informational only; 0 until the
+        #                    first full sync completes).
+        $r = [PSCustomObject]@{
+            PoolUp         = $false
+            WsusRunning    = $false
+            Phase          = $null
+            TotalItems     = -1
+            ProcessedItems = -1
+            LastResult     = 'Unknown'
+            UpdateCount    = -1
+        }
+        try {
+            $srv = Get-WsusServer -ErrorAction Stop
+            try { $r.UpdateCount = $srv.GetStatus().UpdateCount } catch { }
+            $sub = $srv.GetSubscription()
+            try {
+                $syncStatus = $sub.GetSynchronizationStatus()
+                $r.WsusRunning = ($syncStatus.ToString() -eq 'Running')
+            }
+            catch { }
+            if ($r.WsusRunning) {
+                try {
+                    $prog = $sub.GetSynchronizationProgress()
+                    $r.Phase = $prog.Phase.ToString()
+                    $r.TotalItems = [int]$prog.TotalItems
+                    $r.ProcessedItems = [int]$prog.ProcessedItems
+                }
+                catch { }
+            }
+            try {
+                $lastInfo = $sub.GetLastSynchronizationInfo()
+                $r.LastResult = $lastInfo.Result.ToString()
+            }
+            catch { }
+        }
+        catch { }
+
+        # Pool liveness: Started state AND a live w3wp worker for WsusPool.
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
+            $w3wp = Get-WmiObject Win32_Process -Filter "Name='w3wp.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -match 'WsusPool' } | Select-Object -First 1
+            $r.PoolUp = ($poolState -eq 'Started') -and ($null -ne $w3wp)
+        }
+        catch { }
+
+        return $r
+    }
+
     function Wait-WsusSyncCompletion {
         # Poll sync status up to $MaxAttempts times (30s apart). Returns $true
         # if sync reaches 6702 (completed). On 6703 (failed), retries with
         # Invoke-FullSync and escalates to Repair-WsusSync every 3rd failure.
-        # On stale in-progress states (>15 min unchanged), repairs immediately.
+        #
+        # CRITICAL: we NEVER restart a sync that WSUS confirms is actively running
+        # (Get-WsusSyncLiveness.WsusRunning), especially during the Categories
+        # phase -- WSUS writes no progress and CM's state timestamp sits unchanged
+        # for many minutes BY DESIGN, so a stalled counter / stale CM timestamp is
+        # NOT evidence of a hang. A running sync is only ever repaired on a genuine
+        # HARD fault: the WsusPool worker actually crashed (PoolUp=false), or CM
+        # and WSUS are confirmably desynced (WSUS idle + last sync Failed/Canceled
+        # while CM still reports running) over several consecutive polls.
         param(
             [string]$Label = "Sync",
             [int]$MaxAttempts = 40,
@@ -1151,11 +1226,13 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             Invoke-FullSync
         }
 
-        # Cross-check WSUS-native UpdateCount: CM can report a sync as "running"
-        # while the WsusPool underneath is dead (recycled at its memory cap →
-        # 503), in which case the catalog never grows. Track consecutive polls
-        # where CM says "syncing" but UpdateCount stays 0 — that's a zombie sync.
-        $zeroUpdateStreak = 0
+        # Hard-fault streaks. A running sync is NEVER restarted on stalled
+        # counters or a stale CM timestamp -- only on these confirmed faults,
+        # each requiring several consecutive polls to rule out a transient race:
+        #   poolDownStreak : WsusPool worker gone / pool stopped (crashed mid-sync)
+        #   desyncStreak   : WSUS idle + last sync Failed/Canceled while CM=running
+        $poolDownStreak = 0
+        $desyncStreak = 0
         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
             Start-Sleep -Seconds 30
             $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
@@ -1174,29 +1251,78 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
                     Write-DscStatus "$Tag $Label failed (attempt $attempt of $MaxAttempts). Triggering retry..."
                     Invoke-FullSync
                 }
-                $zeroUpdateStreak = 0
+                $poolDownStreak = 0
+                $desyncStreak = 0
             }
             elseif ($status.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                 $age = (Get-Date) - $status.LastSyncStateTime
-                $wsusUpdateCount = -1
-                try { $wsusUpdateCount = (Get-WsusServer -ErrorAction Stop).GetStatus().UpdateCount } catch { }
-                if ($wsusUpdateCount -eq 0) { $zeroUpdateStreak++ } else { $zeroUpdateStreak = 0 }
+                $live = Get-WsusSyncLiveness
 
-                if ($age.TotalMinutes -gt 15) {
-                    Write-DscStatus "$Tag $Label state $($status.LastSyncState) stale ($([math]::Round($age.TotalMinutes,0)) min). Repairing WSUS... (attempt $attempt of $MaxAttempts)"
-                    Repair-WsusSync
-                    $zeroUpdateStreak = 0
+                if (-not $live.PoolUp) {
+                    # CM reports running but the WsusPool worker is gone / pool
+                    # stopped -- the pool crashed mid-sync (the classic memory-cap
+                    # recycle). A dead pool with the SUSDB sync phase frozen at
+                    # "Running" IS the zombie, so this overrides any stale Running
+                    # the DB still reports. Confirm over 2 polls (a deliberate
+                    # recycle is brief) then repair.
+                    $poolDownStreak++
+                    $desyncStreak = 0
+                    if ($poolDownStreak -ge 2) {
+                        Write-DscStatus "$Tag $($Label): CM reports running but WsusPool is down ($poolDownStreak polls) -- pool crashed mid-sync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                        Write-WsusDiagnostics -Reason "$Label WsusPool down at attempt $attempt"
+                        Repair-WsusSync
+                        $poolDownStreak = 0
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WsusPool worker not detected (poll $poolDownStreak) -- confirming before repair (attempt $attempt of $MaxAttempts)"
+                    }
                 }
-                elseif ($zeroUpdateStreak -ge 6) {
-                    # ~3 min of CM "syncing" with an empty WSUS catalog = zombie
-                    # sync (pool recycled mid-sync). Reharden + restart to fix it.
-                    Write-DscStatus "$Tag $Label reports running but WSUS UpdateCount stuck at 0 for $zeroUpdateStreak polls — zombie sync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
-                    Write-WsusDiagnostics -Reason "$Label zombie (UpdateCount=0) at attempt $attempt"
-                    Repair-WsusSync
-                    $zeroUpdateStreak = 0
+                elseif ($live.WsusRunning) {
+                    # WSUS itself confirms the sync engine is actively running and
+                    # the pool is up. NEVER repair/restart a live sync -- during the
+                    # Categories phase WSUS legitimately shows no UpdateCount /
+                    # ProcessedItems movement and CM's state timestamp sits
+                    # unchanged for many minutes BY DESIGN. Just log progress.
+                    $poolDownStreak = 0
+                    $desyncStreak = 0
+                    $prog = ""
+                    if ($live.Phase) { $prog = ", phase=$($live.Phase)" }
+                    if ($live.ProcessedItems -ge 0) { $prog += ", items=$($live.ProcessedItems)/$($live.TotalItems)" }
+                    Write-DscStatus "$Tag $Label running (CM state $($status.LastSyncState)$prog, WSUS UpdateCount=$($live.UpdateCount), attempt $attempt of $MaxAttempts)"
+                }
+                elseif ($live.LastResult -in @('Failed', 'Canceled')) {
+                    # Pool is up but WSUS reports the subscription is NOT processing
+                    # and the last sync ended Failed/Canceled, while CM still reports
+                    # running. CM and WSUS are desynced -- the sync really stopped.
+                    # Confirm over 4 polls (WSUS may have just finished and CM hasn't
+                    # caught up) then repair.
+                    $desyncStreak++
+                    $poolDownStreak = 0
+                    if ($desyncStreak -ge 4) {
+                        Write-DscStatus "$Tag $($Label): CM reports running but WSUS not processing, last result=$($live.LastResult) ($desyncStreak polls) -- CM/WSUS desync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                        Write-WsusDiagnostics -Reason "$Label CM/WSUS desync ($($live.LastResult)) at attempt $attempt"
+                        Repair-WsusSync
+                        $desyncStreak = 0
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WSUS not processing (last result=$($live.LastResult), poll $desyncStreak) -- confirming before repair (attempt $attempt of $MaxAttempts)"
+                    }
                 }
                 else {
-                    Write-DscStatus "$Tag $Label running (state $($status.LastSyncState), WSUS UpdateCount=$wsusUpdateCount, attempt $attempt of $MaxAttempts)"
+                    # Pool up, WSUS not processing, last result Succeeded /
+                    # NotProcessing -- WSUS is idle: it finished and CM hasn't
+                    # transitioned to 6702 yet, or a sync hasn't engaged. WSUS is
+                    # NOT running, so a gentle re-trigger is safe once CM has been
+                    # stale a long time; otherwise keep waiting.
+                    $poolDownStreak = 0
+                    $desyncStreak = 0
+                    if ($age.TotalMinutes -gt 20) {
+                        Write-DscStatus "$Tag $($Label): WSUS idle (last result=$($live.LastResult)) and CM state $($status.LastSyncState) stale $([math]::Round($age.TotalMinutes,0)) min -- re-triggering sync (attempt $attempt of $MaxAttempts)"
+                        Invoke-FullSync
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): WSUS idle (last result=$($live.LastResult)), waiting for CM (CM state $($status.LastSyncState), age $([math]::Round($age.TotalMinutes,0)) min, attempt $attempt of $MaxAttempts)"
+                    }
                 }
             }
             else {
