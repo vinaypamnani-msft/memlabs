@@ -5685,6 +5685,45 @@ function Test-CMSiteWideFunctionality {
             catch {
                 $results.Details.Add("WARN: SMS_SUPSyncStatus query failed: $($_.Exception.Message)")
             }
+
+            # WSUS-native cross-check. CM's SMS_SUPSyncStatus can report a
+            # completed/running sync while the underlying WSUS catalog is
+            # actually empty: the WsusPool app pool recycled at its default
+            # ~1.8 GB private-memory cap mid-sync, returned HTTP 503, and
+            # GetStatus().UpdateCount never grew past 0. Only meaningful when
+            # WSUS is local to this site server; skip silently otherwise.
+            try {
+                $wsusSrv = Get-WsusServer -ErrorAction Stop
+                $wStatus = $wsusSrv.GetStatus()
+                if ($wStatus.UpdateCount -eq 0) {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: WSUS reports UpdateCount=0 - the first full sync never populated the catalog (likely WsusPool recycled at its memory cap mid-sync). CM may still report a sync state.")
+                }
+                else {
+                    $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
+                }
+                # WsusPool memory cap - the default ~1.8 GB cap recycles the pool
+                # mid-sync; a hardened SUP should have it uncapped (0).
+                try {
+                    Import-Module WebAdministration -ErrorAction Stop
+                    if (Test-Path 'IIS:\AppPools\WsusPool') {
+                        $memCap = (Get-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -ErrorAction Stop).Value
+                        $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
+                        if ($memCap -ne 0) {
+                            $results.Details.Add("WARN: WsusPool privateMemory recycle cap is $([math]::Round($memCap/1024,0)) MB (not uncapped) - the first full sync may recycle the pool and stall")
+                        }
+                        else {
+                            $results.Details.Add("OK: WsusPool privateMemory uncapped (state=$poolState)")
+                        }
+                    }
+                }
+                catch {
+                    $results.Details.Add("INFO: WsusPool config not readable: $($_.Exception.Message)")
+                }
+            }
+            catch {
+                $results.Details.Add("INFO: WSUS not local to this site server (skipped UpdateCount check): $($_.Exception.Message)")
+            }
         }
 
         return $results

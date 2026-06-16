@@ -934,12 +934,147 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
     }
     } # end top-level client settings
 
+    function Get-WsusDiagnostics {
+        # Collect WSUS-native health signals for troubleshooting a stuck sync.
+        # Returns an array of human-readable diagnostic lines. Never throws.
+        $lines = @()
+
+        # 1. WSUS catalog state — the real "did a sync ever work" signal.
+        #    GetStatus().UpdateCount stays 0 until the first full sync completes,
+        #    even while CM reports the sync as "running".
+        try {
+            $wsusSrv = Get-WsusServer -ErrorAction Stop
+            $wStatus = $wsusSrv.GetStatus()
+            $lines += "WSUS UpdateCount=$($wStatus.UpdateCount), ApprovedUpdates=$($wStatus.ApprovedUpdateCount), Computers=$($wStatus.ComputerTargetCount)"
+            try {
+                $sub = $wsusSrv.GetSubscription()
+                $lastInfo = $sub.GetLastSynchronizationInfo()
+                $lines += "WSUS LastSync=$($sub.LastSynchronizationTime), Result=$($lastInfo.Result), Error=$($lastInfo.Error)"
+            }
+            catch { $lines += "WSUS subscription info unavailable: $($_.Exception.Message)" }
+        }
+        catch {
+            $lines += "WSUS GetStatus failed (server may be unreachable): $($_.Exception.Message)"
+        }
+
+        # 2. WsusPool app pool state + configured memory cap + queue length.
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+            $poolPath = 'IIS:\AppPools\WsusPool'
+            if (Test-Path $poolPath) {
+                $poolState = (Get-WebAppPoolState -Name WsusPool -ErrorAction SilentlyContinue).Value
+                $memCap = (Get-ItemProperty -Path $poolPath -Name recycling.periodicRestart.privateMemory -ErrorAction SilentlyContinue).Value
+                $qLen = (Get-ItemProperty -Path $poolPath -Name queueLength -ErrorAction SilentlyContinue).Value
+                if ($memCap -eq 0) { $capDesc = 'UNCAPPED' } else { $capDesc = "$([math]::Round($memCap/1024,0)) MB cap" }
+                $lines += "WsusPool state=$poolState, privateMemory=$capDesc, queueLength=$qLen"
+            }
+            else {
+                $lines += "WsusPool app pool not found"
+            }
+        }
+        catch {
+            $lines += "WsusPool state query failed: $($_.Exception.Message)"
+        }
+
+        # 3. Actual w3wp working set for WsusPool (balloon/recycle detection).
+        try {
+            $w3wp = Get-WmiObject Win32_Process -Filter "Name='w3wp.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -match 'WsusPool' } | Select-Object -First 1
+            if ($w3wp) {
+                $wsMB = [math]::Round($w3wp.WorkingSetSize / 1MB, 0)
+                $lines += "WsusPool worker PID=$($w3wp.ProcessId) WorkingSet=$wsMB MB"
+            }
+            else {
+                $lines += "WsusPool worker process not running (no w3wp for WsusPool)"
+            }
+        }
+        catch {
+            $lines += "WsusPool worker query failed: $($_.Exception.Message)"
+        }
+
+        # 4. SoftwareDistribution.log tail — surface the real failure reason
+        #    (503, ODBC/database connect failures, pool recycles, OOM).
+        try {
+            $sdLog = 'C:\Program Files\Update Services\LogFiles\SoftwareDistribution.log'
+            if (Test-Path $sdLog) {
+                $hits = Get-Content $sdLog -Tail 400 -ErrorAction Stop |
+                    Where-Object { $_ -match '503|ODBC|unable to connect to its database|recycl|OutOfMemory|System.OutOfMemoryException' } |
+                    Select-Object -Last 5
+                if ($hits) {
+                    $lines += "SoftwareDistribution.log recent issues:"
+                    foreach ($h in $hits) { $lines += "  $($h.ToString().Trim())" }
+                }
+                else {
+                    $lines += "SoftwareDistribution.log: no 503/ODBC/recycle errors in last 400 lines"
+                }
+            }
+        }
+        catch {
+            $lines += "SoftwareDistribution.log read failed: $($_.Exception.Message)"
+        }
+
+        return $lines
+    }
+
+    function Write-WsusDiagnostics {
+        param([string]$Reason = "WSUS diagnostics")
+        Write-DscStatus "$Tag --- $Reason ---"
+        foreach ($l in (Get-WsusDiagnostics)) {
+            Write-DscStatus "$Tag   $l"
+        }
+        Write-DscStatus "$Tag --- end $Reason ---"
+    }
+
+    function Set-WsusPoolHardened {
+        # Uncap WsusPool memory + raise the queue so the pool survives a full
+        # Microsoft Update sync. Mirrors the install-time hardening in
+        # ConfigureWSUS (TemplateHelpDSC.psm1). The reactive repair path MUST
+        # reharden BEFORE restarting — otherwise the pool comes back with the
+        # default ~1.8 GB cap and the next sync dies the same way.
+        try {
+            Import-Module WebAdministration -ErrorAction Stop
+        }
+        catch {
+            Write-DscStatus "$Tag WsusPool hardening skipped — WebAdministration unavailable: $_"
+            return
+        }
+        $poolPath = 'IIS:\AppPools\WsusPool'
+        if (-not (Test-Path $poolPath)) {
+            Write-DscStatus "$Tag WsusPool not found — skipping hardening"
+            return
+        }
+        $settings = @(
+            @{ Name = 'recycling.periodicRestart.privateMemory'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.requests'; Value = 0 }
+            @{ Name = 'recycling.periodicRestart.time'; Value = [TimeSpan]::Zero }
+            @{ Name = 'queueLength'; Value = 25000 }
+            @{ Name = 'processModel.idleTimeout'; Value = [TimeSpan]::Zero }
+            @{ Name = 'startMode'; Value = 'AlwaysRunning' }
+            @{ Name = 'failure.rapidFailProtection'; Value = $false }
+        )
+        foreach ($s in $settings) {
+            try {
+                Set-ItemProperty -Path $poolPath -Name $s.Name -Value $s.Value -ErrorAction Stop
+            }
+            catch {
+                Write-DscStatus "$Tag WsusPool: failed to set $($s.Name): $_"
+            }
+        }
+        Write-DscStatus "$Tag WsusPool hardened (privateMemory uncapped, queueLength=25000)"
+    }
+
     function Repair-WsusSync {
         # Remediate a stuck/failed WSUS sync by restarting the IIS app pool
         # and the SMS wsyncmgr component, then triggering a fresh sync.
-        # Typical cause: WSUS returned HTTP 503 mid-sync and wsyncmgr couldn't
-        # write the failure state to SQL (SSL/connection error), leaving the
-        # sync status frozen at 6704 indefinitely.
+        # Typical cause: WsusPool hit its default ~1.8 GB private-memory recycle
+        # cap during the first full Microsoft Update category sync and recycled
+        # mid-sync, returning HTTP 503; wsyncmgr couldn't write the failure to
+        # SQL, leaving the sync status frozen at 6704 indefinitely.
+        # Capture WSUS-native health BEFORE remediation so the log shows WHY.
+        Write-WsusDiagnostics -Reason "WSUS health before repair"
+        # Reharden the pool (uncap memory) BEFORE restarting — otherwise it comes
+        # back with the default ~1.8 GB cap and the next sync dies the same way.
+        Set-WsusPoolHardened
         Write-DscStatus "$Tag Restarting WsusPool app pool..."
         try {
             Import-Module WebAdministration -ErrorAction Stop
@@ -1009,6 +1144,11 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             Invoke-FullSync
         }
 
+        # Cross-check WSUS-native UpdateCount: CM can report a sync as "running"
+        # while the WsusPool underneath is dead (recycled at its memory cap →
+        # 503), in which case the catalog never grows. Track consecutive polls
+        # where CM says "syncing" but UpdateCount stays 0 — that's a zombie sync.
+        $zeroUpdateStreak = 0
         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
             Start-Sleep -Seconds 30
             $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
@@ -1020,27 +1160,44 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
             elseif ($status.LastSyncState -eq 6703) {
                 if ($attempt % 3 -eq 0) {
                     Write-DscStatus "$Tag $Label failed $attempt times. Repairing WSUS services... (attempt $attempt of $MaxAttempts)"
+                    Write-WsusDiagnostics -Reason "$Label failed (6703) at attempt $attempt"
                     Repair-WsusSync
                 }
                 else {
                     Write-DscStatus "$Tag $Label failed (attempt $attempt of $MaxAttempts). Triggering retry..."
                     Invoke-FullSync
                 }
+                $zeroUpdateStreak = 0
             }
             elseif ($status.LastSyncState -in @(6701, 6704, 6705, 6706)) {
                 $age = (Get-Date) - $status.LastSyncStateTime
+                $wsusUpdateCount = -1
+                try { $wsusUpdateCount = (Get-WsusServer -ErrorAction Stop).GetStatus().UpdateCount } catch { }
+                if ($wsusUpdateCount -eq 0) { $zeroUpdateStreak++ } else { $zeroUpdateStreak = 0 }
+
                 if ($age.TotalMinutes -gt 15) {
                     Write-DscStatus "$Tag $Label state $($status.LastSyncState) stale ($([math]::Round($age.TotalMinutes,0)) min). Repairing WSUS... (attempt $attempt of $MaxAttempts)"
                     Repair-WsusSync
+                    $zeroUpdateStreak = 0
+                }
+                elseif ($zeroUpdateStreak -ge 6) {
+                    # ~3 min of CM "syncing" with an empty WSUS catalog = zombie
+                    # sync (pool recycled mid-sync). Reharden + restart to fix it.
+                    Write-DscStatus "$Tag $Label reports running but WSUS UpdateCount stuck at 0 for $zeroUpdateStreak polls — zombie sync. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                    Write-WsusDiagnostics -Reason "$Label zombie (UpdateCount=0) at attempt $attempt"
+                    Repair-WsusSync
+                    $zeroUpdateStreak = 0
                 }
                 else {
-                    Write-DscStatus "$Tag $Label running (state $($status.LastSyncState), attempt $attempt of $MaxAttempts)"
+                    Write-DscStatus "$Tag $Label running (state $($status.LastSyncState), WSUS UpdateCount=$wsusUpdateCount, attempt $attempt of $MaxAttempts)"
                 }
             }
             else {
                 Write-DscStatus "$Tag $Label unexpected state $($status.LastSyncState) (attempt $attempt of $MaxAttempts)"
             }
         }
+        Write-DscStatus "$Tag $Label did not complete after $MaxAttempts attempts."
+        Write-WsusDiagnostics -Reason "$Label final timeout diagnostics"
         return $false
     }
 
@@ -1087,7 +1244,16 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # subscribe without waiting for the current sync.
         $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
         $productsInCatalog = @($products | Where-Object { $_ -in $allCatalogProducts })
-        $catalogHasOurProducts = $productsInCatalog.Count -eq $products.Count
+        # Gate Sync 1 on the *core* OS/SQL products only. Compound/aliased names
+        # (the Office bundle string, Defender) may never match a single catalog
+        # category — and Defender ships in the WSUS seed before any real sync —
+        # so requiring an exact full-set (13/13) match means the gate is never
+        # satisfied and Sync 1 re-waits every build. Core OS/SQL categories only
+        # appear after a real Microsoft Update sync, so they're the reliable
+        # "catalog is populated" signal.
+        $coreProducts = @($products | Where-Object { $_ -notmatch '/' -and $_ -ne 'Microsoft Defender for Endpoint' })
+        $coreInCatalog = @($coreProducts | Where-Object { $_ -in $allCatalogProducts })
+        $catalogHasOurProducts = ($coreProducts.Count -gt 0) -and ($coreInCatalog.Count -eq $coreProducts.Count)
 
         if ($missingproducts.Count -gt 0) {
             $syncNeeded = $true
