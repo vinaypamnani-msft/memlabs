@@ -1,4 +1,4 @@
-﻿# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
+# This file must be saved with UTF-8 BOM. createGuestDscZip.ps1 loads it under PS 5.1, which needs the BOM to parse Unicode.
 # Common.ps1
 [CmdletBinding()]
 param (
@@ -8011,8 +8011,8 @@ if (-not $Common.Initialized) {
         }
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260615.0"
-            LatestHotfixVersion         = "260615.0"
+            MemLabsVersion              = "260616.0"
+            LatestHotfixVersion         = "260616.0"
             PS7                         = $PS7
             Initialized                 = $true
             InJob                       = $InJob
