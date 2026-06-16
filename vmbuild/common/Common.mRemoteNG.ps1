@@ -626,6 +626,18 @@ function Repair-MRemoteNGPasswords {
         $pwd = $node.GetAttribute("Password")
         if ([string]::IsNullOrEmpty($pwd)) { continue }
 
+        # Container nodes are folders and carry no real credential (children use
+        # their own). A non-empty container Password is a stale blob from an older
+        # mRemoteNG/version that we cannot re-decrypt, and was the source of the
+        # never-converging "decrypt failed" loop. Blank it (one-time cleanup) and
+        # skip the decrypt audit instead of flagging it corrupted every run.
+        if ($node.GetAttribute("Type") -eq "Container") {
+            $node.SetAttribute("Password", "")
+            $repaired = $true
+            Write-MRNGDiag ("node '$($node.GetAttribute('Name'))' is Container: blanked stale password, skipping decrypt audit")
+            continue
+        }
+
         $checkedCount++
         $nodeName = $node.GetAttribute("Name")
         $pwdLen = $pwd.Length
@@ -776,7 +788,12 @@ function New-MRemoteNGContainerNode {
     $node.SetAttribute("Id", (Get-MRemoteNGDeterministicGuid -Seed "container:$Name"))
     $node.SetAttribute("Username", $Username)
     $node.SetAttribute("Domain", $Domain)
-    $node.SetAttribute("Password", $Password)
+    # Containers are folders only. With no Inheritance element present, mRemoteNG
+    # default behavior is that each child Connection uses its OWN credentials, not
+    # the parent's. A container Password is dead weight that we cannot reliably
+    # re-decrypt across mRemoteNG/version changes, which produced the recurring
+    # "password corrupted (decrypt failed)" audit loop. Always leave it empty.
+    $node.SetAttribute("Password", "")
     $node.SetAttribute("Hostname", "")
     $node.SetAttribute("Protocol", $Protocol)
     $node.SetAttribute("RdpVersion", "rdc10")
@@ -1347,8 +1364,10 @@ function New-MRemoteNGFileFromHyperV {
             $container.SetAttribute("Username", $username)
             $shouldSave = $true
         }
-        if ($encryptedPass -and $container.GetAttribute("Password") -ne $encryptedPass) {
-            $container.SetAttribute("Password", $encryptedPass)
+        # Containers never hold a password (children use their own credentials).
+        # Blank any leftover blob so it can't be re-flagged as corrupted next run.
+        if (-not [string]::IsNullOrEmpty($container.GetAttribute("Password"))) {
+            $container.SetAttribute("Password", "")
             $shouldSave = $true
         }
 
