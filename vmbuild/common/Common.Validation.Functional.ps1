@@ -1345,6 +1345,12 @@ function Test-SQLAOFunctionality {
 
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # Live status — Write-Progress records emitted here are confined to this
+        # -AsJob nested job; Invoke-VmCommand -PollProgress polls and re-emits the
+        # latest one so Phase 11 shows live SQLAO status instead of appearing frozen.
+        $progressActivity = "$env:COMPUTERNAME [SQLAO]"
+        Write-Progress -Activity $progressActivity -Status "Starting SQLAO validation"
+
         # Resolve domain and DNS server once — used by all DNS zone queries.
         # SQLAO VMs aren't DCs, so query the DC's DNS zone remotely.
         $domain = (Get-CimInstance Win32_ComputerSystem).Domain
@@ -1360,6 +1366,7 @@ function Test-SQLAOFunctionality {
             # ==============================================================
             # 1. Failover Cluster health
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Checking failover cluster health"
             $results.Details.Add("CMD: Get-Cluster / Get-ClusterNode / Get-ClusterQuorum")
             try {
                 Import-Module FailoverClusters -ErrorAction SilentlyContinue
@@ -1594,6 +1601,7 @@ function Test-SQLAOFunctionality {
             # ==============================================================
             # 1b. Network configuration validation
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Validating cluster network configuration"
             $results.Details.Add("CMD: Validate cluster network configuration")
             try {
                 $clusterSubnet = '10.250.251.'
@@ -1760,6 +1768,7 @@ function Test-SQLAOFunctionality {
             # ==============================================================
             # 2. Remediation pass: fix common issues before testing AG health
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Remediating availability databases and endpoints"
 
             # 2a. Resume any suspended availability databases
             $suspendedQuery = @"
@@ -1854,6 +1863,7 @@ WHERE rs.connected_state_desc = 'DISCONNECTED'
             # ==============================================================
             # 3. AG replica health check with retry
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Checking Availability Group replica health"
             $healthQuery = @"
 SELECT ag.name AS GroupName,
        rs.role_desc AS Role,
@@ -1987,6 +1997,7 @@ WHERE drs.is_local = 1
             # ==============================================================
             # 4. TESTDB membership in availability group
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Checking TESTDB availability group membership"
             if ($agName) {
                 $results.Details.Add("CMD: Check TESTDB membership in AG '$agName'")
                 try {
@@ -2009,6 +2020,7 @@ WHERE drs.is_local = 1
             # ==============================================================
             # 5. Listener DNS resolution
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Checking listener DNS and SQL connectivity"
             # Query the DC's DNS zone directly instead of Resolve-DnsName.
             if ($listenerName) {
                 $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$dnsServer'")
@@ -2095,6 +2107,7 @@ WHERE drs.is_local = 1
             # ==============================================================
             # 7. Backup and Witness share accessibility
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Checking witness and backup share accessibility"
             foreach ($share in @(@{Name = 'Witness'; Path = $witnessShare }, @{Name = 'Backup'; Path = $backupShare })) {
                 if ($share.Path) {
                     $results.Details.Add("CMD: Test-Path '$($share.Path)'")
@@ -2111,6 +2124,7 @@ WHERE drs.is_local = 1
             # ==============================================================
             # 8. TESTDB recovery model and log backup health (PRIMARY only)
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Verifying TESTDB recovery model and log backups"
             if ($otherNode -and $healthy) {
                 $roleQuery = "SELECT role_desc FROM sys.dm_hadr_availability_replica_states WHERE is_local = 1"
                 $localRole = (Invoke-Sqlcmd -Query $roleQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction SilentlyContinue).role_desc
@@ -2236,6 +2250,7 @@ EXECUTE [dbo].[DatabaseBackup]
             # ==============================================================
             # 9. Cross-node replication test (write on PRIMARY, read from other)
             # ==============================================================
+            Write-Progress -Activity $progressActivity -Status "Testing cross-node replication"
             if ($otherNode -and $healthy) {
                 # Reuse localRole from check #8 if available, otherwise query it
                 if (-not $localRole) {
@@ -2304,10 +2319,22 @@ INSERT INTO dbo.MemLabsValidation (TestValue) VALUES ('$testId');
         return $results
     }
 
+    # Run -AsJob with a hard timeout. The scriptblock runs entirely on the remote
+    # VM (cluster/AG health, share probes, optional SQL/cluster-service restarts
+    # and second-hop Invoke-Command remediation), any of which can block on a
+    # network operation that has no built-in timeout (e.g. Test-Path on an
+    # unreachable UNC witness/backup share, or a remote restart that never
+    # returns). Without a bound, a single hung node (seen on the secondary)
+    # leaves the Phase 11 job running forever with no progress, freezing the
+    # whole phase. The timeout is generous enough for the worst-case remediation
+    # path (health retries 5x20s + SQL restart 30s + post-restart retries
+    # 5x20s + AG log backup 120s + endpoint cycling), so a healthy node never
+    # hits it; on timeout Invoke-VmCommand returns ScriptBlockFailed and
+    # Format-TestResult records a FAIL for the VM and the phase completes.
     $result = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
         -ScriptBlock $scriptBlock `
         -ArgumentList $listenerName, $listenerPort, $agName, $otherNode, $witnessShare, $backupShare, $agIP, $sqlInstName, $clusterName, $clusterIP `
-        -DisplayName "Phase11-SQLAO-Test" -SuppressLog
+        -DisplayName "Phase11-SQLAO-Test" -SuppressLog -AsJob -TimeoutSeconds 600 -PollProgress
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'SQLAO' -Result $result)
 }

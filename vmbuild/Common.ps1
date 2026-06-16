@@ -5155,6 +5155,8 @@ function Invoke-VmCommand {
         [switch]$AsJob,
         [Parameter(Mandatory = $false, HelpMessage = "When running as a job.. Timeout length")]
         [int]$TimeoutSeconds = 180,
+        [Parameter(Mandatory = $false, HelpMessage = "When running as a job, poll the inner job's Progress stream and re-emit the latest record so long-running remote scriptblocks surface live status (instead of appearing frozen). The remote scriptblock must call Write-Progress for there to be anything to forward.")]
+        [switch]$PollProgress,
         [Parameter(Mandatory = $false, HelpMessage = "Skip domain credential fallback via VMNote. Use during OOBE polling when VM is not yet domain-joined.")]
         [switch]$SkipDomainFallback,
         [Parameter(Mandatory = $false, HelpMessage = "Max retries for Get-VmSession (default 3). Reduce for tight polling loops.")]
@@ -5243,7 +5245,38 @@ function Invoke-VmCommand {
             try {
                 if ($AsJob) {
                     $job = Invoke-Command -Session $ps @HashArguments -ErrorVariable Err2 -ErrorAction SilentlyContinue -AsJob
-                    $job | Wait-Job -Timeout $TimeoutSeconds
+                    if ($PollProgress) {
+                        # Poll the inner job's Progress stream while it runs and re-emit the
+                        # latest record. Under -AsJob the remote scriptblock's Write-Progress
+                        # records are confined to the nested job (they don't propagate to this
+                        # caller the way a synchronous Invoke-Command -Session would), so a
+                        # long remote operation looks frozen. Forwarding the latest record via
+                        # Write-Progress2 -force surfaces live status in the caller's progress
+                        # stream (e.g. the Phase 11 job's display via Wait-Phase/Write-JobProgress).
+                        $pollDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
+                        $lastForwarded = $null
+                        while ($job.State -eq "Running" -and (Get-Date) -lt $pollDeadline) {
+                            Start-Sleep -Milliseconds 750
+                            try {
+                                # PSRemotingJob exposes per-session streams on its child job.
+                                $progressSource = if ($job.ChildJobs -and $job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
+                                if ($progressSource -and $progressSource.Progress -and $progressSource.Progress.Count -gt 0) {
+                                    $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
+                                    if ($lastRec -and $lastRec.Activity -and $lastRec.StatusDescription) {
+                                        $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
+                                        if ($line -ne $lastForwarded) {
+                                            $lastForwarded = $line
+                                            Write-Progress2 -Activity $lastRec.Activity -Status $lastRec.StatusDescription -PercentComplete 0 -force
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    else {
+                        $job | Wait-Job -Timeout $TimeoutSeconds
+                    }
                     if ($job.State -eq "Completed") {
                         $return.ScriptBlockOutput = (Receive-Job $job)
                         if (-not $SuppressLog) {
