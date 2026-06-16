@@ -3626,7 +3626,12 @@ function Set-DeployConfigIPAddresses {
 
                 $rIp = $r.IPAddress.IPAddressToString
                 Write-Log "Set-DeployConfigIPAddresses: Removing orphaned DHCP reservation $rIp (Name='$rName', MAC=$rMac, scope $sid) -- no live VM owns this MAC" -LogOnly
-                Remove-DhcpServerv4Reservation -ScopeId $sid -IPAddress $rIp -ErrorAction SilentlyContinue
+                # Remove-DhcpServerv4Reservation's -IPAddress and -ScopeId belong to
+                # different parameter sets (IPAddress uniquely identifies the
+                # reservation; ScopeId pairs with ClientId). Passing both can't
+                # resolve a set, and that binding error is terminating -- it bypasses
+                # -ErrorAction SilentlyContinue. Identify the reservation by IP only.
+                Remove-DhcpServerv4Reservation -IPAddress $rIp -ErrorAction SilentlyContinue
                 $orphansRemoved++
             }
         }
