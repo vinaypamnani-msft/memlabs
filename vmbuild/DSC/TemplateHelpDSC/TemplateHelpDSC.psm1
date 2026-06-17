@@ -5381,6 +5381,11 @@ class ConfigureWSUS {
                     Write-Status "Re-running WSUS postinstall after fix..."
                     $postinstallOutput = & 'C:\Program Files\Update Services\Tools\WsusUtil.exe' postinstall CONTENT_DIR=$($this.ContentPath) 2>&1
                 }
+
+                # WID only: grant the lab admin sysadmin so SSMS can connect to
+                # WID without elevation (WID trusts only BUILTIN\Administrators,
+                # which UAC token filtering strips from a normal logon).
+                $this.GrantWidSysadmin()
             }
             Write-Verbose "WSUS postinstall output: $postinstallOutput"
         }
@@ -5442,6 +5447,58 @@ class ConfigureWSUS {
         # Harden the WsusPool IIS app pool so it survives the first full
         # Microsoft Update sync. Runs regardless of HTTP/HTTPS.
         $this.HardenWsusPool()
+    }
+
+    # WID grants sysadmin only to BUILTIN\Administrators, which UAC token
+    # filtering strips from a normal (non-elevated) logon -- so connecting to
+    # WID in SSMS otherwise needs "Run as administrator". Add the lab domain
+    # admin as an explicit sysadmin login here (this runs as SYSTEM, which is
+    # sysadmin on WID) so a normal SSMS session connects directly. WID's named
+    # pipe is local-only, so this only matters on the WID host itself.
+    # Idempotent -- safe to re-run.
+    [void] GrantWidSysadmin() {
+        try {
+            $deployPath = 'C:\staging\DSC\deployConfig.json'
+            if (-not (Test-Path $deployPath)) {
+                Write-Verbose "GrantWidSysadmin: $deployPath not found, skipping"
+                return
+            }
+            $dc = Get-Content $deployPath -Raw | ConvertFrom-Json
+            $netbios = $dc.vmOptions.domainNetBiosName
+            $admin = $dc.vmOptions.adminName
+            if (-not $netbios -or -not $admin) {
+                Write-Verbose "GrantWidSysadmin: admin/domain missing in deployConfig, skipping"
+                return
+            }
+            $login = "$netbios\$admin"
+            $tsql = "IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'$login') CREATE LOGIN [$login] FROM WINDOWS; IF IS_SRVROLEMEMBER('sysadmin', N'$login') <> 1 ALTER SERVER ROLE sysadmin ADD MEMBER [$login];"
+
+            $conn = New-Object System.Data.SqlClient.SqlConnection
+            $conn.ConnectionString = "Data Source=np:\\.\pipe\MICROSOFT##WID\tsql\query;Initial Catalog=master;Integrated Security=True;Connect Timeout=30"
+            $opened = $false
+            for ($i = 1; $i -le 5 -and -not $opened; $i++) {
+                try { $conn.Open(); $opened = $true }
+                catch { Start-Sleep -Seconds 5 }
+            }
+            if (-not $opened) {
+                Write-Status "GrantWidSysadmin: could not connect to WID pipe after retries (non-fatal)"
+                return
+            }
+            try {
+                Write-Status "Granting WID sysadmin to $login"
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandText = $tsql
+                [void]$cmd.ExecuteNonQuery()
+                Write-Status "WID sysadmin grant for $login completed"
+            }
+            finally {
+                $conn.Close()
+            }
+        }
+        catch {
+            Write-Status "GrantWidSysadmin failed (non-fatal): $_"
+            Write-Verbose "$_"
+        }
     }
 
     # The first full Microsoft Update sync pulls the entire modern category
