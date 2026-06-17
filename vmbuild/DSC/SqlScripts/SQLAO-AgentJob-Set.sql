@@ -123,7 +123,6 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'MemLabs 
 @CleanupTime = NULL,
 @CheckSum = ''N'',
 @LogToTable = ''Y'',
-@ChangeBackupType = ''Y'',
 @ExcludeLogShippedFromLogBackup = ''N''',
 		@database_name=N'master',
 		@output_file_name=N'$(ESCAPE_SQUOTE(SQLLOGDIR))\$(ESCAPE_SQUOTE(JOBNAME))_$(ESCAPE_SQUOTE(STEPID))_$(ESCAPE_SQUOTE(DATE))_$(ESCAPE_SQUOTE(TIME)).txt',

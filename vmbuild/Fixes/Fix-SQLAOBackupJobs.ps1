@@ -1,7 +1,14 @@
 # Fix-SQLAOBackupJobs: repair MemLabs SQLAO Ola Hallengren backup agent job
-# steps that have an unquoted NUL token (parses as a column reference -> job
-# fails with "Invalid column name 'NUL'"). The fix injects a small SQL file
-# and runs it against the default instance via sqlcmd. Idempotent in SQL.
+# steps. Covers two defects:
+#   1) Legacy unquoted NUL token in @Directory (parses as column reference,
+#      job fails with "Invalid column name 'NUL'").
+#   2) @ChangeBackupType = 'Y' on the FULL step. Current Ola releases reject
+#      this with "Setting @ChangeBackupType to 'Y' is only supported with
+#      differential and log backups." The DSC template historically wrote
+#      this parameter on both LOG and FULL steps; it's valid for LOG (fall
+#      back to FULL when no FULL exists), invalid for FULL.
+# The injected SQL file repairs idempotently and runs against the default
+# instance via sqlcmd.
 
 $Fix_SQLAOBackupJobs = {
     $SqlFilePath = "$env:systemdrive\staging\SQLAOBackupJobs-Fix.sql"
@@ -59,7 +66,7 @@ $Fix_SQLAOBackupJobs = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-SQLAOBackupJobs"
-    FixVersion        = "260617"
+    FixVersion        = "260617.1"
     NeededOnFreshDeploy = $false
     AppliesToExisting   = $true
     AppliesToRoles    = @("SQLAO")
