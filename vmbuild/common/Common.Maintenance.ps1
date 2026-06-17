@@ -522,27 +522,61 @@ function Start-VMFixesBatched {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $VMDomain
 
-            # Probe which files/tools already exist on the VM (pre-staged by Phase 2 tools bundle)
-            $probeTargets = @()
-            foreach ($file in $allInjectFiles) { $probeTargets += "C:\staging\$file" }
-            foreach ($toolFolder in $allInjectTools) { $probeTargets += "C:\tools\$toolFolder" }
-            $existingPaths = @()
-            if ($probeTargets.Count -gt 0) {
+            # Probe with content hash for InjectFiles so an updated fix script
+            # on the host overwrites a stale copy on the VM (filename-only
+            # check would let yesterday's broken Fix-*.sql persist forever).
+            # Tool folders stay existence-only — they're large bundles
+            # (SSMS etc.) that we don't version per build.
+            $expectedFileHashes = @{}
+            foreach ($file in $allInjectFiles) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                if (Test-Path -LiteralPath $sourcePath) {
+                    try {
+                        $expectedFileHashes["C:\staging\$file"] = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA1 -ErrorAction Stop).Hash
+                    }
+                    catch { }
+                }
+            }
+            $toolProbe = @()
+            foreach ($toolFolder in $allInjectTools) { $toolProbe += "C:\tools\$toolFolder" }
+
+            $matchingFiles = @()
+            $existingTools = @()
+            if ($expectedFileHashes.Count -gt 0 -or $toolProbe.Count -gt 0) {
+                $fileItems = @($expectedFileHashes.GetEnumerator() | ForEach-Object {
+                        [pscustomobject]@{ Path = $_.Key; Hash = $_.Value }
+                    })
                 try {
-                    $existingPaths = @(Invoke-Command -Session $ps -ScriptBlock {
-                        param($paths)
-                        $paths | Where-Object { Test-Path $_ }
-                    } -ArgumentList (,$probeTargets) -ErrorAction Stop)
+                    $probe = Invoke-Command -Session $ps -ScriptBlock {
+                        param($files, $tools)
+                        $matched = foreach ($i in $files) {
+                            if (Test-Path -LiteralPath $i.Path) {
+                                try {
+                                    $h = (Get-FileHash -LiteralPath $i.Path -Algorithm SHA1 -ErrorAction Stop).Hash
+                                    if ($h -eq $i.Hash) { $i.Path }
+                                }
+                                catch { }
+                            }
+                        }
+                        $existing = foreach ($t in $tools) {
+                            if (Test-Path -LiteralPath $t) { $t }
+                        }
+                        [pscustomobject]@{ MatchingFiles = @($matched); ExistingTools = @($existing) }
+                    } -ArgumentList $fileItems, $toolProbe -ErrorAction Stop
+                    if ($probe) {
+                        $matchingFiles = @($probe.MatchingFiles)
+                        $existingTools = @($probe.ExistingTools)
+                    }
                 }
                 catch {
-                    Write-Log "$VMName`: Could not probe existing paths; will copy all. $_" -LogOnly
+                    Write-Log "$VMName`: Could not probe existing files/tools; will copy all. $_" -LogOnly
                 }
             }
 
             foreach ($file in $allInjectFiles) {
                 $targetPathInVM = "C:\staging\$file"
-                if ($targetPathInVM -in $existingPaths) {
-                    Write-Log "$VMName`: $file already present on VM, skipping copy." -LogOnly
+                if ($targetPathInVM -in $matchingFiles) {
+                    Write-Log "$VMName`: $file already present (hash match), skipping copy." -LogOnly
                     continue
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
@@ -551,7 +585,7 @@ function Start-VMFixesBatched {
             }
             foreach ($toolFolder in $allInjectTools) {
                 $targetPathInVM = "C:\tools\$toolFolder"
-                if ($targetPathInVM -in $existingPaths) {
+                if ($targetPathInVM -in $existingTools) {
                     Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
                     continue
                 }
@@ -869,27 +903,61 @@ function Start-VMFix {
         try {
             $ps = Get-VmSession -VmName $VMName -VmDomainName $vmDomain
 
-            # Probe which files/tools already exist on the VM (pre-staged by Phase 2 tools bundle)
-            $probeTargets = @()
-            foreach ($file in $vmFix.InjectFiles) { $probeTargets += "C:\staging\$file" }
-            foreach ($toolFolder in $vmFix.InjectTools) { $probeTargets += "C:\tools\$toolFolder" }
-            $existingPaths = @()
-            if ($probeTargets.Count -gt 0) {
+            # Probe with content hash for InjectFiles so an updated fix script
+            # on the host overwrites a stale copy on the VM (filename-only
+            # check would let yesterday's broken Fix-*.sql persist forever).
+            # Tool folders stay existence-only — they're large bundles
+            # (SSMS etc.) that we don't version per build.
+            $expectedFileHashes = @{}
+            foreach ($file in $vmFix.InjectFiles) {
+                $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
+                if (Test-Path -LiteralPath $sourcePath) {
+                    try {
+                        $expectedFileHashes["C:\staging\$file"] = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA1 -ErrorAction Stop).Hash
+                    }
+                    catch { }
+                }
+            }
+            $toolProbe = @()
+            foreach ($toolFolder in $vmFix.InjectTools) { $toolProbe += "C:\tools\$toolFolder" }
+
+            $matchingFiles = @()
+            $existingTools = @()
+            if ($expectedFileHashes.Count -gt 0 -or $toolProbe.Count -gt 0) {
+                $fileItems = @($expectedFileHashes.GetEnumerator() | ForEach-Object {
+                        [pscustomobject]@{ Path = $_.Key; Hash = $_.Value }
+                    })
                 try {
-                    $existingPaths = @(Invoke-Command -Session $ps -ScriptBlock {
-                        param($paths)
-                        $paths | Where-Object { Test-Path $_ }
-                    } -ArgumentList (,$probeTargets) -ErrorAction Stop)
+                    $probe = Invoke-Command -Session $ps -ScriptBlock {
+                        param($files, $tools)
+                        $matched = foreach ($i in $files) {
+                            if (Test-Path -LiteralPath $i.Path) {
+                                try {
+                                    $h = (Get-FileHash -LiteralPath $i.Path -Algorithm SHA1 -ErrorAction Stop).Hash
+                                    if ($h -eq $i.Hash) { $i.Path }
+                                }
+                                catch { }
+                            }
+                        }
+                        $existing = foreach ($t in $tools) {
+                            if (Test-Path -LiteralPath $t) { $t }
+                        }
+                        [pscustomobject]@{ MatchingFiles = @($matched); ExistingTools = @($existing) }
+                    } -ArgumentList $fileItems, $toolProbe -ErrorAction Stop
+                    if ($probe) {
+                        $matchingFiles = @($probe.MatchingFiles)
+                        $existingTools = @($probe.ExistingTools)
+                    }
                 }
                 catch {
-                    Write-Log "$VMName`: Could not probe existing paths; will copy all. $_" -LogOnly
+                    Write-Log "$VMName`: Could not probe existing files/tools; will copy all. $_" -LogOnly
                 }
             }
 
             foreach ($file in $vmFix.InjectFiles) {
                 $targetPathInVM = "C:\staging\$file"
-                if ($targetPathInVM -in $existingPaths) {
-                    Write-Log "$VMName`: $file already present on VM, skipping copy." -LogOnly
+                if ($targetPathInVM -in $matchingFiles) {
+                    Write-Log "$VMName`: $file already present (hash match), skipping copy." -LogOnly
                     continue
                 }
                 $sourcePath = Join-Path $Common.StagingInjectPath "staging\$file"
@@ -898,7 +966,7 @@ function Start-VMFix {
             }
             foreach ($toolFolder in $vmFix.InjectTools) {
                 $targetPathInVM = "C:\tools\$toolFolder"
-                if ($targetPathInVM -in $existingPaths) {
+                if ($targetPathInVM -in $existingTools) {
                     Write-Log "$VMName`: Tool '$toolFolder' already present on VM, skipping copy." -LogOnly
                     continue
                 }

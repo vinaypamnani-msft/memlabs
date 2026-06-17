@@ -66,7 +66,7 @@ $Fix_SQLAOBackupJobs = {
 
 $fixesToPerform += [PSCustomObject]@{
     FixName           = "Fix-SQLAOBackupJobs"
-    FixVersion        = "260617.1"
+    FixVersion        = "260617.2"
     NeededOnFreshDeploy = $false
     AppliesToExisting   = $true
     AppliesToRoles    = @("SQLAO")
