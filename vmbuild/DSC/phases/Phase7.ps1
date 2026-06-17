@@ -132,10 +132,21 @@
             #   - WSUSSync starts with no pending reboot in flight
             #   - Phase 7 ends with no pending reboot
             #   - Phase 8 CM setup's "Pending System Restart" prereq passes
+            # SkipPendingFileRename: ComputerManagementDsc.PendingReboot flags
+            # ANY PendingFileRenameOperations entry, including delete-only temp
+            # cleanup (DEL*.tmp, CCM*.tmp, Edge updater leftovers) that some
+            # services rewrite immediately after every boot -- causing an
+            # infinite reboot loop. Our own $Test_PendingReboot (used by pre/
+            # post phase checks AND Phase 8 prereq logic) already filters
+            # delete-only entries as harmless, so skipping the file-rename
+            # signal here is consistent. CBS/WindowsUpdate/computer-rename
+            # signals (which is what PBIRS install actually leaves behind)
+            # still trigger the reboot.
             PendingReboot DrainBeforeWSUSSync {
-                Name                      = 'BeforeWSUSSync'
-                SkipCcmClientSDK          = $true
-                DependsOn                 = $nextDepend
+                Name                  = 'BeforeWSUSSync'
+                SkipCcmClientSDK      = $true
+                SkipPendingFileRename = $true
+                DependsOn             = $nextDepend
             }
             WSUSSync WSUSSync {
                 DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
@@ -178,10 +189,15 @@
             # check already cleared incoming pending reboots, but defend
             # against anything that slipped through (e.g. late CBS state)
             # so the sync runs on a clean OS and Phase 7 ends clean.
+            # SkipPendingFileRename: ComputerManagementDsc.PendingReboot flags
+            # delete-only temp cleanup entries (which our own $Test_PendingReboot
+            # treats as harmless) and re-asserts them every boot, causing an
+            # infinite reboot loop. Skip them here too.
             PendingReboot DrainBeforeWSUSSync {
-                Name             = 'BeforeWSUSSync'
-                SkipCcmClientSDK = $true
-                DependsOn        = "[WriteStatus]StartWSUSSync"
+                Name                  = 'BeforeWSUSSync'
+                SkipCcmClientSDK      = $true
+                SkipPendingFileRename = $true
+                DependsOn             = "[WriteStatus]StartWSUSSync"
             }
             WSUSSync WSUSSync {
                 DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
