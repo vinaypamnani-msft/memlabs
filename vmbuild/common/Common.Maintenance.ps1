@@ -1279,16 +1279,32 @@ function Get-VMFixes {
     else {
         $vmNote = Get-VMNote -VMName $VMName
         if ($Common.InJob) {
-            # In job workers, skip Get-List (triggers expensive Get-VM + Get-VMNetworkAdapter
-            # bulk warmup that serializes on vmms.exe across all parallel workers).
-            # Find the DC by name convention: all VMs share a prefix, DC is always PREFIX-DC.
-            # Only Fix-CMFullAdmin uses $dc.vmName.
+            # In job workers, skip Get-List (triggers expensive Get-VM +
+            # Get-VMNetworkAdapter -All bulk warmup that serializes on vmms.exe
+            # across all parallel workers). Instead, do a single targeted
+            # Get-VM enumeration and resolve the DC by reading notes
+            # (role=DC + matching domain). DC names are user-chosen in
+            # genconfig and are NOT guaranteed to follow a "<prefix>-DC"
+            # convention -- guessing by name produces phantom dependent VMs
+            # whose Get-VMNote returns null and crashes Start-VMIfNotRunning
+            # with "Cannot bind argument ... empty string". Only Fix-CMFullAdmin
+            # consumes $dc.vmName today.
             $dc = $null
-            $vmNameStr = [string]$VMName
-            $dashIdx = $vmNameStr.IndexOf('-')
-            if ($dashIdx -gt 0) {
-                $dcName = $vmNameStr.Substring(0, $dashIdx + 1) + "DC"
-                $dc = [PSCustomObject]@{ vmName = $dcName; role = "DC"; domain = $vmNote.domain }
+            if ($vmNote.domain) {
+                $dcMatches = @()
+                try {
+                    foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+                        if ($hvm.Notes -like "*lastUpdate*" -and $hvm.Notes -like "*`"role`":*`"DC`"*") {
+                            try {
+                                $hvmNote = $hvm.Notes | ConvertFrom-Json
+                                if ($hvmNote.role -eq 'DC' -and $hvmNote.domain -eq $vmNote.domain) {
+                                    $dcMatches += [PSCustomObject]@{ vmName = $hvm.Name; role = 'DC'; domain = $hvmNote.domain }
+                                }
+                            } catch {}
+                        }
+                    }
+                } catch {}
+                if ($dcMatches.Count -gt 0) { $dc = $dcMatches }
             }
         }
         else {
