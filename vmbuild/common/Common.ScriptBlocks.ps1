@@ -2881,17 +2881,36 @@ $global:VM_Config = {
                 # while a configuration is still actively running on this node.
                 $dscStatus = "C:\staging\DSC\DSC_Status.txt"
                 $runGuidPath = "C:\staging\DSC\RunGuid.txt"
+                # Stop_RunningDSC just finished a hard drain (kill WmiPrvSE +
+                # purge on-disk MOFs + loop until LCM!=Busy or unreadable).
+                # If LCM is STILL Busy here, something is genuinely stuck and
+                # we must NOT silently fall through: the old 'Deferring' branch
+                # deleted RunGuid.txt, returned success, and let the DC's
+                # Check-Nodes-Ready loop dead-wait the full 150 attempts before
+                # failing the phase. Throw immediately so the outer retry path
+                # (which re-runs Stop_RunningDSC, and ultimately reboots the
+                # VM if that fails too) takes over.
+                #
+                # Short 15s grace poll first to absorb the small race between
+                # Stop_RunningDSC returning to PSDirect and this scriptblock
+                # actually running -- a final state assertion can briefly tip
+                # LCM back to Busy. Anything beyond 15s is a real stuck apply.
                 $lcmStopped = $false
-                try {
-                    $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
-                    if ($lcmState -ne 'Busy') { $lcmStopped = $true }
-                }
-                catch {
-                    # LCM unreadable (Stop_RunningDSC just killed WmiPrvSE, or
-                    # no LCM). The explicit stop already ran, so treat DSC as
-                    # stopped rather than strand the DC's monitoring loop.
-                    $lcmState = 'Unknown'
-                    $lcmStopped = $true
+                $lcmState = 'Unknown'
+                for ($wait = 0; $wait -lt 5; $wait++) {
+                    try {
+                        $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+                        if ($lcmState -ne 'Busy') { $lcmStopped = $true; break }
+                    }
+                    catch {
+                        # LCM unreadable: WmiPrvSE was just killed, no apply is
+                        # running. Treat as stopped.
+                        $lcmState = 'Unknown'
+                        $lcmStopped = $true
+                        break
+                    }
+                    "LCM is Busy (attempt $($wait + 1)/5); waiting 3s before recheck" | Out-File $log -Append -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 3
                 }
                 if ($lcmStopped) {
                     if (Test-Path $dscStatus) {
@@ -2911,11 +2930,13 @@ $global:VM_Config = {
                     }
                 }
                 else {
-                    # Not ready: LCM still applying a config. Don't signal ready.
-                    # Remove any stale RunGuid.txt so a leftover token from a
-                    # prior run can't be mistaken for this run's ready signal.
-                    "Deferring DSC_Status.txt removal; LCM is Busy (DSC still running)" | Out-File $log -Append -ErrorAction SilentlyContinue
+                    # LCM still Busy after Stop_RunningDSC + 15s drain wait.
+                    # Delete any stale RunGuid.txt and fail loudly so the outer
+                    # retry path can re-run Stop_RunningDSC (and reboot the VM
+                    # if needed) instead of letting the DC dead-wait.
+                    "LCM still Busy after 15s drain wait; throwing to trigger outer retry" | Out-File $log -Append -ErrorAction SilentlyContinue
                     Remove-Item -Path $runGuidPath -Force -Confirm:$false -ErrorAction SilentlyContinue
+                    throw "DSC_ClearStatus: LCMState='Busy' after Stop_RunningDSC drain + 15s wait. Cannot safely clear status (would strand DC handshake). Outer retry will re-run Stop_RunningDSC or reboot the VM."
                 }
 
                 # Rename the DSC_Events.json file, if it exists for DSC re-run
@@ -3011,10 +3032,28 @@ $global:VM_Config = {
         Write-Log "[Phase $Phase]: $($currentItem.vmName):DSC_ClearStatus Clearing previous DSC status"
         $result = Invoke-VmCommand -AsJob -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
         if ($result.ScriptBlockFailed) {
-            start-sleep -seconds 20
+            # DSC_ClearStatus now throws when LCM is still Busy after its 15s
+            # drain wait. The most common cause is a transient post-stop state
+            # that didn't settle in time -- re-running Stop_RunningDSC's full
+            # kill+purge+drain cycle usually clears it. If it still fails after
+            # a fresh Stop_RunningDSC, escalate to a VM reboot (the guaranteed
+            # way to clear an in-memory LCM apply).
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Clear Old Status failed (likely LCM=Busy); re-running Stop_RunningDSC before retry. $($result.ScriptBlockOutput)" -Warning
+            $stopRetry = Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's (retry)"
+            $stopRetryFailed = $stopRetry.ScriptBlockFailed -or ($stopRetry.ScriptBlockOutput -and ($stopRetry.ScriptBlockOutput.Stopped -eq $false))
+            if ($stopRetryFailed) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Stop_RunningDSC retry also failed; rebooting VM to clear the LCM." -Warning
+                Stop-Vm2 -Name $currentItem.vmName
+                Start-Sleep -Seconds 10
+                Start-VM2 -Name $currentItem.vmName
+                Wait-ForHeartbeat -VmName $currentItem.vmName | Out-Null
+                # After a reboot the LCM is fresh; one more Stop_RunningDSC to
+                # also clear PendingConfiguration if the doc auto-loaded.
+                Invoke-VmCommand -AsJob -TimeoutSeconds $stopTimeout -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $Stop_RunningDSC -DisplayName "Stop Any Running DSC's (post-reboot)" | Out-Null
+            }
             $result = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock $DSC_ClearStatus -ArgumentList $DscFolder, $phaseRunGuid -DisplayName "DSC: Clear Old Status"
             if ($result.ScriptBlockFailed) {
-                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status. $($result.ScriptBlockOutput)" -Failure -OutputStream
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: Failed to clear old status after Stop_RunningDSC retry / reboot. $($result.ScriptBlockOutput)" -Failure -OutputStream
                 return
             }
         }
