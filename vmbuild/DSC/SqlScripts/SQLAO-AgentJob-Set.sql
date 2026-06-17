@@ -38,7 +38,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'MemLabs 
 		@os_run_priority=0, @subsystem=N'TSQL',
 		@command=N'EXECUTE [dbo].[DatabaseBackup]
 @Databases = ''AVAILABILITY_GROUP_DATABASES'',
-@Directory = NUL,
+@Directory = ''NUL'',
 @BackupType = ''LOG'',
 @Verify = ''N'',
 @CleanupTime = NULL,
@@ -117,7 +117,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'MemLabs 
 		@os_run_priority=0, @subsystem=N'TSQL',
 		@command=N'EXECUTE [dbo].[DatabaseBackup]
 @Databases = ''AVAILABILITY_GROUP_DATABASES'',
-@Directory = NUL,
+@Directory = ''NUL'',
 @BackupType = ''FULL'',
 @Verify = ''N'',
 @CleanupTime = NULL,
