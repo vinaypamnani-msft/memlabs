@@ -125,8 +125,8 @@ if ($Common.IsAzureVM) {
     $fixesToPerform += [PSCustomObject]@{
         FixName           = "Fix_ActivateWindows"
         FixVersion        = "260616"
-        AppliesToNew      = $true
-        AppliesToExisting = $true
+        NeededOnFreshDeploy = $true
+        AppliesToExisting   = $true
         AppliesToRoles    = @('DomainMember', 'WorkgroupMember', "InternetClient")
         NotAppliesToRoles = @()
         DependentVMs      = @()

@@ -8,12 +8,12 @@ function Start-Maintenance {
         [object]$DeployConfig
     )
 
-    $applyNewOnly = $false
+    $freshDeployOnly = $false
     if ($DeployConfig) {
         Write-log "Start-Maintenance called with DeployConfig"
         $allVMs = $DeployConfig.virtualMachines | Where-Object { -not $_.hidden }
         $vmsNeedingMaintenance = @($allVMs | Sort-Object vmName)
-        $applyNewOnly = $true
+        $freshDeployOnly = $true
     }
     else {
         Write-log -verbose "Start-Maintenance called without DeployConfig"
@@ -43,8 +43,8 @@ function Start-Maintenance {
     # Bulk-read all VM notes in a single Get-VM call (one CIM round-trip)
     # instead of per-VM Get-VMNote calls that serialize on vmms.exe.
     $allFixDefs = Get-VMFixes -ReturnDummyList
-    $relevantFixes = if ($applyNewOnly) {
-        $allFixDefs | Where-Object { $_.AppliesToNew -eq $true }
+    $relevantFixes = if ($freshDeployOnly) {
+        $allFixDefs | Where-Object { $_.NeededOnFreshDeploy -eq $true }
     } else {
         $allFixDefs | Where-Object { $_.AppliesToExisting -eq $true }
     }
@@ -129,7 +129,7 @@ function Start-Maintenance {
     Write-Log $text -Activity
     $stoppedCount = 0
     $stoppedVms = @()
-    if ($applyNewOnly -eq $false) {
+    if ($freshDeployOnly -eq $false) {
         if ($vmCount -gt 0) {
             $response = Read-YesOrNoWithTimeout -Prompt "$($newVmsNeedingMaintenance.Count) VM(s) [$($newVmsNeedingMaintenance.vmName -join ",")] need memlabs maintenance. Run now? (y/N)" -HideHelp -Default "n" -timeout 15
             if ($response -eq "n") {
@@ -179,7 +179,7 @@ function Start-Maintenance {
     #foreach ($vm in $newVmsNeedingMaintenance | Where-Object { $_.role -eq "DC" }) {
     #    $i++
     #    Write-Progress2 -Id $progressId -Activity $text -Status "Performing maintenance on VM $i/$vmCount`: $($vm.vmName)" -PercentComplete (($i / $vmCount) * 100)
-    #    $worked = Start-VMMaintenance -VMName $vm.vmName -ApplyNewOnly:$applyNewOnly
+    #    $worked = Start-VMMaintenance -VMName $vm.vmName -FreshDeployOnly:$freshDeployOnly
     #    if ($worked) { $countWorked++ } else {
     #        $failedDomains += $vm.domain
     #        $countFailed++
@@ -247,8 +247,8 @@ function Start-VMMaintenance {
     param (
         [Parameter(Mandatory = $true, HelpMessage = "VMName")]
         [object] $VMName,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
     Write-Log "Starting maintenance for VM: $VMName"
@@ -292,21 +292,21 @@ function Start-VMMaintenance {
         return $false
     }
 
-    if ($ApplyNewOnly.IsPresent) {
+    if ($FreshDeployOnly.IsPresent) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance on newly deployed VM..." -force
     }
     else {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "Performing maintenance..." -force
     }
 
-    if ($ApplyNewOnly.IsPresent) {
-        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.AppliesToNew -eq $true }
+    if ($FreshDeployOnly.IsPresent) {
+        $vmFixes = Get-VMFixes -newVM $true -VMName $VMName | Where-Object { $_.NeededOnFreshDeploy -eq $true }
     }
     else {
         $vmFixes = Get-VMFixes -newVM $false -VMName $VMName | Where-Object { $_.AppliesToExisting -eq $true }
     }
 
-    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -ApplyNewOnly:$ApplyNewOnly
+    $worked = Start-VMFixes -VMName $VMName -VMFixes $vmFixes -FreshDeployOnly:$FreshDeployOnly
 
     if ($worked) {
         Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status  "VM maintenance completed successfully." -force
@@ -332,7 +332,7 @@ function Start-VMMaintenance {
             return $started
         }
         try {
-            if ($ApplyNewOnly.IsPresent) {
+            if ($FreshDeployOnly.IsPresent) {
                 $result = Invoke-VmCommand -VmName $VMName -VmDomainName $vmNoteObject.domain -ScriptBlock $startLogonTasks -DisplayName "Start logon tasks" -SuppressLog
                 if ($result.ScriptBlockOutput) {
                     Write-Log "$VMName`: Started logon tasks: $($result.ScriptBlockOutput -join ', ')" -Verbose
@@ -359,8 +359,8 @@ function Start-VMFixes {
         [object] $VMFixes,
         [Parameter(Mandatory = $false, HelpMessage = "SkipVMShutdown")]
         [switch] $SkipVMShutdown,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
     Write-Progress2 -Log -PercentComplete 0 -Activity $global:MaintenanceActivity -Status "Applying fixes to the virtual machine." -force
@@ -401,7 +401,7 @@ function Start-VMFixes {
 
     if (-not $hasDependentVMs) {
         # Fast path: batch all fixes into a single remote call per session type
-        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -ApplyNewOnly:$ApplyNewOnly
+        $batchResult = Start-VMFixesBatched -VMName $VMName -VMDomain $vmDomain -VMFixes $sortedFixes -FreshDeployOnly:$FreshDeployOnly
         $success = $batchResult.Success
         $toStop = $batchResult.VMsToStop
         $fixesAppliedCount = $batchResult.AppliedCount
@@ -413,7 +413,7 @@ function Start-VMFixes {
         $fixesApplicableCount = 0
         foreach ($vmFix in $sortedFixes) {
             if ($vmFix.AppliesToThisVM) { $fixesApplicableCount++ }
-            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -ApplyNewOnly:$ApplyNewOnly
+            $status = Start-VMFix -vmName $VMName -vmFix $vmFix -FreshDeployOnly:$FreshDeployOnly
             $toStop += $status.VMsToStop
             $success = $status.Success
             if ($status.Applied) { $fixesAppliedCount++ }
@@ -426,7 +426,7 @@ function Start-VMFixes {
     # If deploying a new VM and fixes were applicable but none actually ran
     # their script block, something is wrong — do not stamp the version.
     # (If zero were applicable, e.g. OSDClient/AADClient, that's expected.)
-    if ($ApplyNewOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
+    if ($FreshDeployOnly.IsPresent -and $fixesApplicableCount -gt 0 -and $fixesAppliedCount -eq 0 -and $success) {
         Write-Log "$VMName`: WARNING - $fixesApplicableCount maintenance fixes were applicable but none were applied. Version will NOT be stamped." -Warning
         $success = $false
     }
@@ -462,7 +462,7 @@ function Start-VMFixesBatched {
         [Parameter(Mandatory = $true)]
         [object[]] $VMFixes,
         [Parameter(Mandatory = $false)]
-        [switch] $ApplyNewOnly
+        [switch] $FreshDeployOnly
     )
 
     $return = [PSCustomObject]@{
@@ -775,8 +775,8 @@ function Start-VMFix {
         [string] $vmName,
         [Parameter(Mandatory = $true, HelpMessage = "vmFix")]
         [object] $vmFix,
-        [Parameter(Mandatory = $false, HelpMessage = "Apply fixes applicable to new")]
-        [switch] $ApplyNewOnly
+        [Parameter(Mandatory = $false, HelpMessage = "Apply only fixes needed on fresh deploy")]
+        [switch] $FreshDeployOnly
     )
 
     $return = [PSCustomObject]@{

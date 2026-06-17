@@ -708,8 +708,8 @@ function Start-PhaseJobs {
     # applicable fix (AppliesToExisting=$true) is already recorded at the
     # current FixVersion. Phase 10's job is to bring the VM to 100%
     # up-to-date, so the eligibility set must match Start-VMMaintenance's
-    # AppliesToExisting filter -- not a subset of AppliesToNew, which used
-    # to silently skip VMs missing existing-only hotfixes (e.g.
+    # AppliesToExisting filter -- not a subset of NeededOnFreshDeploy, which
+    # used to silently skip VMs missing existing-only hotfixes (e.g.
     # Fix-SQLAOBackupJobs). Skipping here just avoids spawning a job for
     # VMs that genuinely have nothing to do.
     $phase10SkipSet = @{}
@@ -910,12 +910,12 @@ function Start-PhaseJobs {
                     continue
                 }
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
-                # 3rd arg ($NewVMS in Phase10Job) = $false: Phase 10's job is
-                # to bring the VM to 100% up-to-date, so route through the
+                # 3rd arg ($FreshDeployOnly in Phase10Job) is $false. Phase 10
+                # brings the VM to 100% up-to-date, so route through the
                 # AppliesToExisting filter (which is a superset of
-                # AppliesToNew). Per-fix version check inside Start-VMFixes
-                # still no-ops fixes already at version, so this stays cheap
-                # on a fresh deploy.
+                # NeededOnFreshDeploy). Per-fix version check inside
+                # Start-VMFixes still no-ops fixes already at version, so this
+                # stays cheap on a fresh deploy.
                 if ($usePhaseThreadJob) {
                     $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
                 }

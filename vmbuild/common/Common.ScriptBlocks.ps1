@@ -5,7 +5,7 @@ $global:Phase10Job = {
     param (
         [object] $vm,
         [array] $Dummy,
-        [boolean] $NewVMS,
+        [boolean] $FreshDeployOnly,
         [boolean] $Dummy2,
         [string] $ScriptRoot
     ) 
@@ -37,8 +37,8 @@ $global:Phase10Job = {
             $Common.LogPath = $Common.LogPath -replace "VMBuild\.log", "VMBuild.$domainNameForLogging.log"
         }
 
-        if ($NewVMS) {
-            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running New Only: $NewVMS"
+        if ($FreshDeployOnly) {
+            Write-Log "[Phase $Phase]: $($currentItem.vmName): Running fresh-deploy fixes only: $FreshDeployOnly"
         }
         if ($currentItem.Role -in @("OSDClient", "AADClient")) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Maintenance not required for $($currentItem.role)." -OutputStream -Success
@@ -53,7 +53,7 @@ $global:Phase10Job = {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Linux VM (role '$($currentItem.role)'); Windows maintenance not applicable. Skipping." -OutputStream -Success
             return
         }
-        $worked = Start-VMMaintenance -VMName $currentItem.vmName -ApplyNewOnly:$NewVMS
+        $worked = Start-VMMaintenance -VMName $currentItem.vmName -FreshDeployOnly:$FreshDeployOnly
         if (-not $worked) {
             Write-Log "[Phase $Phase]: $($currentItem.vmName): Failed - Start-VMMaintenance returned no data." -OutputStream -Failure
             throw "Could not run VM Maintenance on $($currentItem.vmName)"
