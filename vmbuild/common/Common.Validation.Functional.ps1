@@ -6150,8 +6150,14 @@ function Test-CMSiteWideFunctionality {
                 $wsusSrv = Get-WsusServer -ErrorAction Stop
                 $wStatus = $wsusSrv.GetStatus()
                 if ($wStatus.UpdateCount -eq 0) {
-                    # Empty catalog — gather WSUS subscription/sync state to diagnose why
+                    # Empty catalog — gather WSUS subscription/sync state to diagnose why.
+                    # A Succeeded sync with UpdateCount=0 almost always means the
+                    # subscription has no products and/or no classifications
+                    # selected (sync 1 finished, sync 2 never ran), so capture
+                    # those counts in addition to sync state.
                     $diagBits = @()
+                    $prodCount = $null
+                    $classCount = $null
                     try {
                         $sub = $wsusSrv.GetSubscription()
                         $syncState = $sub.GetSynchronizationStatus().ToString()
@@ -6174,12 +6180,51 @@ function Test-CMSiteWideFunctionality {
                                 $diagBits += "Phase=$($prog.Phase) Items=$($prog.ProcessedItems)/$($prog.TotalItems)"
                             } catch { }
                         }
+
+                        # Subscribed products & classifications. Empty either side
+                        # explains UpdateCount=0 with Result=Succeeded.
+                        try { $prodCount = @($sub.GetUpdateCategories()).Count } catch { $prodCount = "err" }
+                        try { $classCount = @($sub.GetUpdateClassifications()).Count } catch { $classCount = "err" }
+                        $diagBits += "Products=$prodCount; Classifications=$classCount"
                     }
                     catch {
                         $diagBits += "WSUS-diag-failed: $($_.Exception.Message)"
                     }
+
+                    # CM SUP component view — what WCM is supposed to have
+                    # configured on WSUS. A mismatch with the WSUS-side counts
+                    # above means WCM hasn't pushed the subscription yet.
+                    try {
+                        $supSiteCode = $script:SiteCode
+                        if (-not $supSiteCode) {
+                            $supSiteCode = (Get-PSDrive -PSProvider CMSite -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+                        }
+                        if ($supSiteCode) {
+                            $cmProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'Product' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed })
+                            $cmClasses = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'UpdateClassification' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed })
+                            $diagBits += "CM-Products=$($cmProducts.Count); CM-Classifications=$($cmClasses.Count)"
+                            try {
+                                $wcmStateVal = [int](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER' -Name 'ConfigurationState' -ErrorAction Stop)
+                                $wcmStateMap = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                                $wcmName = if ($wcmStateMap.ContainsKey($wcmStateVal)) { $wcmStateMap[$wcmStateVal] } else { "UNKNOWN($wcmStateVal)" }
+                                $diagBits += "WCM=$wcmName"
+                            } catch {}
+                        }
+                    } catch {}
+
                     $diagStr = if ($diagBits.Count -gt 0) { " [" + ($diagBits -join '; ') + "]" } else { "" }
-                    $results.Details.Add("WARN: WSUS reports UpdateCount=0 - the first full sync never populated the catalog$diagStr")
+
+                    # Tailor the message to the most likely root cause
+                    $msg = if ($prodCount -is [int] -and $prodCount -eq 0) {
+                        "WARN: WSUS catalog empty (UpdateCount=0) - no products subscribed; sync 2 (post-product) never ran or WCM did not push subscription"
+                    }
+                    elseif ($classCount -is [int] -and $classCount -eq 0) {
+                        "WARN: WSUS catalog empty (UpdateCount=0) - no classifications subscribed; sync returned 0 updates by definition"
+                    }
+                    else {
+                        "WARN: WSUS reports UpdateCount=0 - the first full sync never populated the catalog"
+                    }
+                    $results.Details.Add("$msg$diagStr")
                 }
                 else {
                     $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
