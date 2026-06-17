@@ -1297,7 +1297,9 @@ function Test-SQLFunctionality {
         # The outcome row (step_id=0) always carries SQL Agent's generic wrapper
         # message ("The job failed. The Job was invoked by ..."); the actual
         # T-SQL error lives in the highest-numbered step_id>0 row for the same
-        # run, so we pull that too and emit it as a follow-up Step output line.
+        # run, so we pull that too and emit it as a follow-up DIAG line (log-
+        # only, since Ola's procs emit ~1.5KB of preamble before the error).
+        # Widened to 4000 chars so the actionable error survives that preamble.
         if ($results.Passed) {
             $results.Details.Add("CMD: Check all enabled SQL Agent jobs in msdb for last-run failures")
             try {
@@ -1321,7 +1323,7 @@ SELECT j.name,
        msdb.dbo.agent_datetime(h.run_date, h.run_time) AS LastRunTime,
        LEFT(ISNULL(h.message, ''''), 500) AS LastMessage,
        ISNULL(ls.step_name, '''')                AS LastStepName,
-       LEFT(ISNULL(ls.StepMessage, ''''), 1500)  AS LastStepMessage
+       LEFT(ISNULL(ls.StepMessage, ''''), 4000)  AS LastStepMessage
 FROM msdb.dbo.sysjobs j
 LEFT JOIN lastRun  h  ON h.job_id  = j.job_id AND h.rn  = 1
 LEFT JOIN lastStep ls ON ls.job_id = j.job_id AND ls.rn = 1
@@ -1348,7 +1350,7 @@ ORDER BY LastRunTime DESC
                             $stepClean = ($bj.LastStepMessage -replace '\s+', ' ').Trim()
                             if ($stepClean) {
                                 $stepName = if ($bj.LastStepName) { $bj.LastStepName } else { '(step)' }
-                                $results.Details.Add("WARN:   Step '$stepName' output: $stepClean")
+                                $results.Details.Add("DIAG:   Step '$stepName' output: $stepClean")
                             }
                         }
                     }
@@ -1474,9 +1476,12 @@ ORDER BY h.run_date DESC, h.run_time DESC
                             # the body of the job) for the NEW run instance only.
                             # Filtered by (run_date, run_time) > before-window so
                             # we never report a stale prior-run step message.
+                            # Emitted as DIAG so it stays log-only (Ola's procs
+                            # emit ~1.5KB of preamble before the actual error;
+                            # widened to 4000 chars so the actionable bit fits).
                             $stepQuery = @"
 SELECT TOP 1 ISNULL(h.step_name, '''') AS StepName,
-             LEFT(ISNULL(h.message, ''''), 1500) AS StepMessage
+             LEFT(ISNULL(h.message, ''''), 4000) AS StepMessage
 FROM msdb.dbo.sysjobhistory h
 JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
 WHERE h.step_id > 0 AND j.name = N'$jobNameEsc'
@@ -1490,7 +1495,7 @@ ORDER BY h.instance_id DESC
                                     $stepClean2 = ($stepRow.StepMessage -replace '\s+', ' ').Trim()
                                     if ($stepClean2) {
                                         $stepName2 = if ($stepRow.StepName) { $stepRow.StepName } else { '(step)' }
-                                        $results.Details.Add("WARN:   Step '$stepName2' output: $stepClean2")
+                                        $results.Details.Add("DIAG:   Step '$stepName2' output: $stepClean2")
                                     }
                                 }
                             }
