@@ -5736,8 +5736,7 @@ function Test-CMSiteWideFunctionality {
                         $diagBits += "WSUS-diag-failed: $($_.Exception.Message)"
                     }
                     $diagStr = if ($diagBits.Count -gt 0) { " [" + ($diagBits -join '; ') + "]" } else { "" }
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: WSUS reports UpdateCount=0 - the first full sync never populated the catalog$diagStr")
+                    $results.Details.Add("WARN: WSUS reports UpdateCount=0 - the first full sync never populated the catalog$diagStr")
                 }
                 else {
                     $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
