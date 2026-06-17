@@ -1425,7 +1425,19 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
 
     if ($Sups) {
         $productclassifications = Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName
-        $products = ($deployConfig.virtualMachines.operatingSystem | Select-Object -Unique ) + ($deployConfig.virtualMachines.sqlversion | Select-Object -Unique)
+
+        # Only consider VMs that actually receive CM client push -- those are the
+        # only machines whose OS/SQL versions need a SUP product subscription.
+        # Mirrors the pushable-VM filter used in Common.Phases.ps1 / Common.Config.ps1
+        # so a server marked pushClient=false (or a non-pushable role like DC,
+        # WSUS, SQLAO, WorkgroupMember, InternetClient, AADClient) is excluded
+        # and we don't pull thousands of irrelevant updates into the lab catalog.
+        $pushableRoles = @('DomainMember', 'Primary', 'CAS', 'Secondary', 'SiteSystem', 'PassiveSite')
+        $clientVMs = @($deployConfig.virtualMachines | Where-Object {
+                $_.role -in $pushableRoles -and ($_.pushClient -ne $false)
+            })
+
+        $products = ($clientVMs.operatingSystem | Select-Object -Unique) + ($clientVMs.sqlversion | Select-Object -Unique)
 
         # Filter out Linux OS names — WSUS has no products for Ubuntu/Linux
         $products = @($products | Where-Object { $_ -and $_ -notmatch '^Ubuntu|^CentOS|^RHEL|^Debian|^Linux' })
@@ -1444,9 +1456,14 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $products = $products -replace "^Sql Server 2019\b.*$", "Microsoft SQL server 2019"
         $products = $products -replace "^Sql Server 2022\b.*$", "Microsoft SQL server 2022"
         $products = $products -replace "^Sql Server 2025\b.*$", "Microsoft SQL server 2025"
-        $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
-        $products += "Microsoft Defender for Endpoint"
+
+        # Only subscribe to Office updates when a pushable client actually installs Office.
+        if (@($clientVMs | Where-Object { $_.installOffice -and $_.installOffice -ne $false }).Count -gt 0) {
+            $products += "Microsoft 365 Apps/Office 2019/Office LTSC"
+        }
+
         $products = @($products | Where-Object { $_ } | Select-Object -Unique)
+        Write-DscStatus "$Tag Dynamic SUP product set ($($products.Count)) from $($clientVMs.Count) pushable VMs: $($products -join ', ')"
 
         $missingproducts = @($products | Where-Object { $_ -notin $productclassifications })
 
@@ -1458,13 +1475,12 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         $allCatalogProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
         $productsInCatalog = @($products | Where-Object { $_ -in $allCatalogProducts })
         # Gate Sync 1 on the *core* OS/SQL products only. Compound/aliased names
-        # (the Office bundle string, Defender) may never match a single catalog
-        # category — and Defender ships in the WSUS seed before any real sync —
-        # so requiring an exact full-set (13/13) match means the gate is never
-        # satisfied and Sync 1 re-waits every build. Core OS/SQL categories only
-        # appear after a real Microsoft Update sync, so they're the reliable
+        # (the Office bundle string) may never match a single catalog category,
+        # so requiring an exact full-set match means the gate is never satisfied
+        # and Sync 1 re-waits every build. Core OS/SQL categories only appear
+        # after a real Microsoft Update sync, so they're the reliable
         # "catalog is populated" signal.
-        $coreProducts = @($products | Where-Object { $_ -notmatch '/' -and $_ -ne 'Microsoft Defender for Endpoint' })
+        $coreProducts = @($products | Where-Object { $_ -notmatch '/' })
         $coreInCatalog = @($coreProducts | Where-Object { $_ -in $allCatalogProducts })
         $catalogHasOurProducts = ($coreProducts.Count -gt 0) -and ($coreInCatalog.Count -eq $coreProducts.Count)
 
@@ -2038,7 +2054,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         $parameters = @{
             InputObject                   = $supComp
             SynchronizeAction             = 'SynchronizeFromMicrosoftUpdate'
-            AddUpdateClassification       = "Critical Updates", "Definition updates", "Security Updates", "Upgrades", "updates"
+            AddUpdateClassification       = "Critical Updates", "Security Updates", "Updates"
             Schedule                      = $schedule
             EnableSyncFailureAlert        = $true
             ImmediatelyExpireSupersedence = $false
