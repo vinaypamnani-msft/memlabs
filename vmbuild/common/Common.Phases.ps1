@@ -1821,7 +1821,14 @@ function Get-Phase7ConfigurationData {
     }
 
     $NumberOfNodesAdded = 0
-    foreach ($vm in $deployConfig.virtualMachines | Where-Object { $_.installRP -eq $true }) {
+    # Pull in any VM that needs either PBIRS install OR a WSUS early sync.
+    # WSUS sync was previously fired at end of Phase 6, but on a dual-role VM
+    # (installSUP + installRP), the Phase 7 PBIRS install can trigger a reboot
+    # that kills the in-flight sync. Running the sync at the end of Phase 7
+    # (after PBIRS install completes) puts all install reboots before the sync.
+    foreach ($vm in $deployConfig.virtualMachines | Where-Object {
+            $_.installRP -eq $true -or $_.installSUP -eq $true -or $_.role -eq 'WSUS'
+        }) {
 
         $global:preparePhasePercent++
 
@@ -1834,9 +1841,12 @@ function Get-Phase7ConfigurationData {
             continue
         }
 
+        # PBIRS takes precedence -- if the VM also has WSUS, the PBIRS node
+        # block adds the WSUSSync resource after InstallPBIRS completes.
+        $synthRole = if ($vm.installRP -eq $true) { "PBIRS" } else { "WSUS" }
         $newItem = @{
             NodeName = $vm.vmName
-            Role     = "PBIRS"
+            Role     = $synthRole
         }
         $cd.AllNodes += $newItem
         if ($vm.Role -ne "DC") {

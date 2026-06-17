@@ -11,6 +11,8 @@
     Set-ExecutionPolicy -ExecutionPolicy Bypass -Force
     Import-DscResource -ModuleName 'TemplateHelpDSC'
     Import-DscResource -ModuleName 'PSDesiredStateConfiguration', 'ComputerManagementDsc', 'UpdateServicesDsc'
+    # Note: WSUSSync (early catalog sync) is fired in Phase 7, AFTER any PBIRS
+    # install on the same VM, so a PBIRS-triggered reboot can't interrupt it.
 
     # Read deployConfig
     $deployConfig = Get-Content -Path $DeployConfigPath | ConvertFrom-Json
@@ -171,36 +173,11 @@
             }
         }
 
-        # Determine if this WSUS syncs from Microsoft Update (vs upstream WSUS)
-        # - Standalone WSUS (role=WSUS): always syncs from MU
-        # - SUP on CAS: syncs from MU
-        # - SUP on Primary with no CAS in config: syncs from MU
-        # - SUP on Primary/Secondary when CAS exists: syncs from upstream, skip early sync
-        $syncsFromMU = $false
-        if ($standalone) {
-            $syncsFromMU = $true
-        }
-        else {
-            # This is a ConfigMgr site with installSUP - check hierarchy
-            $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
-            if ($thisVM.role -eq 'CAS') {
-                $syncsFromMU = $true
-            }
-            elseif ($thisVM.role -eq 'Primary' -and -not $hasCAS) {
-                $syncsFromMU = $true
-            }
-            # Secondary or child Primary with CAS -> syncs from upstream, no early sync
-        }
-
-        if ($syncsFromMU) {
-            # Start early catalog sync to pre-download category taxonomy during ~4 hour
-            # window before perfloading needs WSUS ready. Fire-and-forget.
-            WSUSSync WSUSSync {
-                DependsOn  = $nextDepend
-                ServerName = $thisVM.vmName + "." + $DomainName
-            }
-            $nextDepend = "[WSUSSync]WSUSSync"
-        }
+        # NOTE: WSUSSync (early catalog sync) moved to Phase 7. On a dual-role
+        # VM (installSUP + installRP), Phase 7 PBIRS install could trigger a
+        # DSC-level reboot that interrupted the sync. Firing the sync at the
+        # end of Phase 7 (after PBIRS install completes) puts all install
+        # reboots before the sync starts.
 
         WriteStatus Complete {
             Status    = "Complete!"

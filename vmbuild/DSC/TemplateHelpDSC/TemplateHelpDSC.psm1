@@ -5529,10 +5529,12 @@ class WSUSSync {
 
     [void] Set() {
         # Early fire-and-forget sync to pre-download the WSUS category catalog.
-        # This runs in Phase 6, ~4 hours before perfloading needs WSUS ready.
-        # By syncing now (even with minimal products), the full category taxonomy
-        # downloads in background. When perfloading runs its product sync later,
-        # categories are already present and only update metadata is needed.
+        # This runs in Phase 7 (after any PBIRS install on the same VM has
+        # completed and rebooted), ~3-4 hours before perfloading needs WSUS
+        # ready. By syncing now (even with minimal products), the full
+        # category taxonomy downloads in background. When perfloading runs
+        # its product sync later, categories are already present and only
+        # update metadata is needed.
         Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget)"
         try {
             $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530
