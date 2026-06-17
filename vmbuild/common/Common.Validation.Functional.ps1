@@ -742,22 +742,36 @@ function Test-DCFunctionality {
         # yet refuse to serve authentications -- Advertising/NetLogons catches that
         # before downstream DomainMember tests fail with cryptic ERROR_NO_LOGON_SERVERS.
         $results.Details.Add("CMD: dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q")
-        try {
-            $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
-            $dcdiagText = $dcdiag -join "`n"
-            $failCount = ([regex]::Matches($dcdiagText, 'failed test')).Count
-            if ($failCount -gt 0) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: dcdiag reported $failCount failed test(s)")
-                $failLines = $dcdiag | Where-Object { $_ -match 'failed test' } | Select-Object -First 5
-                foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
+        # Retry on transient failures: right after a reboot (e.g. a -startPhase 11
+        # rerun) AD replication between DCs is still re-establishing, so dcdiag's
+        # Replications test can fail on the first pass and pass moments later.
+        $dcdiag = $null
+        $failCount = 0
+        $dcdiagErr = $null
+        for ($dd = 1; $dd -le 3; $dd++) {
+            try {
+                $dcdiag = & dcdiag.exe /test:Services /test:Replications /test:FSMOCheck /test:Advertising /test:NetLogons /q 2>&1
+                $dcdiagText = $dcdiag -join "`n"
+                $failCount = ([regex]::Matches($dcdiagText, 'failed test')).Count
+                $dcdiagErr = $null
+                if ($failCount -eq 0) { break }
             }
-            else {
-                $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck/Advertising/NetLogons passed")
+            catch {
+                $dcdiagErr = $_
             }
+            if ($dd -lt 3) { Start-Sleep -Seconds 20 }
         }
-        catch {
-            $results.Details.Add("WARN: dcdiag execution failed: $($_.Exception.Message)")
+        if ($dcdiagErr) {
+            $results.Details.Add("WARN: dcdiag execution failed: $($dcdiagErr.Exception.Message)")
+        }
+        elseif ($failCount -gt 0) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: dcdiag reported $failCount failed test(s) after retries")
+            $failLines = $dcdiag | Where-Object { $_ -match 'failed test' } | Select-Object -First 5
+            foreach ($fl in $failLines) { $results.Details.Add("  dcdiag: $($fl.Trim())") }
+        }
+        else {
+            $results.Details.Add("OK: dcdiag Services/Replications/FSMOCheck/Advertising/NetLogons passed")
         }
 
         # SYSVOL + NETLOGON shares -- if these are missing GPOs and logons break.
@@ -1373,6 +1387,29 @@ function Test-SQLAOFunctionality {
             $results.Details.Add("CMD: Get-Cluster / Get-ClusterNode / Get-ClusterQuorum")
             try {
                 Import-Module FailoverClusters -ErrorAction SilentlyContinue
+
+                # Post-reboot settle wait: after a -startPhase 11 rerun the nodes
+                # are freshly booted and the failover cluster needs a minute or two
+                # to re-form (node rejoin + AG IP resource online). Poll up to ~2 min
+                # for all nodes Up and all IP-Address resources Online before
+                # evaluating, so a not-yet-settled cluster doesn't produce spurious
+                # FAILs. If it never settles, the checks below still FAIL as before.
+                $settleWaited = $false
+                for ($cw = 1; $cw -le 8; $cw++) {
+                    try {
+                        $wNodes = @(Get-ClusterNode -ErrorAction Stop)
+                        $wIp = @(Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'IP Address' })
+                        $allUp = ($wNodes.Count -gt 0) -and -not @($wNodes | Where-Object { $_.State -ne 'Up' }).Count
+                        $ipOk = -not @($wIp | Where-Object { $_.State -ne 'Online' }).Count
+                        if ($allUp -and $ipOk) { break }
+                    }
+                    catch { }
+                    if ($cw -lt 8) { Start-Sleep -Seconds 15; $settleWaited = $true }
+                }
+                if ($settleWaited) {
+                    $results.Details.Add("INFO: Waited for cluster to settle after reboot before evaluating node/resource state")
+                }
+
                 $cluster = Get-Cluster -ErrorAction Stop
                 $results.Details.Add("OK: Cluster '$($cluster.Name)' is online")
 
@@ -4365,19 +4402,33 @@ function Test-PassiveSiteFunctionality {
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
         $filter = "RoleName = 'SMS Site Server' AND NetworkOSPath LIKE '%$passiveName%'"
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS\site_$sc' -Class SMS_SCI_SysResUse -Filter `"$filter`"")
-        try {
-            $passive = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SCI_SysResUse -Filter $filter -ErrorAction Stop
-            if ($passive) {
-                $results.Details.Add("OK: Passive site server '$passiveName' registered in site '$sc'")
+        # Retry on transient "Provider load failure": right after a reboot (e.g.
+        # a -startPhase 11 rerun) the SMS Provider WMI host hasn't finished
+        # loading even though SMS_EXECUTIVE is Running, so the first query throws.
+        # It typically becomes available within a minute or two.
+        $passive = $null
+        $wmiErr = $null
+        for ($i = 1; $i -le 6; $i++) {
+            try {
+                $passive = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_SCI_SysResUse -Filter $filter -ErrorAction Stop
+                $wmiErr = $null
+                break
             }
-            else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: Passive site server '$passiveName' not registered in site '$sc'")
+            catch {
+                $wmiErr = $_
+                if ($i -lt 6) { Start-Sleep -Seconds 15 }
             }
         }
-        catch {
+        if ($wmiErr) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: WMI query for passive site server failed: $($_.Exception.Message)")
+            $results.Details.Add("FAIL: WMI query for passive site server failed after retries: $($wmiErr.Exception.Message)")
+        }
+        elseif ($passive) {
+            $results.Details.Add("OK: Passive site server '$passiveName' registered in site '$sc'")
+        }
+        else {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: Passive site server '$passiveName' not registered in site '$sc'")
         }
         return $results
     }
@@ -5000,37 +5051,61 @@ function Test-SMSProviderRole {
         param($sc)
         $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
 
+        # Retry on transient "Provider load failure": right after a reboot (e.g.
+        # a -startPhase 11 rerun) the SMS Provider WMI host hasn't finished
+        # loading even though SMS_EXECUTIVE is Running, so the first query throws.
+        # It typically becomes available within a minute or two.
         $results.Details.Add("CMD: Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -Filter `"SiteCode = '$sc'`"")
-        try {
-            $prov = Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -Filter "SiteCode = '$sc'" -ErrorAction Stop |
-                Where-Object { $_.Machine -like "$env:COMPUTERNAME*" }
-            if (-not $prov) {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: This host not registered as a provider for site '$sc'")
-                return $results
+        $prov = $null
+        $provErr = $null
+        for ($i = 1; $i -le 6; $i++) {
+            try {
+                $prov = Get-WmiObject -Namespace 'root\SMS' -Class SMS_ProviderLocation -Filter "SiteCode = '$sc'" -ErrorAction Stop |
+                    Where-Object { $_.Machine -like "$env:COMPUTERNAME*" }
+                $provErr = $null
+                break
             }
-            $results.Details.Add("OK: Provider location: $($prov.NamespacePath)")
+            catch {
+                $provErr = $_
+                if ($i -lt 6) { Start-Sleep -Seconds 15 }
+            }
         }
-        catch {
+        if ($provErr) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: SMS_ProviderLocation query failed: $($_.Exception.Message)")
+            $results.Details.Add("FAIL: SMS_ProviderLocation query failed after retries: $($provErr.Exception.Message)")
             return $results
         }
+        if (-not $prov) {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: This host not registered as a provider for site '$sc'")
+            return $results
+        }
+        $results.Details.Add("OK: Provider location: $($prov.NamespacePath)")
 
-        # Round-trip a query through the local provider
-        try {
-            $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
-            if ($site) {
-                $results.Details.Add("OK: Local SMS_Site query succeeded via provider (site '$($site.SiteCode)')")
+        # Round-trip a query through the local provider (same transient-load retry)
+        $site = $null
+        $siteErr = $null
+        for ($i = 1; $i -le 6; $i++) {
+            try {
+                $site = Get-WmiObject -Namespace "root\SMS\site_$sc" -Class SMS_Site -ErrorAction Stop
+                $siteErr = $null
+                break
             }
-            else {
-                $results.Passed = $false
-                $results.Details.Add("FAIL: SMS_Site query returned null via local provider")
+            catch {
+                $siteErr = $_
+                if ($i -lt 6) { Start-Sleep -Seconds 15 }
             }
         }
-        catch {
+        if ($siteErr) {
             $results.Passed = $false
-            $results.Details.Add("FAIL: SMS_Site query via local provider failed: $($_.Exception.Message)")
+            $results.Details.Add("FAIL: SMS_Site query via local provider failed after retries: $($siteErr.Exception.Message)")
+        }
+        elseif ($site) {
+            $results.Details.Add("OK: Local SMS_Site query succeeded via provider (site '$($site.SiteCode)')")
+        }
+        else {
+            $results.Passed = $false
+            $results.Details.Add("FAIL: SMS_Site query returned null via local provider")
         }
 
         return $results
