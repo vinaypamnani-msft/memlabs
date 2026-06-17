@@ -5528,42 +5528,72 @@ class WSUSSync {
     [string] $ServerName
 
     [void] Set() {
-       
-        Write-Status "Starting initial WSUSSync for $($this.ServerName) using Product: SQL Server 2005 Category: Tools"
+        # Early fire-and-forget sync to pre-download the WSUS category catalog.
+        # This runs in Phase 6, ~4 hours before perfloading needs WSUS ready.
+        # By syncing now (even with minimal products), the full category taxonomy
+        # downloads in background. When perfloading runs its product sync later,
+        # categories are already present and only update metadata is needed.
+        Write-Status "Starting early WSUS catalog sync for $($this.ServerName) (fire-and-forget)"
         try {
-            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530 #-UseSsl
- 
-            Get-WsusProduct | Set-WsusProduct -disable
+            $WSUS = Get-WsusServer -Name $this.ServerName -PortNumber 8530
+            if (-not $WSUS) {
+                Write-Status "WSUS server not found at $($this.ServerName):8530. Skipping early sync."
+                return
+            }
+
+            # Verify WsusPool is hardened (ConfigureWSUS should have done this, but verify)
+            $savedVP = $global:VerbosePreference; $global:VerbosePreference = 'SilentlyContinue'
+            try { Import-Module WebAdministration -ErrorAction SilentlyContinue } finally { $global:VerbosePreference = $savedVP }
+            $pool = Get-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -ErrorAction SilentlyContinue
+            if ($pool -and $pool.Value -gt 0) {
+                Write-Status "WsusPool privateMemory cap is $($pool.Value) - hardening before sync"
+                Set-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -Value 0 -ErrorAction SilentlyContinue
+                Restart-WebAppPool -Name WsusPool -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 5
+            }
+
+            # Select minimal products/classifications to get the category catalog
+            # without downloading massive update metadata. SQL Server 2005 + Tools
+            # is small but forces the full category tree download.
+            Write-Status "Configuring minimal sync scope (SQL Server 2005 + Tools)"
+            Get-WsusProduct | Set-WsusProduct -Disable
             Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
-         
-            Get-WsusClassification | Set-WsusClassification -disable
+            Get-WsusClassification | Set-WsusClassification -Disable
             Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
-         
+
+            # Start sync - fire and forget, don't wait
             $sub = $WSUS.GetSubscription()
             $sub.StartSynchronization()
+            Write-Status "WSUS sync started. Will run in background during Phases 7-8 (~4 hours)."
         }
         catch {
-            Write-Status "Initial WSUSSync failed.  Skipping."
+            Write-Status "Early WSUS sync failed: $($_.Exception.Message). Perfloading will handle sync later."
         }
-       
     }
 
     [bool] Test() {
-
+        # Test if a sync is in progress or has completed (category catalog present)
         try {
-            $wsus = get-WsusServer
-            $sub = $WSUS.GetSubscription()
-            if ($wsus) {
-                if (($sub.GetUpdateCategories() | where-object { $_.Title -eq "SQL Server 2005" }).Count -ge 1) {
-                    return $true
-                }
+            $wsus = Get-WsusServer -ErrorAction Stop
+            $sub = $wsus.GetSubscription()
+            
+            # Check if sync is currently running (compare as string to avoid parse-time type load)
+            $syncStatus = $sub.GetSynchronizationStatus()
+            if ($syncStatus.ToString() -eq 'Running') {
+                Write-Status "WSUS sync already in progress - skipping"
+                return $true
             }
-
+            
+            # If we have categories, a sync has completed at some point
+            $cats = $sub.GetUpdateCategories()
+            if ($cats -and $cats.Count -gt 0) {
+                Write-Status "WSUS catalog already has $($cats.Count) categories - skipping early sync"
+                return $true
+            }
             return $false
         }
         catch {
-            Write-Status "Failed to Find WSUS Server"
-            Write-Verbose "$_"
+            Write-Status "WSUS not ready for sync test: $($_.Exception.Message)"
             return $false
         }
     }

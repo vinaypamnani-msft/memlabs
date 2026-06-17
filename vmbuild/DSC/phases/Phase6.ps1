@@ -171,7 +171,30 @@
             }
         }
 
-        if ($standalone) {            
+        # Determine if this WSUS syncs from Microsoft Update (vs upstream WSUS)
+        # - Standalone WSUS (role=WSUS): always syncs from MU
+        # - SUP on CAS: syncs from MU
+        # - SUP on Primary with no CAS in config: syncs from MU
+        # - SUP on Primary/Secondary when CAS exists: syncs from upstream, skip early sync
+        $syncsFromMU = $false
+        if ($standalone) {
+            $syncsFromMU = $true
+        }
+        else {
+            # This is a ConfigMgr site with installSUP - check hierarchy
+            $hasCAS = ($deployConfig.VirtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
+            if ($thisVM.role -eq 'CAS') {
+                $syncsFromMU = $true
+            }
+            elseif ($thisVM.role -eq 'Primary' -and -not $hasCAS) {
+                $syncsFromMU = $true
+            }
+            # Secondary or child Primary with CAS -> syncs from upstream, no early sync
+        }
+
+        if ($syncsFromMU) {
+            # Start early catalog sync to pre-download category taxonomy during ~4 hour
+            # window before perfloading needs WSUS ready. Fire-and-forget.
             WSUSSync WSUSSync {
                 DependsOn  = $nextDepend
                 ServerName = $thisVM.vmName + "." + $DomainName
