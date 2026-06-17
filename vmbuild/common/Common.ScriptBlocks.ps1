@@ -1938,10 +1938,31 @@ $global:VM_Config = {
             $pending = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
             if ($active -and $pending -and $active -ne $pending) { $reasons += "ComputerRename ($active -> $pending)" }
             if ($reasons.Count -gt 0) {
+                # If a WSUS sync is in progress, do NOT reboot -- the reboot
+                # cancels the sync (Result=Canceled; Err=UserCanceled) and we
+                # lose ~hours of catalog download. Surface a DeferredFor reason
+                # so the caller logs and continues without rebooting.
+                $deferredFor = $null
+                try {
+                    $wsusFeature = Get-WindowsFeature -Name UpdateServices-Services -ErrorAction SilentlyContinue
+                    if ($wsusFeature -and $wsusFeature.Installed) {
+                        [void][reflection.assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration') | Out-Null
+                        $wsus = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                        $sub = $wsus.GetSubscription()
+                        $syncStatus = $sub.GetSynchronizationStatus().ToString()
+                        if ($syncStatus -eq 'Running') {
+                            $prog = $null
+                            try { $prog = $sub.GetSynchronizationProgress() } catch {}
+                            $progText = if ($prog) { " ($($prog.ProcessedItems)/$($prog.TotalItems))" } else { '' }
+                            $deferredFor = "WSUS sync in progress$progText"
+                        }
+                    }
+                } catch {}
                 $result = [pscustomobject]@{
                     Reasons = $reasons -join '; '
                     PendingFileOps = if ($global:_PendingFileRenameDetails) { $global:_PendingFileRenameDetails } else { $null }
                     DeleteOnlyOps = if ($global:_PendingDeleteOnlyOps) { $global:_PendingDeleteOnlyOps } else { 0 }
+                    DeferredFor = $deferredFor
                 }
                 return $result
             }
@@ -1961,6 +1982,9 @@ $global:VM_Config = {
             # Delete-only PendingFileRename ops don't require a reboot
             if (-not $rebootResult.Reasons) {
                 Write-Log "[Phase $Phase]: $($currentItem.vmName): $($rebootResult.DeleteOnlyOps) PendingFileRename delete-only ops (temp file cleanup, no reboot needed)." -LogOnly
+            }
+            elseif ($rebootResult.DeferredFor) {
+                Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected ($($rebootResult.Reasons)) but deferring: $($rebootResult.DeferredFor)." -Warning -OutputStream
             }
             else {
                 $reasonText = if ($rebootResult.Reasons) { $rebootResult.Reasons } else { $rebootResult.ToString() }
@@ -4492,6 +4516,9 @@ $global:VM_Config = {
                     # Delete-only PendingFileRename ops don't require a reboot
                     if (-not $rebootResult.Reasons) {
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): $($rebootResult.DeleteOnlyOps) PendingFileRename delete-only ops after phase completion (temp file cleanup, no reboot needed)." -LogOnly
+                    }
+                    elseif ($rebootResult.DeferredFor) {
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Pending reboot detected after phase completion ($($rebootResult.Reasons)) but deferring: $($rebootResult.DeferredFor)." -OutputStream
                     }
                     else {
                         $reasonText = if ($rebootResult.Reasons) { $rebootResult.Reasons } else { $rebootResult.ToString() }
