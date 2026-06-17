@@ -6131,10 +6131,11 @@ function Test-WindowsProxyConfig {
         Checks `netsh winhttp show proxy` (authoritative, hard FAIL gate) and
         the per-machine WinINET proxy enforcement: ProxySettingsPerUser=0
         (machine-wide proxy for all users + SYSTEM) plus the machine proxy
-        value, read from the HKLM IE ProxyServer string with a fallback to the
-        DefaultConnectionSettings blob (Windows consumes the plain string into
-        the blob across reboots in machine-wide mode). Either source matching
-        `<proxyFqdn>:3128` (or its IP form) is acceptable.
+        value. Reads from every known machine-wide source -- HKLM IE
+        ProxyServer, HKLM IE Connections blob, the policy hive equivalents
+        and the Edge policy key -- because Windows shuffles the value
+        between these locations on first interactive logon in machine-wide
+        mode. WARN only when no source has a `<proxyFqdn>:3128` match.
     #>
     [CmdletBinding()]
     param(
@@ -6186,14 +6187,17 @@ function Test-WindowsProxyConfig {
         }
 
         # IE / WinINET per-machine enforcement. Set-WindowsClientProxy forces
-        # machine-wide proxy by writing ProxySettingsPerUser=0 to the regular
-        # IE key, plus ProxyServer (a plain REG_SZ) and the authoritative
-        # DefaultConnectionSettings binary blob. After a reboot in machine-wide
-        # mode Windows can consume the plain ProxyServer string into the blob,
-        # so read BOTH: the plain value first, then parse the blob as a
-        # fallback. Also confirm the machine-wide switch is actually on.
-        $ieKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
-        $policyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+        # machine-wide proxy by writing ProxySettingsPerUser=0, plus the
+        # ProxyServer string and DefaultConnectionSettings binary blob under
+        # the regular IE key. Windows can consume those values on first
+        # interactive logon in machine-wide mode (seen on ZZ-MOCHI: a session
+        # logon between two Phase 11 runs blanks both HKLM IE ProxyServer and
+        # its Connections blob, leaving the proxy info in the policy hive or
+        # the Edge policy key). Accept any of those sources -- only WARN when
+        # every machine-wide proxy source is empty.
+        $ieKey      = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'
+        $policyKey  = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
+        $edgePolKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'
 
         # Parse the proxy server string out of a DefaultConnectionSettings blob.
         # Layout: [0..3] counter, [4..7] flags, [8..11] proxy-len, then proxy
@@ -6225,27 +6229,34 @@ function Test-WindowsProxyConfig {
                 $results.Details.Add("WARN: ProxySettingsPerUser='$perUser' (machine-wide enforcement not set; expected 0)")
             }
 
-            # Authoritative machine proxy: plain ProxyServer, else the blob.
+            # Probe every known machine-wide proxy source; accept the first match.
+            $sources = [ordered]@{}
             if (Test-Path $ieKey) {
-                $ieProxy = (Get-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
-                $proxySource = 'HKLM IE ProxyServer'
-                if (-not (& $matchesProxy $ieProxy)) {
-                    $blob = (Get-ItemProperty -Path (Join-Path $ieKey 'Connections') -Name 'DefaultConnectionSettings' -ErrorAction SilentlyContinue).DefaultConnectionSettings
-                    $blobProxy = & $proxyFromBlob $blob
-                    if (& $matchesProxy $blobProxy) {
-                        $ieProxy = $blobProxy
-                        $proxySource = 'HKLM DefaultConnectionSettings blob'
-                    }
-                }
-                if (& $matchesProxy $ieProxy) {
-                    $results.Details.Add("OK: $proxySource = '$ieProxy'")
-                }
-                else {
-                    $results.Details.Add("WARN: HKLM machine proxy not set to :3128 (ProxyServer='$ieProxy'; blob also has none)")
-                }
+                $sources['HKLM IE ProxyServer'] = (Get-ItemProperty -Path $ieKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+                $sources['HKLM IE Connections blob'] = & $proxyFromBlob ((Get-ItemProperty -Path (Join-Path $ieKey 'Connections') -Name 'DefaultConnectionSettings' -ErrorAction SilentlyContinue).DefaultConnectionSettings)
+            }
+            if (Test-Path $policyKey) {
+                $sources['HKLM Policies IE ProxyServer'] = (Get-ItemProperty -Path $policyKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+                $sources['HKLM Policies IE Connections blob'] = & $proxyFromBlob ((Get-ItemProperty -Path (Join-Path $policyKey 'Connections') -Name 'DefaultConnectionSettings' -ErrorAction SilentlyContinue).DefaultConnectionSettings)
+            }
+            if (Test-Path $edgePolKey) {
+                $sources['HKLM Edge Policy ProxyServer'] = (Get-ItemProperty -Path $edgePolKey -Name 'ProxyServer' -ErrorAction SilentlyContinue).ProxyServer
+            }
+
+            $matchedName  = $null
+            $matchedValue = $null
+            foreach ($name in $sources.Keys) {
+                if (& $matchesProxy $sources[$name]) { $matchedName = $name; $matchedValue = $sources[$name]; break }
+            }
+            if ($matchedName) {
+                $results.Details.Add("OK: $matchedName = '$matchedValue'")
+            }
+            elseif ($sources.Count -eq 0) {
+                $results.Details.Add("WARN: No HKLM IE/Policies/Edge proxy keys present (Set-WindowsClientProxy may not have run)")
             }
             else {
-                $results.Details.Add("WARN: HKLM IE Internet Settings key absent (Set-WindowsClientProxy may not have run)")
+                $summary = ($sources.GetEnumerator() | ForEach-Object { "$($_.Key)='$($_.Value)'" }) -join '; '
+                $results.Details.Add("WARN: No machine-wide proxy source matches :3128 ($summary)")
             }
         }
         catch {
