@@ -1338,6 +1338,93 @@ ORDER BY LastRunTime DESC
             }
         }
 
+        # Active validation: trigger never-run MemLabs jobs (whitelist only — we
+        # own them and they write to the NUL device, completing in seconds). This
+        # closes the day-zero blind spot where a job is scheduled to first fire
+        # at day+1, leaving freshly-built labs with no signal that the job's
+        # T-SQL would even parse. Non-MemLabs jobs are NEVER triggered here.
+        if ($results.Passed) {
+            try {
+                $neverRanQuery = @"
+;WITH lastRun AS (
+    SELECT job_id, run_status
+    FROM msdb.dbo.sysjobhistory
+    WHERE step_id = 0
+)
+SELECT j.name
+FROM msdb.dbo.sysjobs j
+LEFT JOIN lastRun h ON h.job_id = j.job_id
+WHERE j.enabled = 1
+  AND h.run_status IS NULL
+  AND j.name LIKE 'MemLabs %'
+ORDER BY j.name
+"@
+                $neverRan = @(Invoke-Sqlcmd -ServerInstance $connStr -Query $neverRanQuery -QueryTimeout 30 @sqlParams -ErrorAction Stop)
+                if ($neverRan.Count -gt 0) {
+                    $maxToRun = 10
+                    $toRun = $neverRan | Select-Object -First $maxToRun
+                    if ($neverRan.Count -gt $maxToRun) {
+                        $results.Details.Add("INFO: $($neverRan.Count) MemLabs jobs have never run; testing first $maxToRun")
+                    }
+                    foreach ($nrj in $toRun) {
+                        $jobName = $nrj.name
+                        $jobNameEsc = $jobName -replace "'", "''"
+                        $results.Details.Add("CMD: sp_start_job '$jobName' (never-run validation)")
+                        try {
+                            Invoke-Sqlcmd -ServerInstance $connStr -Query "EXEC msdb.dbo.sp_start_job @job_name = N'$jobNameEsc'" -QueryTimeout 30 @sqlParams -ErrorAction Stop | Out-Null
+                        }
+                        catch {
+                            $results.Details.Add("WARN: sp_start_job '$jobName' failed: $($_.Exception.Message)")
+                            continue
+                        }
+                        # A never-ran job has no step_id=0 history row; poll for
+                        # the new outcome row to appear (up to 60s).
+                        $pollQuery = @"
+SELECT TOP 1 h.run_status,
+       msdb.dbo.agent_datetime(h.run_date, h.run_time) AS LastRunTime,
+       LEFT(ISNULL(h.message, ''''), 500) AS LastMessage
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+WHERE h.step_id = 0 AND j.name = N'$jobNameEsc'
+ORDER BY h.run_date DESC, h.run_time DESC
+"@
+                        $deadline = (Get-Date).AddSeconds(60)
+                        $outcome = $null
+                        while ((Get-Date) -lt $deadline) {
+                            Start-Sleep -Seconds 2
+                            try {
+                                $row = Invoke-Sqlcmd -ServerInstance $connStr -Query $pollQuery -QueryTimeout 15 @sqlParams -ErrorAction SilentlyContinue
+                                if ($row -and $null -ne $row.run_status -and $row.run_status -isnot [System.DBNull]) {
+                                    $outcome = $row
+                                    break
+                                }
+                            }
+                            catch { }
+                        }
+                        if (-not $outcome) {
+                            $results.Details.Add("WARN: Agent job '$jobName' did not complete within 60s of sp_start_job")
+                        }
+                        elseif ([int]$outcome.run_status -eq 1) {
+                            $results.Details.Add("OK: Agent job '$jobName' triggered and succeeded at $($outcome.LastRunTime)")
+                        }
+                        else {
+                            $statusMap2 = @{ 0 = 'Failed'; 2 = 'Retry'; 3 = 'Cancelled'; 4 = 'In Progress' }
+                            $st = if ($statusMap2.ContainsKey([int]$outcome.run_status)) { $statusMap2[[int]$outcome.run_status] } else { "Status $($outcome.run_status)" }
+                            $msgTail2 = ''
+                            if ($outcome.LastMessage) {
+                                $clean2 = ($outcome.LastMessage -replace '\s+', ' ').Trim()
+                                if ($clean2) { $msgTail2 = " - $clean2" }
+                            }
+                            $results.Details.Add("WARN: Agent job '$jobName' triggered run: $st at $($outcome.LastRunTime)$msgTail2")
+                        }
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: Never-run MemLabs job validation failed: $($_.Exception.Message)")
+            }
+        }
+
         return $results
     }
 
