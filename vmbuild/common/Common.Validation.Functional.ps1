@@ -1146,7 +1146,7 @@ function Repair-StoppedSQLServices {
             }
 
             # Service is stopped but has Automatic/Manual start type — try to start it
-            $results.Details.Add("WARN: $($svc.Name) is $($svc.Status) (StartType=$($svc.StartType)), attempting Start-Service...")
+            $results.Details.Add("REMEDIATE: $($svc.Name) is $($svc.Status) (StartType=$($svc.StartType)), attempting Start-Service...")
             try {
                 Start-Service -Name $svc.Name -ErrorAction Stop
                 $waited = 0
@@ -1158,7 +1158,7 @@ function Repair-StoppedSQLServices {
                 }
                 $refreshed = Get-Service -Name $svc.Name
                 if ($refreshed.Status -eq 'Running') {
-                    $results.Details.Add("OK: $($svc.Name) started successfully (took ~$($waited)s)")
+                    $results.Details.Add("RECOVERED: $($svc.Name) was $($svc.Status); started successfully (took ~$($waited)s)")
                 }
                 else {
                     $results.Passed = $false
@@ -1214,7 +1214,7 @@ function Test-SQLFunctionality {
         }
         if ($svc.Status -ne 'Running') {
             # Service exists but is stopped — try to start it before failing
-            $results.Details.Add("WARN: SQL service '$svcName' is $($svc.Status), attempting to start...")
+            $results.Details.Add("REMEDIATE: SQL service '$svcName' is $($svc.Status), attempting to start...")
             try {
                 Start-Service -Name $svcName -ErrorAction Stop
                 $waited = 0
@@ -1234,7 +1234,7 @@ function Test-SQLFunctionality {
                 $results.Details.Add("FAIL: SQL service '$svcName' is still $($svc.Status) after start attempt")
                 return $results
             }
-            $results.Details.Add("OK: SQL service '$svcName' started successfully")
+            $results.Details.Add("RECOVERED: SQL service '$svcName' was stopped; started successfully")
         }
         else {
             $results.Details.Add("OK: SQL service '$svcName' is Running")
@@ -2767,7 +2767,7 @@ function Test-CMSiteFunctionality {
             }
             if ($s.Status -ne 'Running') {
                 # Attempt remediation: force-stop then start
-                $results.Details.Add("WARN: Service '$svc' is $($s.Status), attempting restart...")
+                $results.Details.Add("REMEDIATE: Service '$svc' is $($s.Status), attempting restart...")
                 try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue } catch { }
                 Start-Sleep -Seconds 5
                 try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch { }
@@ -2779,7 +2779,7 @@ function Test-CMSiteFunctionality {
                     if ($s -and $s.Status -eq 'Running') { $svcOk = $true; break }
                 }
                 if ($svcOk) {
-                    $results.Details.Add("OK: Service '$svc' is Running after restart")
+                    $results.Details.Add("RECOVERED: Service '$svc' was stopped; Running after restart")
                 }
                 else {
                     $results.Passed = $false
@@ -3385,7 +3385,7 @@ function Test-SecondaryFunctionality {
         }
         if ($sqlSvc.Status -ne 'Running') {
             # Service exists but is stopped — try to start it before failing
-            $results.Details.Add("WARN: SQL service '$svcName' is $($sqlSvc.Status), attempting to start...")
+            $results.Details.Add("REMEDIATE: SQL service '$svcName' is $($sqlSvc.Status), attempting to start...")
             try {
                 Start-Service -Name $svcName -ErrorAction Stop
                 $waited = 0
@@ -3405,7 +3405,7 @@ function Test-SecondaryFunctionality {
                 $results.Details.Add("FAIL: SQL service '$svcName' is still $($sqlSvc.Status) after start attempt")
                 return $results
             }
-            $results.Details.Add("OK: SQL service '$svcName' started successfully")
+            $results.Details.Add("RECOVERED: SQL service '$svcName' was stopped; started successfully")
         }
         else {
             $results.Details.Add("OK: SQL service '$svcName' is Running")
@@ -4763,11 +4763,11 @@ function Test-DomainMemberFunctionality {
         if (-not $sc -and -not $scError) {
             # Attempt repair: resets the machine account password in AD.
             # Runs as SYSTEM which has the rights to reset its own password.
-            $results.Details.Add("WARN: Secure channel broken, attempting -Repair...")
+            $results.Details.Add("REMEDIATE: Secure channel broken, attempting -Repair...")
             try {
                 $sc = Test-ComputerSecureChannel -Repair -ErrorAction Stop
                 if ($sc) {
-                    $results.Details.Add("OK: Secure channel repaired successfully")
+                    $results.Details.Add("RECOVERED: Secure channel was broken; repaired successfully")
                 }
             }
             catch {
