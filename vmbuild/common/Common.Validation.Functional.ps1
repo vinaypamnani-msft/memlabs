@@ -5707,8 +5707,37 @@ function Test-CMSiteWideFunctionality {
                 $wsusSrv = Get-WsusServer -ErrorAction Stop
                 $wStatus = $wsusSrv.GetStatus()
                 if ($wStatus.UpdateCount -eq 0) {
+                    # Empty catalog — gather WSUS subscription/sync state to diagnose why
+                    $diagBits = @()
+                    try {
+                        $sub = $wsusSrv.GetSubscription()
+                        $syncState = $sub.GetSynchronizationStatus().ToString()
+                        $diagBits += "SyncState=$syncState"
+
+                        $history = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
+                        if ($history.Count -gt 0) {
+                            $h = $history[0]
+                            $diagBits += "LastSync=$($h.StartTime) Result=$($h.Result)"
+                            if ($h.Error -and $h.Error -ne 'NoError') { $diagBits += "Err=$($h.Error)" }
+                            if ($h.ErrorText) { $diagBits += "ErrText='$($h.ErrorText -replace "'",'')'" }
+                        }
+                        else {
+                            $diagBits += "LastSync=never"
+                        }
+
+                        if ($syncState -eq 'Running') {
+                            try {
+                                $prog = $sub.GetSynchronizationProgress()
+                                $diagBits += "Phase=$($prog.Phase) Items=$($prog.ProcessedItems)/$($prog.TotalItems)"
+                            } catch { }
+                        }
+                    }
+                    catch {
+                        $diagBits += "WSUS-diag-failed: $($_.Exception.Message)"
+                    }
+                    $diagStr = if ($diagBits.Count -gt 0) { " [" + ($diagBits -join '; ') + "]" } else { "" }
                     $results.Passed = $false
-                    $results.Details.Add("FAIL: WSUS reports UpdateCount=0 - the first full sync never populated the catalog (likely WsusPool recycled at its memory cap mid-sync). CM may still report a sync state.")
+                    $results.Details.Add("FAIL: WSUS reports UpdateCount=0 - the first full sync never populated the catalog$diagStr")
                 }
                 else {
                     $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
