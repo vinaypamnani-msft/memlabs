@@ -712,13 +712,22 @@ function Start-PhaseJobs {
     # used to silently skip VMs missing existing-only hotfixes (e.g.
     # Fix-SQLAOBackupJobs). Skipping here just avoids spawning a job for
     # VMs that genuinely have nothing to do.
+    #
+    # Also skip VMs whose role is intentionally kept Off after the initial
+    # deploy (StandaloneRootCA = offline root CA). Waking those just to
+    # apply cosmetic Phase 10 fixes defeats the whole point of an offline
+    # CA; they'll catch up the next time the user turns them on manually
+    # for cert work.
     $phase10SkipSet = @{}
+    $offByDesignRoles = @('StandaloneRootCA')
     if ($Phase -eq 10) {
         $allFixDefs = Get-VMFixes -ReturnDummyList
         $relevantFixes = @($allFixDefs | Where-Object { $_.AppliesToExisting -eq $true })
         $vmNoteCache = @{}
+        $vmStateCache = @{}
         try {
             foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
+                $vmStateCache[$hvm.Name] = $hvm.State
                 if ($hvm.Notes -like "*appliedFixes*") {
                     try { $vmNoteCache[$hvm.Name] = $hvm.Notes | ConvertFrom-Json } catch {}
                 }
@@ -726,6 +735,13 @@ function Start-PhaseJobs {
         } catch {}
         foreach ($vm in $deployConfig.virtualMachines) {
             if ($vm.hidden) { continue }
+
+            # Off-by-design + currently Off -> skip without spawning a job.
+            if ($vm.role -in $offByDesignRoles -and $vmStateCache[$vm.vmName] -eq 'Off') {
+                $phase10SkipSet[$vm.vmName] = "$($vm.role) is Off (kept off post-deploy), skipping."
+                continue
+            }
+
             $note = $vmNoteCache[$vm.vmName]
             if ($note -and $note.appliedFixes) {
                 $allApplied = $true
@@ -745,12 +761,12 @@ function Start-PhaseJobs {
                     }
                 }
                 if ($allApplied) {
-                    $phase10SkipSet[$vm.vmName] = $true
+                    $phase10SkipSet[$vm.vmName] = "All fixes already applied, skipping."
                 }
             }
         }
         if ($phase10SkipSet.Count -gt 0) {
-            Write-Log "[Phase 10] $($phase10SkipSet.Count) VM(s) already up-to-date, will skip." -LogOnly
+            Write-Log "[Phase 10] $($phase10SkipSet.Count) VM(s) will skip maintenance (already up-to-date or kept Off by design)." -LogOnly
         }
     }
 
@@ -906,7 +922,7 @@ function Start-PhaseJobs {
                     continue
                 }
                 if ($phase10SkipSet.ContainsKey($currentItem.vmName)) {
-                    Write-Log "[Phase 10] $($currentItem.vmName): All fixes already applied, skipping." -LogOnly
+                    Write-Log "[Phase 10] $($currentItem.vmName): $($phase10SkipSet[$currentItem.vmName])" -LogOnly
                     continue
                 }
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
