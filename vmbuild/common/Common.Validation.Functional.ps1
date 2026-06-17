@@ -4706,18 +4706,32 @@ function Test-DomainMemberFunctionality {
     if ($officeChannel -and $officeChannel -ne $false -and $result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Passed) {
         $officeCheckBlock = {
             $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
+            # The Install Targets collection refreshes on its own schedule, and the
+            # client only pulls down the deployment after a Machine Policy cycle.
+            # Trigger both proactively before checking so a freshly-built VM whose
+            # client just came online doesn't spuriously warn while everything is
+            # actually working.
             try {
-                $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
-                if ($app) {
-                    $officeResults.Details.Add("OK: Office deployment policy received (Name=$($app.Name), State=$($app.EvaluationState))")
-                }
-                else {
-                    $officeResults.Details.Add("WARN: Office deployment policy not yet received — deployment may still be processing")
-                }
+                Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction SilentlyContinue | Out-Null
+                Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000022}' } -ErrorAction SilentlyContinue | Out-Null
             }
-            catch {
-                $officeResults.Details.Add("WARN: Could not query CCM_Application for Office policy: $_")
+            catch { }
+            # Give the policy refresh up to ~45s to land before warning.
+            $app = $null
+            for ($i = 0; $i -lt 9; $i++) {
+                try {
+                    $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
+                }
+                catch { }
+                if ($app) { break }
+                Start-Sleep -Seconds 5
+            }
+            if ($app) {
+                $officeResults.Details.Add("OK: Office deployment policy received (Name=$($app.Name), State=$($app.EvaluationState))")
+            }
+            else {
+                $officeResults.Details.Add("WARN: Office deployment policy not yet received after policy refresh — check MEMLABS-Office Install Targets collection membership on the Primary")
             }
             # Also check if Office is already installed
             $ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue

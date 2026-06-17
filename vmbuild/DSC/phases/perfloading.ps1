@@ -74,6 +74,77 @@ Write-DscStatus "$Tag Starting perfloading"
     # Set the current location to be the site code.
     Set-Location "$($SiteCode):\" @initParams
 
+    # Self-healing setup for the Office Install Targets collection. Called both
+    # before the Office app deployment is created (so the deployment has a real
+    # target on fresh labs) and again later for non-Office paths. Always runs:
+    # creates the collection if missing, replaces stale direct-membership rules
+    # (legacy) with a name-keyed WQL query rule, and updates the query expression
+    # when the VM list has changed. The query auto-evaluates on the collection
+    # schedule and survives ResourceID changes, so VMs added/re-discovered after
+    # collection creation become members without a rebuild.
+    function Set-OfficeInstallTargetsCollection {
+        param($OfficeTargetVMs)
+        if (-not $OfficeTargetVMs -or $OfficeTargetVMs.Count -eq 0) { return $null }
+        $colName = "MEMLABS-Office Install Targets"
+        $col = Get-CMDeviceCollection -Name $colName -ErrorAction SilentlyContinue
+        if (-not $col) {
+            try {
+                $col = New-CMDeviceCollection -Name $colName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install" -ErrorAction Stop
+                Write-DscStatus "$Tag Created collection: $colName"
+                Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $col.CollectionID -ErrorAction SilentlyContinue
+            }
+            catch {
+                Write-DscStatus "$Tag WARNING: Failed to create Office Install Targets collection: $($_.Exception.Message)"
+                return $null
+            }
+        }
+
+        $nameList = ($OfficeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
+        $desiredQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Name in ($nameList)"
+        $ruleName = "Office Install Targets Rule"
+
+        # Remove any stale direct-membership rules left behind by older builds.
+        try {
+            $directRules = @(Get-CMDeviceCollectionDirectMembershipRule -CollectionId $col.CollectionID -ErrorAction SilentlyContinue)
+            foreach ($dr in $directRules) {
+                try {
+                    Remove-CMDeviceCollectionDirectMembershipRule -CollectionId $col.CollectionID -ResourceId $dr.ResourceID -Force -ErrorAction Stop
+                    Write-DscStatus "$Tag Removed legacy direct-membership rule (ResourceID $($dr.ResourceID)) from $colName"
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        # Ensure the query rule exists and matches the current VM list. CM
+        # normalizes the SELECT clause after the rule is created (expands to
+        # ResourceID,ResourceType,Name,...), so compare on the FROM/WHERE tail
+        # only to avoid pointlessly delete-and-recreating the rule every run.
+        try {
+            $existing = @(Get-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -ErrorAction SilentlyContinue) |
+                Where-Object { $_.RuleName -eq $ruleName }
+            $desiredTail = ($desiredQuery -split '(?i)\bfrom\b', 2)[1].Trim()
+            $existingTail = if ($existing) { ($existing.QueryExpression -split '(?i)\bfrom\b', 2)[1].Trim() } else { $null }
+            if ($existing) {
+                if ($existingTail -ne $desiredTail) {
+                    Remove-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -RuleName $ruleName -Force -ErrorAction SilentlyContinue
+                    Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
+                    Write-DscStatus "$Tag Updated query rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+                }
+            }
+            else {
+                Add-CMDeviceCollectionQueryMembershipRule -CollectionId $col.CollectionID -QueryExpression $desiredQuery -RuleName $ruleName -ErrorAction Stop
+                Write-DscStatus "$Tag Added query membership rule on $colName for: $(($OfficeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
+            }
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to set Office Install Targets query rule: $($_.Exception.Message)"
+        }
+
+        Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+        return $col
+    }
+
     #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
     $DPGroupName = "ALL DPS"
     $existingDPGroups = @(Get-CMDistributionPointGroup | Select-Object -ExpandProperty Name)
@@ -850,6 +921,15 @@ Write-DscStatus "$Tag Starting perfloading"
                 New-SmbShare -Name $officeShareName -Path $officeSourceRoot -FullAccess @("Administrators", "Everyone") -ErrorAction SilentlyContinue
                 Write-DscStatus "$Tag Created SMB share \\$ThisMachineName\$officeShareName"
             }
+
+            # Ensure the Install Targets collection exists with an up-to-date query
+            # rule BEFORE creating any deployment. New-CMApplicationDeployment
+            # against a non-existent collection silently no-ops with
+            # -ErrorAction SilentlyContinue, which previously left fresh labs with
+            # an Office app but no deployment (the collection was created later in
+            # the script). Running this here also refreshes the rule on existing
+            # labs whose collection was built with legacy direct-membership rules.
+            Set-OfficeInstallTargetsCollection -OfficeTargetVMs $officeVMs | Out-Null
 
             # Create one CM Application per channel
             foreach ($channel in $channels) {
@@ -1817,33 +1897,44 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         }
     }
 
-    # Office Install Targets collection: query membership for VMs with installOffice.
-    # A query rule (keyed on VM name) auto-evaluates on the collection schedule and
-    # tolerates ResourceID changes, so a VM that is re-discovered or that appears in
-    # CM after this collection is created still becomes a member without a rebuild.
-    # The previous direct-membership-by-ResourceID approach captured each device's
-    # ResourceID once at creation time: VMs not yet discovered were silently skipped,
-    # and a later delete/re-discover left a stale rule pointing at a gone resource,
-    # so the collection never populated and Office never deployed.
-    $officeCollectionName = "MEMLABS-Office Install Targets"
+    # Office Install Targets collection: ensure it exists with a current query
+    # rule. Also called inside the per-Primary Office app block above (before the
+    # deployment is created); calling again here covers the CAS/top-level path
+    # that skips the Office app block but still benefits from the collection
+    # being present and current.
     $officeTargetVMs = @($deployConfig.virtualMachines | Where-Object { $_.installOffice -and $_.installOffice -ne $false })
-    if ($officeTargetVMs.Count -gt 0 -and -not (Get-CMDeviceCollection -Name $officeCollectionName -ErrorAction SilentlyContinue)) {
-        try {
-            $officeCol = New-CMDeviceCollection -Name $officeCollectionName -LimitingCollectionName "All Systems" -Comment "VMs targeted for Microsoft 365 Apps install"
-            Write-DscStatus "$Tag Created collection: $officeCollectionName"
+    if ($officeTargetVMs.Count -gt 0) {
+        Set-OfficeInstallTargetsCollection -OfficeTargetVMs $officeTargetVMs | Out-Null
 
-            # Build a WQL 'Name in (...)' membership query from the office VM names.
-            $officeNameList = ($officeTargetVMs | ForEach-Object { "'$($_.vmName)'" }) -join ","
-            $officeQuery = "select SMS_R_System.ResourceID from SMS_R_System where SMS_R_System.Name in ($officeNameList)"
-            Add-CMDeviceCollectionQueryMembershipRule -CollectionId $officeCol.CollectionID -QueryExpression $officeQuery -RuleName "Office Install Targets Rule" -ErrorAction Stop
-            Write-DscStatus "$Tag Added query membership rule for: $(($officeTargetVMs | ForEach-Object { $_.vmName }) -join ', ')"
-
-            Invoke-CMCollectionUpdate -CollectionId $officeCol.CollectionID -ErrorAction SilentlyContinue
-            Move-CMObject -FolderPath "$SiteCode`:\Devicecollection\MEMLABS" -ObjectId $officeCol.CollectionID -ErrorAction SilentlyContinue
-            Write-DscStatus "$Tag Moved collection '$officeCollectionName' under MEMLABS folder"
-        }
-        catch {
-            Write-DscStatus "$Tag WARNING: Failed to create Office Install Targets collection: $($_.Exception.Message)"
+        # Self-heal missing Office deployments (non-CAS only -- deployment lives
+        # on the Primary). The original perfloading flow created the deployment
+        # immediately after the app and then short-circuits on re-runs
+        # ("application already exists, skipping"). If a prior run hit the order
+        # bug (deployment created against a not-yet-existing collection) the
+        # deployment was lost forever. Re-establish it here if missing.
+        if ($CurrentRole -ne "CAS") {
+            $officeAppNameBase = "MEMLABS-Microsoft365Apps"
+            $officeChannels = @($officeTargetVMs | ForEach-Object { $_.installOffice } | Select-Object -Unique)
+            $officeColName = "MEMLABS-Office Install Targets"
+            foreach ($ch in $officeChannels) {
+                $appName = if ($officeChannels.Count -eq 1) { $officeAppNameBase } else { "$officeAppNameBase-$ch" }
+                if (-not (Get-CMApplication -Name $appName -Fast -ErrorAction SilentlyContinue)) { continue }
+                $existingDep = Get-CMApplicationDeployment -Name $appName -CollectionName $officeColName -ErrorAction SilentlyContinue
+                if (-not $existingDep) {
+                    try {
+                        New-CMApplicationDeployment -ApplicationName $appName `
+                            -CollectionName $officeColName `
+                            -DeployAction Install `
+                            -DeployPurpose Required `
+                            -UserNotification DisplayAll `
+                            -ErrorAction Stop | Out-Null
+                        Write-DscStatus "$Tag Recovered missing Office deployment for '$appName' -> '$officeColName'"
+                    }
+                    catch {
+                        Write-DscStatus "$Tag WARNING: Failed to (re)create Office deployment for '$appName': $($_.Exception.Message)"
+                    }
+                }
+            }
         }
     }
 
