@@ -37,9 +37,18 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
-# Dot-source the memlabs common runtime (same pattern as New-Lab.ps1).
+# Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $here 'Common.ps1') | Out-Null
+$commonPath = Join-Path $here 'Common.ps1'
+$bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse non-ASCII characters." -ForegroundColor Red
+    Write-Host "Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Yellow
+    exit 1
+}
+
+# Dot-source the memlabs common runtime (same pattern as New-Lab.ps1).
+. $commonPath | Out-Null
 
 if (-not (Get-Command Set-VmProxyEnforcementForAllLabs -ErrorAction SilentlyContinue)) {
     Write-Error "Set-VmProxyEnforcementForAllLabs is not loaded. Make sure Common.HyperV.ps1 dot-sourced cleanly."

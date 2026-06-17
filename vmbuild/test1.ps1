@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Diagnoses PS 7.6.2 Copy-Item -ToSession regression in Start-Job vs Start-ThreadJob vs direct.
 .DESCRIPTION
@@ -18,8 +18,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# Validate Common.ps1 has UTF-8 BOM before dot-sourcing (PS5.1 needs BOM for non-ASCII chars)
+$commonPath = Join-Path $PSScriptRoot 'Common.ps1'
+$bomBytes = [System.IO.File]::ReadAllBytes($commonPath)[0..2]
+if (-not ($bomBytes[0] -eq 0xEF -and $bomBytes[1] -eq 0xBB -and $bomBytes[2] -eq 0xBF)) {
+    Write-Host "ERROR: Common.ps1 is missing UTF-8 BOM. PS5.1 will fail to parse non-ASCII characters." -ForegroundColor Red
+    Write-Host "Run: git checkout -- vmbuild/Common.ps1" -ForegroundColor Yellow
+    exit 1
+}
+
 # Load memlabs Common.ps1 for Get-VmSession, Write-Log, credentials, etc.
-. .\Common.ps1 -InJob
+. $commonPath -InJob
 
 Write-Host "`nPS Version: $($PSVersionTable.PSVersion)" -ForegroundColor Cyan
 
