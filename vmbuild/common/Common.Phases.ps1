@@ -1422,19 +1422,40 @@ function Get-ConfigurationData {
                     $snapshot = Get-VMCheckpoint2 -VMName $dc.vmName -ErrorAction SilentlyContinue | where-object { $_.Name -like "*$autoSnapshotName*" } | Sort-Object CreationTime | Select-Object -ExpandProperty Name
                 }
 
-                # Skip auto-snapshot if all phase 8 VMs already completed phase 8+ (re-run)
-                $phase8Nodes = $cd.AllNodes | Where-Object { $_.NodeName -ne "*" }
-                $allAlreadyDeployed = $true
-                foreach ($node in $phase8Nodes) {
+                # Snapshot decision is based ONLY on CAS/Primary site servers in
+                # the Phase 8 set. They are the ones actually running CM setup;
+                # other Phase 8 VMs (DPMP, PassiveSite, Secondary, etc.) are
+                # secondary work whose failure is recoverable. Other roles
+                # (AAD-joined clients, etc.) don't even run in Phase 8.
+                #
+                # Snapshot only when there's a CAS/Primary in the set that has
+                # NOT yet finished Phase 8 -- i.e. the risky first CM install is
+                # about to happen. If the CAS/Primary in scope has already done
+                # Phase 8 once (re-run, validation pass, adding a secondary),
+                # the install already succeeded and a new rollback point is
+                # unnecessary. If there's no CAS/Primary in the Phase 8 set at
+                # all, no CM site install is happening -- also skip.
+                $phase8SiteServers = $cd.AllNodes | Where-Object {
+                    $_.NodeName -ne "*" -and ($_.Role -eq 'CAS' -or $_.Role -eq 'Primary')
+                }
+                $needsSnapshot = $false
+                $pendingSiteServer = $null
+                foreach ($node in $phase8SiteServers) {
                     $vmNote = Get-VMNote -VMName $node.NodeName
                     if (-not $vmNote -or -not $vmNote.lastPhaseComplete -or $vmNote.lastPhaseComplete -lt 8) {
-                        $allAlreadyDeployed = $false
+                        $needsSnapshot = $true
+                        $pendingSiteServer = $node.NodeName
                         break
                     }
                 }
 
-                if ($allAlreadyDeployed) {
-                    Write-Log "[Phase 8] Skipping auto-snapshot: all VMs already deployed (re-run)" -LogOnly
+                if (-not $needsSnapshot) {
+                    if (-not $phase8SiteServers) {
+                        Write-Log "[Phase 8] Skipping auto-snapshot: no CAS/Primary in Phase 8 set" -LogOnly
+                    }
+                    else {
+                        Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
+                    }
                 }
                 elseif (-not $global:Phase1DeployedNewVMs) {
                     Write-Log "[Phase 8] Skipping auto-snapshot: re-deploy (Phase 1 did not deploy new VMs)" -LogOnly
