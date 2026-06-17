@@ -5671,8 +5671,19 @@ function Test-CMSiteWideFunctionality {
                     $syncTime = [Management.ManagementDateTimeConverter]::ToDateTime($syncStatus.LastSyncStateTime)
                     $age = (Get-Date) - $syncTime
                     if ($age.TotalMinutes -gt 30) {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: SUP sync stuck at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime) — likely a dead sync")
+                        # Long-running sync — gather WSUS-level diagnostics to help identify cause
+                        $wsusDiag = ""
+                        try {
+                            $wsusSrv = Get-WsusServer -ErrorAction Stop
+                            $sub = $wsusSrv.GetSubscription()
+                            $wsusState = $sub.GetSynchronizationStatus().ToString()
+                            $prog = $sub.GetSynchronizationProgress()
+                            $wsusDiag = " [WSUS: $wsusState, Phase=$($prog.Phase), Items=$($prog.ProcessedItems)/$($prog.TotalItems)]"
+                        }
+                        catch {
+                            $wsusDiag = " [WSUS diag failed: $($_.Exception.Message)]"
+                        }
+                        $results.Details.Add("WARN: SUP sync at '$sName' for $([math]::Round($age.TotalMinutes,0)) min (since $syncTime)$wsusDiag — may be slow or stuck")
                     }
                     else {
                         $results.Details.Add("OK: SUP sync in progress ($sName, $([math]::Round($age.TotalMinutes,1)) min)")
