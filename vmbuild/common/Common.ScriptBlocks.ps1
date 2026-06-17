@@ -1743,6 +1743,45 @@ $global:VM_Config = {
 
 
         $Stop_RunningDSC = {
+            # Helper: hard-delete the LCM's on-disk documents and disable the
+            # DSC scheduled tasks so it cannot auto-resume from a doc we
+            # missed. Remove-DscConfigurationDocument goes through CIM/WMI --
+            # exactly the surface that hangs when LCM is mid-apply -- so it
+            # silently no-ops on a stuck LCM. The MOFs live as plain files
+            # under C:\Windows\System32\Configuration and admins can unlink
+            # them directly. NEVER touch MetaConfig.mof: that is the LCM's
+            # own settings (RebootNodeIfNeeded, ConfigurationMode, etc.); if
+            # it disappears the LCM falls back to defaults and rejects the
+            # next Set-DscLocalConfigurationManager push.
+            $Force_PurgeDsc = {
+                $cfgDir = 'C:\Windows\System32\Configuration'
+                $docs = @(
+                    'Current.mof', 'Current.mof.checksum',
+                    'Pending.mof', 'Pending.mof.checksum',
+                    'Previous.mof', 'Previous.mof.checksum',
+                    'backup.mof', 'backup.mof.checksum',
+                    'DSCEngineCache.mof'
+                )
+                foreach ($d in $docs) {
+                    $p = Join-Path $cfgDir $d
+                    if (Test-Path -LiteralPath $p) {
+                        try { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                }
+                # Disable the LCM's auto-run hooks so a respawned WmiPrvSE
+                # can't re-launch consistency or boot-time recovery against
+                # whatever document slipped past the purge.
+                foreach ($task in @('Consistency', 'DSCRestartBootTask')) {
+                    try {
+                        $t = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Desired State Configuration\' -TaskName $task -ErrorAction SilentlyContinue
+                        if ($t) {
+                            if ($t.State -eq 'Running') { Stop-ScheduledTask -InputObject $t -ErrorAction SilentlyContinue }
+                            Disable-ScheduledTask -InputObject $t -ErrorAction SilentlyContinue | Out-Null
+                        }
+                    } catch {}
+                }
+            }
+
             # 1. Try a clean stop first (flushes DSC logs so they're readable).
             #    Use a short timeout — on first run there's nothing to stop and
             #    it should return instantly; on re-runs a healthy LCM stops in
@@ -1774,6 +1813,12 @@ $global:VM_Config = {
                 } catch {}
                 # Brief pause for WMI service to respawn
                 Start-Sleep -Seconds 2
+                # Take the documents away on disk so the respawned WmiPrvSE
+                # has nothing to resume from. Without this, killing WmiPrvSE
+                # only pauses the apply -- it can immediately re-load the
+                # still-present Current.mof and pick up where it left off,
+                # leaving LCMState=Busy and stranding DSC_ClearStatus.
+                & $Force_PurgeDsc
                 try {
                     Remove-DscConfigurationDocument -Stage Current, Pending, Previous -Force -ErrorAction SilentlyContinue | Out-Null
                     # Bound this second stop. Killing WmiPrvSE above already
@@ -1827,20 +1872,39 @@ $global:VM_Config = {
             #    into the new push. Return the real state so the host escalates
             #    to a reboot (the guaranteed way to clear an in-memory apply)
             #    only when DSC genuinely did not stop.
+            #    If still Busy, retry the kill+purge cycle up to 4 more times.
+            #    A WmiPrvSE that respawns can re-load a doc we missed (race
+            #    between Stop-Process and Force_PurgeDsc's file unlink), so
+            #    loop: re-purge, re-kill, re-check. Each iteration takes ~3s,
+            #    bounded total ~12s extra -- well inside the outer 60-180s
+            #    Invoke-VmCommand budget. DSC_ClearStatus depends on Busy=false
+            #    here to write its readiness token, so kicking and screaming is
+            #    the whole point.
             $lcmState = 'Unknown'
             $stopped = $true
-            try {
-                $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
-                # Busy = a configuration is actively applying. Anything else
-                # (Idle, PendingConfiguration, Ready) means no apply is running.
-                $stopped = ($lcmState -ne 'Busy')
-            }
-            catch {
-                # LCM unreadable right after we killed WmiPrvSE -- the provider
-                # host was just terminated, so there is no running apply. Treat
-                # as stopped (matches DSC_ClearStatus's LCM-gate logic).
-                $lcmState = 'Unknown'
-                $stopped = $true
+            for ($drain = 0; $drain -lt 5; $drain++) {
+                try {
+                    $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+                    # Busy = a configuration is actively applying. Anything else
+                    # (Idle, PendingConfiguration, Ready) means no apply is running.
+                    $stopped = ($lcmState -ne 'Busy')
+                }
+                catch {
+                    # LCM unreadable right after we killed WmiPrvSE -- the provider
+                    # host was just terminated, so there is no running apply. Treat
+                    # as stopped (matches DSC_ClearStatus's LCM-gate logic).
+                    $lcmState = 'Unknown'
+                    $stopped = $true
+                }
+                if ($stopped) { break }
+                # Still Busy. Repeat the on-disk purge + WmiPrvSE kill so the
+                # respawned provider host has nothing to resume from.
+                try { & $Force_PurgeDsc } catch {}
+                try {
+                    Get-Process WmiPrvSE -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                    Get-Process WmiApSrv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                } catch {}
+                Start-Sleep -Seconds 2
             }
             return [PSCustomObject]@{ Stopped = $stopped; LCMState = $lcmState }
         }
