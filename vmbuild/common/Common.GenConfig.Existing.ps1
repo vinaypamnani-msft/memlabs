@@ -1030,13 +1030,14 @@ function New-UserConfig {
         $inferredUsePKI = if ($existingPkiOptions -and $existingPkiOptions.EnablePKI) { $true } else { $false }
         $synthesized = [PSCustomObject]@{
             Version            = $inferredVersion
-            Install            = $true
+            Install             = $true
             PrePopulateObjects = $true
             EVALVersion        = $false
             OfflineSCP         = $false
             OfflineSUP         = $false
             UsePKI             = $inferredUsePKI
             EnableBLM          = $false
+            WsusImportBaseline = $true
         }
         $configGenerated | Add-Member -MemberType NoteProperty -Name "cmOptions" -Value $synthesized -force
         Write-Log "New-UserConfig: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) for domain $Domain - existing site server $($topLevelSite.vmName) had no cmOptions in VM note." -Verbose

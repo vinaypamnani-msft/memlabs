@@ -70,14 +70,15 @@ function Get-ConfigCmOptions {
                 }
                 $inferredUsePKI = if ($dcVM -and $dcVM.pkiOptions -and $dcVM.pkiOptions.EnablePKI) { $true } else { $false }
                 $synthesized = [PSCustomObject]@{
-                    Version            = $inferredVersion
-                    Install            = $true
-                    PrePopulateObjects = $true
-                    EVALVersion        = $false
-                    OfflineSCP         = $false
-                    OfflineSUP         = $false
-                    UsePKI             = $inferredUsePKI
-                    EnableBLM          = $false
+                    Version             = $inferredVersion
+                    Install             = $true
+                    PrePopulateObjects  = $true
+                    EVALVersion         = $false
+                    OfflineSCP          = $false
+                    OfflineSUP          = $false
+                    UsePKI              = $inferredUsePKI
+                    EnableBLM           = $false
+                    WsusImportBaseline  = $true
                 }
                 Write-Log "Get-ConfigCmOptions: Synthesized cmOptions from defaults (Version=$inferredVersion, UsePKI=$inferredUsePKI) - existing site server $($anySiteServerInDomain.vmName) had no cmOptions in VM note." -Verbose
                 return $synthesized
@@ -323,6 +324,11 @@ function Get-UserConfiguration {
             }
             if ($null -eq ($config.cmOptions.OfflineSUP)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "OfflineSUP" -Value $false -Force
+            }
+            if ($null -eq ($config.cmOptions.WsusImportBaseline)) {
+                # Pre-built WSUS categories baseline cab (vmbuild\azureFiles\tools\wsus\WsusCategoriesBaseline.cab),
+                # imported via wsusutil before MU sync. Default-on; safe no-op when no cab is shipped.
+                $config.cmOptions | Add-Member -MemberType NoteProperty -Name "WsusImportBaseline" -Value $true -Force
             }
             if ($null -eq ($config.cmOptions.EnableBLM)) {
                 $config.cmOptions | Add-Member -MemberType NoteProperty -Name "EnableBLM" -Value $false -Force

@@ -759,6 +759,7 @@ function Add-NewVMForRole {
                     OfflineSUP                = $false
                     UsePKI                    = $false
                     EnableBLM                 = $false
+                    WsusImportBaseline        = $true
                 }
             }
             $virtualMachine | Add-Member -MemberType NoteProperty -Name 'cmOptions' -Value $newCmOptions -force

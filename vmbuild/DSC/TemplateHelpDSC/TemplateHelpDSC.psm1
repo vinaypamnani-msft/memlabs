@@ -5585,6 +5585,93 @@ class WSUSSync {
     [string] $ServerName
 
     [void] Set() {
+        # Pre-built categories baseline cab takes precedence over MU sync.
+        # The cab (C:\staging\wsus\WsusCategoriesBaseline.cab, shipped via
+        # Common.ScriptBlocks.ps1 in pre-DSC stage when cmOptions.WsusImportBaseline
+        # is true) contains only the Products/Classifications/Languages/Detectoid
+        # taxonomy from a `wsusutil export` of a clean WSUS server -- no products
+        # subscribed, no update metadata. Importing it bypasses the slow/flaky
+        # first MU categories sync entirely. perfloading still drives the
+        # per-deploy product subscription + updates sync as today.
+        # Falls through to the MU sync path on any failure (cab missing,
+        # import error, post-import catalog still empty, etc.) so a stale or
+        # corrupt cab can never break a deploy.
+        $cabPath = 'C:\staging\wsus\WsusCategoriesBaseline.cab'
+        if (Test-Path $cabPath) {
+            $importedOk = $false
+            try {
+                # Provenance from sidecar (if shipped alongside the cab).
+                $meta = $null
+                $metaPath = 'C:\staging\wsus\WsusCategoriesBaseline.meta.json'
+                if (Test-Path $metaPath) {
+                    try { $meta = Get-Content $metaPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+                }
+                $genDate = if ($meta -and $meta.generatedUtc) { $meta.generatedUtc } else { '<unknown>' }
+                $genSha = if ($meta -and $meta.sha256) { $meta.sha256.Substring(0, [Math]::Min(12, $meta.sha256.Length)) } else { '<unknown>' }
+                $ageDays = $null
+                if ($meta -and $meta.generatedUtc) {
+                    try { $ageDays = [int](((Get-Date).ToUniversalTime() - [datetime]::Parse($meta.generatedUtc)).TotalDays) } catch {}
+                }
+                Write-Status "WSUS categories baseline cab present (generated=$genDate, sha=$genSha, ageDays=$ageDays). Attempting wsusutil import for $($this.ServerName)."
+
+                # Skip import if categories already present -- merging into a
+                # non-empty DB leaves subscription state ambiguous.
+                $hasCats = $false
+                $preCount = 0
+                try {
+                    $WSUS_pre = Get-WsusServer -Name $this.ServerName -PortNumber 8530
+                    if ($WSUS_pre) {
+                        $cats_pre = $WSUS_pre.GetSubscription().GetUpdateCategories()
+                        if ($cats_pre) { $preCount = $cats_pre.Count }
+                        $hasCats = $preCount -gt 0
+                    }
+                } catch {}
+                if ($hasCats) {
+                    Write-Status "WSUS catalog already populated ($preCount categories) - skipping baseline import and MU sync."
+                    return
+                }
+
+                $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+                if (-not (Test-Path $wsusUtil)) {
+                    Write-Status "WsusUtil.exe not found at $wsusUtil - falling back to MU sync."
+                }
+                else {
+                    $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
+                    $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -Wait -PassThru -NoNewWindow -ErrorAction Stop
+                    if ($proc.ExitCode -eq 0) {
+                        $postCount = 0
+                        try {
+                            $WSUS_post = Get-WsusServer -Name $this.ServerName -PortNumber 8530
+                            $cats_post = $WSUS_post.GetSubscription().GetUpdateCategories()
+                            if ($cats_post) { $postCount = $cats_post.Count }
+                        } catch {}
+                        if ($postCount -gt 0) {
+                            Write-Status "WSUS baseline import OK: $postCount categories present after import. Skipping MU categories sync."
+                            if ($null -ne $ageDays -and $ageDays -gt 540) {
+                                Write-Status "WARNING: WSUS baseline cab is $ageDays days old (>540). Consider regenerating via baseimagestaging\New-WsusCategoriesBaseline.ps1."
+                            }
+                            $importedOk = $true
+                        }
+                        else {
+                            Write-Status "WSUS baseline import returned exit=0 but no categories present afterwards - falling back to MU sync."
+                        }
+                    }
+                    else {
+                        $tail = ''
+                        if (Test-Path $importLog) {
+                            $tailLines = Get-Content $importLog -Tail 5 -ErrorAction SilentlyContinue
+                            if ($tailLines) { $tail = ($tailLines -join ' | ') }
+                        }
+                        Write-Status "WSUS baseline import failed (exit=$($proc.ExitCode)). Tail: $tail. Falling back to MU sync."
+                    }
+                }
+            }
+            catch {
+                Write-Status "WSUS baseline import threw: $($_.Exception.Message). Falling back to MU sync."
+            }
+            if ($importedOk) { return }
+        }
+
         # Early fire-and-forget sync to pre-download the WSUS category catalog.
         # This runs in Phase 7 (after any PBIRS install on the same VM has
         # completed and rebooted), ~3-4 hours before perfloading needs WSUS

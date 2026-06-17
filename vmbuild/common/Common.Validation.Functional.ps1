@@ -6228,6 +6228,21 @@ function Test-CMSiteWideFunctionality {
                 }
                 else {
                     $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
+                    # Append baseline-cab provenance when an import was used.
+                    # No-op when the import path didn't run (no log file).
+                    try {
+                        $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
+                        $metaPath = 'C:\staging\wsus\WsusCategoriesBaseline.meta.json'
+                        if (Test-Path $importLog) {
+                            $meta = $null
+                            if (Test-Path $metaPath) {
+                                try { $meta = Get-Content $metaPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+                            }
+                            $genDate = if ($meta -and $meta.generatedUtc) { $meta.generatedUtc } else { '<unknown>' }
+                            $genSha = if ($meta -and $meta.sha256) { $meta.sha256.Substring(0, [Math]::Min(12, $meta.sha256.Length)) } else { '<unknown>' }
+                            $results.Details.Add("OK: WSUS categories baseline cab used (generated=$genDate, sha=$genSha)")
+                        }
+                    } catch {}
                 }
                 # WsusPool memory cap - the default ~1.8 GB cap recycles the pool
                 # mid-sync; a hardened SUP should have it uncapped (0).

@@ -2585,6 +2585,57 @@ $global:VM_Config = {
             Write-Progress2 $Activity -Status "Skip copying DSC files to the VM." -percentcomplete 35 -force -Log
         }
 
+        # WSUS categories baseline cab. Ship to top-of-hierarchy SUP/WSUS
+        # VMs so Phase 7's WSUSSync resource can `wsusutil import` instead of
+        # doing the slow/flaky first categories sync from Microsoft Update.
+        # No-op when the cab is absent on host, the flag is off, the VM isn't
+        # the top-of-hierarchy SUP, or the guest already has a matching cab.
+        # Gated on Phase <= 7 so the copy doesn't fire on every later phase
+        # pass (the cab only needs to be in place before Phase 7's DSC pass).
+        if ($Phase -le 7) {
+            $cmoForCab = if ($currentItem.cmOptions) { $currentItem.cmOptions } else { $deployConfig.cmOptions }
+            $cabEnabled = $true
+            if ($cmoForCab -and $cmoForCab.PSObject.Properties['WsusImportBaseline'] -and $cmoForCab.WsusImportBaseline -eq $false) {
+                $cabEnabled = $false
+            }
+            $isWsusVm = ($currentItem.installSUP -eq $true) -or ($currentItem.Role -eq 'WSUS')
+            $hasCAS = ($deployConfig.virtualMachines | Where-Object { $_.role -eq 'CAS' }).Count -gt 0
+            $isTopOfHier = ($currentItem.Role -eq 'WSUS') -or (
+                ($currentItem.installSUP -eq $true) -and (
+                    ($currentItem.role -eq 'CAS') -or ($currentItem.role -eq 'Primary' -and -not $hasCAS)
+                )
+            )
+            $hostCabPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.cab"
+            if ($cabEnabled -and $isWsusVm -and $isTopOfHier -and (Test-Path $hostCabPath)) {
+                try {
+                    $hostCabHash = (Get-FileHash -Path $hostCabPath -Algorithm MD5 -ErrorAction Stop).Hash
+                    $guestProbe = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
+                        New-Item -Path 'C:\staging\wsus' -ItemType Directory -Force | Out-Null
+                        (Get-FileHash -Path 'C:\staging\wsus\WsusCategoriesBaseline.cab' -Algorithm MD5 -ErrorAction SilentlyContinue).Hash
+                    } -DisplayName "DSC: Detect existing WSUS baseline cab"
+                    $guestHash = if ($guestProbe -and $guestProbe.ScriptBlockOutput) { $guestProbe.ScriptBlockOutput } else { $null }
+                    if ($guestHash -ne $hostCabHash) {
+                        $sizeMB = [math]::Round((Get-Item $hostCabPath).Length / 1MB, 1)
+                        Write-Progress2 $Activity -Status "Copying WSUS categories baseline ($sizeMB MB)" -percentcomplete 38 -force
+                        Write-Log "[Phase $Phase]: $($currentItem.vmName): Copying WSUS categories baseline cab ($sizeMB MB) to the VM."
+                        $cabCopyOk = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $hostCabPath -Destination 'C:\staging\wsus' -Force
+                        if ($cabCopyOk -eq $false) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab copy failed; WSUSSync will fall back to Microsoft Update sync." -Warning
+                        }
+                        else {
+                            $hostMetaPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.meta.json"
+                            if (Test-Path $hostMetaPath) {
+                                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $hostMetaPath -Destination 'C:\staging\wsus' -Force | Out-Null
+                            }
+                        }
+                    }
+                }
+                catch {
+                    Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab pre-copy probe threw: $($_.Exception.Message). Skipping; WSUSSync will fall back to MU sync." -Warning
+                }
+            }
+        }
+
         # Expand DSC.zip and install modules in one PSDirect round-trip
         $DSC_ExpandAndInstall = {
             try {
