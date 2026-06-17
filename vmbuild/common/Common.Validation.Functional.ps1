@@ -1294,23 +1294,37 @@ function Test-SQLFunctionality {
         # Generic SQL Agent job health: any enabled job whose most-recent run
         # was NOT Succeeded is a real signal (CM site maintenance, WSUS reindex,
         # AG backup jobs, operator-added jobs). Never-run jobs are skipped.
+        # The outcome row (step_id=0) always carries SQL Agent's generic wrapper
+        # message ("The job failed. The Job was invoked by ..."); the actual
+        # T-SQL error lives in the highest-numbered step_id>0 row for the same
+        # run, so we pull that too and emit it as a follow-up Step output line.
         if ($results.Passed) {
             $results.Details.Add("CMD: Check all enabled SQL Agent jobs in msdb for last-run failures")
             try {
                 $jobHealthQuery = @"
 ;WITH lastRun AS (
-    SELECT job_id, run_status, run_date, run_time, message,
+    SELECT job_id, run_status, run_date, run_time, message, instance_id,
            ROW_NUMBER() OVER (PARTITION BY job_id
-                              ORDER BY run_date DESC, run_time DESC) AS rn
+                              ORDER BY run_date DESC, run_time DESC, instance_id DESC) AS rn
     FROM msdb.dbo.sysjobhistory
     WHERE step_id = 0
+),
+lastStep AS (
+    SELECT h.job_id, h.step_name, h.message AS StepMessage, h.run_status AS StepRunStatus,
+           ROW_NUMBER() OVER (PARTITION BY h.job_id
+                              ORDER BY h.instance_id DESC) AS rn
+    FROM msdb.dbo.sysjobhistory h
+    WHERE h.step_id > 0
 )
 SELECT j.name,
        h.run_status AS LastRunStatus,
        msdb.dbo.agent_datetime(h.run_date, h.run_time) AS LastRunTime,
-       LEFT(ISNULL(h.message, ''''), 500) AS LastMessage
+       LEFT(ISNULL(h.message, ''''), 500) AS LastMessage,
+       ISNULL(ls.step_name, '''')                AS LastStepName,
+       LEFT(ISNULL(ls.StepMessage, ''''), 1500)  AS LastStepMessage
 FROM msdb.dbo.sysjobs j
-LEFT JOIN lastRun h ON h.job_id = j.job_id AND h.rn = 1
+LEFT JOIN lastRun  h  ON h.job_id  = j.job_id AND h.rn  = 1
+LEFT JOIN lastStep ls ON ls.job_id = j.job_id AND ls.rn = 1
 WHERE j.enabled = 1
   AND h.run_status IS NOT NULL
   AND h.run_status <> 1
@@ -1330,6 +1344,13 @@ ORDER BY LastRunTime DESC
                             if ($clean) { $msgTail = " - $clean" }
                         }
                         $results.Details.Add("WARN: Agent job '$($bj.name)' last run: $statusText at $($bj.LastRunTime)$msgTail")
+                        if ($bj.LastStepMessage -and $bj.LastStepMessage -isnot [System.DBNull]) {
+                            $stepClean = ($bj.LastStepMessage -replace '\s+', ' ').Trim()
+                            if ($stepClean) {
+                                $stepName = if ($bj.LastStepName) { $bj.LastStepName } else { '(step)' }
+                                $results.Details.Add("WARN:   Step '$stepName' output: $stepClean")
+                            }
+                        }
                     }
                 }
             }
@@ -1449,6 +1470,31 @@ ORDER BY h.run_date DESC, h.run_time DESC
                                 if ($clean2) { $msgTail2 = " - $clean2" }
                             }
                             $results.Details.Add("WARN: Agent job '$jobName' triggered run ($reason): $st at $($outcome.LastRunTime)$msgTail2")
+                            # Pull the actual step-level error (T-SQL message from
+                            # the body of the job) for the NEW run instance only.
+                            # Filtered by (run_date, run_time) > before-window so
+                            # we never report a stale prior-run step message.
+                            $stepQuery = @"
+SELECT TOP 1 ISNULL(h.step_name, '''') AS StepName,
+             LEFT(ISNULL(h.message, ''''), 1500) AS StepMessage
+FROM msdb.dbo.sysjobhistory h
+JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+WHERE h.step_id > 0 AND j.name = N'$jobNameEsc'
+  AND (h.run_date > $beforeDate
+       OR (h.run_date = $beforeDate AND h.run_time > $beforeTime))
+ORDER BY h.instance_id DESC
+"@
+                            try {
+                                $stepRow = Invoke-Sqlcmd -ServerInstance $connStr -Query $stepQuery -QueryTimeout 15 @sqlParams -ErrorAction SilentlyContinue
+                                if ($stepRow -and $stepRow.StepMessage -and $stepRow.StepMessage -isnot [System.DBNull]) {
+                                    $stepClean2 = ($stepRow.StepMessage -replace '\s+', ' ').Trim()
+                                    if ($stepClean2) {
+                                        $stepName2 = if ($stepRow.StepName) { $stepRow.StepName } else { '(step)' }
+                                        $results.Details.Add("WARN:   Step '$stepName2' output: $stepClean2")
+                                    }
+                                }
+                            }
+                            catch { }
                         }
                     }
                 }
