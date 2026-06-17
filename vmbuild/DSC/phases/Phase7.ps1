@@ -124,8 +124,21 @@
             ($thisVM.role -eq 'Primary' -and -not $hasCAS)
         )
         if ($syncsFromMU) {
+            # Drain any pending reboot left over from PBIRS install before
+            # firing the WSUS sync. If any reboot is pending, PendingReboot
+            # sets $global:DSCMachineStatus = 1 and LCM reboots; on resume,
+            # LCM moves on to WSUSSync (the next resource in the chain),
+            # which then fires the sync on a clean OS. This guarantees:
+            #   - WSUSSync starts with no pending reboot in flight
+            #   - Phase 7 ends with no pending reboot
+            #   - Phase 8 CM setup's "Pending System Restart" prereq passes
+            PendingReboot DrainBeforeWSUSSync {
+                Name                      = 'BeforeWSUSSync'
+                SkipCcmClientSDK          = $true
+                DependsOn                 = $nextDepend
+            }
             WSUSSync WSUSSync {
-                DependsOn  = $nextDepend
+                DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
                 ServerName = $thisVM.vmName + "." + $DomainName
             }
             $nextDepend = "[WSUSSync]WSUSSync"
@@ -161,8 +174,17 @@
             WriteStatus StartWSUSSync {
                 Status = "Starting early WSUS catalog sync (background)"
             }
+            # Drain any pending reboot before firing the sync. Pre-Phase-7
+            # check already cleared incoming pending reboots, but defend
+            # against anything that slipped through (e.g. late CBS state)
+            # so the sync runs on a clean OS and Phase 7 ends clean.
+            PendingReboot DrainBeforeWSUSSync {
+                Name             = 'BeforeWSUSSync'
+                SkipCcmClientSDK = $true
+                DependsOn        = "[WriteStatus]StartWSUSSync"
+            }
             WSUSSync WSUSSync {
-                DependsOn  = "[WriteStatus]StartWSUSSync"
+                DependsOn  = "[PendingReboot]DrainBeforeWSUSSync"
                 ServerName = $thisVM.vmName + "." + $DomainName
             }
             WriteStatus Complete {
