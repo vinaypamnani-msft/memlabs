@@ -120,23 +120,22 @@ function Invoke-AutoSnapShotDomain {
         [string] $comment
     )
 
-    #Get Critical Server list.  All domain VMs should be restarted after snapshot,
-    #not just the ones in the current phase's ConfigurationData.
-    $critlist = Get-CriticalVMs -domain $domain
-
-    #Stop all VMs in Domain
-    Invoke-StopVMs -domain $domain -quiet:$true
-
-    #Take Snapshot
+    # Live (production) checkpoint -- VMs stay running.
+    #
+    # Previously we stopped every VM in the domain, snapshotted, then started
+    # them back up in dependency order. That cold-snapshot pattern killed the
+    # in-flight WSUS catalog sync kicked off in Phase 7 (and added several
+    # minutes of stop+start overhead). Lab VMs are Gen2 with integration
+    # services and default CheckpointType=Production, so Hyper-V uses VSS to
+    # quiesce each VM and produce an application-consistent snapshot while
+    # the VMs continue running. SQL, WSUS, AD are all VSS-aware.
+    #
+    # Per-VM VSS snapshots are not coordinated across VMs, but the wall-clock
+    # drift is sub-second and the snapshot's purpose is "rollback point before
+    # CM install" -- minor inter-VM drift is fine.
     $failures = Invoke-SnapshotDomain -domain $domain -comment $comment -quiet:$true
     if ($failures -ne 0) {
         write-log "$failures VM(s) could not be snapshotted" -Failure
-    }
-
-    #Start VMs in correct order
-    $failures = Invoke-SmartStartVMs -CritList $critlist
-    if ($failures -ne 0) {
-        write-log "$failures VM(s) could not be started" -Failure
     }
 }
 
