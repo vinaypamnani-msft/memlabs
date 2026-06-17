@@ -231,7 +231,9 @@ write-host "Running ""$($dscRole)"" -DeployConfigPath $filePath -AdminCreds $adm
     # Update both MemLabsVersion and LatestHotfixVersion
     $content = $content -replace "MemLabsVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "MemLabsVersion              = `"$newVersion`""
     $content = $content -replace "LatestHotfixVersion\s*=\s*`"$([regex]::Escape($oldVersion))`"", "LatestHotfixVersion         = `"$newVersion`""
-    [System.IO.File]::WriteAllText($commonPs1Path, $content)
+    # Write with UTF-8 BOM — PS5.1 needs the BOM to parse non-ASCII characters
+    $utf8Bom = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText($commonPs1Path, $content, $utf8Bom)
     Write-Host "MemLabsVersion updated: $oldVersion -> $newVersion" -ForegroundColor Cyan
 }
 finally {
