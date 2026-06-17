@@ -5567,6 +5567,35 @@ class WSUSSync {
             $sub = $WSUS.GetSubscription()
             $sub.StartSynchronization()
             Write-Status "WSUS sync started. Will run in background during Phases 7-8 (~4 hours)."
+
+            # Block until the sync has actually transitioned to Running before
+            # returning. StartSynchronization() is async -- the WSUS service
+            # picks up the request on a worker thread and flips the status
+            # NotStarted -> Running within a few seconds. The orchestrator's
+            # post-phase reboot check (Phase < 8) runs Test_PendingReboot,
+            # which only sets DeferredFor when GetSynchronizationStatus()
+            # returns 'Running'. If we return from Set() before the transition
+            # is observable, the post-phase check can race in, see NotStarted,
+            # find any pending reboot from PBIRS install aftermath, and
+            # reboot the VM -- killing the sync we just kicked off.
+            $deadline = (Get-Date).AddSeconds(30)
+            $observedRunning = $false
+            $lastStatus = $null
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $lastStatus = $sub.GetSynchronizationStatus().ToString()
+                    if ($lastStatus -eq 'Running') {
+                        $observedRunning = $true
+                        break
+                    }
+                } catch {}
+                Start-Sleep -Seconds 1
+            }
+            if ($observedRunning) {
+                Write-Status "WSUS sync confirmed Running. Safe to end Phase 7 DSC pass."
+            } else {
+                Write-Status "WSUS sync did not transition to Running within 30s (last status: $lastStatus). Post-phase reboot check may not defer; perfloading will retry sync later."
+            }
         }
         catch {
             Write-Status "Early WSUS sync failed: $($_.Exception.Message). Perfloading will handle sync later."
