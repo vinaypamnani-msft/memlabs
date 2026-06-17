@@ -704,14 +704,18 @@ function Start-PhaseJobs {
         }
     }
 
-    # Phase 10 pre-filter: bulk-read VM notes and skip VMs where all
-    # new-VM maintenance fixes are already applied. This avoids spawning
-    # a job, dot-sourcing Common.ps1, opening PSDirect, and copying DSC
-    # for every VM that has nothing to do on a re-run.
+    # Phase 10 pre-filter: bulk-read VM notes and skip VMs where every
+    # applicable fix (AppliesToExisting=$true) is already recorded at the
+    # current FixVersion. Phase 10's job is to bring the VM to 100%
+    # up-to-date, so the eligibility set must match Start-VMMaintenance's
+    # AppliesToExisting filter -- not a subset of AppliesToNew, which used
+    # to silently skip VMs missing existing-only hotfixes (e.g.
+    # Fix-SQLAOBackupJobs). Skipping here just avoids spawning a job for
+    # VMs that genuinely have nothing to do.
     $phase10SkipSet = @{}
     if ($Phase -eq 10) {
         $allFixDefs = Get-VMFixes -ReturnDummyList
-        $newVmFixes = @($allFixDefs | Where-Object { $_.AppliesToNew -eq $true })
+        $relevantFixes = @($allFixDefs | Where-Object { $_.AppliesToExisting -eq $true })
         $vmNoteCache = @{}
         try {
             foreach ($hvm in (Get-VM -ErrorAction SilentlyContinue)) {
@@ -725,7 +729,16 @@ function Start-PhaseJobs {
             $note = $vmNoteCache[$vm.vmName]
             if ($note -and $note.appliedFixes) {
                 $allApplied = $true
-                foreach ($fix in $newVmFixes) {
+                foreach ($fix in $relevantFixes) {
+                    # Per-VM role gating: skip fixes that don't apply to this VM's role.
+                    $roleOk = $true
+                    if ($fix.AppliesToRoles -and $fix.AppliesToRoles.Count -gt 0) {
+                        $roleOk = ($note.role -in $fix.AppliesToRoles) -or
+                                  (($fix.AppliesToRoles -contains 'CASorStandalonePrimary') -and
+                                   ($note.role -eq 'CAS' -or ($note.role -eq 'Primary' -and -not $note.parentSiteCode)))
+                    }
+                    if ($fix.NotAppliesToRoles -and ($note.role -in $fix.NotAppliesToRoles)) { $roleOk = $false }
+                    if (-not $roleOk) { continue }
                     if (-not (Test-VMFixApplied -VMNote $note -FixName $fix.FixName -FixVersion $fix.FixVersion)) {
                         $allApplied = $false
                         break
@@ -897,11 +910,17 @@ function Start-PhaseJobs {
                     continue
                 }
                 # -ArgumentList $currentItem, (, $argument1), $argument2, $argument3, $PSScriptRoot
+                # 3rd arg ($NewVMS in Phase10Job) = $false: Phase 10's job is
+                # to bring the VM to 100% up-to-date, so route through the
+                # AppliesToExisting filter (which is a superset of
+                # AppliesToNew). Per-fix version check inside Start-VMFixes
+                # still no-ops fixes already at version, so this stays cheap
+                # on a fresh deploy.
                 if ($usePhaseThreadJob) {
-                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-ThreadJob -ScriptBlock $global:Phase10Job -Name $jobName -ThrottleLimit $phaseThreadJobThrottle -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
                 }
                 else {
-                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $true, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
+                    $job = Start-Job -ScriptBlock $global:Phase10Job -Name $jobName -ArgumentList $currentItem, (, @()), $false, $false, $PSScriptRoot -ErrorAction Stop -ErrorVariable Err
                 }
                 if (-not $job) {
                     Write-Log "[Phase $Phase] Failed to create job for VM $($currentItem.vmName). $Err" -Failure
