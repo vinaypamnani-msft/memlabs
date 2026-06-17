@@ -1457,7 +1457,21 @@ ORDER BY h.run_date DESC, h.run_time DESC
                         }
                         elseif ([int]$outcome.run_status -eq 1) {
                             if ($isRetry) {
-                                $results.Details.Add("OK: Agent job '$jobName' re-triggered after prior failure and succeeded at $($outcome.LastRunTime)")
+                                # The passive job-health block above already emitted
+                                # a screen-visible WARN for this job (the prior
+                                # failure was the last history row at scan time).
+                                # We've now proven the job is healthy by re-running
+                                # it successfully, so suppress that WARN and emit
+                                # a single RECOVERED: line in its place. The DIAG
+                                # follow-up line (log-only) stays for forensics.
+                                $warnPattern = "^WARN: Agent job '$([regex]::Escape($jobName))' last run: "
+                                for ($wi = $results.Details.Count - 1; $wi -ge 0; $wi--) {
+                                    if ($results.Details[$wi] -match $warnPattern) {
+                                        $results.Details.RemoveAt($wi)
+                                        break
+                                    }
+                                }
+                                $results.Details.Add("RECOVERED: Agent job '$jobName' previously failed; re-triggered and succeeded at $($outcome.LastRunTime)")
                             }
                             else {
                                 $results.Details.Add("OK: Agent job '$jobName' triggered and succeeded at $($outcome.LastRunTime)")
@@ -6853,6 +6867,10 @@ function Format-TestResult {
             elseif ($line -match '^WARN:') {
                 Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Warning -LogOnly
                 $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: $line"; Level = 'Warning' })
+            }
+            elseif ($line -match '^RECOVERED:') {
+                Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -Success -LogOnly
+                $script:Phase11OutputBuffer.Add(@{ Text = "[Phase $Phase] $VMName [$RoleLabel]: $line"; Level = 'Success' })
             }
             else {
                 Write-Log "[Phase $Phase] $VMName [$RoleLabel]: $line" -LogOnly

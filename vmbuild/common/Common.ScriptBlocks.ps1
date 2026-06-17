@@ -112,6 +112,7 @@ $global:Phase11Job = {
                 switch ($entry.Level) {
                     'Failure' { Write-Log $entry.Text -OutputStream -Failure }
                     'Warning' { Write-Log $entry.Text -OutputStream -Warning }
+                    'Success' { Write-Log $entry.Text -OutputStream -Success }
                     default   { Write-Log $entry.Text -OutputStream }
                 }
             }
