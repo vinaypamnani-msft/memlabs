@@ -790,6 +790,11 @@ function Start-VMFix {
     $vmNote = Get-VMNote -VMName $vmName
     $vmDomain = $vmNote.domain
 
+    if (-not $vmDomain) {
+        Write-Log "$vmName`: No domain found in VMNote (vmNote=$($null -ne $vmNote)); assuming unmanaged. Skipping fix '$($vmFix.FixName)'." -LogOnly -Warning
+        $return.Success = $true
+        return $return
+    }
 
     # Check applicability
     $fixName = $vmFix.FixName
@@ -817,6 +822,10 @@ function Start-VMFix {
         foreach ($vm in $dependentVMs) {
             if ([string]::IsNullOrWhiteSpace($vm)) { continue }
             $note = Get-VMNote -VMName $vm
+            if (-not $note -or [string]::IsNullOrWhiteSpace($note.domain)) {
+                Write-Log "$VMName`: Dependent VM '$vm' has no resolvable domain (note=$($null -ne $note)); skipping start." -LogOnly -Warning
+                continue
+            }
             $status = Start-VMIfNotRunning -VMName $vm -VMDomain $note.domain -WaitForConnect -Quiet
             if ($status.StartedVM) {
                 $return.VMsToStop += $vm
