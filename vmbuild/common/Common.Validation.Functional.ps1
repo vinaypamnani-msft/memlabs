@@ -1343,6 +1343,9 @@ ORDER BY LastRunTime DESC
         # closes the day-zero blind spot where a job is scheduled to first fire
         # at day+1, leaving freshly-built labs with no signal that the job's
         # T-SQL would even parse. Non-MemLabs jobs are NEVER triggered here.
+        # IndexOptimize is excluded: it does real index work (not NUL), can run
+        # minutes on a CAS / perf-loaded lab, and a syntax bug there would fail
+        # in <1s anyway via the next-day scheduled run + passive check.
         if ($results.Passed) {
             try {
                 $neverRanQuery = @"
@@ -1357,6 +1360,7 @@ LEFT JOIN lastRun h ON h.job_id = j.job_id
 WHERE j.enabled = 1
   AND h.run_status IS NULL
   AND j.name LIKE 'MemLabs %'
+  AND j.name NOT LIKE 'MemLabs IndexOptimize%'
 ORDER BY j.name
 "@
                 $neverRan = @(Invoke-Sqlcmd -ServerInstance $connStr -Query $neverRanQuery -QueryTimeout 30 @sqlParams -ErrorAction Stop)
