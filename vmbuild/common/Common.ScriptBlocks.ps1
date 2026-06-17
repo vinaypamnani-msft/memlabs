@@ -3803,7 +3803,8 @@ $global:VM_Config = {
 
                         # Map VM role to the DSC Node-block role the phase config expects.
                         # Get-Phase*ConfigurationData does this mapping when the DC pushes;
-                        # the local recovery must match.
+                        # the local recovery must match or it compiles against a non-existent
+                        # Node block and produces no MOF (MOF_NOT_FOUND).
                         $nodeRole = if ($thisVm) { $thisVm.Role } else { 'DomainMember' }
                         if ($nodeRole -eq 'SQLAO') {
                             if ($Phase -eq 5) {
@@ -3813,6 +3814,25 @@ $global:VM_Config = {
                             else {
                                 # Phases 8/9 treat SQLAO as SqlServer
                                 $nodeRole = 'SqlServer'
+                            }
+                        }
+                        elseif ($Phase -eq 6) {
+                            # Get-Phase6ConfigurationData synthesizes Role='WSUS' for every VM
+                            # picked up by the filter (Role='WSUS' OR installSUP=$true). A
+                            # dual-role VM (e.g. Primary/CAS/FileServer with installSUP) keeps
+                            # its real role on disk but the DC-pushed MOF expects 'WSUS'.
+                            if ($thisVm -and ($thisVm.Role -eq 'WSUS' -or $thisVm.installSUP -eq $true)) {
+                                $nodeRole = 'WSUS'
+                            }
+                        }
+                        elseif ($Phase -eq 7) {
+                            # Get-Phase7ConfigurationData filter: installRP OR installSUP OR Role='WSUS'.
+                            # Synthetic role: PBIRS if installRP, else WSUS.
+                            if ($thisVm -and $thisVm.installRP -eq $true) {
+                                $nodeRole = 'PBIRS'
+                            }
+                            elseif ($thisVm -and ($thisVm.Role -eq 'WSUS' -or $thisVm.installSUP -eq $true)) {
+                                $nodeRole = 'WSUS'
                             }
                         }
 
