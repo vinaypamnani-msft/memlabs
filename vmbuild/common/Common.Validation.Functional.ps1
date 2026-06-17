@@ -1637,6 +1637,65 @@ function Test-SQLAOFunctionality {
         $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
 
+        # Watchdog: run a scriptblock under Start-ThreadJob (or Start-Job
+        # fallback) with a per-attempt timeout and retry. A few SQLAO probes
+        # (Get-DnsServerResourceRecord against a slow DC, Invoke-Sqlcmd to a
+        # listener whose AG IP is mid-failover) have no native timeout and
+        # can block far past the outer 10-min Invoke-VmCommand budget. The
+        # whole test normally completes in seconds, so a stuck probe is
+        # almost certainly a transient hang -- kill it after $TimeoutSec,
+        # try again up to $MaxAttempts, and treat all-attempts-timed-out as
+        # WARN (not FAIL). Caller inspects .Status (OK / Error / TimedOut)
+        # and reads .Output / .Errors.
+        function Invoke-WithWatchdog {
+            param(
+                [Parameter(Mandatory)] [scriptblock] $ScriptBlock,
+                [object[]] $ArgumentList = @(),
+                [int] $TimeoutSec = 20,
+                [int] $MaxAttempts = 3
+            )
+            $useThreadJob = $null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)
+            $attemptLog = [System.Collections.Generic.List[string]]::new()
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+                $job = $null
+                try {
+                    $job = if ($useThreadJob) {
+                        Start-ThreadJob -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+                    } else {
+                        Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+                    }
+                    $completed = Wait-Job -Job $job -Timeout $TimeoutSec
+                    if ($completed) {
+                        $jobErrors = $null
+                        $output = Receive-Job -Job $job -ErrorAction SilentlyContinue -ErrorVariable jobErrors
+                        try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                        $status = if ($jobErrors -and $jobErrors.Count -gt 0) { 'Error' } else { 'OK' }
+                        return [pscustomobject]@{
+                            Status     = $status
+                            Output     = $output
+                            Errors     = @($jobErrors)
+                            Attempts   = $attempt
+                            AttemptLog = $attemptLog
+                        }
+                    }
+                    $attemptLog.Add("attempt $attempt timed out after ${TimeoutSec}s")
+                    try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                catch {
+                    $attemptLog.Add("attempt $attempt failed to start: $($_.Exception.Message)")
+                    if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                }
+            }
+            return [pscustomobject]@{
+                Status     = 'TimedOut'
+                Output     = $null
+                Errors     = @()
+                Attempts   = $MaxAttempts
+                AttemptLog = $attemptLog
+            }
+        }
+
         try {
             Import-Module SqlServer -ErrorAction SilentlyContinue
             if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
@@ -2325,13 +2384,28 @@ WHERE drs.is_local = 1
             # ==============================================================
             Write-Progress -Activity $progressActivity -Status "Checking listener DNS and SQL connectivity"
             # Query the DC's DNS zone directly instead of Resolve-DnsName.
+            # Wrap in watchdog: the remote DNS RPC has no native timeout and
+            # can hang for the entire 10-min outer budget if the DC is busy.
             if ($listenerName) {
                 $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$dnsServer'")
-                try {
-                    $listenerRecs = @(Get-DnsServerResourceRecord -ZoneName $domain -Name $listenerName -RRType A -ComputerName $dnsServer -ErrorAction Stop)
+                $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 3 -ArgumentList @($domain, $listenerName, $dnsServer) -ScriptBlock {
+                    param($zone, $name, $server)
+                    Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                }
+                if ($wd.Status -eq 'TimedOut') {
+                    $results.Details.Add("WARN: DNS query for '$listenerName' did not complete after $($wd.Attempts) attempts (20s each); skipping. $($wd.AttemptLog -join '; ')")
+                }
+                elseif ($wd.Status -eq 'Error') {
+                    $results.Passed = $false
+                    $errMsg = if ($wd.Errors -and $wd.Errors[0].Exception) { $wd.Errors[0].Exception.Message } else { ($wd.Errors -join '; ') }
+                    $results.Details.Add("FAIL: DNS zone query for '$listenerName' failed: $errMsg")
+                }
+                else {
+                    $listenerRecs = @($wd.Output)
                     $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
                     if ($resolvedIPs.Count -gt 0) {
-                        $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')")
+                        $retryNote = if ($wd.Attempts -gt 1) { " (succeeded on attempt $($wd.Attempts) after timeouts)" } else { '' }
+                        $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$retryNote")
                         if ($agIP -and $agIP -notin $resolvedIPs) {
                             $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
                         }
@@ -2341,31 +2415,39 @@ WHERE drs.is_local = 1
                         $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                     }
                 }
-                catch {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: DNS zone query for '$listenerName' failed: $($_.Exception.Message)")
-                }
             }
 
             # ==============================================================
             # 6. Listener SQL connectivity
             # ==============================================================
+            # Wrap in watchdog: SqlClient's TCP/TLS handshake to a listener
+            # whose AG IP is mid-failover can block for minutes without
+            # honoring -QueryTimeout (which only governs post-connect).
             if ($listenerName -and $listenerPort) {
                 $listenerConnStr = "$listenerName,$listenerPort"
                 $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$listenerConnStr' -Query 'SELECT 1'")
-                try {
-                    $lr = Invoke-Sqlcmd -ServerInstance $listenerConnStr -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                $wd = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 3 -ArgumentList @($listenerConnStr) -ScriptBlock {
+                    param($conn)
+                    Invoke-Sqlcmd -ServerInstance $conn -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                }
+                if ($wd.Status -eq 'TimedOut') {
+                    $results.Details.Add("WARN: SQL connection via listener '$listenerConnStr' did not complete after $($wd.Attempts) attempts (30s each); skipping. $($wd.AttemptLog -join '; ')")
+                }
+                elseif ($wd.Status -eq 'Error') {
+                    $results.Passed = $false
+                    $errMsg = if ($wd.Errors -and $wd.Errors[0].Exception) { $wd.Errors[0].Exception.Message } else { ($wd.Errors -join '; ') }
+                    $results.Details.Add("FAIL: SQL connection via listener '$listenerConnStr' failed: $errMsg")
+                }
+                else {
+                    $lr = $wd.Output
                     if ($lr.TestResult -eq 1) {
-                        $results.Details.Add("OK: SQL query via listener '$listenerConnStr' succeeded")
+                        $retryNote = if ($wd.Attempts -gt 1) { " (succeeded on attempt $($wd.Attempts) after timeouts)" } else { '' }
+                        $results.Details.Add("OK: SQL query via listener '$listenerConnStr' succeeded$retryNote")
                     }
                     else {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: Listener query returned unexpected result")
                     }
-                }
-                catch {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: SQL connection via listener '$listenerConnStr' failed: $($_.Exception.Message)")
                 }
             }
 
@@ -2392,18 +2474,27 @@ WHERE drs.is_local = 1
                     $remoteConnStr = "$remoteNodeFQDN\$sqlInstName"
                 }
                 $results.Details.Add("CMD: Check auth_scheme on remote node '$remoteConnStr'")
-                try {
-                    $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
-                    $authResult = Invoke-Sqlcmd -ServerInstance $remoteConnStr -Query $authQuery -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                $authQuery = "SELECT auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+                $wd = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 3 -ArgumentList @($remoteConnStr, $authQuery) -ScriptBlock {
+                    param($conn, $q)
+                    Invoke-Sqlcmd -ServerInstance $conn -Query $q -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                }
+                if ($wd.Status -eq 'TimedOut') {
+                    $results.Details.Add("WARN: auth_scheme query on '$remoteConnStr' did not complete after $($wd.Attempts) attempts (30s each); skipping.")
+                }
+                elseif ($wd.Status -eq 'Error') {
+                    $errMsg = if ($wd.Errors -and $wd.Errors[0].Exception) { $wd.Errors[0].Exception.Message } else { ($wd.Errors -join '; ') }
+                    $results.Details.Add("WARN: Could not query auth_scheme on '$remoteConnStr': $errMsg")
+                }
+                else {
+                    $authResult = $wd.Output
                     if ($authResult.auth_scheme -eq 'KERBEROS') {
-                        $results.Details.Add("OK: Remote SQL auth_scheme = KERBEROS")
+                        $retryNote = if ($wd.Attempts -gt 1) { " (succeeded on attempt $($wd.Attempts) after timeouts)" } else { '' }
+                        $results.Details.Add("OK: Remote SQL auth_scheme = KERBEROS$retryNote")
                     }
                     else {
                         $results.Details.Add("WARN: Remote SQL auth_scheme = $($authResult.auth_scheme) (expected KERBEROS). Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account.")
                     }
-                }
-                catch {
-                    $results.Details.Add("WARN: Could not query auth_scheme on '$remoteConnStr': $($_.Exception.Message)")
                 }
             }
 
