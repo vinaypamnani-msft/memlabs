@@ -1165,8 +1165,9 @@ function Wait-Phase {
 
                     # Skip warning/error items already displayed while the job was running
                     if ($outputIndex -le $alreadyShown -and $OutputObject.LogLevel -ge 2) {
-                        # DC/CAS failure still needs to stop the phase even if already displayed
-                        if ($OutputObject.LogLevel -eq 3 -and $phase -ge 2 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
+                        # DC/CAS failure still needs to stop the phase even if already displayed.
+                        # Exception: Phase 11 is validation -- continue so we collect every problem.
+                        if ($OutputObject.LogLevel -eq 3 -and $phase -ge 2 -and $phase -ne 11 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
                             $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try { $jobs | Stop-Job } catch {}
@@ -1178,7 +1179,7 @@ function Wait-Phase {
 
                     if ($OutputObject.LogLevel -eq 3) {
                         Write-RedX $line -ForegroundColor $OutputObject.ForegroundColor
-                        if ($phase -ge 2 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
+                        if ($phase -ge 2 -and $phase -ne 11 -and ($jobName.Contains("[DC]") -or $jobName.Contains("[CAS]"))) {
                             $critRole = if ($jobName.Contains("[DC]")) { "DC" } else { "CAS" }
                             Write-RedX "$critRole failed. Stopping Phase." -ForegroundColor $OutputObject.ForegroundColor
                             try {
