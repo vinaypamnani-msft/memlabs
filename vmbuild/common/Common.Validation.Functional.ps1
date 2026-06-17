@@ -60,6 +60,37 @@ function Test-VmFunctionality {
     $testsPassed = $true
     $vmIsLinux = Test-VmIsLinux -Vm $CurrentItem
 
+    # Post-reboot settle gate: when Phase 11 is run standalone (-startPhase 11)
+    # the VMs are freshly rebooted and many subsystems (AD replication, the
+    # failover cluster, the SMS provider host, secure channels) need a couple of
+    # minutes to converge. Validating immediately produces spurious failures.
+    # Gate on the guest's actual OS uptime (LastBootUpTime) rather than a fixed
+    # sleep: on a normal end-to-end deploy the OS has been up well past the
+    # threshold (Phase 11 follows Phase 8/10 with no reboot) so this adds ZERO
+    # delay; only a freshly-rebooted VM waits, and only for the time remaining.
+    if (-not $vmIsLinux) {
+        $minUptimeMinutes = 3
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Checking uptime (settle gate)"
+        $uptimeResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock { (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object -ExpandProperty TotalMinutes } `
+            -DisplayName "Phase11-UptimeGate" -SuppressLog -SessionMaxRetries 3
+        if ($uptimeResult -and -not $uptimeResult.ScriptBlockFailed -and $null -ne $uptimeResult.ScriptBlockOutput) {
+            $uptimeMin = [double]($uptimeResult.ScriptBlockOutput | Select-Object -First 1)
+            if ($uptimeMin -lt $minUptimeMinutes) {
+                $waitSec = [int][math]::Ceiling(($minUptimeMinutes - $uptimeMin) * 60)
+                Write-Log "[Phase $Phase] $VMName [$role]: Uptime $([int]$uptimeMin)min < ${minUptimeMinutes}min — waiting ${waitSec}s for the VM to settle before validating" -LogOnly
+                Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Waiting ${waitSec}s for VM to settle after reboot"
+                Start-Sleep -Seconds $waitSec
+            }
+            else {
+                Write-Log "[Phase $Phase] $VMName [$role]: Uptime $([int]$uptimeMin)min >= ${minUptimeMinutes}min — no settle wait needed" -LogOnly
+            }
+        }
+        else {
+            Write-Log "[Phase $Phase] $VMName [$role]: Could not determine uptime; skipping settle gate" -LogOnly
+        }
+    }
+
     # Ensure all SQL services on this VM are running before role-specific tests.
     # If any Automatic-start SQL engine service is stopped, try to start it.
     $hasLocalSql = ($CurrentItem.sqlVersion -and -not $CurrentItem.remoteSQLVM) -or

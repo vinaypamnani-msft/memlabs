@@ -624,8 +624,73 @@ function Start-PhaseJobs {
             }
         }
 
-        $startedCount = 0
+        # Boot ordering: start domain controllers FIRST and wait for AD DS / DNS /
+        # Netlogon to be serving before starting the dependent VMs. On a cold start
+        # every VM otherwise boots simultaneously, so SQLAO cluster nodes, domain
+        # members, secure channels and SMS providers come up before the DC can
+        # answer them -- producing a cascade of transient Phase 11 failures (broken
+        # secure channel, dcdiag Replications, cluster not formed, provider not
+        # loaded). Starting DCs first lets AD converge before its dependents arrive.
+        # This is a no-op when the DCs are already Running (e.g. a full end-to-end
+        # deploy where Phase 11 follows Phase 10 without a reboot).
+        $dcRoleSet = @("DC", "BDC")
+        $dcNames = @()
         foreach ($vmName in $vmsToStart) {
+            $vmRole = ($existingVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1).Role
+            if (-not $vmRole) {
+                $vmRole = ($allDomainVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1).Role
+            }
+            if ($vmRole -in $dcRoleSet) { $dcNames += $vmName }
+        }
+        $otherNames = @($vmsToStart | Where-Object { $_ -notin $dcNames })
+
+        $startedCount = 0
+
+        # Start DCs first
+        $startedDcs = @()
+        foreach ($vmName in $dcNames) {
+            $vmObj = $existingVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
+            if ($vmObj -and $vmObj.State -ne 'Running') {
+                Write-Progress2 "Preparing Phase $Phase" -Status "Starting domain controller $vmName ($($vmObj.State))" -PercentComplete $global:preparePhasePercent
+                Start-VM2 -Name $vmName -ErrorAction SilentlyContinue
+                $startedCount++
+                $startedDcs += $vmName
+            }
+        }
+
+        # Only wait if we actually started a DC from a non-running state. Poll each
+        # for AD DS / DNS / Netlogon up (bounded) before releasing dependent VMs.
+        if ($startedDcs.Count -gt 0) {
+            $dcWaitTimeoutSec = 300
+            foreach ($dcName in $startedDcs) {
+                Write-Progress2 "Preparing Phase $Phase" -Status "Waiting for domain controller $dcName (AD DS / DNS / Netlogon)" -PercentComplete $global:preparePhasePercent
+                $dcReady = $false
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($sw.Elapsed.TotalSeconds -lt $dcWaitTimeoutSec) {
+                    $probe = Invoke-VmCommand -VmName $dcName -VmDomainName $deployConfig.vmOptions.domainName `
+                        -ScriptBlock {
+                        $nl = (Get-Service -Name Netlogon -ErrorAction SilentlyContinue).Status
+                        $dns = (Get-Service -Name DNS -ErrorAction SilentlyContinue).Status
+                        $ntds = (Get-Service -Name NTDS -ErrorAction SilentlyContinue).Status
+                            ($nl -eq 'Running') -and ($dns -eq 'Running') -and ($ntds -eq 'Running')
+                    } -DisplayName "Phase$Phase-DCReady-$dcName" -SuppressLog -CommandReturnsBool -SessionMaxRetries 2
+                    if ($probe -and -not $probe.ScriptBlockFailed -and $probe.ScriptBlockOutput -eq $true) {
+                        $dcReady = $true
+                        break
+                    }
+                    Start-Sleep -Seconds 10
+                }
+                if ($dcReady) {
+                    Write-Log "[Phase $Phase] Domain controller $dcName is serving AD DS / DNS / Netlogon ($([int]$sw.Elapsed.TotalSeconds)s)." -LogOnly
+                }
+                else {
+                    Write-Log "[Phase $Phase] Domain controller $dcName not confirmed ready after ${dcWaitTimeoutSec}s; starting remaining VMs anyway." -Warning
+                }
+            }
+        }
+
+        # Start the remaining (non-DC) VMs.
+        foreach ($vmName in $otherNames) {
             $vmObj = $existingVMs | Where-Object { $_.vmName -eq $vmName } | Select-Object -First 1
             if ($vmObj -and $vmObj.State -ne 'Running') {
                 Write-Progress2 "Preparing Phase $Phase" -Status "Starting VM $vmName ($($vmObj.State))" -PercentComplete $global:preparePhasePercent
@@ -633,6 +698,7 @@ function Start-PhaseJobs {
                 $startedCount++
             }
         }
+
         if ($startedCount -gt 0) {
             Write-Log "[Phase $Phase] Started $startedCount VMs." -LogOnly
         }
