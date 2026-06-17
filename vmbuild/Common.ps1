@@ -5265,8 +5265,24 @@ function Invoke-VmCommand {
                                 # PSRemotingJob exposes per-session streams on its child job.
                                 $progressSource = if ($job.ChildJobs -and $job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
                                 if ($progressSource -and $progressSource.Progress -and $progressSource.Progress.Count -gt 0) {
-                                    $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
-                                    if ($lastRec -and $lastRec.Activity -and $lastRec.StatusDescription) {
+                                    # Scan backward for the latest *real* progress record. PowerShell
+                                    # auto-emits a "Preparing modules for first use." (and Compress-Archive)
+                                    # pseudo-record whose StatusDescription is whitespace-only; forwarding
+                                    # it to Write-Progress2 trips the -Status ValidateNotNullOrEmpty guard
+                                    # and logs a benign-but-noisy exception. Skip those, mirroring the
+                                    # filtering Write-JobProgress already does in Common.Phases.ps1.
+                                    $lastRec = $null
+                                    for ($ri = $progressSource.Progress.Count - 1; $ri -ge 0; $ri--) {
+                                        $cand = $progressSource.Progress[$ri]
+                                        if ($cand -and $cand.Activity -and
+                                            $cand.Activity -ne "Preparing modules for first use." -and
+                                            $cand.Activity -ne "Compress-Archive" -and
+                                            $cand.StatusDescription -and $cand.StatusDescription.Trim().Length -gt 0) {
+                                            $lastRec = $cand
+                                            break
+                                        }
+                                    }
+                                    if ($lastRec) {
                                         $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
                                         if ($line -ne $lastForwarded) {
                                             $lastForwarded = $line
