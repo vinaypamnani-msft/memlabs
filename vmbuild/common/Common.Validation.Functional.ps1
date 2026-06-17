@@ -1291,6 +1291,53 @@ function Test-SQLFunctionality {
             $results.Details.Add("FAIL: SQL connection to '$connStr' as '$identity' failed: $($_.Exception.Message)")
         }
 
+        # Generic SQL Agent job health: any enabled job whose most-recent run
+        # was NOT Succeeded is a real signal (CM site maintenance, WSUS reindex,
+        # AG backup jobs, operator-added jobs). Never-run jobs are skipped.
+        if ($results.Passed) {
+            $results.Details.Add("CMD: Check all enabled SQL Agent jobs in msdb for last-run failures")
+            try {
+                $jobHealthQuery = @"
+;WITH lastRun AS (
+    SELECT job_id, run_status, run_date, run_time, message,
+           ROW_NUMBER() OVER (PARTITION BY job_id
+                              ORDER BY run_date DESC, run_time DESC) AS rn
+    FROM msdb.dbo.sysjobhistory
+    WHERE step_id = 0
+)
+SELECT j.name,
+       h.run_status AS LastRunStatus,
+       msdb.dbo.agent_datetime(h.run_date, h.run_time) AS LastRunTime,
+       LEFT(ISNULL(h.message, ''''), 500) AS LastMessage
+FROM msdb.dbo.sysjobs j
+LEFT JOIN lastRun h ON h.job_id = j.job_id AND h.rn = 1
+WHERE j.enabled = 1
+  AND h.run_status IS NOT NULL
+  AND h.run_status <> 1
+ORDER BY LastRunTime DESC
+"@
+                $badJobs = @(Invoke-Sqlcmd -ServerInstance $connStr -Query $jobHealthQuery -QueryTimeout 30 @sqlParams -ErrorAction Stop)
+                if ($badJobs.Count -eq 0) {
+                    $results.Details.Add("OK: All enabled SQL Agent jobs that have run completed successfully on last run")
+                }
+                else {
+                    $statusMap = @{ 0 = 'Failed'; 2 = 'Retry'; 3 = 'Cancelled'; 4 = 'In Progress' }
+                    foreach ($bj in $badJobs) {
+                        $statusText = if ($statusMap.ContainsKey([int]$bj.LastRunStatus)) { $statusMap[[int]$bj.LastRunStatus] } else { "Status $($bj.LastRunStatus)" }
+                        $msgTail = ''
+                        if ($bj.LastMessage) {
+                            $clean = ($bj.LastMessage -replace '\s+', ' ').Trim()
+                            if ($clean) { $msgTail = " - $clean" }
+                        }
+                        $results.Details.Add("WARN: Agent job '$($bj.name)' last run: $statusText at $($bj.LastRunTime)$msgTail")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("WARN: SQL Agent job health check failed: $($_.Exception.Message)")
+            }
+        }
+
         return $results
     }
 
