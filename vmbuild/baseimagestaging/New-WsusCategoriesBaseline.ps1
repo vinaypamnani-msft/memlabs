@@ -77,7 +77,7 @@ Write-Log "[Baseline] Reset:        $($Reset.IsPresent)" -OutputStream
 # re-run the generator against an already-synced VM without rebuilding it.
 if ($Reset.IsPresent) {
     Write-Log "[Baseline] -Reset specified: stopping services, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
-    $reset = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
+    $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
         try {
             $contentDir = $null
             try { $contentDir = (Get-ItemProperty 'HKLM:\Software\Microsoft\Update Services\Server\Setup' -ErrorAction Stop).ContentDir } catch {}
@@ -131,11 +131,11 @@ END
             [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
         }
     }
-    if (-not $reset -or -not $reset.ScriptBlockOutput -or -not $reset.ScriptBlockOutput.Ok) {
-        $errMsg = if ($reset -and $reset.ScriptBlockOutput) { $reset.ScriptBlockOutput.Error } else { 'no output' }
+    if (-not $resetResult -or -not $resetResult.ScriptBlockOutput -or -not $resetResult.ScriptBlockOutput.Ok) {
+        $errMsg = if ($resetResult -and $resetResult.ScriptBlockOutput) { $resetResult.ScriptBlockOutput.Error } else { 'no output' }
         throw "[Baseline] -Reset failed: $errMsg"
     }
-    Write-Log "[Baseline] Reset complete (ContentDir=$($reset.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
+    Write-Log "[Baseline] Reset complete (ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
 }
 
 # Pre-flight: VM must be a clean WSUS server with categories empty. Fail
