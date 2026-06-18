@@ -345,6 +345,14 @@ if ($configureSUP) {
                     }
                 }
  
+                # If Phase 7's WSUSSync launched wsusutil import in the
+                # background, wait for it to finish before triggering the
+                # CM-side sync. wsyncmgr -> WSUS.StartSynchronization() on
+                # top of an in-flight wsusutil import races on SUSDB writes
+                # and on subscription state. Bounded to 30 min from the
+                # import's original start (see ScriptFunctions.ps1).
+                Wait-WsusBaselineImport -Tag "[InstallRoles]"
+
                 # Guard against re-runs: if a sync (especially a long Categories
                 # sync) is already in progress from a prior build attempt, don't
                 # restart it - triggering a new sync cancels the running one and

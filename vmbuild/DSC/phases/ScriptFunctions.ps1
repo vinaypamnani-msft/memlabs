@@ -732,3 +732,82 @@ function Get-UpdatePack {
     return $updatepack
 }
 
+function Wait-WsusBaselineImport {
+    # WSUSSync (Phase 7, TemplateHelpDSC.psm1) may have launched
+    # `wsusutil import` in the background and persisted its PID + start
+    # time to C:\staging\wsus\WsusCategoriesBaseline.import.state.json.
+    # Any later caller that's about to trigger a WSUS sync (InstallRoles'
+    # Sync-CMSoftwareUpdate, perfloading's full.syn drop) must wait for
+    # that process to finish first -- triggering a CM-side sync on top
+    # of an in-flight `wsusutil import` races on SUSDB writes and on
+    # WSUS subscription state.
+    #
+    # Bounded to MaxWaitMinutes (default 30, from the state file) measured
+    # from the import's ORIGINAL StartTimeUtc -- not from when this
+    # function is entered -- so a long Phase 8/9 doesn't extend the
+    # deadline. Returns silently when no state file exists, the PID is
+    # already gone, the deadline has passed, or the process exits during
+    # the wait. Removes the state file on terminal exit.
+    param([string]$Tag = '[WSUS]')
+
+    $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
+    if (-not (Test-Path $stateFile)) { return }
+
+    try {
+        $state = Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+    }
+    catch {
+        Write-DscStatus "$Tag Baseline import state file unreadable ($($_.Exception.Message)). Proceeding without wait."
+        return
+    }
+
+    $importPid = 0
+    try { $importPid = [int]$state.ProcessId } catch {}
+    if ($importPid -le 0) {
+        Write-DscStatus "$Tag Baseline import state file missing ProcessId. Proceeding without wait."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $expectedName = if ($state.ProcessName) { [string]$state.ProcessName } else { 'WsusUtil' }
+    $maxMinutes   = 30
+    try { if ($state.MaxWaitMinutes) { $maxMinutes = [int]$state.MaxWaitMinutes } } catch {}
+    $startTimeUtc = [DateTime]::UtcNow
+    try { $startTimeUtc = ([DateTime]::Parse($state.StartTimeUtc)).ToUniversalTime() } catch {}
+    $deadlineUtc  = $startTimeUtc.AddMinutes($maxMinutes)
+
+    $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+    if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
+        Write-DscStatus "$Tag Baseline import (pid=$importPid) no longer running. Proceeding."
+        Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $remainingSec = ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds
+    if ($remainingSec -le 0) {
+        Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) is past its $maxMinutes-min deadline (started $($startTimeUtc.ToString('u'))). Not waiting; proceeding."
+        return
+    }
+
+    Write-DscStatus "$Tag Waiting for in-flight WSUS baseline import (pid=$importPid, up to $([math]::Round($remainingSec/60,1)) min remaining)..."
+    $lastLogUtc = [DateTime]::UtcNow
+    while ($true) {
+        $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+        if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
+            $elapsedMin = [math]::Round(([DateTime]::UtcNow - $startTimeUtc).TotalMinutes, 1)
+            Write-DscStatus "$Tag Baseline import (pid=$importPid) finished after ${elapsedMin} min. Proceeding."
+            Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadlineUtc) {
+            Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) exceeded $maxMinutes-min deadline. Leaving process running; proceeding with sync."
+            return
+        }
+        Start-Sleep -Seconds 5
+        if (([DateTime]::UtcNow - $lastLogUtc).TotalSeconds -ge 60) {
+            $remainingSec = [math]::Max(0, ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+            Write-DscStatus "$Tag Baseline import still running (pid=$importPid, $([math]::Round($remainingSec/60,1)) min remaining)..."
+            $lastLogUtc = [DateTime]::UtcNow
+        }
+    }
+}
+
