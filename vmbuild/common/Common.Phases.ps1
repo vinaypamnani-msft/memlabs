@@ -582,6 +582,76 @@ function Start-PhaseJobs {
         $multiNodeDsc = $false
     }
 
+    # Phase 8 preflight: ensure each CAS/Primary's machine account is in local
+    # Administrators on every SQL host it will use. ConfigMgr Setup walks the
+    # AG replica nodes via remote WMI to read the SQL config; if the site
+    # server's machine account isn't admin on a replica, the prereq emits
+    # "Computer account doesn't have admininstrative rights to the SQL Server"
+    # and Setup fails before doing any real work. Phase 3 normally adds this
+    # via AddUserToLocalAdminGroup, but `-StartPhase 8` skips Phase 3 and a
+    # restored snapshot may predate the membership (config drift, prior
+    # topology without this site server, secure-channel reset, etc.). Self-
+    # heal here so a -Restore + -StartPhase 8 run is robust against drift.
+    # Idempotent: no-op when already a member.
+    if ($Phase -eq 8) {
+        $netbios = $deployConfig.vmOptions.domainNetBiosName
+        $domain = $deployConfig.vmOptions.domainName
+        $siteServers = @($deployConfig.virtualMachines | Where-Object {
+            ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and $_.remoteSQLVM
+        })
+        foreach ($ss in $siteServers) {
+            # Resolve SQL host set: the remoteSQLVM itself plus its OtherNode
+            # when it's a SQLAO pair. CM Setup probes every replica, so all
+            # nodes must have the site server's machine account in local
+            # Administrators -- missing it on the secondary trips the same
+            # prereq error whenever the AG happens to be mounted there.
+            $sqlVm = $deployConfig.virtualMachines | Where-Object { $_.vmName -eq $ss.remoteSQLVM } | Select-Object -First 1
+            $sqlHosts = @($ss.remoteSQLVM)
+            if ($sqlVm -and $sqlVm.OtherNode) { $sqlHosts += $sqlVm.OtherNode }
+            $sqlHosts = @($sqlHosts | Where-Object { $_ } | Select-Object -Unique)
+
+            foreach ($sqlHost in $sqlHosts) {
+                $hvm = Get-VM2 -Name $sqlHost -ErrorAction SilentlyContinue
+                if (-not $hvm -or $hvm.State -ne 'Running') {
+                    Write-Log "[Phase 8] $($ss.vmName) preflight: SQL host $sqlHost not Running ($($hvm.State)); skipping local-admin self-heal." -Warning
+                    continue
+                }
+                $account = "$netbios\$($ss.vmName)" + '$'
+                $result = Invoke-VmCommand -VmName $sqlHost -VmDomainName $domain -DisplayName "Ensure $account in local Administrators" -ArgumentList @($account) -SuppressLog -ScriptBlock {
+                    param($acct)
+                    try {
+                        $grpName = (Get-CimInstance -ClassName Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"' -ErrorAction Stop).Name
+                        $g = [ADSI]"WinNT://$env:COMPUTERNAME/$grpName,group"
+                        $parts = $acct.Split('\')
+                        $path = "WinNT://$($parts[0])/$($parts[1])"
+                        if ($g.IsMember($path)) { return 'already-member' }
+                        $g.Add($path)
+                        return 'added'
+                    }
+                    catch {
+                        return "error: $($_.Exception.Message)"
+                    }
+                }
+                if ($result -and -not $result.ScriptBlockFailed) {
+                    $out = "$($result.ScriptBlockOutput)".Trim()
+                    if ($out -eq 'added') {
+                        Write-Log "[Phase 8] $sqlHost`: added $account to local Administrators (was missing) -- self-heal for site server $($ss.vmName)." -Activity
+                    }
+                    elseif ($out -eq 'already-member') {
+                        Write-Log "[Phase 8] $sqlHost`: $account already in local Administrators." -LogOnly
+                    }
+                    else {
+                        Write-Log "[Phase 8] $sqlHost`: local-admin self-heal for $account returned '$out'." -Warning
+                    }
+                }
+                else {
+                    $errMsg = if ($result.ErrorDetails) { $result.ErrorDetails } else { 'Invoke-VmCommand returned no result' }
+                    Write-Log "[Phase 8] $sqlHost`: failed to verify $account in local Administrators ($errMsg)." -Warning
+                }
+            }
+        }
+    }
+
     # Per-run readiness token for the multi-node DSC handshake. Every VM_Config
     # job dispatched below captures this same GUID via $using:phaseRunGuid.
     # Members write it to C:\staging\DSC\RunGuid.txt as the LAST step of
