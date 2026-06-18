@@ -21,14 +21,26 @@
 #   - WsusCategoriesBaseline.export.log   : wsusutil's own log (kept for diagnostics)
 #
 # After this script completes the operator must:
-#   1. Add the cab to vmbuild\azureFiles\_filelist.json under tools (md5
+#   1. (Optional but recommended) Test the cab end-to-end against a fresh
+#      WSUS VM with `-Upload` (see below) before publishing.
+#   2. Add the cab to vmbuild\azureFiles\_filelist.json under tools (md5
 #      gates integrity; optional GeneratedUtc field is allowed for human
 #      reference).
-#   2. Upload it to the storage account at the same relative path.
+#   3. Upload it to the storage account at the same relative path.
 #   Subsequent deploys with cmOptions.WsusImportBaseline=$true (the default)
 #   will pick the cab up automatically via Get-FilesForConfiguration. The
 #   pre-DSC copy logs a staleness warning if the host cab is >540 days old
 #   (based on its LastWriteTime).
+#
+# -Upload (test mode):
+#   Skips generation entirely. Pushes an existing host cab (default
+#   $OutputDir\WsusCategoriesBaseline.cab, override with -CabPath) to the
+#   guest at C:\staging\wsus\WsusCategoriesBaseline.cab -- the exact path
+#   the WSUSSync DSC resource reads from in Phase 7 -- runs `wsusutil
+#   import`, and prints pre/post taxonomy counts and the delta. Use this
+#   to validate a freshly-generated cab against a clean WSUS VM before
+#   uploading it to Azure Files. Combine with -Reset to wipe + retest on
+#   the same VM.
 
 [CmdletBinding()]
 param (
@@ -55,11 +67,26 @@ param (
     # then export. Use when a previous run timed out mid-sync. Mutually
     # exclusive with -Reset.
     [Parameter(Mandatory = $false)]
-    [switch]$Resume
+    [switch]$Resume,
+
+    # Test mode: skip generation. Push an existing host cab to the guest at
+    # the same path WSUSSync DSC reads from, run `wsusutil import`, and
+    # report pre/post taxonomy counts. Combine with -Reset to wipe + retest.
+    # Mutually exclusive with -Resume.
+    [Parameter(Mandatory = $false)]
+    [switch]$Upload,
+
+    # Optional override for -Upload mode: path to the host cab to push +
+    # import. Defaults to $OutputDir\WsusCategoriesBaseline.cab.
+    [Parameter(Mandatory = $false)]
+    [string]$CabPath
 )
 
 if ($Reset.IsPresent -and $Resume.IsPresent) {
     throw "[Baseline] -Reset and -Resume are mutually exclusive."
+}
+if ($Upload.IsPresent -and $Resume.IsPresent) {
+    throw "[Baseline] -Upload and -Resume are mutually exclusive."
 }
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +114,7 @@ Write-Log "[Baseline] Output dir:   $OutputDir"
 Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min"
 Write-Log "[Baseline] Reset:        $($Reset.IsPresent)"
 Write-Log "[Baseline] Resume:       $($Resume.IsPresent)"
+Write-Log "[Baseline] Upload:       $($Upload.IsPresent)"
 
 # -Reset: wipe SUSDB + WsusContent and re-run wsusutil postinstall. Lets us
 # re-run the generator against an already-synced VM without rebuilding it.
@@ -190,6 +218,178 @@ END
         throw "[Baseline] -Reset failed: $errMsg"
     }
     Write-Log "[Baseline] Reset complete (backend=$($resetResult.ScriptBlockOutput.SqlBackend), ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -Success
+}
+
+# -Upload: short-circuit. Skip generation; push an existing host cab to the
+# guest at C:\staging\wsus\WsusCategoriesBaseline.cab (the exact path the
+# WSUSSync DSC resource reads from in Phase 7), snapshot pre-import
+# taxonomy, run `wsusutil import`, snapshot post-import taxonomy, and
+# report the delta. Validates a freshly-generated cab end-to-end before
+# the operator uploads it to Azure Files.
+if ($Upload.IsPresent) {
+    if (-not $CabPath) {
+        $CabPath = Join-Path $OutputDir "WsusCategoriesBaseline.cab"
+    }
+    if (-not (Test-Path -LiteralPath $CabPath)) {
+        throw "[Baseline] -Upload: cab not found at $CabPath. Run the generator first, or pass -CabPath."
+    }
+    $cabFile = Get-Item -LiteralPath $CabPath
+    $cabMd5 = (Get-FileHash -LiteralPath $CabPath -Algorithm MD5).Hash
+    $cabSizeMB = [math]::Round($cabFile.Length / 1MB, 2)
+    Write-Log "[Baseline] -Upload source: $CabPath ($cabSizeMB MB, MD5=$cabMd5, mtime=$($cabFile.LastWriteTimeUtc.ToString('o')))"
+
+    # Pre-import snapshot. Mirrors the DSC gate: if subscribed categories
+    # are already populated, DSC skips import -- surface the same gate here
+    # so the test reflects what production would do. Allows -Reset to be
+    # combined with -Upload to wipe the VM first.
+    $preU = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -DisplayName "Upload: pre-import snapshot" -ScriptBlock {
+        try {
+            $wsus = Get-WsusServer -ErrorAction Stop
+            $sub = $wsus.GetSubscription()
+            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
+            $subCats = @($sub.GetUpdateCategories()).Count
+            $subClas = @($sub.GetUpdateClassifications()).Count
+            $status = $wsus.GetStatus()
+            $hist = @($sub.GetSynchronizationHistory())
+            [PSCustomObject]@{
+                Ok               = $true
+                TaxonomyCats     = $taxonomyCats
+                TaxonomyClas     = $taxonomyClas
+                SubscribedCats   = $subCats
+                SubscribedClas   = $subClas
+                UpdateCount      = $status.UpdateCount
+                SyncHistoryCount = $hist.Count
+                WsusVersion      = $wsus.Version.ToString()
+            }
+        }
+        catch { [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    }
+    if (-not $preU -or -not $preU.ScriptBlockOutput -or -not $preU.ScriptBlockOutput.Ok) {
+        $errMsg = if ($preU -and $preU.ScriptBlockOutput) { $preU.ScriptBlockOutput.Error } else { "no output" }
+        throw "[Baseline] -Upload: pre-import snapshot failed: $errMsg"
+    }
+    $pre = $preU.ScriptBlockOutput
+    Write-Log "[Baseline] Pre-import:  WSUS=$($pre.WsusVersion), TaxonomyCats=$($pre.TaxonomyCats), TaxonomyClas=$($pre.TaxonomyClas), SubscribedCats=$($pre.SubscribedCats), UpdateCount=$($pre.UpdateCount), SyncHistory=$($pre.SyncHistoryCount)"
+    if ($pre.SubscribedCats -gt 0) {
+        throw "[Baseline] -Upload: VM already has $($pre.SubscribedCats) subscribed categories. The WSUSSync DSC resource would skip import in this state. Re-run with -Reset -Upload (combined) or use a fresh WSUS VM."
+    }
+
+    # Push cab to the guest at the exact path DSC consumes.
+    $guestCabDir = 'C:\staging\wsus'
+    $guestCab = "$guestCabDir\WsusCategoriesBaseline.cab"
+    $guestImportLog = "$guestCabDir\WsusCategoriesBaseline.import.log"
+    Write-Log "[Baseline] Preparing guest staging dir + copying cab to ${VmName}:$guestCab"
+    $prep = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -DisplayName "Upload: prep staging dir" -ScriptBlock {
+        param($dir, $cab, $log)
+        try {
+            if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            if (Test-Path $cab) { Remove-Item -LiteralPath $cab -Force -ErrorAction SilentlyContinue }
+            if (Test-Path $log) { Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue }
+            [PSCustomObject]@{ Ok = $true }
+        }
+        catch { [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    } -ArgumentList $guestCabDir, $guestCab, $guestImportLog
+    if (-not $prep -or -not $prep.ScriptBlockOutput -or -not $prep.ScriptBlockOutput.Ok) {
+        $errMsg = if ($prep -and $prep.ScriptBlockOutput) { $prep.ScriptBlockOutput.Error } else { "no output" }
+        throw "[Baseline] -Upload: failed to prepare guest staging dir: $errMsg"
+    }
+
+    $copyOk = Copy-ItemSafe -VmName $VmName -VMDomainName $DomainName -Path $CabPath -Destination $guestCabDir -Force
+    if ($copyOk -eq $false) { throw "[Baseline] -Upload: Copy-ItemSafe failed pushing $CabPath to ${VmName}:$guestCabDir." }
+
+    # Verify the guest-side MD5 to catch any transfer corruption before import.
+    $verify = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -DisplayName "Upload: verify cab MD5" -ScriptBlock {
+        param($p)
+        try {
+            if (-not (Test-Path $p)) { return [PSCustomObject]@{ Ok = $false; Error = "cab not at $p after copy" } }
+            $h = (Get-FileHash -LiteralPath $p -Algorithm MD5).Hash
+            $f = Get-Item -LiteralPath $p
+            [PSCustomObject]@{ Ok = $true; Md5 = $h; Bytes = $f.Length }
+        }
+        catch { [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    } -ArgumentList $guestCab
+    if (-not $verify -or -not $verify.ScriptBlockOutput -or -not $verify.ScriptBlockOutput.Ok) {
+        $errMsg = if ($verify -and $verify.ScriptBlockOutput) { $verify.ScriptBlockOutput.Error } else { "no output" }
+        throw "[Baseline] -Upload: post-copy verify failed: $errMsg"
+    }
+    $v = $verify.ScriptBlockOutput
+    if ($v.Md5 -ne $cabMd5) {
+        throw "[Baseline] -Upload: guest MD5 ($($v.Md5)) != host MD5 ($cabMd5). Transfer corrupted."
+    }
+    Write-Log "[Baseline] Cab on guest verified: $($v.Bytes) bytes, MD5=$($v.Md5)."
+
+    # Run wsusutil import. Same invocation the DSC resource uses.
+    Write-Log "[Baseline] Running wsusutil import on $VmName (may take several minutes)..."
+    $import = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Upload: wsusutil import" -ScriptBlock {
+        param($cab, $log)
+        try {
+            $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+            if (-not (Test-Path $wsusUtil)) { return [PSCustomObject]@{ Ok = $false; ExitCode = -1; Error = "WsusUtil.exe not found at $wsusUtil" } }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cab, $log) -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            $sw.Stop()
+            $tail = ''
+            if (Test-Path $log) {
+                $tailLines = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
+                if ($tailLines) { $tail = ($tailLines -join "`n") }
+            }
+            [PSCustomObject]@{ Ok = ($proc.ExitCode -eq 0); ExitCode = $proc.ExitCode; ElapsedSec = [int]$sw.Elapsed.TotalSeconds; LogTail = $tail; LogPath = $log }
+        }
+        catch { [PSCustomObject]@{ Ok = $false; ExitCode = -1; Error = $_.Exception.Message } }
+    } -ArgumentList $guestCab, $guestImportLog
+    if (-not $import -or -not $import.ScriptBlockOutput) {
+        throw "[Baseline] -Upload: wsusutil import returned no output."
+    }
+    $imp = $import.ScriptBlockOutput
+    if (-not $imp.Ok) {
+        $tail = if ($imp.LogTail) { "`n--- import log tail ---`n$($imp.LogTail)" } else { "" }
+        $detail = if ($imp.Error) { $imp.Error } else { "exit=$($imp.ExitCode)" }
+        throw "[Baseline] -Upload: wsusutil import failed ($detail).$tail"
+    }
+    Write-Log "[Baseline] wsusutil import OK (exit=0, $($imp.ElapsedSec)s)." -Success
+    if ($imp.LogTail) {
+        Write-Log "[Baseline] Import log tail:"
+        foreach ($l in ($imp.LogTail -split "`r?`n")) { if ($l.Trim()) { Write-Log "    $l" } }
+    }
+
+    # Post-import snapshot.
+    $postU = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -DisplayName "Upload: post-import snapshot" -ScriptBlock {
+        try {
+            $wsus = Get-WsusServer -ErrorAction Stop
+            $sub = $wsus.GetSubscription()
+            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
+            $subCats = @($sub.GetUpdateCategories()).Count
+            $subClas = @($sub.GetUpdateClassifications()).Count
+            [PSCustomObject]@{ Ok = $true; TaxonomyCats = $taxonomyCats; TaxonomyClas = $taxonomyClas; SubscribedCats = $subCats; SubscribedClas = $subClas }
+        }
+        catch { [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message } }
+    }
+    if (-not $postU -or -not $postU.ScriptBlockOutput -or -not $postU.ScriptBlockOutput.Ok) {
+        $errMsg = if ($postU -and $postU.ScriptBlockOutput) { $postU.ScriptBlockOutput.Error } else { "no output" }
+        throw "[Baseline] -Upload: post-import snapshot failed: $errMsg"
+    }
+    $post = $postU.ScriptBlockOutput
+    $dCats = $post.TaxonomyCats - $pre.TaxonomyCats
+    $dClas = $post.TaxonomyClas - $pre.TaxonomyClas
+
+    Write-Log ""
+    Write-Log "[Baseline] -Upload test complete." -Success
+    Write-Log "  Cab:                  $CabPath ($cabSizeMB MB, MD5=$cabMd5)"
+    Write-Log "  Pre-import  Taxonomy: Cats=$($pre.TaxonomyCats), Clas=$($pre.TaxonomyClas), SubscribedCats=$($pre.SubscribedCats)"
+    Write-Log "  Post-import Taxonomy: Cats=$($post.TaxonomyCats), Clas=$($post.TaxonomyClas), SubscribedCats=$($post.SubscribedCats)"
+    Write-Log "  Delta:                Cats=+$dCats, Clas=+$dClas, ImportTime=$($imp.ElapsedSec)s"
+    if ($post.TaxonomyCats -le 0) {
+        Write-Log "[Baseline] FAIL: post-import taxonomy is empty. The DSC resource would treat this as a failure and fall back to MU sync." -Failure
+    }
+    elseif ($post.SubscribedCats -le 0) {
+        Write-Log "[Baseline] WARNING: TaxonomyCats=$($post.TaxonomyCats) but SubscribedCats=0. The DSC resource checks SubscribedCats and would treat this as 'no categories present' and fall back to MU sync. The cab populated the catalog but no entries are flagged as subscribed -- regenerate the cab or revisit the import-side gating." -Warning
+    }
+    else {
+        Write-Log "[Baseline] PASS: cab is good. The WSUSSync DSC resource would accept this and skip MU categories sync." -Success
+    }
+    return
 }
 
 # Pre-flight: VM must be a clean WSUS server with no MU sync history. Fail
@@ -444,9 +644,12 @@ Write-Log "  Log:      $outLog"
 Write-Log "  MD5:      $hostMd5"
 Write-Log ""
 Write-Log "[Baseline] Next steps:"
-Write-Log "  1. Add the cab to vmbuild\azureFiles\_filelist.json under 'Tools' (ready-to-paste entry below)."
-Write-Log "  2. Upload it to the storage account at tools\wsus\WsusCategoriesBaseline.cab."
-Write-Log "  3. Future deploys with cmOptions.WsusImportBaseline=`$true (default) pick it up automatically."
+Write-Log "  1. (Recommended) Test the cab end-to-end against a fresh WSUS VM:"
+Write-Log "       .\New-WsusCategoriesBaseline.ps1 -VmName <fresh-wsus-vm> -DomainName <domain> -Upload"
+Write-Log "     (or combine -Reset -Upload to wipe + retest on the same VM)."
+Write-Log "  2. Add the cab to vmbuild\azureFiles\_filelist.json under 'Tools' (ready-to-paste entry below)."
+Write-Log "  3. Upload it to the storage account at tools\wsus\WsusCategoriesBaseline.cab."
+Write-Log "  4. Future deploys with cmOptions.WsusImportBaseline=`$true (default) pick it up automatically."
 Write-Log ""
 Write-Log "[Baseline] _filelist.json entry:"
 foreach ($line in $filelistJson -split "`r?`n") { Write-Log "    $line" }
