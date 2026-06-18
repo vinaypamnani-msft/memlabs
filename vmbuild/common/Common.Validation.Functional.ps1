@@ -2386,14 +2386,33 @@ WHERE drs.is_local = 1
             # Query the DC's DNS zone directly instead of Resolve-DnsName.
             # Wrap in watchdog: the remote DNS RPC has no native timeout and
             # can hang for the entire 10-min outer budget if the DC is busy.
+            # If the RPC channel is stuck, fall back to a direct port-53 DNS
+            # query against the same DC -- still authoritative, still bypasses
+            # the local cache + LLMNR (-DnsOnly -NoHostsFile), just a different
+            # transport that doesn't share the DnsServer RPC hang.
             if ($listenerName) {
                 $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$dnsServer'")
                 $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 3 -ArgumentList @($domain, $listenerName, $dnsServer) -ScriptBlock {
                     param($zone, $name, $server)
                     Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
                 }
+                $resolvedIPs = @()
+                $sourceNote = ''
                 if ($wd.Status -eq 'TimedOut') {
-                    $results.Details.Add("WARN: DNS query for '$listenerName' did not complete after $($wd.Attempts) attempts (20s each); skipping. $($wd.AttemptLog -join '; ')")
+                    $results.Details.Add("INFO: DnsServer RPC timed out after $($wd.Attempts) attempts (20s each); falling back to direct DNS query. $($wd.AttemptLog -join '; ')")
+                    $fqdn = "$listenerName.$domain"
+                    $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
+                    $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $dnsServer) -ScriptBlock {
+                        param($n, $s)
+                        Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                    }
+                    if ($wd2.Status -eq 'OK') {
+                        $resolvedIPs = @($wd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                        $sourceNote = ' (resolved via direct DNS fallback)'
+                    }
+                    else {
+                        $results.Details.Add("WARN: DNS query for '$listenerName' did not complete via RPC or direct DNS; skipping listener DNS check")
+                    }
                 }
                 elseif ($wd.Status -eq 'Error') {
                     $results.Passed = $false
@@ -2403,17 +2422,17 @@ WHERE drs.is_local = 1
                 else {
                     $listenerRecs = @($wd.Output)
                     $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    if ($resolvedIPs.Count -gt 0) {
-                        $retryNote = if ($wd.Attempts -gt 1) { " (succeeded on attempt $($wd.Attempts) after timeouts)" } else { '' }
-                        $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$retryNote")
-                        if ($agIP -and $agIP -notin $resolvedIPs) {
-                            $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
-                        }
+                    if ($wd.Attempts -gt 1) { $sourceNote = " (succeeded on attempt $($wd.Attempts) after timeouts)" }
+                }
+                if ($resolvedIPs.Count -gt 0) {
+                    $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
+                    if ($agIP -and $agIP -notin $resolvedIPs) {
+                        $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
                     }
-                    else {
-                        $results.Passed = $false
-                        $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
-                    }
+                }
+                elseif ($wd.Status -eq 'OK') {
+                    $results.Passed = $false
+                    $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                 }
             }
 
@@ -5113,30 +5132,62 @@ function Test-DomainMemberFunctionality {
             $officeResults = @{ Details = [System.Collections.Generic.List[string]]::new() }
             # The Install Targets collection refreshes on its own schedule, and the
             # client only pulls down the deployment after a Machine Policy cycle.
-            # Trigger both proactively before checking so a freshly-built VM whose
-            # client just came online doesn't spuriously warn while everything is
-            # actually working.
+            # Trigger the full chain proactively (Policy Retrieval -> Evaluation ->
+            # App Deployment Eval) so a freshly-built VM whose client just came
+            # online doesn't spuriously warn while everything is actually working.
+            # CCM_Application is populated by App Deployment Eval ({...0121}), not
+            # by policy retrieval alone -- triggering only 0021/0022 leaves a
+            # window where policy is on disk but no CCM_Application row exists yet.
             try {
                 Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction SilentlyContinue | Out-Null
                 Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000022}' } -ErrorAction SilentlyContinue | Out-Null
             }
             catch { }
-            # Give the policy refresh up to ~45s to land before warning.
+            # Poll up to ~2 min for CCM_Application to populate. Retrigger
+            # Application Deployment Eval ({...0121}) and App Global Eval
+            # ({...0027}) at 30s and 60s if still empty -- the first eval can
+            # race with the policy download on a freshly-onboarded client.
             $app = $null
-            for ($i = 0; $i -lt 9; $i++) {
+            for ($i = 0; $i -lt 24; $i++) {
                 try {
                     $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
                 }
                 catch { }
                 if ($app) { break }
+                if ($i -eq 6 -or $i -eq 12) {
+                    try {
+                        Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000121}' } -ErrorAction SilentlyContinue | Out-Null
+                        Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000027}' } -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    catch { }
+                }
                 Start-Sleep -Seconds 5
             }
             if ($app) {
                 $officeResults.Details.Add("OK: Office deployment policy received (Name=$($app.Name), State=$($app.EvaluationState))")
             }
             else {
-                $officeResults.Details.Add("WARN: Office deployment policy not yet received after policy refresh — check MEMLABS-Office Install Targets collection membership on the Primary")
+                # Collect quick diagnostics so the WARN points at the right subsystem
+                # instead of just suggesting collection membership.
+                $diag = @()
+                $assignCount = 0
+                try {
+                    $assignCount = @(Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' -ClassName CCM_ApplicationCIAssignment -ErrorAction SilentlyContinue).Count
+                    $diag += "AppAssignments=$assignCount"
+                }
+                catch { $diag += "AppAssignments=?" }
+                try {
+                    $ccmExec = (Get-Service -Name CcmExec -ErrorAction SilentlyContinue).Status
+                    $diag += "CcmExec=$ccmExec"
+                }
+                catch { }
+                $hint = if ($assignCount -gt 0) {
+                    "policy is present but Microsoft 365 not in it — check the deployment on the Primary"
+                } else {
+                    "no application policy received — VM likely not yet in MEMLABS-Office Install Targets collection (update collection membership on the Primary)"
+                }
+                $officeResults.Details.Add("WARN: Office deployment policy not visible after 2 min of polling [$($diag -join ', ')] — $hint")
             }
             # Also check if Office is already installed
             $ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
