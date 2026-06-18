@@ -915,6 +915,157 @@ CurrentBranch=1
         if ($authScheme -and $authScheme -ne 'KERBEROS') {
             Write-DscStatus "SQL pre-flight: WARNING — auth_scheme still $authScheme after $kerbMaxAttempts attempts. setup.exe may fail with error 18452 during cluster settling. Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account."
         }
+
+        # Step 4: AG synchronization stability gate (SQLAO only).
+        # ConfigMgr Setup's Init_Database does an unconditional failover to
+        # the secondary (to set db_owner / clr / trustworthy on the AG db)
+        # and then a failback. Each leg waits a hardcoded ~15 min for the AG
+        # to report HEALTHY/SYNCHRONIZED. If the secondary is still seeding,
+        # is briefly NOT_HEALTHY, or its replica state-machine gets stuck in
+        # UNKNOWN after the failback, setup fails with:
+        #     "Init_Database (AG) - Something went wrong waiting for
+        #      synchronization to report as healthy."
+        #     "~Setup has encountered fatal errors during database
+        #      initialization. Contact your SQL administrator."
+        # The site DB CM_<sitecode> is committed BEFORE that failover, so a
+        # retry needs a Phase 8 checkpoint restore. We require N consecutive
+        # clean polls (not just one momentary HEALTHY blip) before allowing
+        # setup.exe to launch, and resume any suspended AG dbs as we go.
+        if ($installToAO -and $sqlPreCheckCs -and $sqlAOGroupName) {
+            $agStableMin     = 3        # consecutive clean polls required (~60s stability)
+            $agPollInterval  = 20       # seconds between polls
+            $agMaxAttempts   = 30       # 30 * 20s = 10 min max wall-clock
+            $agCleanStreak   = 0
+            $agLastSnapshot  = $null
+            $agStable        = $false
+            $agReplicaQuery  = @"
+SELECT ar.replica_server_name,
+       rs.role_desc,
+       rs.connected_state_desc,
+       rs.synchronization_health_desc,
+       rs.operational_state_desc,
+       rs.recovery_health_desc
+FROM sys.dm_hadr_availability_replica_states rs
+JOIN sys.availability_groups ag ON rs.group_id = ag.group_id
+JOIN sys.availability_replicas ar ON rs.replica_id = ar.replica_id
+WHERE ag.name = '$sqlAOGroupName'
+"@
+            $agSuspendedQuery = @"
+SELECT DISTINCT adb.database_name
+FROM sys.dm_hadr_database_replica_states drs
+JOIN sys.availability_databases_cluster adb ON drs.group_database_id = adb.group_database_id
+WHERE drs.is_suspended = 1
+"@
+            for ($agTry = 1; $agTry -le $agMaxAttempts; $agTry++) {
+                $replicas = @()
+                try {
+                    $agConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
+                    $agConn.Open()
+                    try {
+                        $agCmd = $agConn.CreateCommand()
+                        $agCmd.CommandTimeout = 30
+                        $agCmd.CommandText = $agReplicaQuery
+                        $agReader = $agCmd.ExecuteReader()
+                        while ($agReader.Read()) {
+                            $replicas += [pscustomobject]@{
+                                Name   = $agReader['replica_server_name']
+                                Role   = $agReader['role_desc']
+                                Conn   = $agReader['connected_state_desc']
+                                Health = $agReader['synchronization_health_desc']
+                                Op     = if ($agReader.IsDBNull(4)) { 'UNKNOWN' } else { $agReader['operational_state_desc'] }
+                                Rec    = if ($agReader.IsDBNull(5)) { 'UNKNOWN' } else { $agReader['recovery_health_desc'] }
+                            }
+                        }
+                        $agReader.Close()
+                    }
+                    finally { $agConn.Close() }
+                }
+                catch {
+                    Write-DscStatus "AG pre-flight: attempt $agTry/$agMaxAttempts — replica query failed: $($_.Exception.Message)"
+                    $agCleanStreak = 0
+                    if ($agTry -lt $agMaxAttempts) { Start-Sleep -Seconds $agPollInterval }
+                    continue
+                }
+
+                if ($replicas.Count -eq 0) {
+                    Write-DscStatus "AG pre-flight: attempt $agTry/$agMaxAttempts — AG '$sqlAOGroupName' returned 0 replicas (listener may not be on a node that hosts the AG yet)"
+                    $agCleanStreak = 0
+                }
+                else {
+                    $snapshot = ($replicas | ForEach-Object { "$($_.Name)[$($_.Role)/$($_.Conn)/$($_.Health)/op=$($_.Op)/rec=$($_.Rec)]" }) -join '; '
+                    $allHealthy = $true
+                    foreach ($r in $replicas) {
+                        if ($r.Conn -ne 'CONNECTED' -or $r.Health -ne 'HEALTHY' -or
+                            $r.Op   -eq 'UNKNOWN'   -or $r.Op    -eq 'OFFLINE' -or
+                            $r.Rec  -eq 'UNKNOWN'   -or $r.Rec   -eq 'ONLINE_IN_PROGRESS') {
+                            $allHealthy = $false
+                            break
+                        }
+                    }
+                    if ($allHealthy) {
+                        $agCleanStreak++
+                        if ($snapshot -ne $agLastSnapshot -or $agCleanStreak -eq $agStableMin) {
+                            Write-DscStatus "AG pre-flight: attempt $agTry — HEALTHY (streak $agCleanStreak/$agStableMin) [$snapshot]"
+                            $agLastSnapshot = $snapshot
+                        }
+                        if ($agCleanStreak -ge $agStableMin) {
+                            $agStable = $true
+                            Write-DscStatus "AG pre-flight: AG '$sqlAOGroupName' stable for $($agStableMin * $agPollInterval)s — safe for ConfigMgr Init_Database failover/failback"
+                            break
+                        }
+                    }
+                    else {
+                        if ($snapshot -ne $agLastSnapshot) {
+                            Write-DscStatus "AG pre-flight: attempt $agTry/$agMaxAttempts — UNHEALTHY [$snapshot]"
+                            $agLastSnapshot = $snapshot
+                        }
+                        $agCleanStreak = 0
+                        # Remediation: resume any suspended AG databases via the listener.
+                        # (Endpoint cycling / per-node SQL restarts are intentionally NOT
+                        # done here — those require remoting into the SQLAO nodes and
+                        # belong to Test-SQLAOFunctionality. We do the cheap, safe
+                        # remediation only; if the AG is in serious trouble we surface
+                        # the WARN and let the operator look at it.)
+                        try {
+                            $rsConn = New-Object System.Data.Odbc.OdbcConnection $sqlPreCheckCs
+                            $rsConn.Open()
+                            try {
+                                $suspended = @()
+                                $rsCmd = $rsConn.CreateCommand()
+                                $rsCmd.CommandTimeout = 30
+                                $rsCmd.CommandText = $agSuspendedQuery
+                                $rsReader = $rsCmd.ExecuteReader()
+                                while ($rsReader.Read()) { $suspended += [string]$rsReader['database_name'] }
+                                $rsReader.Close()
+                                foreach ($db in $suspended) {
+                                    try {
+                                        $resCmd = $rsConn.CreateCommand()
+                                        $resCmd.CommandTimeout = 30
+                                        $resCmd.CommandText = "ALTER DATABASE [$db] SET HADR RESUME"
+                                        $null = $resCmd.ExecuteNonQuery()
+                                        Write-DscStatus "AG pre-flight: resumed suspended AG database '$db'"
+                                    }
+                                    catch {
+                                        Write-DscStatus "AG pre-flight: failed to resume '$db': $($_.Exception.Message)"
+                                    }
+                                }
+                            }
+                            finally { $rsConn.Close() }
+                        }
+                        catch {
+                            Write-DscStatus "AG pre-flight: suspended-database probe failed: $($_.Exception.Message)"
+                        }
+                    }
+                }
+
+                if ($agStable) { break }
+                if ($agTry -lt $agMaxAttempts) { Start-Sleep -Seconds $agPollInterval }
+            }
+
+            if (-not $agStable) {
+                Write-DscStatus "AG pre-flight: WARNING — AG '$sqlAOGroupName' did not stay HEALTHY for $($agStableMin * $agPollInterval)s within $($agMaxAttempts * $agPollInterval)s. ConfigMgr Init_Database may fail at AGWaitForSynchronizationHealth (the failover/failback CM does to set db_owner needs both replicas HEALTHY+SYNCHRONIZED within ~15 min). Last state: $agLastSnapshot. Proceeding anyway."
+            }
+        }
     }
 
     Write-DscStatus "Starting Install of CM from $CMInstallationFile [$($CMFileVersion.VersionInfo.FileVersion)]"

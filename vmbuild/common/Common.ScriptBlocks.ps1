@@ -4445,13 +4445,25 @@ $global:VM_Config = {
                     # by renaming the log and re-launching setup.exe. If the retry
                     # also fails, the guest writes a JOBFAILURE status that the
                     # normal monitoring loop above detects.
+                    #
+                    # Also pull a wider context window when a fatal is seen so we
+                    # can recognize specific failure shapes (e.g. SQLAO Init_Database
+                    # AGWaitForSynchronizationHealth) and emit actionable guidance.
                     $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
                         if (Test-Path C:\ConfigMgrSetup.log) {
-                            Get-Content C:\ConfigMgrSetup.log -tail 10 | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" | Select-Object -First 1
+                            $tail = Get-Content C:\ConfigMgrSetup.log -tail 30
+                            $hit  = $tail | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" | Select-Object -First 1
+                            if ($hit) {
+                                [pscustomobject]@{
+                                    Line    = $hit.Line
+                                    Context = ($tail -join "`n")
+                                }
+                            }
                         }
                     }
                     if ($cmLogCheck.ScriptBlockOutput.Line) {
-                        $failEntry = $cmLogCheck.ScriptBlockOutput.Line
+                        $failEntry   = $cmLogCheck.ScriptBlockOutput.Line
+                        $failContext = $cmLogCheck.ScriptBlockOutput.Context
                         $bailEarly = $true
                     }
 
@@ -4460,6 +4472,20 @@ $global:VM_Config = {
                             $failEntry = $failEntry.Substring(0, $failEntry.IndexOf("$"))
                         }
                         Write-Log "[Phase $Phase]: $($currentItem.vmName): DSC: $($currentItem.role) failed: $failEntry. Check C:\ConfigMgrSetup.log for more." -Failure -OutputStream
+                        # Recognize the SQLAO Init_Database AG wait-for-health timeout
+                        # and surface explicit remediation. CM Setup creates the site
+                        # database BEFORE the failover/failback, so a blind retry
+                        # against a partial install is unsafe — checkpoint restore is
+                        # required. A SQL restart on the secondary almost always
+                        # un-sticks an UNKNOWN-state replica after the failback.
+                        if ($failContext -and (
+                                $failContext -match 'did not return to a healthy state in the alloted time' -or
+                                $failContext -match 'Init_Database \(AG\) - Something went wrong waiting for synchronization' -or
+                                $failContext -match 'AGWaitForSynchronizationHealth'
+                            )) {
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: SQLAO Init_Database failure detected. ConfigMgr Setup failed over to the secondary to set db_owner, failed back to the primary, and the secondary replica did not re-converge to HEALTHY/SYNCHRONIZED within ConfigMgr's ~15min budget." -OutputStream
+                            Write-Log "[Phase $Phase]: $($currentItem.vmName): DIAG: The CM site DB is partially committed (created before the failover); re-running setup.exe is unsafe. Restore the Phase 8 checkpoint on this VM, then before redeploying restart the SQL service on the SQLAO secondary node (the one that was UNKNOWN in ConfigMgrSetup.log) to clear the stuck replica state-machine, wait ~2 min for AG to report HEALTHY on both replicas, then resume Phase 8. The new pre-flight AG stability gate will hold setup.exe until the AG has been HEALTHY for 60s, which prevents this in most cases." -OutputStream
+                        }
                         return
                     }
                 }
