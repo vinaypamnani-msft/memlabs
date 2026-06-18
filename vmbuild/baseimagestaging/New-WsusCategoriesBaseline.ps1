@@ -369,9 +369,11 @@ $export = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSec
         if (-not (Test-Path $cabPath)) { throw "wsusutil export reported success but cab not found at $cabPath" }
 
         $cabFile = Get-Item $cabPath
-        $sub = $wsus.GetSubscription()
-        $cats = @($sub.GetUpdateCategories())
-        $clas = @($sub.GetUpdateClassifications())
+        # Record DB-wide taxonomy counts (what the cab actually contains).
+        # $sub.GetUpdateCategories() would return 0 here because we just
+        # unsubscribed everything to keep the cab pure-taxonomy.
+        $cats = @($wsus.GetUpdateCategories())
+        $clas = @($wsus.GetUpdateClassifications())
         $hash = (Get-FileHash -Path $cabPath -Algorithm SHA256).Hash
         [PSCustomObject]@{
             Ok              = $true
