@@ -660,6 +660,15 @@ function Start-PhaseJobs {
                 # local Administrators on this SQL host. Retry transient
                 # Invoke-VmCommand / ADSI failures (PSDirect session not yet
                 # warm right after Start-VM2, brief WinRM contention, etc.).
+                # ADSI WinNT://NETBIOS/USER lookups need a working secure
+                # channel (the principal resolve walks NetLogon to a DC);
+                # if the snapshot we just restored predates an AD machine-
+                # password rotation, the channel is broken and the add
+                # throws "The trust relationship between this workstation
+                # and the primary domain failed". The scriptblock below
+                # detects that and runs Test-ComputerSecureChannel -Repair
+                # first (PSDirect authenticated us as the domain admin,
+                # which has rights to reset the machine password in AD).
                 $attempts = 0
                 $maxAttempts = 3
                 $success = $false
@@ -668,30 +677,55 @@ function Start-PhaseJobs {
                     $attempts++
                     $result = Invoke-VmCommand -VmName $sqlHost -VmDomainName $domain -DisplayName "Ensure $account in local Administrators" -ArgumentList @($account) -SuppressLog -ScriptBlock {
                         param($acct)
+                        $scNote = ''
+                        # Repair secure channel first if needed -- without it,
+                        # ADSI WinNT://DOMAIN/USER below will throw "trust
+                        # relationship failed" because the principal resolve
+                        # walks NetLogon to a DC.
+                        try {
+                            $sc = Test-ComputerSecureChannel -ErrorAction Stop
+                            if (-not $sc) {
+                                try {
+                                    $sc = Test-ComputerSecureChannel -Repair -ErrorAction Stop
+                                    $scNote = if ($sc) { ' (secure channel repaired)' } else { ' (secure channel repair returned False)' }
+                                }
+                                catch { $scNote = " (secure channel repair threw: $($_.Exception.Message))" }
+                            }
+                        }
+                        catch {
+                            # Test-ComputerSecureChannel can itself throw
+                            # "trust relationship failed" -- treat as broken
+                            # and try -Repair to recover.
+                            try {
+                                $sc = Test-ComputerSecureChannel -Repair -ErrorAction Stop
+                                $scNote = if ($sc) { ' (secure channel repaired after Test threw)' } else { ' (secure channel repair returned False)' }
+                            }
+                            catch { $scNote = " (secure channel repair threw: $($_.Exception.Message))" }
+                        }
                         try {
                             $grpName = (Get-CimInstance -ClassName Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"' -ErrorAction Stop).Name
                             $g = [ADSI]"WinNT://$env:COMPUTERNAME/$grpName,group"
                             $parts = $acct.Split('\')
                             $path = "WinNT://$($parts[0])/$($parts[1])"
-                            if ($g.IsMember($path)) { return 'already-member' }
+                            if ($g.IsMember($path)) { return "already-member$scNote" }
                             $g.Add($path)
                             # Verify post-add so a silent ADSI no-op surfaces.
-                            if ($g.IsMember($path)) { return 'added' }
-                            return 'error: Add returned success but IsMember still false'
+                            if ($g.IsMember($path)) { return "added$scNote" }
+                            return "error: Add returned success but IsMember still false$scNote"
                         }
                         catch {
-                            return "error: $($_.Exception.Message)"
+                            return "error: $($_.Exception.Message)$scNote"
                         }
                     }
                     if ($result -and -not $result.ScriptBlockFailed) {
                         $out = "$($result.ScriptBlockOutput)".Trim()
-                        if ($out -eq 'added') {
+                        if ($out -like 'added*') {
                             $note = if ($attempts -gt 1) { " (attempt $attempts)" } else { '' }
-                            Write-Log "[Phase 8] $sqlHost`: added $account to local Administrators (was missing) -- self-heal for site server $($ss.vmName)$note." -Activity
+                            Write-Log "[Phase 8] $sqlHost`: added $account to local Administrators (was missing) -- self-heal for site server $($ss.vmName)$note. $out" -Activity
                             $success = $true
                         }
-                        elseif ($out -eq 'already-member') {
-                            Write-Log "[Phase 8] $sqlHost`: $account already in local Administrators." -LogOnly
+                        elseif ($out -like 'already-member*') {
+                            Write-Log "[Phase 8] $sqlHost`: $account already in local Administrators. $out" -LogOnly
                             $success = $true
                         }
                         else {
