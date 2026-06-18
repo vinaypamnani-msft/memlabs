@@ -296,10 +296,15 @@ while ((Get-Date) -lt $pollDeadline) {
             $status = $sub.GetSynchronizationStatus().ToString()
             $phase = ''
             try { $phase = $sub.GetSynchronizationProgress().Phase.ToString() } catch {}
-            $cats = @($sub.GetUpdateCategories()).Count
+            # Taxonomy: ALL categories now in the WSUS DB (what the cab will
+            # export). $sub.GetUpdateCategories() returns only SUBSCRIBED
+            # categories and is 0 here because the first sync had no products
+            # subscribed yet -- it populates the taxonomy regardless.
+            $taxonomyCats = @($wsus.GetUpdateCategories()).Count
+            $taxonomyClas = @($wsus.GetUpdateClassifications()).Count
             $hist = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
             $lastResult = if ($hist.Count -gt 0) { $hist[0].Result.ToString() } else { '<no-history>' }
-            [PSCustomObject]@{ Ok = $true; Status = $status; Phase = $phase; Categories = $cats; LastResult = $lastResult }
+            [PSCustomObject]@{ Ok = $true; Status = $status; Phase = $phase; TaxonomyCats = $taxonomyCats; TaxonomyClas = $taxonomyClas; LastResult = $lastResult }
         }
         catch {
             [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
@@ -315,8 +320,12 @@ while ((Get-Date) -lt $pollDeadline) {
         continue
     }
     $elapsedMin = [math]::Round((New-TimeSpan -Start ($pollDeadline.AddMinutes(-$SyncTimeoutMinutes)) -End (Get-Date)).TotalMinutes, 1)
-    Write-Log "[Baseline] [$elapsedMin min] Status=$($p.Status) Phase=$($p.Phase) Categories=$($p.Categories) LastResult=$($p.LastResult)"
-    if ($p.Status -ne 'Running' -and $p.Categories -gt 0) {
+    Write-Log "[Baseline] [$elapsedMin min] Status=$($p.Status) Phase=$($p.Phase) TaxonomyCats=$($p.TaxonomyCats) TaxonomyClas=$($p.TaxonomyClas) LastResult=$($p.LastResult)"
+    # Break once the sync is no longer running AND a history record exists.
+    # We intentionally do NOT gate on taxonomy counts -- a successful sync
+    # that returns 0 categories is still a definitive terminal state and
+    # the LastResult check below will surface the problem.
+    if ($p.Status -ne 'Running' -and $p.LastResult -ne '<no-history>') {
         $syncResult = $p
         break
     }
@@ -325,9 +334,12 @@ if (-not $syncResult) {
     throw "[Baseline] Categories sync did not complete within $SyncTimeoutMinutes minutes."
 }
 if ($syncResult.LastResult -ne 'Succeeded') {
-    throw "[Baseline] Categories sync ended with LastResult='$($syncResult.LastResult)' (status=$($syncResult.Status), categories=$($syncResult.Categories))."
+    throw "[Baseline] Categories sync ended with LastResult='$($syncResult.LastResult)' (status=$($syncResult.Status), taxonomyCats=$($syncResult.TaxonomyCats))."
 }
-Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), Categories=$($syncResult.Categories), LastResult=$($syncResult.LastResult)"
+if ($syncResult.TaxonomyCats -le 0) {
+    throw "[Baseline] Sync reported Succeeded but the WSUS taxonomy is empty (TaxonomyCats=0). Refusing to export an empty cab."
+}
+Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), TaxonomyCats=$($syncResult.TaxonomyCats), TaxonomyClas=$($syncResult.TaxonomyClas), LastResult=$($syncResult.LastResult)"
 
 # Disable subscriptions and run wsusutil export on the guest.
 $exportGuestPath = "C:\staging\wsus_export\WsusCategoriesBaseline.cab"
