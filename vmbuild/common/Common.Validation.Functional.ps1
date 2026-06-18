@@ -3259,6 +3259,153 @@ function Test-CMSiteFunctionality {
         if (-not $dpRegPassed) { $passed = $false }
     }
 
+    # Office Install Targets collection: validate + self-heal membership.
+    # Only on Primaries (perfloading creates the Office app/deployment on the
+    # Primary, never on CAS). Pre-emptively confirms every VM with
+    # installOffice is resolved into MEMLABS-Office Install Targets and that
+    # the deployment exists, so spurious DomainMember-side "policy not
+    # received" WARNs in Phase 11 get a definitive parent diagnosis (and an
+    # auto-refresh attempt) here instead of falling on the client.
+    $officeExpected = @($DeployConfig.virtualMachines | Where-Object {
+        $_.installOffice -and $_.installOffice -ne $false
+    } | ForEach-Object { $_.vmName })
+    if ($passed -and $CurrentItem.role -eq 'Primary' -and $officeExpected.Count -gt 0) {
+        Write-Progress2 -PercentComplete 0 -Activity "$VMName [$($CurrentItem.role)]" -Status "Verifying Office Install Targets collection"
+        Write-Log "[Phase $Phase] $VMName [$roleLabel]: Validating MEMLABS-Office Install Targets membership for $($officeExpected.Count) VM(s): $($officeExpected -join ', ')" -LogOnly
+
+        $officeCollectionScript = {
+            param($sc, $expected)
+            $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+            $colName = 'MEMLABS-Office Install Targets'
+            $ns = "root\SMS\site_$sc"
+
+            # 1. Collection exists
+            $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_Collection -Filter `"Name='$colName'`"")
+            $col = $null
+            try {
+                $col = Get-WmiObject -Namespace $ns -Class SMS_Collection -Filter "Name='$colName'" -ErrorAction Stop | Select-Object -First 1
+            }
+            catch {
+                $results.Details.Add("WARN: SMS_Collection query failed: $($_.Exception.Message)")
+                return $results
+            }
+            if (-not $col) {
+                $results.Details.Add("WARN: Collection '$colName' does not exist — perfloading may not have run, or Office source download failed")
+                return $results
+            }
+            $results.Details.Add("OK: Collection '$colName' exists (CollectionID=$($col.CollectionID))")
+
+            # 2. Query membership rule reflects current VM list
+            try {
+                $colFull = [wmi]$col.__PATH
+                $colFull.Get()
+                $queryRules = @($colFull.CollectionRules | Where-Object { $_.__CLASS -eq 'SMS_CollectionRuleQuery' })
+                $directRules = @($colFull.CollectionRules | Where-Object { $_.__CLASS -eq 'SMS_CollectionRuleDirect' })
+                $results.Details.Add("INFO: Collection has $($queryRules.Count) query rule(s), $($directRules.Count) direct rule(s)")
+                if ($queryRules.Count -gt 0) {
+                    $ruleQ = $queryRules[0].QueryExpression
+                    $missingFromRule = @($expected | Where-Object { $ruleQ -notmatch "'$([regex]::Escape($_))'" })
+                    if ($missingFromRule.Count -gt 0) {
+                        $results.Details.Add("WARN: Query rule does not reference VM(s): $($missingFromRule -join ', ') — rerun perfloading or Set-OfficeInstallTargetsCollection to refresh")
+                    }
+                    else {
+                        $results.Details.Add("OK: Query rule references all $($expected.Count) expected VM(s)")
+                    }
+                }
+                elseif ($directRules.Count -eq 0) {
+                    $results.Details.Add("WARN: Collection has no membership rules at all")
+                }
+            }
+            catch {
+                $results.Details.Add("INFO: Could not inspect collection rules: $($_.Exception.Message)")
+            }
+
+            # 3. Membership content — with self-healing refresh
+            $getMembers = {
+                param($n, $cid)
+                try {
+                    $names = @(Get-WmiObject -Namespace $n -Class SMS_FullCollectionMembership -Filter "CollectionID='$cid'" -ErrorAction Stop |
+                        Select-Object -ExpandProperty Name)
+                    return ,@($names)
+                }
+                catch { return ,@() }
+            }
+            $members = & $getMembers $ns $col.CollectionID
+            $missing = @($expected | Where-Object { $_ -notin $members })
+
+            if ($missing.Count -gt 0) {
+                $results.Details.Add("REMEDIATE: $($missing.Count)/$($expected.Count) expected VM(s) not in collection ($($missing -join ', ')); requesting collection eval and retrying")
+                try {
+                    # Trigger an incremental + full evaluation. RequestRefresh
+                    # takes a boolean: $true = also refresh sub-collections.
+                    $colFull2 = [wmi]$col.__PATH
+                    [void]$colFull2.RequestRefresh($false)
+                    $results.Details.Add("  Invoked SMS_Collection.RequestRefresh on '$colName'")
+                }
+                catch {
+                    $results.Details.Add("  WARN: RequestRefresh failed: $($_.Exception.Message)")
+                }
+                # Poll up to ~2 min for the missing members to appear.
+                for ($i = 0; $i -lt 12; $i++) {
+                    Start-Sleep -Seconds 10
+                    $members = & $getMembers $ns $col.CollectionID
+                    $missing = @($expected | Where-Object { $_ -notin $members })
+                    if ($missing.Count -eq 0) { break }
+                }
+            }
+
+            if ($missing.Count -eq 0) {
+                $results.Details.Add("OK: All $($expected.Count) expected VM(s) resolved in '$colName'")
+            }
+            else {
+                # Distinguish "VM not yet discovered by CM" from "discovered but rule didn't match"
+                $undiscovered = @()
+                $unmatched = @()
+                foreach ($m in $missing) {
+                    try {
+                        $r = @(Get-WmiObject -Namespace $ns -Class SMS_R_System -Filter "Name='$m'" -ErrorAction Stop)
+                        if ($r.Count -eq 0) { $undiscovered += $m } else { $unmatched += $m }
+                    }
+                    catch { $undiscovered += $m }
+                }
+                if ($undiscovered.Count -gt 0) {
+                    $results.Details.Add("WARN: Not in CM discovery yet (System Discovery hasn't picked them up): $($undiscovered -join ', ')")
+                }
+                if ($unmatched.Count -gt 0) {
+                    $results.Details.Add("WARN: Discovered but not in '$colName' after RequestRefresh: $($unmatched -join ', ') — query rule may not match (check Name property in SMS_R_System)")
+                }
+            }
+
+            # 4. Deployment exists targeting this collection
+            $results.Details.Add("CMD: Get-WmiObject -Namespace '$ns' -Class SMS_ApplicationAssignment -Filter `"TargetCollectionID='$($col.CollectionID)'`"")
+            try {
+                $deployments = @(Get-WmiObject -Namespace $ns -Class SMS_ApplicationAssignment -Filter "TargetCollectionID='$($col.CollectionID)'" -ErrorAction Stop)
+                if ($deployments.Count -eq 0) {
+                    $results.Details.Add("WARN: No SMS_ApplicationAssignment targets '$colName' — Office deployment is missing (perfloading should have created it)")
+                }
+                else {
+                    foreach ($d in $deployments) {
+                        $purpose = if ($d.OfferTypeID -eq 0) { 'Required' } else { 'Available' }
+                        $results.Details.Add("OK: Deployment '$($d.AssignmentName)' (AppCI=$($d.AssignedCI_UniqueID)) targets '$colName' [$purpose]")
+                    }
+                }
+            }
+            catch {
+                $results.Details.Add("INFO: Could not enumerate SMS_ApplicationAssignment: $($_.Exception.Message)")
+            }
+
+            return $results
+        }
+
+        $officeColResult = Invoke-VmCommand -VmName $VMName -VmDomainName $domain `
+            -ScriptBlock $officeCollectionScript -ArgumentList $siteCode, $officeExpected `
+            -DisplayName "Phase11-OfficeCollection-Test" -SuppressLog `
+            -AsJob -TimeoutSeconds 300
+
+        # WARN-only test: don't fail the Primary if collection membership is still propagating.
+        [void](Format-TestResult -VMName $VMName -RoleLabel "OfficeCollection ($siteCode)" -Result $officeColResult)
+    }
+
     return $passed
 }
 
