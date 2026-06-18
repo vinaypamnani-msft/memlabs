@@ -168,20 +168,29 @@ Write-DscStatus "$Tag Starting perfloading"
     # Required when a resource is added to the target collection AFTER the
     # deployment was originally authored: ConfigMgr does not retroactively
     # project pre-existing deployments to late-arriving collection members
-    # until the deployment itself is touched. Re-saves the deployment with its
-    # current intent, which bumps SMS_ApplicationAssignment.LastModifiedTime and
-    # causes site_comp / policypv to re-project the assignment for all members.
+    # until the deployment itself is touched. Re-saves the deployment via
+    # SMS_ApplicationAssignment.Put() which bumps LastModifiedTime and causes
+    # site_comp / policypv to re-project the assignment for all members.
+    #
+    # Implemented against WMI directly because Set-CMApplicationDeployment's
+    # accepted parameters vary by SCCM build -- older SDKs reject both
+    # -DeployAction and -DeployPurpose, leaving no portable cmdlet-level way
+    # to force a Put(). WMI Put() works on every version.
     function Update-OfficeDeploymentPolicy {
         param([string]$AppName, [string]$CollectionName)
         try {
             $dep = Get-CMApplicationDeployment -Name $AppName -CollectionName $CollectionName -ErrorAction SilentlyContinue
             if (-not $dep) { return }
-            # Setting the same intent triggers a Put() on SMS_ApplicationAssignment
-            # which forces a fresh policy author. This is a no-op for the user-
-            # visible deployment configuration. Note: Set-CMApplicationDeployment
-            # does NOT accept -DeployAction (install/uninstall is fixed at create
-            # time); only -DeployPurpose and notification properties are settable.
-            $dep | Set-CMApplicationDeployment -DeployPurpose Required -UserNotification DisplayAll -ErrorAction Stop
+            $assignmentName = $dep.AssignmentName
+            if (-not $assignmentName) { return }
+            $escaped = $assignmentName.Replace("'", "''")
+            $ass = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_ApplicationAssignment `
+                -Filter "AssignmentName='$escaped'" -ErrorAction Stop
+            if (-not $ass) { return }
+            # Touch a benign property so Put() registers a change and bumps
+            # LastModificationTime. NotifyUser is settable on every CM build.
+            $ass.NotifyUser = $ass.NotifyUser
+            [void]$ass.Put()
             Write-DscStatus "$Tag Re-authored deployment policy for '$AppName' -> '$CollectionName' (forces projection to late-added members)"
         }
         catch {
