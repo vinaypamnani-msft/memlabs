@@ -1632,10 +1632,25 @@ function Test-SQLAOFunctionality {
         Write-Progress -Activity $progressActivity -Status "Starting SQLAO validation"
 
         # Resolve domain and DNS server once — used by all DNS zone queries.
-        # SQLAO VMs aren't DCs, so query the DC's DNS zone remotely.
+        # SQLAO VMs aren't DCs, so query the DC's DNS zone remotely. Build a
+        # CANDIDATE LIST of DNS servers (not just the first NIC's first entry):
+        # SQLAO nodes have a heartbeat NIC, and if a stale DNS server leaked
+        # onto it (or onto a disconnected adapter), picking [0] can silently
+        # target a non-resolver and time out every probe. Iterate every IPv4
+        # ServerAddress across every NIC, skip loopback / APIPA / 0.0.0.0, and
+        # try each candidate at the call site until one answers.
         $domain = (Get-CimInstance Win32_ComputerSystem).Domain
-        $dnsServer = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-            Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses[0]
+        $dnsCandidates = @(
+            Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.ServerAddresses } |
+                ForEach-Object { $_.ServerAddresses } |
+                Where-Object {
+                    $_ -and $_ -ne '0.0.0.0' -and $_ -ne '127.0.0.1' -and
+                    $_ -notlike '169.254.*' -and $_ -notlike '127.*'
+                } |
+                Select-Object -Unique
+        )
+        $dnsServer = if ($dnsCandidates.Count -gt 0) { $dnsCandidates[0] } else { $null }
 
         # Watchdog: run a scriptblock under Start-ThreadJob (or Start-Job
         # fallback) with a per-attempt timeout and retry. A few SQLAO probes
@@ -2386,53 +2401,76 @@ WHERE drs.is_local = 1
             # Query the DC's DNS zone directly instead of Resolve-DnsName.
             # Wrap in watchdog: the remote DNS RPC has no native timeout and
             # can hang for the entire 10-min outer budget if the DC is busy.
-            # If the RPC channel is stuck, fall back to a direct port-53 DNS
-            # query against the same DC -- still authoritative, still bypasses
-            # the local cache + LLMNR (-DnsOnly -NoHostsFile), just a different
-            # transport that doesn't share the DnsServer RPC hang.
+            # If the RPC channel is stuck OR the chosen DNS server isn't a
+            # real resolver (stale entry on a SQLAO heartbeat NIC), iterate
+            # every candidate DNS server from $dnsCandidates and fall back to
+            # a direct port-53 DNS query against each -- still authoritative,
+            # still bypasses local cache + LLMNR (-DnsOnly -NoHostsFile), just
+            # a different transport that doesn't share the DnsServer RPC hang.
             if ($listenerName) {
-                $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$dnsServer'")
-                $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 3 -ArgumentList @($domain, $listenerName, $dnsServer) -ScriptBlock {
-                    param($zone, $name, $server)
-                    Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
-                }
-                $resolvedIPs = @()
-                $sourceNote = ''
-                if ($wd.Status -eq 'TimedOut') {
-                    $results.Details.Add("INFO: DnsServer RPC timed out after $($wd.Attempts) attempts (20s each); falling back to direct DNS query. $($wd.AttemptLog -join '; ')")
-                    $fqdn = "$listenerName.$domain"
-                    $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$dnsServer' -DnsOnly -NoHostsFile")
-                    $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $dnsServer) -ScriptBlock {
-                        param($n, $s)
-                        Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
-                    }
-                    if ($wd2.Status -eq 'OK') {
-                        $resolvedIPs = @($wd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
-                        $sourceNote = ' (resolved via direct DNS fallback)'
-                    }
-                    else {
-                        $results.Details.Add("WARN: DNS query for '$listenerName' did not complete via RPC or direct DNS; skipping listener DNS check")
-                    }
-                }
-                elseif ($wd.Status -eq 'Error') {
-                    $results.Passed = $false
-                    $errMsg = if ($wd.Errors -and $wd.Errors[0].Exception) { $wd.Errors[0].Exception.Message } else { ($wd.Errors -join '; ') }
-                    $results.Details.Add("FAIL: DNS zone query for '$listenerName' failed: $errMsg")
+                if (-not $dnsServer) {
+                    $results.Details.Add("WARN: No usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA); skipping listener DNS check")
                 }
                 else {
-                    $listenerRecs = @($wd.Output)
-                    $resolvedIPs = @($listenerRecs | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
-                    if ($wd.Attempts -gt 1) { $sourceNote = " (succeeded on attempt $($wd.Attempts) after timeouts)" }
-                }
-                if ($resolvedIPs.Count -gt 0) {
-                    $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
-                    if ($agIP -and $agIP -notin $resolvedIPs) {
-                        $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                    $resolvedIPs = @()
+                    $sourceNote = ''
+                    $rpcStatus = 'Skipped'
+                    foreach ($candidate in $dnsCandidates) {
+                        $results.Details.Add("CMD: Get-DnsServerResourceRecord -ZoneName '$domain' -Name '$listenerName' -RRType A -ComputerName '$candidate'")
+                        $wd = Invoke-WithWatchdog -TimeoutSec 20 -MaxAttempts 2 -ArgumentList @($domain, $listenerName, $candidate) -ScriptBlock {
+                            param($zone, $name, $server)
+                            Get-DnsServerResourceRecord -ZoneName $zone -Name $name -RRType A -ComputerName $server -ErrorAction Stop
+                        }
+                        $rpcStatus = $wd.Status
+                        if ($wd.Status -eq 'OK') {
+                            $resolvedIPs = @($wd.Output | ForEach-Object { $_.RecordData.IPv4Address.IPAddressToString })
+                            $attemptNote = if ($wd.Attempts -gt 1) { ", attempt $($wd.Attempts)" } else { '' }
+                            if ($candidate -ne $dnsCandidates[0] -or $wd.Attempts -gt 1) {
+                                $sourceNote = " (via '$candidate'$attemptNote)"
+                            }
+                            break
+                        }
+                        elseif ($wd.Status -eq 'Error') {
+                            $results.Details.Add("  RPC against '$candidate' errored: $($wd.Errors[0].Exception.Message)")
+                        }
+                        else {
+                            $results.Details.Add("  RPC against '$candidate' timed out after $($wd.Attempts) attempts")
+                        }
                     }
-                }
-                elseif ($wd.Status -eq 'OK') {
-                    $results.Passed = $false
-                    $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
+
+                    if ($resolvedIPs.Count -eq 0 -and $rpcStatus -ne 'OK') {
+                        # RPC failed against every candidate -- try direct DNS port 53 next.
+                        $fqdn = "$listenerName.$domain"
+                        foreach ($candidate in $dnsCandidates) {
+                            $results.Details.Add("CMD: Resolve-DnsName -Name '$fqdn' -Type A -Server '$candidate' -DnsOnly -NoHostsFile")
+                            $wd2 = Invoke-WithWatchdog -TimeoutSec 10 -MaxAttempts 2 -ArgumentList @($fqdn, $candidate) -ScriptBlock {
+                                param($n, $s)
+                                Resolve-DnsName -Name $n -Type A -Server $s -DnsOnly -NoHostsFile -ErrorAction Stop
+                            }
+                            if ($wd2.Status -eq 'OK') {
+                                $resolvedIPs = @($wd2.Output | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress })
+                                if ($resolvedIPs.Count -gt 0) {
+                                    $sourceNote = " (direct DNS via '$candidate')"
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if ($resolvedIPs.Count -gt 0) {
+                        $results.Details.Add("OK: '$listenerName' resolves to $($resolvedIPs -join ', ')$sourceNote")
+                        if ($agIP -and $agIP -notin $resolvedIPs) {
+                            $results.Details.Add("WARN: Expected AG IP '$agIP' not in resolved addresses")
+                        }
+                    }
+                    elseif ($rpcStatus -eq 'OK') {
+                        # RPC succeeded but returned no records => listener has no A record in the zone.
+                        $results.Passed = $false
+                        $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
+                    }
+                    else {
+                        $results.Details.Add("WARN: DNS query for '$listenerName' did not complete via RPC or direct DNS against any of $($dnsCandidates.Count) DNS server(s) [$($dnsCandidates -join ', ')]; skipping listener DNS check")
+                    }
                 }
             }
 
@@ -5319,9 +5357,20 @@ function Test-DomainMemberFunctionality {
                 # instead of just suggesting collection membership.
                 $diag = @()
                 $assignCount = 0
+                $assignNames = @()
                 try {
-                    $assignCount = @(Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' -ClassName CCM_ApplicationCIAssignment -ErrorAction SilentlyContinue).Count
+                    $assignments = @(Get-CimInstance -Namespace 'root\ccm\Policy\Machine\ActualConfig' -ClassName CCM_ApplicationCIAssignment -ErrorAction SilentlyContinue)
+                    $assignCount = $assignments.Count
+                    # AssignmentName is the deployment name; fall back to AppDeliveryTypeName / AssignmentID.
+                    $assignNames = @($assignments | ForEach-Object {
+                        $n = $_.AssignmentName
+                        if (-not $n) { $n = $_.AssignmentID }
+                        $n
+                    } | Where-Object { $_ } | Select-Object -First 5)
                     $diag += "AppAssignments=$assignCount"
+                    if ($assignNames.Count -gt 0) {
+                        $diag += "Names=[$($assignNames -join '; ')]"
+                    }
                 }
                 catch { $diag += "AppAssignments=?" }
                 try {
@@ -5329,8 +5378,12 @@ function Test-DomainMemberFunctionality {
                     $diag += "CcmExec=$ccmExec"
                 }
                 catch { }
-                $hint = if ($assignCount -gt 0) {
-                    "policy is present but Microsoft 365 not in it — check the deployment on the Primary"
+                # Was Microsoft 365 specifically in the assignment list?
+                $officeInAssignments = @($assignNames | Where-Object { $_ -like '*Microsoft 365*' -or $_ -like '*Microsoft365*' -or $_ -like '*Office*' })
+                $hint = if ($officeInAssignments.Count -gt 0) {
+                    "Office assignment is in policy ($($officeInAssignments[0])) but CCM_Application hasn't materialized yet — App Deployment Eval likely still running; usually resolves within a few minutes"
+                } elseif ($assignCount -gt 0) {
+                    "policy received but no Office assignment in it — Primary's MEMLABS-Office Install Targets deployment isn't targeting this client (collection membership eval may still be running on the Primary; check ZZ-GYRO OfficeCollection sub-test)"
                 } else {
                     "no application policy received — VM likely not yet in MEMLABS-Office Install Targets collection (update collection membership on the Primary)"
                 }
