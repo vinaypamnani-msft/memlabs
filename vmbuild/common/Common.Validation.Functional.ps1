@@ -2407,9 +2407,18 @@ WHERE drs.is_local = 1
             # a direct port-53 DNS query against each -- still authoritative,
             # still bypasses local cache + LLMNR (-DnsOnly -NoHostsFile), just
             # a different transport that doesn't share the DnsServer RPC hang.
+            #
+            # IMPORTANT: this check is *informational*. The authoritative test
+            # of "is DNS for the listener working?" is the SQL listener
+            # connect in Step 6 -- if SqlClient resolved the listener and
+            # opened a session, DNS is functional via the OS resolver
+            # regardless of whether the explicit zone probes timed out.
+            # On any DNS-probe failure we record a sentinel and defer the
+            # WARN/INFO decision until after Step 6 has voted.
+            $dnsProbeFailureMsg = $null  # null = succeeded or skipped, string = failure detail
             if ($listenerName) {
                 if (-not $dnsServer) {
-                    $results.Details.Add("WARN: No usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA); skipping listener DNS check")
+                    $dnsProbeFailureMsg = "no usable DNS server found on this VM (Get-DnsClientServerAddress returned no IPv4 entries outside loopback/APIPA)"
                 }
                 else {
                     $resolvedIPs = @()
@@ -2465,11 +2474,13 @@ WHERE drs.is_local = 1
                     }
                     elseif ($rpcStatus -eq 'OK') {
                         # RPC succeeded but returned no records => listener has no A record in the zone.
+                        # This is a genuine fault, not a probe glitch -- emit FAIL immediately.
                         $results.Passed = $false
                         $results.Details.Add("FAIL: '$listenerName' has no A records in DNS zone")
                     }
                     else {
-                        $results.Details.Add("WARN: DNS query for '$listenerName' did not complete via RPC or direct DNS against any of $($dnsCandidates.Count) DNS server(s) [$($dnsCandidates -join ', ')]; skipping listener DNS check")
+                        # All probes failed. Defer the WARN/INFO decision until after Step 6.
+                        $dnsProbeFailureMsg = "DNS zone probes (RPC + port 53) did not complete against any of $($dnsCandidates.Count) DNS server(s) [$($dnsCandidates -join ', ')]"
                     }
                 }
             }
@@ -2480,6 +2491,7 @@ WHERE drs.is_local = 1
             # Wrap in watchdog: SqlClient's TCP/TLS handshake to a listener
             # whose AG IP is mid-failover can block for minutes without
             # honoring -QueryTimeout (which only governs post-connect).
+            $listenerSqlOk = $false   # used by Step 5b to decide WARN vs INFO on a deferred DNS-probe failure
             if ($listenerName -and $listenerPort) {
                 $listenerConnStr = "$listenerName,$listenerPort"
                 $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$listenerConnStr' -Query 'SELECT 1'")
@@ -2500,11 +2512,28 @@ WHERE drs.is_local = 1
                     if ($lr.TestResult -eq 1) {
                         $retryNote = if ($wd.Attempts -gt 1) { " (succeeded on attempt $($wd.Attempts) after timeouts)" } else { '' }
                         $results.Details.Add("OK: SQL query via listener '$listenerConnStr' succeeded$retryNote")
+                        $listenerSqlOk = $true
                     }
                     else {
                         $results.Passed = $false
                         $results.Details.Add("FAIL: Listener query returned unexpected result")
                     }
+                }
+            }
+
+            # ==============================================================
+            # 5b. Deferred DNS-probe verdict
+            # ==============================================================
+            # If Step 5's explicit zone probes (RPC + port 53) all failed
+            # but Step 6's SqlClient connect succeeded, DNS is functional
+            # via the OS resolver -- the WARN would be misleading. Demote
+            # to INFO. Only emit a real WARN when neither path worked.
+            if ($dnsProbeFailureMsg) {
+                if ($listenerSqlOk) {
+                    $results.Details.Add("INFO: $dnsProbeFailureMsg, but SQL listener connect in Step 6 succeeded -- DNS is functional via the OS resolver; explicit zone probe is informational only")
+                }
+                else {
+                    $results.Details.Add("WARN: $dnsProbeFailureMsg; skipping listener DNS check")
                 }
             }
 
@@ -5328,22 +5357,34 @@ function Test-DomainMemberFunctionality {
                 Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000022}' } -ErrorAction SilentlyContinue | Out-Null
             }
             catch { }
-            # Poll up to ~2 min for CCM_Application to populate. Retrigger
-            # Application Deployment Eval ({...0121}) and App Global Eval
-            # ({...0027}) at 30s and 60s if still empty -- the first eval can
-            # race with the policy download on a freshly-onboarded client.
+            # Poll up to ~3 min for CCM_Application to populate. Retrigger
+            # Application Deployment Eval ({...0121}) + App Global Eval
+            # ({...0027}) at 30s, 60s, 120s, plus a fresh Machine Policy
+            # Retrieval ({...0021}) at 90s -- the first eval can race with
+            # the policy download on a freshly-onboarded client, and on a
+            # cold deploy the site's policy projection for the Office
+            # deployment can lag the collection-membership eval by a couple
+            # of cycles. Total budget: 36 iterations * 5s = 180s.
             $app = $null
-            for ($i = 0; $i -lt 24; $i++) {
+            for ($i = 0; $i -lt 36; $i++) {
                 try {
                     $app = Get-CimInstance -Namespace 'root\ccm\ClientSDK' -ClassName CCM_Application -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -like '*Microsoft 365*' -or $_.Name -like '*Microsoft365*' }
                 }
                 catch { }
                 if ($app) { break }
-                if ($i -eq 6 -or $i -eq 12) {
+                if ($i -eq 6 -or $i -eq 12 -or $i -eq 24) {
                     try {
                         Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000121}' } -ErrorAction SilentlyContinue | Out-Null
                         Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000027}' } -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    catch { }
+                }
+                if ($i -eq 18) {
+                    # Mid-poll, re-pull machine policy in case the Primary
+                    # has just finished projecting the Office deployment.
+                    try {
+                        Invoke-CimMethod -Namespace 'root\ccm' -ClassName SMS_Client -MethodName TriggerSchedule -Arguments @{ sScheduleID = '{00000000-0000-0000-0000-000000000021}' } -ErrorAction SilentlyContinue | Out-Null
                     }
                     catch { }
                 }
@@ -5387,7 +5428,7 @@ function Test-DomainMemberFunctionality {
                 } else {
                     "no application policy received — VM likely not yet in MEMLABS-Office Install Targets collection (update collection membership on the Primary)"
                 }
-                $officeResults.Details.Add("WARN: Office deployment policy not visible after 2 min of polling [$($diag -join ', ')] — $hint")
+                $officeResults.Details.Add("WARN: Office deployment policy not visible after 3 min of polling [$($diag -join ', ')] — $hint")
             }
             # Also check if Office is already installed
             $ctr = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
