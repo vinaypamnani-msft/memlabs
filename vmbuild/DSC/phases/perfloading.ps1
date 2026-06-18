@@ -178,8 +178,10 @@ Write-DscStatus "$Tag Starting perfloading"
             if (-not $dep) { return }
             # Setting the same intent triggers a Put() on SMS_ApplicationAssignment
             # which forces a fresh policy author. This is a no-op for the user-
-            # visible deployment configuration.
-            $dep | Set-CMApplicationDeployment -DeployAction Install -DeployPurpose Required -ErrorAction Stop
+            # visible deployment configuration. Note: Set-CMApplicationDeployment
+            # does NOT accept -DeployAction (install/uninstall is fixed at create
+            # time); only -DeployPurpose and notification properties are settable.
+            $dep | Set-CMApplicationDeployment -DeployPurpose Required -UserNotification DisplayAll -ErrorAction Stop
             Write-DscStatus "$Tag Re-authored deployment policy for '$AppName' -> '$CollectionName' (forces projection to late-added members)"
         }
         catch {
