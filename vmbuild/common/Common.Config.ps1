@@ -719,6 +719,28 @@ function Get-FilesForConfiguration {
     $siteServers = $null
     $siteServers = $config.virtualMachines | Where-Object { $_.role -in ("CAS", "Primary") }
 
+    # WSUS categories baseline cab: lives in SupportFiles, but only downloaded
+    # when the config actually has a WSUS server and the import opt-in
+    # (cmOptions.WsusImportBaseline, default $true) hasn't been turned off.
+    # Pre-DSC (Common.ScriptBlocks.ps1) reads this from
+    # azureFiles\tools\wsus\WsusCategoriesBaseline.cab; the SupportFiles
+    # filename matches that relative path so Get-FileWithHash lands it there.
+    $wsusVms = $config.virtualMachines | Where-Object { $_.installSUP -eq $true -or $_.role -eq 'WSUS' }
+    $wsusImportEnabled = $true
+    if ($cfgCmOptions -and $cfgCmOptions.PSObject.Properties['WsusImportBaseline'] -and $cfgCmOptions.WsusImportBaseline -eq $false) {
+        $wsusImportEnabled = $false
+    }
+    if ($DownloadAll -or ($wsusImportEnabled -and $wsusVms)) {
+        $wsusCab = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "WSUS Categories Baseline" }
+        if ($wsusCab) {
+            $worked = Get-FileFromStorage -File $wsusCab -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure
+            if (-not $worked) {
+                Write-Log -Verbose "WSUS Categories Baseline cab failed to download via Get-FileFromStorage; WSUSSync will fall back to MU sync."
+                # Non-fatal: the cab is an optimization, not a deploy requirement.
+            }
+        }
+    }
+
     if ($DownloadAll -or ($cfgCmOptions.PrePopulateObjects -and $siteServers) ) {
         $baselineFile = $Common.AzureFileList.SupportFiles | Where-Object { $_.id -eq "Prepopulate Baselines" }
         $worked = Get-FileFromStorage -File $baselineFile -ForceDownloadFiles:$ForceDownloadFiles -WhatIf:$WhatIf -UseCDN:$UseCDN -IgnoreHashFailure:$IgnoreHashFailure

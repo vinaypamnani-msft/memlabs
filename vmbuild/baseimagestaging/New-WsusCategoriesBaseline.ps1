@@ -23,9 +23,11 @@
 # After this script completes the operator must:
 #   1. (Optional but recommended) Test the cab end-to-end against a fresh
 #      WSUS VM with `-Upload` (see below) before publishing.
-#   2. Add the cab to vmbuild\azureFiles\_filelist.json under tools (md5
-#      gates integrity; optional GeneratedUtc field is allowed for human
-#      reference).
+#   2. Add the cab to vmbuild\azureFiles\_filelist.json under 'SupportFiles'
+#      using the { id, filename, md5 } schema (Get-FileWithHash resolves
+#      'filename' relative to azureFiles\, so use 'tools\wsus\...').
+#      Get-FilesForConfiguration auto-downloads this entry whenever the
+#      config has a WSUS VM and cmOptions.WsusImportBaseline != $false.
 #   3. Upload it to the storage account at the same relative path.
 #   Subsequent deploys with cmOptions.WsusImportBaseline=$true (the default)
 #   will pick the cab up automatically via Get-FilesForConfiguration. The
@@ -626,22 +628,25 @@ if (-not $copiedLog) { Write-Log "[Baseline] Warning: failed to copy export log 
 # print a ready-to-paste entry for the operator.
 $hostMd5 = (Get-FileHash -Path $outCab -Algorithm MD5).Hash
 $generatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+# SupportFiles schema: { id, filename, md5 }. Get-FileWithHash resolves
+# 'filename' relative to $Common.AzureFilesPath, so 'tools\wsus\...' lands
+# at azureFiles\tools\wsus\WsusCategoriesBaseline.cab -- the exact path
+# Common.ScriptBlocks.ps1's pre-DSC copy reads from. Extra metadata fields
+# (SourceVm, Sha256, ...) ride along for human reference. Get-FilesForConfiguration
+# auto-downloads this entry by id when the config has a WSUS server and
+# cmOptions.WsusImportBaseline is not false.
 $filelistEntry = [PSCustomObject]@{
-    Name               = 'WSUS Categories Baseline'
-    md5                = $hostMd5
-    URL                = 'tools\wsus\WsusCategoriesBaseline.cab'
-    IsPublic           = $false
-    Optional           = $true
-    Target             = 'tools\wsus'
-    ExtractFolderIfZip = $false
-    GeneratedUtc       = $generatedUtc
-    SourceVm           = $VmName
-    SourceOs           = $pre.OsVersion
-    WsusVersion        = $pre.WsusServerVersion
-    Sha256             = $exp.Sha256
-    SizeBytes          = $exp.Bytes
-    Categories         = $exp.Categories
-    Classifications    = $exp.Classifications
+    id              = 'WSUS Categories Baseline'
+    filename        = 'tools\wsus\WsusCategoriesBaseline.cab'
+    md5             = $hostMd5
+    GeneratedUtc    = $generatedUtc
+    SourceVm        = $VmName
+    SourceOs        = $pre.OsVersion
+    WsusVersion     = $pre.WsusServerVersion
+    Sha256          = $exp.Sha256
+    SizeBytes       = $exp.Bytes
+    Categories      = $exp.Categories
+    Classifications = $exp.Classifications
 }
 $filelistJson = $filelistEntry | ConvertTo-Json -Depth 4
 
@@ -655,9 +660,9 @@ Write-Log "[Baseline] Next steps:"
 Write-Log "  1. (Recommended) Test the cab end-to-end against a fresh WSUS VM:"
 Write-Log "       .\New-WsusCategoriesBaseline.ps1 -VmName <fresh-wsus-vm> -DomainName <domain> -Upload"
 Write-Log "     (or combine -Reset -Upload to wipe + retest on the same VM)."
-Write-Log "  2. Add the cab to vmbuild\azureFiles\_filelist.json under 'Tools' (ready-to-paste entry below)."
+Write-Log "  2. Add the cab to vmbuild\azureFiles\_filelist.json under 'SupportFiles' (ready-to-paste entry below)."
 Write-Log "  3. Upload it to the storage account at tools\wsus\WsusCategoriesBaseline.cab."
-Write-Log "  4. Future deploys with cmOptions.WsusImportBaseline=`$true (default) pick it up automatically."
+Write-Log "  4. Future deploys with a WSUS VM and cmOptions.WsusImportBaseline=`$true (default) pick it up automatically via Get-FilesForConfiguration."
 Write-Log ""
 Write-Log "[Baseline] _filelist.json entry:"
 foreach ($line in $filelistJson -split "`r?`n") { Write-Log "    $line" }
