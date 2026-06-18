@@ -76,38 +76,49 @@ Write-Log "[Baseline] Reset:        $($Reset.IsPresent)" -OutputStream
 # -Reset: wipe SUSDB + WsusContent and re-run wsusutil postinstall. Lets us
 # re-run the generator against an already-synced VM without rebuilding it.
 if ($Reset.IsPresent) {
-    Write-Log "[Baseline] -Reset specified: stopping services, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
+    Write-Log "[Baseline] -Reset specified: stopping WSUS, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
     $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
         try {
             $contentDir = $null
             try { $contentDir = (Get-ItemProperty 'HKLM:\Software\Microsoft\Update Services\Server\Setup' -ErrorAction Stop).ContentDir } catch {}
             if (-not $contentDir) { $contentDir = 'C:\WSUS' }
 
-            # Stop dependent services first.
+            # Stop WSUS so SUSDB has no live connections. Leave WID running --
+            # we need its named pipe to drop SUSDB.
             Stop-Service WsusService -Force -ErrorAction SilentlyContinue
-            iisreset /stop | Out-Null
 
-            # Drop SUSDB via WID's named pipe. sqlcmd ships with SQL tools or WID.
-            $pipe = '\\.\pipe\MICROSOFT##WID\tsql\query'
-            $sqlcmd = (Get-Command sqlcmd.exe -ErrorAction SilentlyContinue).Source
-            if (-not $sqlcmd) {
-                $cand = Get-ChildItem -Path 'C:\Program Files\Microsoft SQL Server' -Filter sqlcmd.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($cand) { $sqlcmd = $cand.FullName }
+            # Ensure WID is running (it hosts SUSDB).
+            $widSvc = Get-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction SilentlyContinue
+            if (-not $widSvc) { throw "WID service 'MSSQL`$MICROSOFT##WID' not found." }
+            if ($widSvc.Status -ne 'Running') {
+                Set-Service -Name 'MSSQL$MICROSOFT##WID' -StartupType Automatic -ErrorAction SilentlyContinue
+                Start-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction Stop
             }
-            if (-not $sqlcmd) { throw 'sqlcmd.exe not found; cannot drop SUSDB.' }
+            # Wait up to 30s for the pipe to appear.
+            $deadline = (Get-Date).AddSeconds(30)
+            while (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query') -and (Get-Date) -lt $deadline) {
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query')) { throw "WID pipe never appeared." }
 
-            $tsql = @"
+            # Drop SUSDB via SqlClient over the WID named pipe (sqlcmd's ODBC
+            # named-pipes parsing has been unreliable across versions).
+            $connStr = 'Server=np:\\.\pipe\MICROSOFT##WID\tsql\query;Database=master;Integrated Security=True;Connect Timeout=30'
+            $conn = New-Object System.Data.SqlClient.SqlConnection $connStr
+            $conn.Open()
+            try {
+                $cmd = $conn.CreateCommand()
+                $cmd.CommandTimeout = 60
+                $cmd.CommandText = @"
 IF DB_ID('SUSDB') IS NOT NULL
 BEGIN
   ALTER DATABASE SUSDB SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
   DROP DATABASE SUSDB;
 END
 "@
-            $tmpSql = [System.IO.Path]::GetTempFileName()
-            Set-Content -Path $tmpSql -Value $tsql -Encoding ASCII
-            $sqlOut = & $sqlcmd -S $pipe -E -i $tmpSql 2>&1
-            Remove-Item $tmpSql -Force -ErrorAction SilentlyContinue
-            if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed dropping SUSDB (exit=$LASTEXITCODE): $sqlOut" }
+                [void]$cmd.ExecuteNonQuery()
+            }
+            finally { $conn.Close() }
 
             # Clear content.
             if (Test-Path $contentDir) {
@@ -117,15 +128,19 @@ END
             }
 
             # Re-run postinstall to recreate SUSDB and re-stamp WSUS.
-            iisreset /start | Out-Null
             $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
             if (-not (Test-Path $wsusUtil)) { throw "WsusUtil.exe not found at $wsusUtil" }
-            $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('postinstall', "CONTENT_DIR=$contentDir") -Wait -PassThru -NoNewWindow -ErrorAction Stop
-            if ($proc.ExitCode -ne 0) { throw "wsusutil postinstall exit=$($proc.ExitCode)." }
+            $postinstallLog = Join-Path $env:TEMP 'WsusBaselineReset_postinstall.log'
+            $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('postinstall', "CONTENT_DIR=$contentDir") -Wait -PassThru -NoNewWindow -RedirectStandardOutput $postinstallLog -ErrorAction Stop
+            if ($proc.ExitCode -ne 0) {
+                $tail = ''
+                if (Test-Path $postinstallLog) { $tail = (Get-Content $postinstallLog -Tail 10 -ErrorAction SilentlyContinue) -join "`n" }
+                throw "wsusutil postinstall exit=$($proc.ExitCode). Tail: $tail"
+            }
 
             Start-Service WsusService -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 10
-            [PSCustomObject]@{ Ok = $true; ContentDir = $contentDir; SqlcmdPath = $sqlcmd }
+            [PSCustomObject]@{ Ok = $true; ContentDir = $contentDir }
         }
         catch {
             [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
