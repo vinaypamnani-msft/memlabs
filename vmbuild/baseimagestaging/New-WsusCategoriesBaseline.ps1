@@ -79,36 +79,54 @@ if ($Reset.IsPresent) {
     Write-Log "[Baseline] -Reset specified: stopping WSUS, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
     $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
         try {
-            $contentDir = $null
-            try { $contentDir = (Get-ItemProperty 'HKLM:\Software\Microsoft\Update Services\Server\Setup' -ErrorAction Stop).ContentDir } catch {}
-            if (-not $contentDir) { $contentDir = 'C:\WSUS' }
+            # Read WSUS configuration from registry. ContentDir + SqlServerName
+            # tell us where SUSDB lives (WID vs local/remote SQL).
+            $setupKey = 'HKLM:\Software\Microsoft\Update Services\Server\Setup'
+            $regProps = $null
+            try { $regProps = Get-ItemProperty $setupKey -ErrorAction Stop } catch {}
+            $contentDir = if ($regProps -and $regProps.ContentDir) { $regProps.ContentDir } else { 'C:\WSUS' }
+            $sqlServerName = if ($regProps -and $regProps.SqlServerName) { [string]$regProps.SqlServerName } else { '' }
 
-            # Stop WSUS so SUSDB has no live connections. Leave WID running --
-            # we need its named pipe to drop SUSDB.
+            # Classify backend: WID instance name is literally MICROSOFT##WID
+            # (usually qualified as <COMPUTER>\MICROSOFT##WID). Anything else
+            # is a real SQL instance, local or remote.
+            $isWid = ($sqlServerName -match 'MICROSOFT##WID' -or $sqlServerName -eq '')
+            if ($isWid) {
+                $sqlDisplay = "WID ($sqlServerName)"
+                $sqlClientServer = 'np:\\.\pipe\MICROSOFT##WID\tsql\query'
+            } else {
+                $sqlDisplay = "SQL ($sqlServerName)"
+                $sqlClientServer = $sqlServerName
+            }
+            Write-Verbose "[Reset] Backend: $sqlDisplay  ContentDir: $contentDir"
+
+            # Stop WSUS so SUSDB has no live connections.
             Stop-Service WsusService -Force -ErrorAction SilentlyContinue
 
-            # Ensure WID is running (it hosts SUSDB).
-            $widSvc = Get-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction SilentlyContinue
-            if (-not $widSvc) { throw "WID service 'MSSQL`$MICROSOFT##WID' not found." }
-            if ($widSvc.Status -ne 'Running') {
-                Set-Service -Name 'MSSQL$MICROSOFT##WID' -StartupType Automatic -ErrorAction SilentlyContinue
-                Start-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction Stop
+            if ($isWid) {
+                # Ensure WID is running (it hosts SUSDB locally).
+                $widSvc = Get-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction SilentlyContinue
+                if (-not $widSvc) { throw "WID service 'MSSQL`$MICROSOFT##WID' not found, but registry says SUSDB is on WID." }
+                if ($widSvc.Status -ne 'Running') {
+                    Set-Service -Name 'MSSQL$MICROSOFT##WID' -StartupType Automatic -ErrorAction SilentlyContinue
+                    Start-Service -Name 'MSSQL$MICROSOFT##WID' -ErrorAction Stop
+                }
+                $pipeDeadline = (Get-Date).AddSeconds(30)
+                while (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query') -and (Get-Date) -lt $pipeDeadline) {
+                    Start-Sleep -Milliseconds 500
+                }
+                if (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query')) { throw "WID pipe never appeared." }
             }
-            # Wait up to 30s for the pipe to appear.
-            $deadline = (Get-Date).AddSeconds(30)
-            while (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query') -and (Get-Date) -lt $deadline) {
-                Start-Sleep -Milliseconds 500
-            }
-            if (-not (Test-Path '\\.\pipe\MICROSOFT##WID\tsql\query')) { throw "WID pipe never appeared." }
 
-            # Drop SUSDB via SqlClient over the WID named pipe (sqlcmd's ODBC
-            # named-pipes parsing has been unreliable across versions).
-            $connStr = 'Server=np:\\.\pipe\MICROSOFT##WID\tsql\query;Database=master;Integrated Security=True;Connect Timeout=30'
+            # Drop SUSDB via SqlClient (works against WID over the pipe, against
+            # local/remote SQL over TCP). System.Data.SqlClient is always present
+            # in PowerShell 5.1.
+            $connStr = "Server=$sqlClientServer;Database=master;Integrated Security=True;Connect Timeout=30;TrustServerCertificate=True"
             $conn = New-Object System.Data.SqlClient.SqlConnection $connStr
             $conn.Open()
             try {
                 $cmd = $conn.CreateCommand()
-                $cmd.CommandTimeout = 60
+                $cmd.CommandTimeout = 120
                 $cmd.CommandText = @"
 IF DB_ID('SUSDB') IS NOT NULL
 BEGIN
@@ -127,20 +145,26 @@ END
                 New-Item -ItemType Directory -Path $contentDir -Force | Out-Null
             }
 
-            # Re-run postinstall to recreate SUSDB and re-stamp WSUS.
+            # Re-run postinstall to recreate SUSDB. Mirror the DSC's argument
+            # shape: SQL_INSTANCE_NAME only when not on WID.
             $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
             if (-not (Test-Path $wsusUtil)) { throw "WsusUtil.exe not found at $wsusUtil" }
+            if ($isWid) {
+                $piArgs = @('postinstall', "CONTENT_DIR=$contentDir")
+            } else {
+                $piArgs = @('postinstall', "SQL_INSTANCE_NAME=$sqlServerName", "CONTENT_DIR=$contentDir")
+            }
             $postinstallLog = Join-Path $env:TEMP 'WsusBaselineReset_postinstall.log'
-            $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('postinstall', "CONTENT_DIR=$contentDir") -Wait -PassThru -NoNewWindow -RedirectStandardOutput $postinstallLog -ErrorAction Stop
+            $proc = Start-Process -FilePath $wsusUtil -ArgumentList $piArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $postinstallLog -ErrorAction Stop
             if ($proc.ExitCode -ne 0) {
                 $tail = ''
                 if (Test-Path $postinstallLog) { $tail = (Get-Content $postinstallLog -Tail 10 -ErrorAction SilentlyContinue) -join "`n" }
-                throw "wsusutil postinstall exit=$($proc.ExitCode). Tail: $tail"
+                throw "wsusutil postinstall exit=$($proc.ExitCode). Args: $($piArgs -join ' '). Tail: $tail"
             }
 
             Start-Service WsusService -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 10
-            [PSCustomObject]@{ Ok = $true; ContentDir = $contentDir }
+            [PSCustomObject]@{ Ok = $true; ContentDir = $contentDir; SqlBackend = $sqlDisplay }
         }
         catch {
             [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
@@ -150,7 +174,7 @@ END
         $errMsg = if ($resetResult -and $resetResult.ScriptBlockOutput) { $resetResult.ScriptBlockOutput.Error } else { 'no output' }
         throw "[Baseline] -Reset failed: $errMsg"
     }
-    Write-Log "[Baseline] Reset complete (ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
+    Write-Log "[Baseline] Reset complete (backend=$($resetResult.ScriptBlockOutput.SqlBackend), ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
 }
 
 # Pre-flight: VM must be a clean WSUS server with categories empty. Fail
