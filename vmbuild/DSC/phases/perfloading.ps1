@@ -142,7 +142,49 @@ Write-DscStatus "$Tag Starting perfloading"
         }
 
         Invoke-CMCollectionUpdate -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+
+        # Wait (bounded) for the membership eval to actually land so callers that
+        # immediately author a deployment against this collection see a populated
+        # target. Without this wait the site's first policy projection for the
+        # deployment is computed against 0 members; a member added later (when
+        # eval finally completes) never gets the assignment retroactively
+        # projected until something else touches the deployment.
+        $expected = ($OfficeTargetVMs | Measure-Object).Count
+        $deadline = (Get-Date).AddSeconds(120)
+        do {
+            Start-Sleep -Seconds 5
+            $cur = Get-CMDeviceCollection -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
+        } while ($cur -and $cur.MemberCount -lt $expected -and (Get-Date) -lt $deadline)
+        if ($cur -and $cur.MemberCount -ge $expected) {
+            Write-DscStatus "$Tag Collection '$colName' eval complete: MemberCount=$($cur.MemberCount)"
+        }
+        else {
+            Write-DscStatus "$Tag WARNING: Collection '$colName' eval did not reach expected $expected within 120s (current=$($cur.MemberCount))"
+        }
         return $col
+    }
+
+    # Force re-authoring of an existing application deployment's policy body.
+    # Required when a resource is added to the target collection AFTER the
+    # deployment was originally authored: ConfigMgr does not retroactively
+    # project pre-existing deployments to late-arriving collection members
+    # until the deployment itself is touched. Re-saves the deployment with its
+    # current intent, which bumps SMS_ApplicationAssignment.LastModifiedTime and
+    # causes site_comp / policypv to re-project the assignment for all members.
+    function Update-OfficeDeploymentPolicy {
+        param([string]$AppName, [string]$CollectionName)
+        try {
+            $dep = Get-CMApplicationDeployment -Name $AppName -CollectionName $CollectionName -ErrorAction SilentlyContinue
+            if (-not $dep) { return }
+            # Setting the same intent triggers a Put() on SMS_ApplicationAssignment
+            # which forces a fresh policy author. This is a no-op for the user-
+            # visible deployment configuration.
+            $dep | Set-CMApplicationDeployment -DeployAction Install -DeployPurpose Required -ErrorAction Stop
+            Write-DscStatus "$Tag Re-authored deployment policy for '$AppName' -> '$CollectionName' (forces projection to late-added members)"
+        }
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to re-author Office deployment policy for '$AppName': $($_.Exception.Message)"
+        }
     }
 
     #create all DPs group to distribute the content (its easier to distribute the content to a DP group than enumerating all DPs)
@@ -1949,6 +1991,15 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
                     catch {
                         Write-DscStatus "$Tag WARNING: Failed to (re)create Office deployment for '$appName': $($_.Exception.Message)"
                     }
+                }
+                else {
+                    # Deployment exists; force a policy re-author so any collection
+                    # member added after the original deployment author time gets
+                    # the assignment projected. Symptom this fixes: client's
+                    # PolicyAgent RequestedConfig has 7-Zip / other assignments
+                    # but not the Office assignment, even though the collection
+                    # contains the client and the deployment targets it.
+                    Update-OfficeDeploymentPolicy -AppName $appName -CollectionName $officeColName
                 }
             }
         }
