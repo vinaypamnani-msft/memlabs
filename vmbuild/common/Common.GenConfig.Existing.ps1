@@ -992,7 +992,7 @@ function New-UserConfig {
     $netbiosName = $Domain.Split(".")[0]
     $vmOptions = [PSCustomObject]@{
         prefix            = $prefix
-        basePath          = "E:\VirtualMachines"
+        basePath          = (Get-MemlabsVmStorageRoot)
         domainName        = $Domain
         domainNetBiosName = $netbiosName
         adminName         = $adminUser

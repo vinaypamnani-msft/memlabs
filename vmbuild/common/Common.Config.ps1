@@ -921,7 +921,7 @@ function New-DeployConfig {
         }
 
         $sysCenterId = "SysCenterId"
-        $sysCenterIdPath = "E:\$sysCenterId.txt"
+        $sysCenterIdPath = Join-Path (Get-MemlabsDataRoot) "$sysCenterId.txt"
         if (Test-Path $sysCenterIdPath) {
             $id = Get-Content $sysCenterIdPath -ErrorAction SilentlyContinue
             if ($id) {
@@ -930,7 +930,7 @@ function New-DeployConfig {
         }
 
         $productID = "productID"
-        $productIdPath = "E:\$productID.txt"
+        $productIdPath = Join-Path (Get-MemlabsDataRoot) "$productID.txt"
         if (Test-Path $productIdPath) {
             $prodid = Get-Content $productIdPath -ErrorAction SilentlyContinue
             if ($prodid) {

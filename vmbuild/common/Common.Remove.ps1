@@ -794,9 +794,13 @@ function Remove-Domain {
     }
     
     if ($all) {
-        if (Test-Path "E:\virtualMachines\$DomainName") {
-            Write-Log "Removing $DomainName folder" -SubActivity
-            Remove-Item -Path "E:\virtualMachines\$DomainName" -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+        $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt
+        if ($vmStorageRoot) {
+            $domainFolder = Join-Path $vmStorageRoot $DomainName
+            if (Test-Path $domainFolder) {
+                Write-Log "Removing $DomainName folder" -SubActivity
+                Remove-Item -Path $domainFolder -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+            }
         }
     }
 
@@ -849,11 +853,14 @@ function Remove-All {
     Remove-Item -Path $Global:Common.RdcManFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
     Remove-Item -Path $Global:Common.MRemoteNGFilePath -Force -WhatIf:$WhatIf -ErrorAction SilentlyContinue -ProgressAction SilentlyContinue| Out-Null
 
-    # Get all the folders in E:\VirtualMachines and delete them
-    $folders = Get-ChildItem -Path "E:\VirtualMachines" -Directory
-    foreach ($folder in $folders) {
-        Write-Log "Removing $($folder.Name) folder" -SubActivity
-        Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+    # Get all the folders in the host VM-storage root and delete them
+    $vmStorageRoot = Get-MemlabsVmStorageRoot -NoPrompt
+    if ($vmStorageRoot -and (Test-Path $vmStorageRoot)) {
+        $folders = Get-ChildItem -Path $vmStorageRoot -Directory -ErrorAction SilentlyContinue
+        foreach ($folder in $folders) {
+            Write-Log "Removing $($folder.Name) folder" -SubActivity
+            Remove-Item -Path $folder.FullName -Recurse -Force -WhatIf:$WhatIf -ProgressAction SilentlyContinue
+        }
     }
 
     Write-Host
