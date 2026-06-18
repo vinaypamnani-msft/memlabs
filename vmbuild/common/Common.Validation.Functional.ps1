@@ -6140,110 +6140,136 @@ function Test-CMSiteWideFunctionality {
                 $results.Details.Add("WARN: SMS_SUPSyncStatus query failed: $($_.Exception.Message)")
             }
 
-            # WSUS-native cross-check. CM's SMS_SUPSyncStatus can report a
-            # completed/running sync while the underlying WSUS catalog is
-            # actually empty: the WsusPool app pool recycled at its default
-            # ~1.8 GB private-memory cap mid-sync, returned HTTP 503, and
-            # GetStatus().UpdateCount never grew past 0. Only meaningful when
-            # WSUS is local to this site server; skip silently otherwise.
+            # WSUS-native cross-check, split into independent sub-tests so
+            # each surfaces with its own OK/WARN. CM's SMS_SUPSyncStatus can
+            # report "completed" while the underlying WSUS catalog is broken
+            # in any of three orthogonal ways:
+            #
+            #   A) Initial categories sync never populated the taxonomy
+            #      (cab import failed AND a real MU categories sync never
+            #      completed; e.g. WsusPool recycled at its 1.8 GB cap and
+            #      returned 503 mid-sync).
+            #   B) Taxonomy is fine but WCM never pushed the subscription,
+            #      so what WSUS thinks it should sync != what the SUP
+            #      component has marked subscribed in CM.
+            #   C) Subscription is set but the last sync didn't succeed.
+            #
+            # The cab generator's pre/post log is the ground truth for (A):
+            # postinstall-default WSUS sits at TaxonomyCats=~17, the cab
+            # brings 433. >= 100 means a real categories load happened
+            # (cab import OR a full MU categories sync). UpdateCount is
+            # NOT the right "sync 1 done" signal -- it's the row count of
+            # dbo.Update (sync 2 / post-subscription update metadata) and
+            # legitimately stays at 0 when the subscription is narrow.
+            #
+            # Only meaningful when WSUS is local to this site server; the
+            # outer catch skips silently otherwise.
             try {
                 $wsusSrv = Get-WsusServer -ErrorAction Stop
                 $wStatus = $wsusSrv.GetStatus()
-                if ($wStatus.UpdateCount -eq 0) {
-                    # Empty catalog — gather WSUS subscription/sync state to diagnose why.
-                    # A Succeeded sync with UpdateCount=0 almost always means the
-                    # subscription has no products and/or no classifications
-                    # selected (sync 1 finished, sync 2 never ran), so capture
-                    # those counts in addition to sync state.
-                    $diagBits = @()
-                    $prodCount = $null
-                    $classCount = $null
-                    try {
-                        $sub = $wsusSrv.GetSubscription()
-                        $syncState = $sub.GetSynchronizationStatus().ToString()
-                        $diagBits += "SyncState=$syncState"
 
-                        $history = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
-                        if ($history.Count -gt 0) {
-                            $h = $history[0]
-                            $diagBits += "LastSync=$($h.StartTime) Result=$($h.Result)"
-                            if ($h.Error -and $h.Error -ne 'NoError') { $diagBits += "Err=$($h.Error)" }
-                            if ($h.ErrorText) { $diagBits += "ErrText='$($h.ErrorText -replace "'",'')'" }
-                        }
-                        else {
-                            $diagBits += "LastSync=never"
-                        }
+                # ---- gather raw signals (each guarded; never throws) ----
+                $taxCats = $null; $taxClas = $null
+                try { $taxCats = @($wsusSrv.GetUpdateCategories()).Count } catch {}
+                try { $taxClas = @($wsusSrv.GetUpdateClassifications()).Count } catch {}
 
-                        if ($syncState -eq 'Running') {
-                            try {
-                                $prog = $sub.GetSynchronizationProgress()
-                                $diagBits += "Phase=$($prog.Phase) Items=$($prog.ProcessedItems)/$($prog.TotalItems)"
-                            } catch { }
-                        }
-
-                        # Subscribed products & classifications. Empty either side
-                        # explains UpdateCount=0 with Result=Succeeded.
-                        try { $prodCount = @($sub.GetUpdateCategories()).Count } catch { $prodCount = "err" }
-                        try { $classCount = @($sub.GetUpdateClassifications()).Count } catch { $classCount = "err" }
-                        $diagBits += "Products=$prodCount; Classifications=$classCount"
+                $subCats = $null; $subClas = $null
+                $lastResult = $null; $syncState = $null; $lastSyncTime = $null
+                try {
+                    $sub = $wsusSrv.GetSubscription()
+                    try { $syncState = $sub.GetSynchronizationStatus().ToString() } catch {}
+                    try { $subCats = @($sub.GetUpdateCategories()).Count } catch {}
+                    try { $subClas = @($sub.GetUpdateClassifications()).Count } catch {}
+                    $history = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
+                    if ($history.Count -gt 0) {
+                        $lastResult = $history[0].Result.ToString()
+                        $lastSyncTime = $history[0].StartTime
                     }
-                    catch {
-                        $diagBits += "WSUS-diag-failed: $($_.Exception.Message)"
-                    }
+                } catch {}
 
-                    # CM SUP component view — what WCM is supposed to have
-                    # configured on WSUS. A mismatch with the WSUS-side counts
-                    # above means WCM hasn't pushed the subscription yet.
-                    try {
-                        $supSiteCode = $script:SiteCode
-                        if (-not $supSiteCode) {
-                            $supSiteCode = (Get-PSDrive -PSProvider CMSite -ErrorAction SilentlyContinue | Select-Object -First 1).Name
-                        }
-                        if ($supSiteCode) {
-                            $cmProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'Product' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed })
-                            $cmClasses = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'UpdateClassification' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed })
-                            $diagBits += "CM-Products=$($cmProducts.Count); CM-Classifications=$($cmClasses.Count)"
-                            try {
-                                $wcmStateVal = [int](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER' -Name 'ConfigurationState' -ErrorAction Stop)
-                                $wcmStateMap = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
-                                $wcmName = if ($wcmStateMap.ContainsKey($wcmStateVal)) { $wcmStateMap[$wcmStateVal] } else { "UNKNOWN($wcmStateVal)" }
-                                $diagBits += "WCM=$wcmName"
-                            } catch {}
-                        }
-                    } catch {}
+                # CM-side subscription = what we EXPECT WSUS to have. WCM
+                # reads this from CM and pushes it to WSUS; a mismatch
+                # means WCM hasn't pushed (yet). Best-effort -- if we
+                # can't read CM, the parity test falls back to a plain
+                # ">0" check on the WSUS side.
+                $cmProdCount = $null; $cmClassCount = $null; $wcmName = $null
+                try {
+                    $cmProdCount  = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'Product'              -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
+                    $cmClassCount = @(Get-CMSoftwareUpdateCategory -Fast -TypeName 'UpdateClassification' -ErrorAction SilentlyContinue | Where-Object { $_.IsSubscribed }).Count
+                } catch {}
+                try {
+                    $wcmStateVal = [int](Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_WSUS_CONFIGURATION_MANAGER' -Name 'ConfigurationState' -ErrorAction Stop)
+                    $wcmStateMap = @{ 0='NONE'; 1='PENDING'; 2='SUCCESS'; 3='FAILED'; 4='SUBSCRIPTION_PENDING' }
+                    $wcmName = if ($wcmStateMap.ContainsKey($wcmStateVal)) { $wcmStateMap[$wcmStateVal] } else { "UNKNOWN($wcmStateVal)" }
+                } catch {}
 
-                    $diagStr = if ($diagBits.Count -gt 0) { " [" + ($diagBits -join '; ') + "]" } else { "" }
-
-                    # Tailor the message to the most likely root cause
-                    $msg = if ($prodCount -is [int] -and $prodCount -eq 0) {
-                        "WARN: WSUS catalog empty (UpdateCount=0) - no products subscribed; sync 2 (post-product) never ran or WCM did not push subscription"
-                    }
-                    elseif ($classCount -is [int] -and $classCount -eq 0) {
-                        "WARN: WSUS catalog empty (UpdateCount=0) - no classifications subscribed; sync returned 0 updates by definition"
-                    }
-                    else {
-                        "WARN: WSUS reports UpdateCount=0 - the first full sync never populated the catalog"
-                    }
-                    $results.Details.Add("$msg$diagStr")
+                # ---- Test A: initial sync / taxonomy populated ----
+                # Postinstall WSUS ships with ~17 categories, the cab brings
+                # 433. >= 100 means a real categories load happened (cab
+                # import or full MU categories sync).
+                if ($taxCats -is [int] -and $taxCats -ge 100) {
+                    $results.Details.Add("OK: WSUS initial sync (taxonomy) populated [TaxonomyCats=$taxCats; TaxonomyClas=$taxClas]")
                 }
                 else {
-                    $results.Details.Add("OK: WSUS catalog populated (UpdateCount=$($wStatus.UpdateCount))")
-                    # Append baseline-cab provenance when an import was used.
-                    # No-op when the import path didn't run (no log file).
-                    try {
-                        $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
-                        $metaPath = 'C:\staging\wsus\WsusCategoriesBaseline.meta.json'
-                        if (Test-Path $importLog) {
-                            $meta = $null
-                            if (Test-Path $metaPath) {
-                                try { $meta = Get-Content $metaPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
-                            }
-                            $genDate = if ($meta -and $meta.generatedUtc) { $meta.generatedUtc } else { '<unknown>' }
-                            $genSha = if ($meta -and $meta.sha256) { $meta.sha256.Substring(0, [Math]::Min(12, $meta.sha256.Length)) } else { '<unknown>' }
-                            $results.Details.Add("OK: WSUS categories baseline cab used (generated=$genDate, sha=$genSha)")
-                        }
-                    } catch {}
+                    $taxShown = if ($taxCats -is [int]) { $taxCats } else { '<unknown>' }
+                    $results.Details.Add("WARN: WSUS initial sync (taxonomy) not populated [TaxonomyCats=$taxShown; TaxonomyClas=$taxClas] - cab import failed and the first categories sync never completed")
                 }
+
+                # ---- Test B: subscription parity (CM SUP -> WSUS) ----
+                # Healthy: CM has subscribed products+classifications, AND
+                # WSUS-side subscription matches what CM has configured.
+                $haveCm = ($cmProdCount -is [int]) -and ($cmClassCount -is [int])
+                $wcmBit = if ($wcmName) { "; WCM=$wcmName" } else { '' }
+                if ($haveCm) {
+                    if ($cmProdCount -eq 0 -or $cmClassCount -eq 0) {
+                        $results.Details.Add("WARN: CM SUP has nothing subscribed [CM-Products=$cmProdCount; CM-Classifications=$cmClassCount; WSUS-Sub=$subCats/$subClas$wcmBit] - configure SUP products/classifications")
+                    }
+                    elseif ($subCats -eq $cmProdCount -and $subClas -eq $cmClassCount) {
+                        $results.Details.Add("OK: WSUS subscription matches CM SUP config [Products=$cmProdCount; Classifications=$cmClassCount$wcmBit]")
+                    }
+                    else {
+                        $results.Details.Add("WARN: WSUS subscription out of sync with CM SUP [WSUS-Sub=$subCats/$subClas; CM-Sub=$cmProdCount/$cmClassCount$wcmBit] - WCM has not pushed subscription yet")
+                    }
+                }
+                else {
+                    # Fallback: CM cmdlets unavailable; just check WSUS-side
+                    # has SOMETHING subscribed.
+                    if (($subCats -is [int] -and $subCats -gt 0) -and ($subClas -is [int] -and $subClas -gt 0)) {
+                        $results.Details.Add("OK: WSUS subscription set [Products=$subCats; Classifications=$subClas$wcmBit] (CM-side parity not checked - cmdlets unavailable)")
+                    }
+                    else {
+                        $results.Details.Add("WARN: WSUS subscription empty [SubCats=$subCats; SubClas=$subClas$wcmBit]")
+                    }
+                }
+
+                # ---- Test C: last sync result + UpdateCount (informational) ----
+                $ucBit = "UpdateCount=$($wStatus.UpdateCount)"
+                if ($lastResult -eq 'Succeeded') {
+                    $results.Details.Add("OK: WSUS last sync Succeeded [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
+                }
+                elseif ($lastResult) {
+                    $results.Details.Add("WARN: WSUS last sync Result=$lastResult [LastSync=$lastSyncTime; SyncState=$syncState; $ucBit]")
+                }
+                else {
+                    $results.Details.Add("WARN: WSUS has no sync history [SyncState=$syncState; $ucBit] - first sync has not run")
+                }
+
+                # Append baseline-cab provenance when an import was used.
+                # No-op when the import path didn't run (no log file).
+                try {
+                    $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
+                    $metaPath = 'C:\staging\wsus\WsusCategoriesBaseline.meta.json'
+                    if (Test-Path $importLog) {
+                        $meta = $null
+                        if (Test-Path $metaPath) {
+                            try { $meta = Get-Content $metaPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+                        }
+                        $genDate = if ($meta -and $meta.generatedUtc) { $meta.generatedUtc } else { '<unknown>' }
+                        $genSha = if ($meta -and $meta.sha256) { $meta.sha256.Substring(0, [Math]::Min(12, $meta.sha256.Length)) } else { '<unknown>' }
+                        $results.Details.Add("OK: WSUS categories baseline cab used (generated=$genDate, sha=$genSha)")
+                    }
+                } catch {}
+
                 # WsusPool memory cap - the default ~1.8 GB cap recycles the pool
                 # mid-sync; a hardened SUP should have it uncapped (0).
                 try {
