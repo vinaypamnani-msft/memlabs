@@ -149,17 +149,26 @@ Write-DscStatus "$Tag Starting perfloading"
         # deployment is computed against 0 members; a member added later (when
         # eval finally completes) never gets the assignment retroactively
         # projected until something else touches the deployment.
+        #
+        # Poll Get-CMCollectionMember (live row count) instead of the collection's
+        # MemberCount property. The property is a cached header value the site
+        # bumps on its own schedule and can read correct (e.g. "1") while
+        # v_FullCollectionMembership has not yet been materialized -- which is
+        # exactly the state observed in the field where MemberCount=1 but
+        # Get-CMCollectionMember returned no rows until a second manual
+        # Invoke-CMCollectionUpdate ran.
         $expected = ($OfficeTargetVMs | Measure-Object).Count
         $deadline = (Get-Date).AddSeconds(120)
+        $live = 0
         do {
             Start-Sleep -Seconds 5
-            $cur = Get-CMDeviceCollection -CollectionId $col.CollectionID -ErrorAction SilentlyContinue
-        } while ($cur -and $cur.MemberCount -lt $expected -and (Get-Date) -lt $deadline)
-        if ($cur -and $cur.MemberCount -ge $expected) {
-            Write-DscStatus "$Tag Collection '$colName' eval complete: MemberCount=$($cur.MemberCount)"
+            $live = @(Get-CMCollectionMember -CollectionId $col.CollectionID -ErrorAction SilentlyContinue).Count
+        } while ($live -lt $expected -and (Get-Date) -lt $deadline)
+        if ($live -ge $expected) {
+            Write-DscStatus "$Tag Collection '$colName' eval complete: live members=$live"
         }
         else {
-            Write-DscStatus "$Tag WARNING: Collection '$colName' eval did not reach expected $expected within 120s (current=$($cur.MemberCount))"
+            Write-DscStatus "$Tag WARNING: Collection '$colName' eval did not reach expected $expected within 120s (live=$live)"
         }
         return $col
     }
@@ -183,6 +192,30 @@ Write-DscStatus "$Tag Starting perfloading"
             if (-not $dep) { return }
             $assignmentName = $dep.AssignmentName
             if (-not $assignmentName) { return }
+
+            # Force a fresh collection eval and wait for live membership rows BEFORE
+            # the Put(). The toggle-Put() below re-projects the assignment against
+            # whatever members the site currently sees in v_FullCollectionMembership;
+            # if that table is still empty (cached MemberCount can read correct
+            # while the membership rows are not yet materialized), late-arriving
+            # members are silently skipped. Field repro: the manual recovery that
+            # finally got Office onto MOCHI was a second Invoke-CMCollectionUpdate
+            # followed by client policy reset -- nothing more.
+            try {
+                $tgtCol = Get-CMDeviceCollection -Name $CollectionName -ErrorAction SilentlyContinue
+                if ($tgtCol) {
+                    Invoke-CMCollectionUpdate -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue
+                    $deadline = (Get-Date).AddSeconds(90)
+                    $live = 0
+                    do {
+                        Start-Sleep -Seconds 5
+                        $live = @(Get-CMCollectionMember -CollectionId $tgtCol.CollectionID -ErrorAction SilentlyContinue).Count
+                    } while ($live -lt 1 -and (Get-Date) -lt $deadline)
+                    Write-DscStatus "$Tag Pre-Put '$CollectionName' live membership: $live"
+                }
+            }
+            catch { }
+
             $escaped = $assignmentName.Replace("'", "''")
             $ass = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_ApplicationAssignment `
                 -Filter "AssignmentName='$escaped'" -ErrorAction Stop
