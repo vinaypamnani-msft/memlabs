@@ -67,16 +67,16 @@ if (-not (Test-Path $OutputDir)) {
 }
 $OutputDir = (Resolve-Path $OutputDir).Path
 
-Write-Log "[Baseline] Target VM:    $VmName" -OutputStream
-Write-Log "[Baseline] Domain:       $DomainName" -OutputStream
-Write-Log "[Baseline] Output dir:   $OutputDir" -OutputStream
-Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min" -OutputStream
-Write-Log "[Baseline] Reset:        $($Reset.IsPresent)" -OutputStream
+Write-Log "[Baseline] Target VM:    $VmName"
+Write-Log "[Baseline] Domain:       $DomainName"
+Write-Log "[Baseline] Output dir:   $OutputDir"
+Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min"
+Write-Log "[Baseline] Reset:        $($Reset.IsPresent)"
 
 # -Reset: wipe SUSDB + WsusContent and re-run wsusutil postinstall. Lets us
 # re-run the generator against an already-synced VM without rebuilding it.
 if ($Reset.IsPresent) {
-    Write-Log "[Baseline] -Reset specified: stopping WSUS, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
+    Write-Log "[Baseline] -Reset specified: stopping WSUS, dropping SUSDB, clearing content, re-running postinstall..." -Warning
     $resetResult = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
         try {
             # Read WSUS configuration from registry. ContentDir + SqlServerName
@@ -174,12 +174,15 @@ END
         $errMsg = if ($resetResult -and $resetResult.ScriptBlockOutput) { $resetResult.ScriptBlockOutput.Error } else { 'no output' }
         throw "[Baseline] -Reset failed: $errMsg"
     }
-    Write-Log "[Baseline] Reset complete (backend=$($resetResult.ScriptBlockOutput.SqlBackend), ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
+    Write-Log "[Baseline] Reset complete (backend=$($resetResult.ScriptBlockOutput.SqlBackend), ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -Success
 }
 
-# Pre-flight: VM must be a clean WSUS server with categories empty. Fail
+# Pre-flight: VM must be a clean WSUS server with no MU sync history. Fail
 # loudly otherwise -- exporting from a partially-synced or product-subscribed
-# WSUS would inflate the cab and contaminate every future deploy.
+# WSUS would inflate the cab and contaminate every future deploy. We allow
+# Categories > 0 (a fresh `wsusutil postinstall` seeds a small bookkeeping
+# row in dbo.UpdateCategories) and use UpdateCount=0 + SyncHistory=0 as the
+# authoritative "nothing's been synced from MU" signals.
 $preflight = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -DisplayName "Baseline: pre-flight check" -ScriptBlock {
     try {
         $wsus = Get-WsusServer -ErrorAction Stop
@@ -189,12 +192,14 @@ $preflight = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -Display
         $clas = $sub.GetUpdateClassifications()
         $clasCount = if ($clas) { $clas.Count } else { 0 }
         $status = $wsus.GetStatus()
+        $hist = @($sub.GetSynchronizationHistory())
         $os = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').ProductName
         [PSCustomObject]@{
             Ok                = $true
             Categories        = $catCount
             Classifications   = $clasCount
             UpdateCount       = $status.UpdateCount
+            SyncHistoryCount  = $hist.Count
             WsusServerVersion = $wsus.Version.ToString()
             OsVersion         = $os
         }
@@ -208,15 +213,15 @@ if (-not $preflight -or -not $preflight.ScriptBlockOutput -or -not $preflight.Sc
     throw "[Baseline] Pre-flight failed against $VmName : $errMsg"
 }
 $pre = $preflight.ScriptBlockOutput
-Write-Log "[Baseline] Pre-flight OK. WSUS=$($pre.WsusServerVersion), OS='$($pre.OsVersion)', Categories=$($pre.Categories), Classifications=$($pre.Classifications), UpdateCount=$($pre.UpdateCount)" -OutputStream
-if ($pre.Categories -gt 0 -or $pre.UpdateCount -gt 0) {
-    throw "[Baseline] $VmName already has categories ($($pre.Categories)) or updates ($($pre.UpdateCount)). Generator requires a clean WSUS (0/0). Use a freshly-built single-VM Role=WSUS lab."
+Write-Log "[Baseline] Pre-flight OK. WSUS=$($pre.WsusServerVersion), OS='$($pre.OsVersion)', Categories=$($pre.Categories), Classifications=$($pre.Classifications), UpdateCount=$($pre.UpdateCount), SyncHistory=$($pre.SyncHistoryCount)"
+if ($pre.UpdateCount -gt 0 -or $pre.SyncHistoryCount -gt 0) {
+    throw "[Baseline] $VmName has UpdateCount=$($pre.UpdateCount) and SyncHistoryCount=$($pre.SyncHistoryCount). Generator requires a WSUS that has never synced from MU. Re-run with -Reset, or use a freshly-built single-VM Role=WSUS lab."
 }
 
 # Drive a categories sync on the guest. Subscribe to a minimal product set
 # (SQL Server 2005 + Tools, mirroring the existing WSUSSync resource), kick
 # the sync, then poll from the host every 60s so progress is visible.
-Write-Log "[Baseline] Hardening WsusPool and kicking minimal-scope categories sync..." -OutputStream
+Write-Log "[Baseline] Hardening WsusPool and kicking minimal-scope categories sync..."
 $kick = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 300 -DisplayName "Baseline: start categories sync" -ScriptBlock {
     try {
         $wsus = Get-WsusServer -ErrorAction Stop
@@ -248,7 +253,7 @@ if (-not $kick -or -not $kick.ScriptBlockOutput -or -not $kick.ScriptBlockOutput
     $errMsg = if ($kick -and $kick.ScriptBlockOutput) { $kick.ScriptBlockOutput.Error } else { "no output" }
     throw "[Baseline] Failed to start categories sync: $errMsg"
 }
-Write-Log "[Baseline] Sync started (status=$($kick.ScriptBlockOutput.Status)). Polling every 60s..." -OutputStream
+Write-Log "[Baseline] Sync started (status=$($kick.ScriptBlockOutput.Status)). Polling every 60s..."
 
 # Poll from host. Each poll is a short Invoke-VmCommand so we see live progress
 # in the console instead of one ~60-min silent block.
@@ -275,16 +280,16 @@ while ((Get-Date) -lt $pollDeadline) {
         }
     }
     if (-not $poll -or -not $poll.ScriptBlockOutput) {
-        Write-Log "[Baseline] Poll #$pollIdx returned no output; continuing..." -OutputStream -Warning
+        Write-Log "[Baseline] Poll #$pollIdx returned no output; continuing..." -Warning
         continue
     }
     $p = $poll.ScriptBlockOutput
     if (-not $p.Ok) {
-        Write-Log "[Baseline] Poll #$pollIdx error: $($p.Error)" -OutputStream -Warning
+        Write-Log "[Baseline] Poll #$pollIdx error: $($p.Error)" -Warning
         continue
     }
     $elapsedMin = [math]::Round((New-TimeSpan -Start ($pollDeadline.AddMinutes(-$SyncTimeoutMinutes)) -End (Get-Date)).TotalMinutes, 1)
-    Write-Log "[Baseline] [$elapsedMin min] Status=$($p.Status) Phase=$($p.Phase) Categories=$($p.Categories) LastResult=$($p.LastResult)" -OutputStream
+    Write-Log "[Baseline] [$elapsedMin min] Status=$($p.Status) Phase=$($p.Phase) Categories=$($p.Categories) LastResult=$($p.LastResult)"
     if ($p.Status -ne 'Running' -and $p.Categories -gt 0) {
         $syncResult = $p
         break
@@ -296,12 +301,12 @@ if (-not $syncResult) {
 if ($syncResult.LastResult -ne 'Succeeded') {
     throw "[Baseline] Categories sync ended with LastResult='$($syncResult.LastResult)' (status=$($syncResult.Status), categories=$($syncResult.Categories))."
 }
-Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), Categories=$($syncResult.Categories), LastResult=$($syncResult.LastResult)" -OutputStream
+Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), Categories=$($syncResult.Categories), LastResult=$($syncResult.LastResult)"
 
 # Disable subscriptions and run wsusutil export on the guest.
 $exportGuestPath = "C:\staging\wsus_export\WsusCategoriesBaseline.cab"
 $exportGuestLog = "C:\staging\wsus_export\WsusCategoriesBaseline.export.log"
-Write-Log "[Baseline] Cleaning subscriptions and running wsusutil export..." -OutputStream
+Write-Log "[Baseline] Cleaning subscriptions and running wsusutil export..."
 $export = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: wsusutil export" -ScriptBlock {
     param($cabPath, $logPath)
     try {
@@ -350,13 +355,13 @@ if (-not $export -or -not $export.ScriptBlockOutput -or -not $export.ScriptBlock
 }
 $exp = $export.ScriptBlockOutput
 $sizeMB = [math]::Round($exp.Bytes / 1MB, 1)
-Write-Log "[Baseline] Export OK. Size=$sizeMB MB, SHA256=$($exp.Sha256), Categories=$($exp.Categories), Classifications=$($exp.Classifications)" -OutputStream
+Write-Log "[Baseline] Export OK. Size=$sizeMB MB, SHA256=$($exp.Sha256), Categories=$($exp.Categories), Classifications=$($exp.Classifications)"
 
 # Pull cab + log back to host via PSDirect session using the lab local admin.
 $outCab = Join-Path $OutputDir "WsusCategoriesBaseline.cab"
 $outLog = Join-Path $OutputDir "WsusCategoriesBaseline.export.log"
 $outMeta = Join-Path $OutputDir "WsusCategoriesBaseline.meta.json"
-Write-Log "[Baseline] Copying cab to host: $outCab" -OutputStream
+Write-Log "[Baseline] Copying cab to host: $outCab"
 
 $session = New-PSSession -VMName $VmName -Credential $Common.LocalAdmin -ErrorAction Stop
 try {
@@ -381,13 +386,13 @@ $meta = [PSCustomObject]@{
 }
 $meta | ConvertTo-Json -Depth 5 | Out-File -FilePath $outMeta -Encoding utf8 -Force
 
-Write-Log "" -OutputStream
-Write-Log "[Baseline] Done." -OutputStream -Success
-Write-Log "  Cab:      $outCab ($sizeMB MB)" -OutputStream
-Write-Log "  Sidecar:  $outMeta" -OutputStream
-Write-Log "  Log:      $outLog" -OutputStream
-Write-Log "" -OutputStream
-Write-Log "[Baseline] Next steps:" -OutputStream
-Write-Log "  1. Add the cab + sidecar to vmbuild\azureFiles\_filelist.json under 'tools'." -OutputStream
-Write-Log "  2. Upload them to the storage account at the same relative path." -OutputStream
-Write-Log "  3. Future deploys with cmOptions.WsusImportBaseline=`$true (default) will pick this up automatically." -OutputStream
+Write-Log ""
+Write-Log "[Baseline] Done." -Success
+Write-Log "  Cab:      $outCab ($sizeMB MB)"
+Write-Log "  Sidecar:  $outMeta"
+Write-Log "  Log:      $outLog"
+Write-Log ""
+Write-Log "[Baseline] Next steps:"
+Write-Log "  1. Add the cab + sidecar to vmbuild\azureFiles\_filelist.json under 'tools'."
+Write-Log "  2. Upload them to the storage account at the same relative path."
+Write-Log "  3. Future deploys with cmOptions.WsusImportBaseline=`$true (default) will pick this up automatically."
