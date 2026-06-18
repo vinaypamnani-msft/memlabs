@@ -5593,10 +5593,20 @@ class WSUSSync {
         # subscribed, no update metadata. Importing it bypasses the slow/flaky
         # first MU categories sync entirely. perfloading still drives the
         # per-deploy product subscription + updates sync as today.
+        #
+        # Run the import in the BACKGROUND (no -Wait) so Phase 7 doesn't sit
+        # on a 10-15 min synchronous wsusutil import. We persist the launched
+        # PID + start time to a state file; perfloading.ps1 reads it and waits
+        # on the process (bounded to 30 min from start) before triggering its
+        # first product sync. The state file is removed by perfloading once
+        # the wait completes, or on the next Phase 7 pass before re-launch.
+        #
         # Falls through to the MU sync path on any failure (cab missing,
-        # import error, post-import catalog still empty, etc.) so a stale or
-        # corrupt cab can never break a deploy.
+        # wsusutil missing, fast-fail at launch). A late failure (process
+        # alive past 2s, then errors out) leaves no categories; perfloading
+        # will see the empty catalog and trigger a normal sync there.
         $cabPath = 'C:\staging\wsus\WsusCategoriesBaseline.cab'
+        $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
         if (Test-Path $cabPath) {
             $importedOk = $false
             try {
@@ -5616,6 +5626,7 @@ class WSUSSync {
                 } catch {}
                 if ($hasCats) {
                     Write-Status "WSUS catalog already populated ($preCount categories) - skipping baseline import and MU sync."
+                    if (Test-Path $stateFile) { Remove-Item $stateFile -Force -ErrorAction SilentlyContinue }
                     return
                 }
 
@@ -5624,30 +5635,43 @@ class WSUSSync {
                     Write-Status "WsusUtil.exe not found at $wsusUtil - falling back to MU sync."
                 }
                 else {
+                    # Drop any stale state file from a prior pass before launching.
+                    if (Test-Path $stateFile) { Remove-Item $stateFile -Force -ErrorAction SilentlyContinue }
                     $importLog = 'C:\staging\wsus\WsusCategoriesBaseline.import.log'
-                    $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -Wait -PassThru -NoNewWindow -ErrorAction Stop
-                    if ($proc.ExitCode -eq 0) {
-                        $postCount = 0
-                        try {
-                            $WSUS_post = Get-WsusServer -Name $this.ServerName -PortNumber 8530
-                            $cats_post = $WSUS_post.GetSubscription().GetUpdateCategories()
-                            if ($cats_post) { $postCount = $cats_post.Count }
-                        } catch {}
-                        if ($postCount -gt 0) {
-                            Write-Status "WSUS baseline import OK: $postCount categories present after import. Skipping MU categories sync."
-                            $importedOk = $true
-                        }
-                        else {
-                            Write-Status "WSUS baseline import returned exit=0 but no categories present afterwards - falling back to MU sync."
-                        }
-                    }
-                    else {
+                    $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('import', $cabPath, $importLog) -PassThru -NoNewWindow -ErrorAction Stop
+                    # Give wsusutil a moment to fail fast (bad cab, locked DB, ...).
+                    Start-Sleep -Seconds 2
+                    if ($proc.HasExited -and $proc.ExitCode -ne 0) {
                         $tail = ''
                         if (Test-Path $importLog) {
                             $tailLines = Get-Content $importLog -Tail 5 -ErrorAction SilentlyContinue
                             if ($tailLines) { $tail = ($tailLines -join ' | ') }
                         }
-                        Write-Status "WSUS baseline import failed (exit=$($proc.ExitCode)). Tail: $tail. Falling back to MU sync."
+                        Write-Status "WSUS baseline import exited immediately (exit=$($proc.ExitCode)). Tail: $tail. Falling back to MU sync."
+                    }
+                    elseif ($proc.HasExited -and $proc.ExitCode -eq 0) {
+                        # Unusual (real import takes minutes) but treat as success.
+                        Write-Status "WSUS baseline import finished immediately (exit=0). Skipping MU categories sync."
+                        $importedOk = $true
+                    }
+                    else {
+                        # Background import in flight. Record state for perfloading.
+                        $state = [PSCustomObject]@{
+                            ProcessId       = $proc.Id
+                            ProcessName     = $proc.ProcessName
+                            StartTimeUtc    = (Get-Date).ToUniversalTime().ToString('o')
+                            CabPath         = $cabPath
+                            ImportLog       = $importLog
+                            MaxWaitMinutes  = 30
+                        }
+                        try {
+                            $state | ConvertTo-Json | Set-Content -Path $stateFile -Encoding UTF8 -Force
+                        }
+                        catch {
+                            Write-Status "Failed to persist baseline import state ($stateFile): $($_.Exception.Message). Perfloading will not wait."
+                        }
+                        Write-Status "WSUS baseline import running in background (pid=$($proc.Id), max wait 30 min). Perfloading will wait before sync 1. Skipping MU categories sync."
+                        $importedOk = $true
                     }
                 }
             }

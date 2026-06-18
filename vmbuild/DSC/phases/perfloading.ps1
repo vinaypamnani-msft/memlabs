@@ -1143,6 +1143,78 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         Write-DscStatus "$Tag WsusPool hardened (privateMemory uncapped, queueLength=25000)"
     }
 
+    function Wait-WsusBaselineImport {
+        # WSUSSync (Phase 7) may have launched `wsusutil import` in the
+        # background and persisted its PID + start time to
+        # C:\staging\wsus\WsusCategoriesBaseline.import.state.json. If that
+        # process is still alive when we reach the first product sync, wait
+        # for it to finish so we don't trigger an MU categories sync on top
+        # of an in-flight baseline import (which would deadlock or corrupt
+        # subscription state). Bounded to 30 min from the import's original
+        # start time. Returns silently when no state file exists, the PID is
+        # already gone, the deadline has passed, or the process exits during
+        # the wait. Removes the state file on terminal exit.
+        $stateFile = 'C:\staging\wsus\WsusCategoriesBaseline.import.state.json'
+        if (-not (Test-Path $stateFile)) { return }
+
+        try {
+            $state = Get-Content $stateFile -Raw -ErrorAction Stop | ConvertFrom-Json
+        }
+        catch {
+            Write-DscStatus "$Tag Baseline import state file unreadable ($($_.Exception.Message)). Proceeding without wait."
+            return
+        }
+
+        $importPid = 0
+        try { $importPid = [int]$state.ProcessId } catch {}
+        if ($importPid -le 0) {
+            Write-DscStatus "$Tag Baseline import state file missing ProcessId. Proceeding without wait."
+            Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+        $expectedName = if ($state.ProcessName) { [string]$state.ProcessName } else { 'WsusUtil' }
+        $maxMinutes   = 30
+        try { if ($state.MaxWaitMinutes) { $maxMinutes = [int]$state.MaxWaitMinutes } } catch {}
+        $startTimeUtc = [DateTime]::UtcNow
+        try { $startTimeUtc = ([DateTime]::Parse($state.StartTimeUtc)).ToUniversalTime() } catch {}
+        $deadlineUtc  = $startTimeUtc.AddMinutes($maxMinutes)
+
+        $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+        if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
+            Write-DscStatus "$Tag Baseline import (pid=$importPid) no longer running. Proceeding."
+            Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
+        $remainingSec = ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds
+        if ($remainingSec -le 0) {
+            Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) is past its $maxMinutes-min deadline (started $($startTimeUtc.ToString('u'))). Not waiting; proceeding."
+            return
+        }
+
+        Write-DscStatus "$Tag Waiting for in-flight WSUS baseline import (pid=$importPid, up to $([math]::Round($remainingSec/60,1)) min remaining)..."
+        $lastLogUtc = [DateTime]::UtcNow
+        while ($true) {
+            $proc = Get-Process -Id $importPid -ErrorAction SilentlyContinue
+            if (-not $proc -or ($expectedName -and $proc.ProcessName -ine $expectedName)) {
+                $elapsedMin = [math]::Round(([DateTime]::UtcNow - $startTimeUtc).TotalMinutes, 1)
+                Write-DscStatus "$Tag Baseline import (pid=$importPid) finished after ${elapsedMin} min. Proceeding."
+                Remove-Item $stateFile -Force -ErrorAction SilentlyContinue
+                return
+            }
+            if ([DateTime]::UtcNow -ge $deadlineUtc) {
+                Write-DscStatus "$Tag WARN: Baseline import (pid=$importPid) exceeded $maxMinutes-min deadline. Leaving process running; proceeding with sync."
+                return
+            }
+            Start-Sleep -Seconds 5
+            if (([DateTime]::UtcNow - $lastLogUtc).TotalSeconds -ge 60) {
+                $remainingSec = [math]::Max(0, ($deadlineUtc - [DateTime]::UtcNow).TotalSeconds)
+                Write-DscStatus "$Tag Baseline import still running (pid=$importPid, $([math]::Round($remainingSec/60,1)) min remaining)..."
+                $lastLogUtc = [DateTime]::UtcNow
+            }
+        }
+    }
+
     function Repair-WsusSync {
         # Remediate a stuck/failed WSUS sync by restarting the IIS app pool
         # and the SMS wsyncmgr component, then triggering a fresh sync.
@@ -1989,6 +2061,12 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
     }
 
     if ($Sups -and $syncNeeded) {
+        # If Phase 7's WSUSSync launched wsusutil import in the background,
+        # wait for it to finish (bounded 30 min from start) before kicking
+        # off any sync work. Running an MU categories sync on top of an
+        # in-flight baseline import would race on subscription state.
+        Wait-WsusBaselineImport
+
         # Two syncs are needed for WSUS to be fully operational:
         #   Sync 1: Pulls in the product catalog so products can be subscribed
         #   Sync 2: After subscribing to products, downloads update metadata
