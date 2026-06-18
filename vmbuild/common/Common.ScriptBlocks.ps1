@@ -3862,6 +3862,7 @@ $global:VM_Config = {
         [int]$failCount = 0
         $dscRecoveryAttempted = $false
         $dcReadySince = $null  # track when DC became reachable for non-DC nodes
+        $sqlaoStuckRemediated = $false   # one-shot guard: bounce SQL on a stuck SQLAO replica at most once per deploy
         try {
             do {
 
@@ -4449,14 +4450,75 @@ $global:VM_Config = {
                     # Also pull a wider context window when a fatal is seen so we
                     # can recognize specific failure shapes (e.g. SQLAO Init_Database
                     # AGWaitForSynchronizationHealth) and emit actionable guidance.
+                    #
+                    # Live SQLAO stuck-replica detection: while ConfigMgr is inside
+                    # AGWaitForSynchronizationHealth (the ~15min budget), it logs one
+                    # 'AG replica X ... Operational State: UNKNOWN, Recovery Health
+                    # UNKNOWN, Synchronization Health: NOT_HEALTHY' line every 15s.
+                    # Each line carries its own timestamp in the CMTrace tail
+                    # ($$<Configuration Manager Setup><MM-dd-yyyy HH:mm:ss.fff+TZ>).
+                    # If the same replica is reported stuck across a span of >= 5 min
+                    # without recovery, the only reliable in-place fix is to bounce
+                    # the SQL service on that replica so its recovery thread starts
+                    # fresh. We do that ONCE per deploy and let setup.exe observe
+                    # HEALTHY on its next poll (CM still has ~10 min of budget left).
                     $cmLogCheck = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -SuppressLog -ScriptBlock {
                         if (Test-Path C:\ConfigMgrSetup.log) {
                             $tail = Get-Content C:\ConfigMgrSetup.log -tail 30
                             $hit  = $tail | Select-String "Failed Configuration Manager Server Setup|fatal errors|cannot be completed|doesn't have administrative rights" | Select-Object -First 1
-                            if ($hit) {
+
+                            # Stuck-replica probe: scan a wider tail (~25 min worth at
+                            # 15s cadence) and find replicas whose UNKNOWN-state span
+                            # is the longest. Returns the worst (longest-stuck) replica.
+                            $stuckTail   = Get-Content C:\ConfigMgrSetup.log -tail 200 -ErrorAction SilentlyContinue
+                            $rxStuck     = [regex]'AG replica (\S+) in group .+ is not ready - Operational State: UNKNOWN, Connected State: \S+, Recovery Health UNKNOWN, Synchronization Health: NOT_HEALTHY.*?\$\$<Configuration Manager Setup><(\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3})'
+                            $rxRecovered = [regex]'AGWaitForSynchronizationHealth - Availability group .+ is now healthy\.\s*\$\$<Configuration Manager Setup><(\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}\.\d{3})'
+                            $stuckByVm   = @{}
+                            $lastHealthy = [datetime]::MinValue
+                            foreach ($line in $stuckTail) {
+                                $hm = $rxRecovered.Match($line)
+                                if ($hm.Success) {
+                                    $t = [datetime]::ParseExact($hm.Groups[1].Value,'MM-dd-yyyy HH:mm:ss.fff',$null)
+                                    if ($t -gt $lastHealthy) { $lastHealthy = $t }
+                                    continue
+                                }
+                                $sm = $rxStuck.Match($line)
+                                if ($sm.Success) {
+                                    $name = $sm.Groups[1].Value
+                                    $t    = [datetime]::ParseExact($sm.Groups[2].Value,'MM-dd-yyyy HH:mm:ss.fff',$null)
+                                    if (-not $stuckByVm.ContainsKey($name)) {
+                                        $stuckByVm[$name] = [pscustomobject]@{ First = $t; Last = $t; Count = 1 }
+                                    }
+                                    else {
+                                        $entry = $stuckByVm[$name]
+                                        if ($t -lt $entry.First) { $entry.First = $t }
+                                        if ($t -gt $entry.Last)  { $entry.Last  = $t }
+                                        $entry.Count++
+                                    }
+                                }
+                            }
+                            # Discard any entry whose First < lastHealthy: that's a stale
+                            # window from a prior failover the AG already recovered from.
+                            $stuckOut = $null
+                            foreach ($kv in $stuckByVm.GetEnumerator()) {
+                                if ($kv.Value.First -lt $lastHealthy) { continue }
+                                $spanMin = ($kv.Value.Last - $kv.Value.First).TotalMinutes
+                                if ($null -eq $stuckOut -or $spanMin -gt $stuckOut.SpanMinutes) {
+                                    $stuckOut = [pscustomobject]@{
+                                        Replica     = $kv.Key
+                                        SpanMinutes = [math]::Round($spanMin, 2)
+                                        First       = $kv.Value.First
+                                        Last        = $kv.Value.Last
+                                        Count       = $kv.Value.Count
+                                    }
+                                }
+                            }
+
+                            if ($hit -or $stuckOut) {
                                 [pscustomobject]@{
-                                    Line    = $hit.Line
+                                    Line    = if ($hit) { $hit.Line } else { $null }
                                     Context = ($tail -join "`n")
+                                    Stuck   = $stuckOut
                                 }
                             }
                         }
@@ -4465,6 +4527,55 @@ $global:VM_Config = {
                         $failEntry   = $cmLogCheck.ScriptBlockOutput.Line
                         $failContext = $cmLogCheck.ScriptBlockOutput.Context
                         $bailEarly = $true
+                    }
+
+                    # Live SQLAO auto-remediation: if a replica has been UNKNOWN for >= 5 min
+                    # within the current AGWait window (and we haven't already remediated this
+                    # deploy), restart SQL on that replica. CM Setup will observe HEALTHY on its
+                    # next poll and finish Init_Database. ONE-SHOT to avoid bounce loops.
+                    if (-not $bailEarly -and -not $sqlaoStuckRemediated -and $cmLogCheck.ScriptBlockOutput.Stuck) {
+                        $stuck = $cmLogCheck.ScriptBlockOutput.Stuck
+                        if ($stuck.SpanMinutes -ge 5) {
+                            $stuckVmName = [string]$stuck.Replica
+                            # The replica name in the log is the SQL Server's NETBIOS / computer name,
+                            # which equals the VM name in memlabs. Confirm we own it before acting.
+                            $vmIsOurs = $false
+                            if ($deployConfig -and $deployConfig.virtualMachines) {
+                                $vmIsOurs = [bool]($deployConfig.virtualMachines | Where-Object { $_.vmName -eq $stuckVmName })
+                            }
+                            if (-not $vmIsOurs) {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: replica '$stuckVmName' has been UNKNOWN for $($stuck.SpanMinutes) min in ConfigMgrSetup.log, but no VM by that name is in the deploy config. Skipping remediation; will bail-early when CM Setup gives up." -Warning
+                                $sqlaoStuckRemediated = $true
+                            }
+                            else {
+                                Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: replica '$stuckVmName' has been Op=UNKNOWN/Rec=UNKNOWN/Sync=NOT_HEALTHY for $($stuck.SpanMinutes) min ($($stuck.Count) consecutive AGWaitForSynchronizationHealth poll(s) in ConfigMgrSetup.log). Restarting SQL on '$stuckVmName' to clear the stuck recovery thread." -Warning -OutputStream
+                                $bounceResult = Invoke-VmCommand -VmName $stuckVmName -VmDomainName $domainName -DisplayName "SQLAO auto-remediate: bounce SQL on $stuckVmName" -ScriptBlock {
+                                    $svc = Get-Service -Name 'MSSQLSERVER' -ErrorAction SilentlyContinue
+                                    if (-not $svc) {
+                                        $svc = Get-Service -Name 'MSSQL$*' -ErrorAction SilentlyContinue | Select-Object -First 1
+                                    }
+                                    if (-not $svc) { return [pscustomobject]@{ Ok = $false; Error = 'No MSSQLSERVER service found' } }
+                                    $svcName = $svc.Name
+                                    try {
+                                        Restart-Service -Name $svcName -Force -ErrorAction Stop
+                                        # Don't restart SQLSERVERAGENT explicitly — it has Restart-Service dependency
+                                        # behavior and will be restarted as part of the SQL stop.
+                                        return [pscustomobject]@{ Ok = $true; Service = $svcName }
+                                    }
+                                    catch {
+                                        return [pscustomobject]@{ Ok = $false; Service = $svcName; Error = $_.Exception.Message }
+                                    }
+                                }
+                                $sqlaoStuckRemediated = $true
+                                if ($bounceResult.ScriptBlockFailed -or -not $bounceResult.ScriptBlockOutput -or -not $bounceResult.ScriptBlockOutput.Ok) {
+                                    $errMsg = if ($bounceResult.ScriptBlockOutput) { $bounceResult.ScriptBlockOutput.Error } else { 'no output' }
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: SQL restart on '$stuckVmName' FAILED: $errMsg. CM Setup will likely bail with 'did not return to a healthy state' once its 15min budget expires." -Warning -OutputStream
+                                }
+                                else {
+                                    Write-Log "[Phase $Phase]: $($currentItem.vmName): SQLAO auto-remediate: restarted '$($bounceResult.ScriptBlockOutput.Service)' on '$stuckVmName'. AG should re-converge within ~90s; CM Setup's AGWaitForSynchronizationHealth poll will pick HEALTHY on its next 15s tick." -OutputStream
+                                }
+                            }
+                        }
                     }
 
                     if ($bailEarly) {
