@@ -37,24 +37,12 @@ if ($ssmsVersions.Count -eq 0) {
     return
 }
 
-# --- Discover SQL Server instances from AD SPNs ---
-Write-Log "Querying AD for MSSQLSvc SPNs..."
-try {
-    $searcher = [adsisearcher]"(servicePrincipalName=MSSQLSvc/*)"
-    $searcher.PropertiesToLoad.Add("dNSHostName") | Out-Null
-    $searcher.PropertiesToLoad.Add("servicePrincipalName") | Out-Null
-    $results = $searcher.FindAll()
-    Write-Log "AD query returned $($results.Count) computer object(s) with MSSQLSvc SPNs"
-}
-catch {
-    Write-Log "ERROR: AD query failed: $($_.Exception.Message)"
-    return
-}
-
-# Ordered list of connection targets. Local instances take precedence (added
-# first), then AG listeners, then domain SQL servers discovered via SPNs.
+# Ordered list of connection targets. Local SQL is added first (precedence),
+# then every SQL endpoint discovered from MSSQLSvc SPNs across the domain.
 # Dedupe is by connection string, first-wins, so a local instance shadows the
-# domain SPN for the same box.
+# domain SPN for the same box. Encryption is left Optional (EC=False) with
+# Trust Server Certificate always on, so lab self-signed certs never block a
+# connection.
 $serverList = New-Object 'System.Collections.Generic.List[object]'
 $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -62,8 +50,8 @@ function Add-ServerEntry {
     param(
         [string]$Display,
         [string]$Instance,
-        [ValidateSet('Local', 'Listener', 'Domain')] [string]$Kind,
-        [bool]$Encrypt = $true
+        [ValidateSet('Local', 'Domain')] [string]$Kind,
+        [bool]$Encrypt = $false
     )
     if ([string]::IsNullOrWhiteSpace($Instance)) { return }
     if (-not $seen.Add($Instance)) { return }
@@ -134,49 +122,78 @@ foreach ($svc in $localServices) {
     }
 }
 
-# Pass 1: record all computer dNSHostNames so AG listeners (whose port-based
-# SPNs live on the SQL service account, not a computer object) can be told
-# apart from a real server's port SPN.
-$computerShortNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($result in $results) {
-    $dns = ($result.Properties["dnshostname"] | Select-Object -First 1) -as [string]
-    if ($dns) { [void]$computerShortNames.Add(($dns -split '\.')[0]) }
+# --- Dump every MSSQLSvc SPN in the domain and collapse per host ---
+# SQL frequently runs under a domain service account, so its SPNs live on the
+# account object, not the computer -- distinguishing "real server vs listener"
+# from SPNs alone is unreliable. Instead, group all SPNs by host and emit ONE
+# connection target per server: host\instance for a named instance, host,port
+# for a non-default port, or bare host for the default instance on 1433. This
+# drops the redundant :1433 / :MSSQLSERVER duplicates automatically and treats
+# AG listeners exactly like any other host (e.g. KETCHUP,1500).
+Write-Log "Querying AD for all MSSQLSvc SPNs..."
+$spnHosts = @{}
+try {
+    $searcher = [adsisearcher]"(servicePrincipalName=MSSQLSvc/*)"
+    $searcher.PageSize = 500
+    [void]$searcher.PropertiesToLoad.Add("servicePrincipalName")
+    $adResults = $searcher.FindAll()
+    Write-Log "AD returned $($adResults.Count) object(s) with MSSQLSvc SPNs"
+}
+catch {
+    Write-Log "ERROR: AD query failed: $($_.Exception.Message)"
+    $adResults = @()
 }
 
-# Pass 2: walk every MSSQLSvc SPN. Non-port SPNs => real servers; port SPNs on
-# a non-computer host => AG listener (added as 'name,port').
-Write-Log "Processing $($results.Count) AD object(s) with MSSQLSvc SPNs..."
-foreach ($result in $results) {
-    $spns = $result.Properties["serviceprincipalname"]
-    foreach ($spn in $spns) {
-        if ($spn -notlike "MSSQLSvc/*") { continue }
+foreach ($result in $adResults) {
+    foreach ($spn in $result.Properties["serviceprincipalname"]) {
         if ($spn -notmatch '^MSSQLSvc/([^:]+)(?::(.+))?$') { continue }
-        $spnHost = $Matches[1]
+        $short = (($Matches[1]) -split '\.')[0]
         $suffix = $Matches[2]
-        $shortHost = ($spnHost -split '\.')[0]
-
-        if ($suffix -and $suffix -match '^\d+$') {
-            # Port-based SPN. If the host is NOT a known computer object it is
-            # an Availability Group listener; register it as Name,Port.
-            if (-not $computerShortNames.Contains($shortHost)) {
-                Add-ServerEntry -Display "$shortHost,$suffix" -Instance "$shortHost,$suffix" -Kind Listener -Encrypt $true
-            }
-            continue
+        if (-not $spnHosts.ContainsKey($short)) {
+            $spnHosts[$short] = @{ Named = @{}; Ports = @{}; HasDefault = $false }
         }
-
-        if ($suffix -and $suffix -ne 'MSSQLSERVER') {
-            Add-ServerEntry -Display "$shortHost\$suffix" -Instance "$shortHost\$suffix" -Kind Domain -Encrypt $true
-        }
-        else {
-            Add-ServerEntry -Display $shortHost -Instance $shortHost -Kind Domain -Encrypt $true
-        }
+        $h = $spnHosts[$short]
+        if (-not $suffix -or $suffix -ieq 'MSSQLSERVER') { $h.HasDefault = $true }
+        elseif ($suffix -match '^\d+$') { $h.Ports[$suffix] = $true }
+        else { $h.Named[$suffix] = $true }
     }
 }
 
-# --- Prefer the relevant AG listener at the very top of the list when this box
-#     is itself a SQLAO node, or uses an AG listener as its (CM) database server
-#     (e.g. a Primary whose CM DB lives on the AG). Uses the authoritative
-#     deployConfig.json injected for DSC; all names there are already prefixed. ---
+foreach ($short in ($spnHosts.Keys | Sort-Object)) {
+    $h = $spnHosts[$short]
+    $named = @($h.Named.Keys)
+    $nonDefaultPorts = @($h.Ports.Keys | Where-Object { $_ -ne '1433' })
+    if ($named.Count -gt 0) {
+        # Named instance(s) -> connect via host\instance (SQL Browser resolves).
+        foreach ($inst in $named) {
+            Add-ServerEntry -Display "$short\$inst" -Instance "$short\$inst" -Kind Domain
+        }
+    }
+    elseif ($nonDefaultPorts.Count -gt 0) {
+        # Default-style endpoint (incl. AG listeners) on a non-default port.
+        foreach ($p in $nonDefaultPorts) {
+            Add-ServerEntry -Display "$short,$p" -Instance "$short,$p" -Kind Domain
+        }
+    }
+    else {
+        # Default instance on 1433 -> bare host (drops the :1433 duplicate).
+        Add-ServerEntry -Display $short -Instance $short -Kind Domain
+    }
+}
+
+# --- Float the SQL endpoints THIS machine's roles use to the top ---
+# Detect the databases this box actually talks to and pull them to the front in
+# priority order:
+#   1. A SQLAO node's own AG listener.
+#   2. The ConfigMgr site database (used by a Site Server itself, and by the
+#      Management Point / Reporting point / SMS Provider site systems of that
+#      site).
+#   3. The WSUS / SUSDB (which may be WID) -- so WID lands right after a role DB
+#      when the box has both, or first when WSUS is its only DB.
+# We only ever MOVE already-discovered entries (matched by host), so SPN ports
+# are preserved and no duplicate is created. deployConfig.json is used purely
+# for this ordering; discovery above is pure SPN + local services. All config
+# names are already prefixed.
 $deployConfigPath = "C:\staging\DSC\deployConfig.json"
 if (Test-Path $deployConfigPath) {
     try {
@@ -187,48 +204,84 @@ if (Test-Path $deployConfigPath) {
         $me = $vms | Where-Object { $_.vmName -ieq $thisName } | Select-Object -First 1
         if (-not $me) { $me = $vms | Where-Object { $_.vmName -ieq $env:COMPUTERNAME } | Select-Object -First 1 }
 
-        $listenerOwner = $null
+        # Resolve a SQL-hosting VM to its connection host: AG listener if it is
+        # an AlwaysOn node (or the partner of one), otherwise the VM's own name.
+        function Resolve-SqlHost {
+            param($sqlVm)
+            if (-not $sqlVm) { return $null }
+            if ($sqlVm.AlwaysOnListenerName) { return $sqlVm.AlwaysOnListenerName }
+            $partner = $vms | Where-Object { $_.OtherNode -ieq $sqlVm.vmName -and $_.AlwaysOnListenerName } | Select-Object -First 1
+            if ($partner) { return $partner.AlwaysOnListenerName }
+            return $sqlVm.vmName
+        }
+
+        $siteRoles = @('CAS', 'Primary', 'Secondary')
+        $targets = New-Object 'System.Collections.Generic.List[object]'
+
         if ($me) {
+            # 1. SQLAO node -> its own AG listener.
             if ($me.role -eq 'SQLAO') {
-                # This box is a cluster node -> prefer its own AG listener. The
-                # passive node carries no AlwaysOnListenerName, so fall back to
-                # the partner node that does.
-                if ($me.AlwaysOnListenerName) { $listenerOwner = $me }
-                else { $listenerOwner = $vms | Where-Object { $_.OtherNode -ieq $me.vmName -and $_.AlwaysOnListenerName } | Select-Object -First 1 }
+                $ln = Resolve-SqlHost $me
+                if ($ln) { $targets.Add(@{ Type = 'Host'; Value = $ln }) }
             }
-            elseif ($me.remoteSQLVM) {
-                # This box uses a remote SQL server. If that server is an AG
-                # node, prefer the listener it serves its databases through.
-                $rsql = $vms | Where-Object { $_.vmName -ieq $me.remoteSQLVM } | Select-Object -First 1
-                if ($rsql) {
-                    if ($rsql.AlwaysOnListenerName) { $listenerOwner = $rsql }
-                    else { $listenerOwner = $vms | Where-Object { $_.OtherNode -ieq $rsql.vmName -and $_.AlwaysOnListenerName } | Select-Object -First 1 }
+
+            # 2. ConfigMgr site DB (Site Server itself, or the MP / RP / SMS
+            #    Provider site systems belonging to the same site).
+            $siteServer = $null
+            if ($me.role -in $siteRoles) { $siteServer = $me }
+            elseif ($me.siteCode) {
+                $siteServer = $vms | Where-Object { $_.role -in $siteRoles -and $_.siteCode -ieq $me.siteCode } | Select-Object -First 1
+            }
+            if ($siteServer) {
+                if ($siteServer.remoteSQLVM) {
+                    $sqlVm = $vms | Where-Object { $_.vmName -ieq $siteServer.remoteSQLVM } | Select-Object -First 1
+                    if ($sqlVm) { $targets.Add(@{ Type = 'Host'; Value = (Resolve-SqlHost $sqlVm) }) }
+                    else { $targets.Add(@{ Type = 'Host'; Value = $siteServer.remoteSQLVM }) }
                 }
+                else {
+                    $targets.Add(@{ Type = 'Host'; Value = $siteServer.vmName })
+                }
+            }
+
+            # 3. WSUS / SUSDB (WID floats here, so it lands after a site DB).
+            $hasWsus = ($me.role -eq 'WSUS') -or ($me.installSUP -eq $true)
+            if ($hasWsus) {
+                if ($me.wsusDataBaseServer -and $me.wsusDataBaseServer -ieq 'WID') { $targets.Add(@{ Type = 'WID' }) }
+                elseif ($me.wsusDataBaseServer) { $targets.Add(@{ Type = 'Host'; Value = $me.wsusDataBaseServer }) }
+                elseif ($me.sqlVersion) { $targets.Add(@{ Type = 'Host'; Value = $me.vmName }) }
+                elseif ($me.remoteSQLVM) {
+                    $sqlVm = $vms | Where-Object { $_.vmName -ieq $me.remoteSQLVM } | Select-Object -First 1
+                    if ($sqlVm) { $targets.Add(@{ Type = 'Host'; Value = (Resolve-SqlHost $sqlVm) }) }
+                    else { $targets.Add(@{ Type = 'Host'; Value = $me.remoteSQLVM }) }
+                }
+                else { $targets.Add(@{ Type = 'WID' }) }
             }
         }
 
-        if ($listenerOwner -and $listenerOwner.AlwaysOnListenerName) {
-            $lname = $listenerOwner.AlwaysOnListenerName
-            $lport = if ($listenerOwner.sqlPort) { $listenerOwner.sqlPort } else { '1433' }
-            $lInstance = "$lname,$lport"
+        # Match each target to a discovered entry (skipping dupes) in priority
+        # order, then move the matched set to the very front keeping that order.
+        $promoted = New-Object 'System.Collections.Generic.List[object]'
+        $promotedKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($t in $targets) {
+            $hit = $null
+            if ($t.Type -eq 'WID') {
+                $hit = $serverList | Where-Object { $_.Instance -like '*MICROSOFT##WID*' -and -not $promotedKeys.Contains($_.Instance) } | Select-Object -First 1
+            }
+            elseif ($t.Value) {
+                $hn = $t.Value
+                $hit = $serverList | Where-Object { (($_.Instance -split '[\\,]')[0]) -ieq $hn -and -not $promotedKeys.Contains($_.Instance) } | Select-Object -First 1
+            }
+            if ($hit) { [void]$promoted.Add($hit); [void]$promotedKeys.Add($hit.Instance) }
+        }
 
-            # Reuse the already-discovered listener entry (any port) if present,
-            # otherwise synthesize one from config (covers labs where the
-            # listener has no Kerberos SPN registered).
-            $existing = $serverList | Where-Object { $_.Kind -eq 'Listener' -and (($_.Instance -split ',')[0] -ieq $lname) } | Select-Object -First 1
-            if ($existing) {
-                [void]$serverList.Remove($existing)
-                $serverList.Insert(0, $existing)
-                Write-Log "Preferred AG listener moved to top: $($existing.Instance)"
-            }
-            elseif ($seen.Add($lInstance)) {
-                $serverList.Insert(0, [pscustomobject]@{ Display = $lInstance; Instance = $lInstance; Kind = 'Listener'; Encrypt = $true })
-                Write-Log "Preferred AG listener added at top: $lInstance"
-            }
+        if ($promoted.Count -gt 0) {
+            foreach ($p in $promoted) { [void]$serverList.Remove($p) }
+            for ($i = $promoted.Count - 1; $i -ge 0; $i--) { $serverList.Insert(0, $promoted[$i]) }
+            Write-Log ("Prioritized this machine's role DBs to top: " + (($promoted | ForEach-Object { $_.Instance }) -join ', '))
         }
     }
     catch {
-        Write-Log "deployConfig listener-preference failed: $($_.Exception.Message)"
+        Write-Log "deployConfig preference failed: $($_.Exception.Message)"
     }
 }
 
