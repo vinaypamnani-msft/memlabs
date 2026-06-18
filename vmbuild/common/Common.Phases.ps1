@@ -327,6 +327,14 @@ function Start-Phase {
 
     # Start Phase
     $start = Start-PhaseJobs -Phase $Phase -deployConfig $deployConfig
+    # Hard-fail when a phase's preflight (e.g. the Phase 8 SQL-admin self-heal)
+    # couldn't remediate. Returning $false here breaks the New-Lab phase loop
+    # immediately so other VMs don't sit waiting through CM Setup's own multi-
+    # hour internal timeouts on dependencies that we already know are broken.
+    if ($start -and $start.PreflightFailed) {
+        Write-RedX "[Phase $Phase] Preflight checks failed; aborting before any per-VM jobs are dispatched. See log for details." -WriteLog
+        return $false
+    }
     if (-not $start.Applicable) {
         Write-OrangePoint "[Phase $Phase] No VMs need this step. Skipping." -ForegroundColor Yellow -WriteLog
         $global:PhaseSkipped = $true
@@ -592,13 +600,23 @@ function Start-PhaseJobs {
     # restored snapshot may predate the membership (config drift, prior
     # topology without this site server, secure-channel reset, etc.). Self-
     # heal here so a -Restore + -StartPhase 8 run is robust against drift.
-    # Idempotent: no-op when already a member.
+    #
+    # Fail-fast contract: actively try to remediate (start the SQL host if it
+    # isn't Running, retry the self-heal up to 3 times). If we still can't
+    # confirm membership, ABORT Phase 8 immediately by returning
+    # PreflightFailed=$true. Without this, a single broken SQL host would let
+    # CM Setup launch and wait through its multi-hour internal timeouts, and
+    # every dependent node (Primary waiting on CAS replication, secondary
+    # waiting on Primary) would block on the same wall-clock, turning a
+    # 30-second misconfig into a 9-hour stuck deploy.
     if ($Phase -eq 8) {
         $netbios = $deployConfig.vmOptions.domainNetBiosName
         $domain = $deployConfig.vmOptions.domainName
         $siteServers = @($deployConfig.virtualMachines | Where-Object {
             ($_.role -eq 'CAS' -or $_.role -eq 'Primary') -and $_.remoteSQLVM
         })
+        $preflightFailures = New-Object System.Collections.Generic.List[string]
+
         foreach ($ss in $siteServers) {
             # Resolve SQL host set: the remoteSQLVM itself plus its OtherNode
             # when it's a SQLAO pair. CM Setup probes every replica, so all
@@ -609,45 +627,106 @@ function Start-PhaseJobs {
             $sqlHosts = @($ss.remoteSQLVM)
             if ($sqlVm -and $sqlVm.OtherNode) { $sqlHosts += $sqlVm.OtherNode }
             $sqlHosts = @($sqlHosts | Where-Object { $_ } | Select-Object -Unique)
+            $account = "$netbios\$($ss.vmName)" + '$'
 
             foreach ($sqlHost in $sqlHosts) {
+                # Step 1: make sure the SQL host VM is Running and reachable
+                # via PSDirect. If it's not, start it and wait briefly --
+                # without a running, reachable VM there's no point trying
+                # the ADSI add and Phase 8 will definitely fail.
                 $hvm = Get-VM2 -Name $sqlHost -ErrorAction SilentlyContinue
-                if (-not $hvm -or $hvm.State -ne 'Running') {
-                    Write-Log "[Phase 8] $($ss.vmName) preflight: SQL host $sqlHost not Running ($($hvm.State)); skipping local-admin self-heal." -Warning
+                if (-not $hvm) {
+                    $msg = "[$($ss.vmName) -> $sqlHost] SQL host VM not found on this Hyper-V host."
+                    Write-Log "[Phase 8] $msg" -Failure
+                    $preflightFailures.Add($msg) | Out-Null
                     continue
                 }
-                $account = "$netbios\$($ss.vmName)" + '$'
-                $result = Invoke-VmCommand -VmName $sqlHost -VmDomainName $domain -DisplayName "Ensure $account in local Administrators" -ArgumentList @($account) -SuppressLog -ScriptBlock {
-                    param($acct)
-                    try {
-                        $grpName = (Get-CimInstance -ClassName Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"' -ErrorAction Stop).Name
-                        $g = [ADSI]"WinNT://$env:COMPUTERNAME/$grpName,group"
-                        $parts = $acct.Split('\')
-                        $path = "WinNT://$($parts[0])/$($parts[1])"
-                        if ($g.IsMember($path)) { return 'already-member' }
-                        $g.Add($path)
-                        return 'added'
+                if ($hvm.State -ne 'Running') {
+                    Write-Log "[Phase 8] $sqlHost is $($hvm.State); starting it for site-server $($ss.vmName) preflight." -Activity
+                    try { Start-VM2 -Name $sqlHost -ErrorAction Stop } catch {
+                        Write-Log "[Phase 8] $sqlHost`: Start-VM2 threw: $($_.Exception.Message)" -Warning
                     }
-                    catch {
-                        return "error: $($_.Exception.Message)"
+                    $ready = Wait-ForVm -VmName $sqlHost -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 3 -SkipDiskTest -Quiet
+                    if (-not $ready) {
+                        $postState = (Get-VM2 -Name $sqlHost -ErrorAction SilentlyContinue).State
+                        $msg = "[$($ss.vmName) -> $sqlHost] SQL host did not become reachable within 3 minutes (state=$postState)."
+                        Write-Log "[Phase 8] $msg" -Failure
+                        $preflightFailures.Add($msg) | Out-Null
+                        continue
                     }
                 }
-                if ($result -and -not $result.ScriptBlockFailed) {
-                    $out = "$($result.ScriptBlockOutput)".Trim()
-                    if ($out -eq 'added') {
-                        Write-Log "[Phase 8] $sqlHost`: added $account to local Administrators (was missing) -- self-heal for site server $($ss.vmName)." -Activity
+
+                # Step 2: idempotently add the site-server machine account to
+                # local Administrators on this SQL host. Retry transient
+                # Invoke-VmCommand / ADSI failures (PSDirect session not yet
+                # warm right after Start-VM2, brief WinRM contention, etc.).
+                $attempts = 0
+                $maxAttempts = 3
+                $success = $false
+                $lastError = $null
+                while (-not $success -and $attempts -lt $maxAttempts) {
+                    $attempts++
+                    $result = Invoke-VmCommand -VmName $sqlHost -VmDomainName $domain -DisplayName "Ensure $account in local Administrators" -ArgumentList @($account) -SuppressLog -ScriptBlock {
+                        param($acct)
+                        try {
+                            $grpName = (Get-CimInstance -ClassName Win32_Group -Filter 'LocalAccount = True AND SID = "S-1-5-32-544"' -ErrorAction Stop).Name
+                            $g = [ADSI]"WinNT://$env:COMPUTERNAME/$grpName,group"
+                            $parts = $acct.Split('\')
+                            $path = "WinNT://$($parts[0])/$($parts[1])"
+                            if ($g.IsMember($path)) { return 'already-member' }
+                            $g.Add($path)
+                            # Verify post-add so a silent ADSI no-op surfaces.
+                            if ($g.IsMember($path)) { return 'added' }
+                            return 'error: Add returned success but IsMember still false'
+                        }
+                        catch {
+                            return "error: $($_.Exception.Message)"
+                        }
                     }
-                    elseif ($out -eq 'already-member') {
-                        Write-Log "[Phase 8] $sqlHost`: $account already in local Administrators." -LogOnly
+                    if ($result -and -not $result.ScriptBlockFailed) {
+                        $out = "$($result.ScriptBlockOutput)".Trim()
+                        if ($out -eq 'added') {
+                            $note = if ($attempts -gt 1) { " (attempt $attempts)" } else { '' }
+                            Write-Log "[Phase 8] $sqlHost`: added $account to local Administrators (was missing) -- self-heal for site server $($ss.vmName)$note." -Activity
+                            $success = $true
+                        }
+                        elseif ($out -eq 'already-member') {
+                            Write-Log "[Phase 8] $sqlHost`: $account already in local Administrators." -LogOnly
+                            $success = $true
+                        }
+                        else {
+                            $lastError = $out
+                            Write-Log "[Phase 8] $sqlHost`: self-heal attempt $attempts returned '$out'." -Warning
+                        }
                     }
                     else {
-                        Write-Log "[Phase 8] $sqlHost`: local-admin self-heal for $account returned '$out'." -Warning
+                        $lastError = if ($result -and $result.ErrorDetails) { $result.ErrorDetails } else { 'Invoke-VmCommand returned no result' }
+                        Write-Log "[Phase 8] $sqlHost`: self-heal attempt $attempts failed ($lastError)." -Warning
                     }
+                    if (-not $success -and $attempts -lt $maxAttempts) { Start-Sleep -Seconds 10 }
                 }
-                else {
-                    $errMsg = if ($result.ErrorDetails) { $result.ErrorDetails } else { 'Invoke-VmCommand returned no result' }
-                    Write-Log "[Phase 8] $sqlHost`: failed to verify $account in local Administrators ($errMsg)." -Warning
+
+                if (-not $success) {
+                    $msg = "[$($ss.vmName) -> $sqlHost] Could not verify/add $account in local Administrators after $maxAttempts attempts. Last error: $lastError"
+                    Write-Log "[Phase 8] $msg" -Failure
+                    $preflightFailures.Add($msg) | Out-Null
                 }
+            }
+        }
+
+        if ($preflightFailures.Count -gt 0) {
+            Write-Log "[Phase 8] Preflight FAILED: $($preflightFailures.Count) site-server/SQL-host pair(s) could not be remediated. Aborting Phase 8 BEFORE dispatching CM Setup jobs -- otherwise dependent nodes (Primary waiting on CAS, secondary waiting on Primary) would block on multi-hour internal timeouts." -Failure
+            foreach ($f in $preflightFailures) {
+                Write-Log "[Phase 8]   $f" -Failure
+            }
+            Write-Log "[Phase 8] Remediation: ensure each listed SQL host is Running and reachable via PowerShell Direct, then re-run with -StartPhase 8. If the SQL host is up but the self-heal still fails, log in and inspect 'net localgroup Administrators' on it." -Failure
+            return [PSCustomObject]@{
+                Failed          = $siteServers.Count
+                Success         = 0
+                Jobs            = 0
+                Applicable      = $true
+                AdditionalData  = $null
+                PreflightFailed = $true
             }
         }
     }
