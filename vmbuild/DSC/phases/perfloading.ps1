@@ -187,9 +187,15 @@ Write-DscStatus "$Tag Starting perfloading"
             $ass = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Class SMS_ApplicationAssignment `
                 -Filter "AssignmentName='$escaped'" -ErrorAction Stop
             if (-not $ass) { return }
-            # Touch a benign property so Put() registers a change and bumps
-            # LastModificationTime. NotifyUser is settable on every CM build.
-            $ass.NotifyUser = $ass.NotifyUser
+            # Toggle NotifyUser twice so each Put() registers an actual change
+            # (PowerShell's WMI wrapper skips Put() when the assigned value
+            # equals the existing value, so `$ass.NotifyUser = $ass.NotifyUser`
+            # is a silent no-op). End state is identical to start state, but
+            # LastModificationTime is bumped and the assignment is re-projected.
+            $ass.NotifyUser = -not $ass.NotifyUser
+            [void]$ass.Put()
+            Start-Sleep -Seconds 1
+            $ass.NotifyUser = -not $ass.NotifyUser
             [void]$ass.Put()
             Write-DscStatus "$Tag Re-authored deployment policy for '$AppName' -> '$CollectionName' (forces projection to late-added members)"
         }
