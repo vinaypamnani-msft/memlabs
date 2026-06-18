@@ -397,20 +397,22 @@ $exp = $export.ScriptBlockOutput
 $sizeMB = [math]::Round($exp.Bytes / 1MB, 1)
 Write-Log "[Baseline] Export OK. Size=$sizeMB MB, SHA256=$($exp.Sha256), Categories=$($exp.Categories), Classifications=$($exp.Classifications)"
 
-# Pull cab + log back to host via PSDirect session using the lab local admin.
+# Pull cab + log back to host via Copy-ItemFromVM (uses Get-VmSession which
+# constructs DOMAIN\admin from $Common.LocalAdmin). A bare
+# 'New-PSSession -VMName ... -Credential $Common.LocalAdmin' fails on
+# domain-joined VMs because PSDirect authenticates against the guest's
+# local SAM, and the local admin account is disabled after dcpromo/join.
 $outCab = Join-Path $OutputDir "WsusCategoriesBaseline.cab"
 $outLog = Join-Path $OutputDir "WsusCategoriesBaseline.export.log"
 $outMeta = Join-Path $OutputDir "WsusCategoriesBaseline.meta.json"
 Write-Log "[Baseline] Copying cab to host: $outCab"
 
-$session = New-PSSession -VMName $VmName -Credential $Common.LocalAdmin -ErrorAction Stop
-try {
-    Copy-Item -FromSession $session -Path $exportGuestPath -Destination $outCab -Force
-    Copy-Item -FromSession $session -Path $exportGuestLog  -Destination $outLog -Force
-}
-finally {
-    Remove-PSSession $session -ErrorAction SilentlyContinue
-}
+$copiedCab = Copy-ItemFromVM -VMName $VmName -VMDomainName $DomainName -Path $exportGuestPath -Destination $OutputDir
+if (-not $copiedCab) { throw "[Baseline] Failed to copy cab from $VmName : $exportGuestPath" }
+# Copy-ItemFromVM puts the file at $OutputDir\<basename>; the cab basename
+# already matches $outCab so no rename is needed.
+$copiedLog = Copy-ItemFromVM -VMName $VmName -VMDomainName $DomainName -Path $exportGuestLog -Destination $OutputDir
+if (-not $copiedLog) { Write-Log "[Baseline] Warning: failed to copy export log from $VmName ($exportGuestLog). Continuing." -Warning }
 
 # Sidecar: provenance metadata for the WSUSSync DSC resource and Phase 11 validation.
 $meta = [PSCustomObject]@{
