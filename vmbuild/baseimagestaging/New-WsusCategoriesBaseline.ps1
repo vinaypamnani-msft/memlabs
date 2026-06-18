@@ -45,8 +45,19 @@ param (
     # before pre-flight. Use when re-running the generator on a VM whose
     # WSUS has already been synced (categories>0 or updates>0).
     [Parameter(Mandatory = $false)]
-    [switch]$Reset
+    [switch]$Reset,
+
+    # Skip pre-flight gate and the StartSynchronization kick: attach to an
+    # already-running categories sync on the guest and poll it to completion,
+    # then export. Use when a previous run timed out mid-sync. Mutually
+    # exclusive with -Reset.
+    [Parameter(Mandatory = $false)]
+    [switch]$Resume
 )
+
+if ($Reset.IsPresent -and $Resume.IsPresent) {
+    throw "[Baseline] -Reset and -Resume are mutually exclusive."
+}
 
 $ErrorActionPreference = 'Stop'
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
@@ -72,6 +83,7 @@ Write-Log "[Baseline] Domain:       $DomainName"
 Write-Log "[Baseline] Output dir:   $OutputDir"
 Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min"
 Write-Log "[Baseline] Reset:        $($Reset.IsPresent)"
+Write-Log "[Baseline] Resume:       $($Resume.IsPresent)"
 
 # -Reset: wipe SUSDB + WsusContent and re-run wsusutil postinstall. Lets us
 # re-run the generator against an already-synced VM without rebuilding it.
@@ -214,13 +226,22 @@ if (-not $preflight -or -not $preflight.ScriptBlockOutput -or -not $preflight.Sc
 }
 $pre = $preflight.ScriptBlockOutput
 Write-Log "[Baseline] Pre-flight OK. WSUS=$($pre.WsusServerVersion), OS='$($pre.OsVersion)', Categories=$($pre.Categories), Classifications=$($pre.Classifications), UpdateCount=$($pre.UpdateCount), SyncHistory=$($pre.SyncHistoryCount)"
-if ($pre.UpdateCount -gt 0 -or $pre.SyncHistoryCount -gt 0) {
-    throw "[Baseline] $VmName has UpdateCount=$($pre.UpdateCount) and SyncHistoryCount=$($pre.SyncHistoryCount). Generator requires a WSUS that has never synced from MU. Re-run with -Reset, or use a freshly-built single-VM Role=WSUS lab."
+if (-not $Resume.IsPresent) {
+    if ($pre.UpdateCount -gt 0 -or $pre.SyncHistoryCount -gt 0) {
+        throw "[Baseline] $VmName has UpdateCount=$($pre.UpdateCount) and SyncHistoryCount=$($pre.SyncHistoryCount). Generator requires a WSUS that has never synced from MU. Re-run with -Reset, or use a freshly-built single-VM Role=WSUS lab."
+    }
+}
+else {
+    Write-Log "[Baseline] -Resume: skipping clean-WSUS pre-flight gate."
 }
 
 # Drive a categories sync on the guest. Subscribe to a minimal product set
 # (SQL Server 2005 + Tools, mirroring the existing WSUSSync resource), kick
 # the sync, then poll from the host every 60s so progress is visible.
+if ($Resume.IsPresent) {
+    Write-Log "[Baseline] -Resume: attaching to existing categories sync (skipping hardening + StartSynchronization)..."
+}
+else {
 Write-Log "[Baseline] Hardening WsusPool and kicking minimal-scope categories sync..."
 $kick = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 300 -DisplayName "Baseline: start categories sync" -ScriptBlock {
     try {
@@ -254,6 +275,7 @@ if (-not $kick -or -not $kick.ScriptBlockOutput -or -not $kick.ScriptBlockOutput
     throw "[Baseline] Failed to start categories sync: $errMsg"
 }
 Write-Log "[Baseline] Sync started (status=$($kick.ScriptBlockOutput.Status)). Polling every 60s..."
+}
 
 # Poll from host. Each poll is a short Invoke-VmCommand so we see live progress
 # in the console instead of one ~60-min silent block.
@@ -261,7 +283,11 @@ $pollDeadline = (Get-Date).AddMinutes($SyncTimeoutMinutes)
 $syncResult = $null
 $pollIdx = 0
 while ((Get-Date) -lt $pollDeadline) {
-    Start-Sleep -Seconds 60
+    # On -Resume, poll immediately so operator sees current sync state without
+    # waiting a full minute; subsequent iterations use the normal 60s cadence.
+    if (-not ($Resume.IsPresent -and $pollIdx -eq 0)) {
+        Start-Sleep -Seconds 60
+    }
     $pollIdx++
     $poll = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 120 -DisplayName "Baseline: poll #$pollIdx" -SuppressLog -ScriptBlock {
         try {
