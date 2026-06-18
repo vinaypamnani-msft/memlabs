@@ -39,7 +39,13 @@ param (
     [string]$OutputDir,
 
     [Parameter(Mandatory = $false)]
-    [int]$SyncTimeoutMinutes = 90
+    [int]$SyncTimeoutMinutes = 90,
+
+    # Wipe SUSDB + WsusContent and re-run wsusutil postinstall on the guest
+    # before pre-flight. Use when re-running the generator on a VM whose
+    # WSUS has already been synced (categories>0 or updates>0).
+    [Parameter(Mandatory = $false)]
+    [switch]$Reset
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +71,72 @@ Write-Log "[Baseline] Target VM:    $VmName" -OutputStream
 Write-Log "[Baseline] Domain:       $DomainName" -OutputStream
 Write-Log "[Baseline] Output dir:   $OutputDir" -OutputStream
 Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min" -OutputStream
+Write-Log "[Baseline] Reset:        $($Reset.IsPresent)" -OutputStream
+
+# -Reset: wipe SUSDB + WsusContent and re-run wsusutil postinstall. Lets us
+# re-run the generator against an already-synced VM without rebuilding it.
+if ($Reset.IsPresent) {
+    Write-Log "[Baseline] -Reset specified: stopping services, dropping SUSDB, clearing content, re-running postinstall..." -OutputStream -Warning
+    $reset = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 1800 -DisplayName "Baseline: reset WSUS" -ScriptBlock {
+        try {
+            $contentDir = $null
+            try { $contentDir = (Get-ItemProperty 'HKLM:\Software\Microsoft\Update Services\Server\Setup' -ErrorAction Stop).ContentDir } catch {}
+            if (-not $contentDir) { $contentDir = 'C:\WSUS' }
+
+            # Stop dependent services first.
+            Stop-Service WsusService -Force -ErrorAction SilentlyContinue
+            iisreset /stop | Out-Null
+
+            # Drop SUSDB via WID's named pipe. sqlcmd ships with SQL tools or WID.
+            $pipe = '\\.\pipe\MICROSOFT##WID\tsql\query'
+            $sqlcmd = (Get-Command sqlcmd.exe -ErrorAction SilentlyContinue).Source
+            if (-not $sqlcmd) {
+                $cand = Get-ChildItem -Path 'C:\Program Files\Microsoft SQL Server' -Filter sqlcmd.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($cand) { $sqlcmd = $cand.FullName }
+            }
+            if (-not $sqlcmd) { throw 'sqlcmd.exe not found; cannot drop SUSDB.' }
+
+            $tsql = @"
+IF DB_ID('SUSDB') IS NOT NULL
+BEGIN
+  ALTER DATABASE SUSDB SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+  DROP DATABASE SUSDB;
+END
+"@
+            $tmpSql = [System.IO.Path]::GetTempFileName()
+            Set-Content -Path $tmpSql -Value $tsql -Encoding ASCII
+            $sqlOut = & $sqlcmd -S $pipe -E -i $tmpSql 2>&1
+            Remove-Item $tmpSql -Force -ErrorAction SilentlyContinue
+            if ($LASTEXITCODE -ne 0) { throw "sqlcmd failed dropping SUSDB (exit=$LASTEXITCODE): $sqlOut" }
+
+            # Clear content.
+            if (Test-Path $contentDir) {
+                Get-ChildItem -Path $contentDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            } else {
+                New-Item -ItemType Directory -Path $contentDir -Force | Out-Null
+            }
+
+            # Re-run postinstall to recreate SUSDB and re-stamp WSUS.
+            iisreset /start | Out-Null
+            $wsusUtil = Join-Path $env:ProgramFiles 'Update Services\Tools\WsusUtil.exe'
+            if (-not (Test-Path $wsusUtil)) { throw "WsusUtil.exe not found at $wsusUtil" }
+            $proc = Start-Process -FilePath $wsusUtil -ArgumentList @('postinstall', "CONTENT_DIR=$contentDir") -Wait -PassThru -NoNewWindow -ErrorAction Stop
+            if ($proc.ExitCode -ne 0) { throw "wsusutil postinstall exit=$($proc.ExitCode)." }
+
+            Start-Service WsusService -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 10
+            [PSCustomObject]@{ Ok = $true; ContentDir = $contentDir; SqlcmdPath = $sqlcmd }
+        }
+        catch {
+            [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
+        }
+    }
+    if (-not $reset -or -not $reset.ScriptBlockOutput -or -not $reset.ScriptBlockOutput.Ok) {
+        $errMsg = if ($reset -and $reset.ScriptBlockOutput) { $reset.ScriptBlockOutput.Error } else { 'no output' }
+        throw "[Baseline] -Reset failed: $errMsg"
+    }
+    Write-Log "[Baseline] Reset complete (ContentDir=$($reset.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -OutputStream -Success
+}
 
 # Pre-flight: VM must be a clean WSUS server with categories empty. Fail
 # loudly otherwise -- exporting from a partially-synced or product-subscribed
@@ -104,59 +176,87 @@ if ($pre.Categories -gt 0 -or $pre.UpdateCount -gt 0) {
 
 # Drive a categories sync on the guest. Subscribe to a minimal product set
 # (SQL Server 2005 + Tools, mirroring the existing WSUSSync resource), kick
-# the sync, wait for it to complete, then disable the subscriptions again so
-# the exported cab is pure taxonomy with no subscribed products.
-Write-Log "[Baseline] Driving minimal-scope categories sync (timeout: $SyncTimeoutMinutes min)..." -OutputStream
-$sync = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds (($SyncTimeoutMinutes + 5) * 60) -DisplayName "Baseline: drive categories sync" -ScriptBlock {
-    param($timeoutMinutes)
-    $wsus = Get-WsusServer -ErrorAction Stop
-    $sub = $wsus.GetSubscription()
-
-    # Harden WsusPool. The default 1.8 GB privateMemory cap recycles the pool
-    # mid-sync (HTTP 503) -- documented as a recurring root cause of stuck
-    # syncs. Uncap before we start.
+# the sync, then poll from the host every 60s so progress is visible.
+Write-Log "[Baseline] Hardening WsusPool and kicking minimal-scope categories sync..." -OutputStream
+$kick = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 300 -DisplayName "Baseline: start categories sync" -ScriptBlock {
     try {
-        Import-Module WebAdministration -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -Value 0 -ErrorAction SilentlyContinue
-        Restart-WebAppPool -Name WsusPool -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
-    } catch {}
+        $wsus = Get-WsusServer -ErrorAction Stop
+        $sub = $wsus.GetSubscription()
 
-    Get-WsusProduct | Set-WsusProduct -Disable
-    Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
-    Get-WsusClassification | Set-WsusClassification -Disable
-    Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
+        # Harden WsusPool. The default 1.8 GB privateMemory cap recycles the pool
+        # mid-sync (HTTP 503) -- documented as a recurring root cause of stuck
+        # syncs. Uncap before we start.
+        try {
+            Import-Module WebAdministration -ErrorAction SilentlyContinue
+            Set-ItemProperty -Path 'IIS:\AppPools\WsusPool' -Name recycling.periodicRestart.privateMemory -Value 0 -ErrorAction SilentlyContinue
+            Restart-WebAppPool -Name WsusPool -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
+        } catch {}
 
-    $sub.StartSynchronization()
-    $deadline = (Get-Date).AddMinutes([int]$timeoutMinutes)
-    while ((Get-Date) -lt $deadline) {
-        $status = $sub.GetSynchronizationStatus().ToString()
-        $cats = $sub.GetUpdateCategories()
-        $catCount = if ($cats) { $cats.Count } else { 0 }
-        if ($status -ne 'Running' -and $catCount -gt 0) {
-            $hist = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
-            $result = if ($hist.Count -gt 0) { $hist[0].Result.ToString() } else { '<no-history>' }
-            return [PSCustomObject]@{
-                Ok         = ($result -eq 'Succeeded')
-                Status     = $status
-                Categories = $catCount
-                LastResult = $result
-            }
-        }
-        Start-Sleep -Seconds 30
+        Get-WsusProduct | Set-WsusProduct -Disable
+        Get-WsusProduct | Where-Object { $_.Product.Title -eq "SQL Server 2005" } | Set-WsusProduct
+        Get-WsusClassification | Set-WsusClassification -Disable
+        Get-WsusClassification | Where-Object { $_.Classification.Title -eq "Tools" } | Set-WsusClassification
+
+        $sub.StartSynchronization()
+        [PSCustomObject]@{ Ok = $true; Status = $sub.GetSynchronizationStatus().ToString() }
     }
-    return [PSCustomObject]@{
-        Ok         = $false
-        Status     = $sub.GetSynchronizationStatus().ToString()
-        Categories = (@($sub.GetUpdateCategories()).Count)
-        LastResult = 'TIMEOUT'
+    catch {
+        [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
     }
-} -ArgumentList $SyncTimeoutMinutes
-if (-not $sync -or -not $sync.ScriptBlockOutput -or -not $sync.ScriptBlockOutput.Ok) {
-    $s = if ($sync) { $sync.ScriptBlockOutput | Out-String } else { "<no output>" }
-    throw "[Baseline] Categories sync did not complete cleanly: $s"
 }
-$syncResult = $sync.ScriptBlockOutput
+if (-not $kick -or -not $kick.ScriptBlockOutput -or -not $kick.ScriptBlockOutput.Ok) {
+    $errMsg = if ($kick -and $kick.ScriptBlockOutput) { $kick.ScriptBlockOutput.Error } else { "no output" }
+    throw "[Baseline] Failed to start categories sync: $errMsg"
+}
+Write-Log "[Baseline] Sync started (status=$($kick.ScriptBlockOutput.Status)). Polling every 60s..." -OutputStream
+
+# Poll from host. Each poll is a short Invoke-VmCommand so we see live progress
+# in the console instead of one ~60-min silent block.
+$pollDeadline = (Get-Date).AddMinutes($SyncTimeoutMinutes)
+$syncResult = $null
+$pollIdx = 0
+while ((Get-Date) -lt $pollDeadline) {
+    Start-Sleep -Seconds 60
+    $pollIdx++
+    $poll = Invoke-VmCommand -VmName $VmName -VmDomainName $DomainName -TimeoutSeconds 120 -DisplayName "Baseline: poll #$pollIdx" -SuppressLog -ScriptBlock {
+        try {
+            $wsus = Get-WsusServer -ErrorAction Stop
+            $sub = $wsus.GetSubscription()
+            $status = $sub.GetSynchronizationStatus().ToString()
+            $phase = ''
+            try { $phase = $sub.GetSynchronizationProgress().Phase.ToString() } catch {}
+            $cats = @($sub.GetUpdateCategories()).Count
+            $hist = @($sub.GetSynchronizationHistory() | Sort-Object StartTime -Descending | Select-Object -First 1)
+            $lastResult = if ($hist.Count -gt 0) { $hist[0].Result.ToString() } else { '<no-history>' }
+            [PSCustomObject]@{ Ok = $true; Status = $status; Phase = $phase; Categories = $cats; LastResult = $lastResult }
+        }
+        catch {
+            [PSCustomObject]@{ Ok = $false; Error = $_.Exception.Message }
+        }
+    }
+    if (-not $poll -or -not $poll.ScriptBlockOutput) {
+        Write-Log "[Baseline] Poll #$pollIdx returned no output; continuing..." -OutputStream -Warning
+        continue
+    }
+    $p = $poll.ScriptBlockOutput
+    if (-not $p.Ok) {
+        Write-Log "[Baseline] Poll #$pollIdx error: $($p.Error)" -OutputStream -Warning
+        continue
+    }
+    $elapsedMin = [math]::Round((New-TimeSpan -Start ($pollDeadline.AddMinutes(-$SyncTimeoutMinutes)) -End (Get-Date)).TotalMinutes, 1)
+    Write-Log "[Baseline] [$elapsedMin min] Status=$($p.Status) Phase=$($p.Phase) Categories=$($p.Categories) LastResult=$($p.LastResult)" -OutputStream
+    if ($p.Status -ne 'Running' -and $p.Categories -gt 0) {
+        $syncResult = $p
+        break
+    }
+}
+if (-not $syncResult) {
+    throw "[Baseline] Categories sync did not complete within $SyncTimeoutMinutes minutes."
+}
+if ($syncResult.LastResult -ne 'Succeeded') {
+    throw "[Baseline] Categories sync ended with LastResult='$($syncResult.LastResult)' (status=$($syncResult.Status), categories=$($syncResult.Categories))."
+}
 Write-Log "[Baseline] Sync complete. Status=$($syncResult.Status), Categories=$($syncResult.Categories), LastResult=$($syncResult.LastResult)" -OutputStream
 
 # Disable subscriptions and run wsusutil export on the guest.
