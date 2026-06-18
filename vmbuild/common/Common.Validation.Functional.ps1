@@ -2519,6 +2519,87 @@ WHERE drs.is_local = 1
                         $results.Details.Add("FAIL: Listener query returned unexpected result")
                     }
                 }
+
+                # ==========================================================
+                # 6a. Listener IP recycle remediation
+                # ==========================================================
+                # When the listener SQL connect fails it is almost always
+                # one of two faults: (1) the AG IP cluster resource is in a
+                # phantom state (Online but not bound, or stuck Pending)
+                # so the listener Network Name didn't re-register a fresh
+                # A record, or (2) DNS has a stale A from a prior failover
+                # owner. Both are fixed by an offline/online cycle of the
+                # AG IP resource(s): on Offline the Network Name drops its
+                # DNS registration, on Online the cluster re-registers an
+                # A record for whichever IP is currently active. Do this
+                # once and retry the listener SQL connect.
+                if (-not $listenerSqlOk -and $agName) {
+                    try {
+                        $agGroup = Get-ClusterGroup -Name $agName -ErrorAction Stop
+                        $agIpResources = @(Get-ClusterResource -ErrorAction Stop |
+                            Where-Object { $_.OwnerGroup -eq $agName -and $_.ResourceType -eq 'IP Address' })
+                        if ($agIpResources.Count -gt 0 -and $agGroup.State -eq 'Online') {
+                            $ipNames = ($agIpResources | ForEach-Object { $_.Name }) -join ', '
+                            $results.Details.Add("REMEDIATE: Listener SQL connect failed; cycling AG IP resource(s) [$ipNames] to force DNS re-registration")
+                            foreach ($ipRes in $agIpResources) {
+                                try {
+                                    $ipRes | Stop-ClusterResource -ErrorAction Stop | Out-Null
+                                }
+                                catch {
+                                    $results.Details.Add("  WARN: Stop-ClusterResource '$($ipRes.Name)' failed: $($_.Exception.Message)")
+                                }
+                            }
+                            Start-Sleep -Seconds 5
+                            foreach ($ipRes in $agIpResources) {
+                                try {
+                                    $ipRes | Start-ClusterResource -ErrorAction Stop | Out-Null
+                                }
+                                catch {
+                                    $results.Details.Add("  WARN: Start-ClusterResource '$($ipRes.Name)' failed: $($_.Exception.Message)")
+                                }
+                            }
+                            # Also start the AG group so the Network Name +
+                            # AG resources come back up if cycling the IP
+                            # took dependents offline.
+                            try { Start-ClusterGroup -Name $agName -ErrorAction SilentlyContinue | Out-Null } catch { }
+
+                            # Wait up to 60s for the IPs and the listener
+                            # Network Name resource to be Online again.
+                            $deadline = (Get-Date).AddSeconds(60)
+                            do {
+                                Start-Sleep -Seconds 5
+                                $allOnline = $true
+                                foreach ($ipRes in $agIpResources) {
+                                    $st = (Get-ClusterResource -Name $ipRes.Name -ErrorAction SilentlyContinue).State
+                                    if ($st -ne 'Online') { $allOnline = $false; break }
+                                }
+                                if ($allOnline -and $listenerName) {
+                                    $nn = Get-ClusterResource -Name $listenerName -ErrorAction SilentlyContinue
+                                    if ($nn -and $nn.State -ne 'Online') { $allOnline = $false }
+                                }
+                            } while (-not $allOnline -and (Get-Date) -lt $deadline)
+                            $finalStates = ($agIpResources | ForEach-Object { "$($_.Name)=$((Get-ClusterResource -Name $_.Name -ErrorAction SilentlyContinue).State)" }) -join ', '
+                            $results.Details.Add("  Post-cycle states: $finalStates")
+
+                            # Retry the listener SQL connect once.
+                            $results.Details.Add("CMD: Invoke-Sqlcmd -ServerInstance '$listenerConnStr' -Query 'SELECT 1' (post-recycle retry)")
+                            $wdR = Invoke-WithWatchdog -TimeoutSec 30 -MaxAttempts 2 -ArgumentList @($listenerConnStr) -ScriptBlock {
+                                param($conn)
+                                Invoke-Sqlcmd -ServerInstance $conn -Query "SELECT 1 AS TestResult" -QueryTimeout 30 -TrustServerCertificate -ErrorAction Stop
+                            }
+                            if ($wdR.Status -eq 'OK' -and $wdR.Output.TestResult -eq 1) {
+                                $results.Details.Add("OK: SQL query via listener '$listenerConnStr' succeeded after AG IP recycle")
+                                $listenerSqlOk = $true
+                            }
+                            else {
+                                $results.Details.Add("WARN: Listener SQL connect still failing after AG IP recycle (status=$($wdR.Status))")
+                            }
+                        }
+                    }
+                    catch {
+                        $results.Details.Add("WARN: AG IP recycle remediation failed: $($_.Exception.Message)")
+                    }
+                }
             }
 
             # ==============================================================
