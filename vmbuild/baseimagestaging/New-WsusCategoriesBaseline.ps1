@@ -271,8 +271,16 @@ if ($Upload.IsPresent) {
     }
     $pre = $preU.ScriptBlockOutput
     Write-Log "[Baseline] Pre-import:  WSUS=$($pre.WsusVersion), TaxonomyCats=$($pre.TaxonomyCats), TaxonomyClas=$($pre.TaxonomyClas), SubscribedCats=$($pre.SubscribedCats), UpdateCount=$($pre.UpdateCount), SyncHistory=$($pre.SyncHistoryCount)"
+    # Gate mirrors the generator pre-flight: allow SubscribedCats > 0
+    # (a fresh `wsusutil postinstall` seeds a small bookkeeping row in
+    # dbo.UpdateCategories that surfaces here as 1) and refuse only when
+    # UpdateCount > 0 or SyncHistoryCount > 0 -- the authoritative signals
+    # that an MU sync has actually happened and the catalog is mixed.
+    if ($pre.UpdateCount -gt 0 -or $pre.SyncHistoryCount -gt 0) {
+        throw "[Baseline] -Upload: VM is not clean (UpdateCount=$($pre.UpdateCount), SyncHistory=$($pre.SyncHistoryCount)). WSUS has already synced from MU; importing the baseline on top would mix taxonomies. Re-run with -Reset -Upload or use a fresh WSUS VM."
+    }
     if ($pre.SubscribedCats -gt 0) {
-        throw "[Baseline] -Upload: VM already has $($pre.SubscribedCats) subscribed categories. The WSUSSync DSC resource would skip import in this state. Re-run with -Reset -Upload (combined) or use a fresh WSUS VM."
+        Write-Log "[Baseline] -Upload: SubscribedCats=$($pre.SubscribedCats) on a never-synced WSUS (UpdateCount=0, SyncHistory=0). This is the postinstall seed row; proceeding with import." -Warning
     }
 
     # Push cab to the guest at the exact path DSC consumes.
