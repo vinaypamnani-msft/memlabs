@@ -18,14 +18,17 @@
 #
 # Output (in -OutputDir, default vmbuild\azureFiles\tools\wsus\):
 #   - WsusCategoriesBaseline.cab          : the exported metadata cab
-#   - WsusCategoriesBaseline.meta.json    : provenance sidecar (sha256, date, counts)
 #   - WsusCategoriesBaseline.export.log   : wsusutil's own log (kept for diagnostics)
 #
 # After this script completes the operator must:
-#   1. Add the cab + sidecar to vmbuild\azureFiles\_filelist.json under tools.
-#   2. Upload them to the storage account at the same relative path.
+#   1. Add the cab to vmbuild\azureFiles\_filelist.json under tools (md5
+#      gates integrity; optional GeneratedUtc field is allowed for human
+#      reference).
+#   2. Upload it to the storage account at the same relative path.
 #   Subsequent deploys with cmOptions.WsusImportBaseline=$true (the default)
-#   will pick the cab up automatically via Get-FilesForConfiguration.
+#   will pick the cab up automatically via Get-FilesForConfiguration. The
+#   pre-DSC copy logs a staleness warning if the host cab is >540 days old
+#   (based on its LastWriteTime).
 
 [CmdletBinding()]
 param (
@@ -404,37 +407,46 @@ Write-Log "[Baseline] Export OK. Size=$sizeMB MB, SHA256=$($exp.Sha256), Categor
 # local SAM, and the local admin account is disabled after dcpromo/join.
 $outCab = Join-Path $OutputDir "WsusCategoriesBaseline.cab"
 $outLog = Join-Path $OutputDir "WsusCategoriesBaseline.export.log"
-$outMeta = Join-Path $OutputDir "WsusCategoriesBaseline.meta.json"
 Write-Log "[Baseline] Copying cab to host: $outCab"
 
 $copiedCab = Copy-ItemFromVM -VMName $VmName -VMDomainName $DomainName -Path $exportGuestPath -Destination $OutputDir
 if (-not $copiedCab) { throw "[Baseline] Failed to copy cab from $VmName : $exportGuestPath" }
-# Copy-ItemFromVM puts the file at $OutputDir\<basename>; the cab basename
-# already matches $outCab so no rename is needed.
 $copiedLog = Copy-ItemFromVM -VMName $VmName -VMDomainName $DomainName -Path $exportGuestLog -Destination $OutputDir
 if (-not $copiedLog) { Write-Log "[Baseline] Warning: failed to copy export log from $VmName ($exportGuestLog). Continuing." -Warning }
 
-# Sidecar: provenance metadata for the WSUSSync DSC resource and Phase 11 validation.
-$meta = [PSCustomObject]@{
-    generatedUtc     = (Get-Date).ToUniversalTime().ToString('o')
-    sourceVm         = $VmName
-    sourceOs         = $pre.OsVersion
-    wsusVersion      = $pre.WsusServerVersion
-    sha256           = $exp.Sha256
-    sizeBytes        = $exp.Bytes
-    categories       = $exp.Categories
-    classifications  = $exp.Classifications
-    generatorVersion = '1.0'
+# Compute the host MD5 (what _filelist.json gates downloads on) so we can
+# print a ready-to-paste entry for the operator.
+$hostMd5 = (Get-FileHash -Path $outCab -Algorithm MD5).Hash
+$generatedUtc = (Get-Date).ToUniversalTime().ToString('o')
+$filelistEntry = [PSCustomObject]@{
+    Name               = 'WSUS Categories Baseline'
+    md5                = $hostMd5
+    URL                = 'tools\wsus\WsusCategoriesBaseline.cab'
+    IsPublic           = $false
+    Optional           = $true
+    Target             = 'tools\wsus'
+    ExtractFolderIfZip = $false
+    GeneratedUtc       = $generatedUtc
+    SourceVm           = $VmName
+    SourceOs           = $pre.OsVersion
+    WsusVersion        = $pre.WsusServerVersion
+    Sha256             = $exp.Sha256
+    SizeBytes          = $exp.Bytes
+    Categories         = $exp.Categories
+    Classifications    = $exp.Classifications
 }
-$meta | ConvertTo-Json -Depth 5 | Out-File -FilePath $outMeta -Encoding utf8 -Force
+$filelistJson = $filelistEntry | ConvertTo-Json -Depth 4
 
 Write-Log ""
 Write-Log "[Baseline] Done." -Success
 Write-Log "  Cab:      $outCab ($sizeMB MB)"
-Write-Log "  Sidecar:  $outMeta"
 Write-Log "  Log:      $outLog"
+Write-Log "  MD5:      $hostMd5"
 Write-Log ""
 Write-Log "[Baseline] Next steps:"
-Write-Log "  1. Add the cab + sidecar to vmbuild\azureFiles\_filelist.json under 'tools'."
-Write-Log "  2. Upload them to the storage account at the same relative path."
-Write-Log "  3. Future deploys with cmOptions.WsusImportBaseline=`$true (default) will pick this up automatically."
+Write-Log "  1. Add the cab to vmbuild\azureFiles\_filelist.json under 'Tools' (ready-to-paste entry below)."
+Write-Log "  2. Upload it to the storage account at tools\wsus\WsusCategoriesBaseline.cab."
+Write-Log "  3. Future deploys with cmOptions.WsusImportBaseline=`$true (default) pick it up automatically."
+Write-Log ""
+Write-Log "[Baseline] _filelist.json entry:"
+foreach ($line in $filelistJson -split "`r?`n") { Write-Log "    $line" }

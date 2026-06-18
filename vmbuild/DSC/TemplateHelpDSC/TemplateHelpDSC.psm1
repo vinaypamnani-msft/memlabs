@@ -5600,19 +5600,7 @@ class WSUSSync {
         if (Test-Path $cabPath) {
             $importedOk = $false
             try {
-                # Provenance from sidecar (if shipped alongside the cab).
-                $meta = $null
-                $metaPath = 'C:\staging\wsus\WsusCategoriesBaseline.meta.json'
-                if (Test-Path $metaPath) {
-                    try { $meta = Get-Content $metaPath -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
-                }
-                $genDate = if ($meta -and $meta.generatedUtc) { $meta.generatedUtc } else { '<unknown>' }
-                $genSha = if ($meta -and $meta.sha256) { $meta.sha256.Substring(0, [Math]::Min(12, $meta.sha256.Length)) } else { '<unknown>' }
-                $ageDays = $null
-                if ($meta -and $meta.generatedUtc) {
-                    try { $ageDays = [int](((Get-Date).ToUniversalTime() - [datetime]::Parse($meta.generatedUtc)).TotalDays) } catch {}
-                }
-                Write-Status "WSUS categories baseline cab present (generated=$genDate, sha=$genSha, ageDays=$ageDays). Attempting wsusutil import for $($this.ServerName)."
+                Write-Status "WSUS categories baseline cab present. Attempting wsusutil import for $($this.ServerName)."
 
                 # Skip import if categories already present -- merging into a
                 # non-empty DB leaves subscription state ambiguous.
@@ -5647,9 +5635,6 @@ class WSUSSync {
                         } catch {}
                         if ($postCount -gt 0) {
                             Write-Status "WSUS baseline import OK: $postCount categories present after import. Skipping MU categories sync."
-                            if ($null -ne $ageDays -and $ageDays -gt 540) {
-                                Write-Status "WARNING: WSUS baseline cab is $ageDays days old (>540). Consider regenerating via baseimagestaging\New-WsusCategoriesBaseline.ps1."
-                            }
                             $importedOk = $true
                         }
                         else {

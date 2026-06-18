@@ -2608,6 +2608,15 @@ $global:VM_Config = {
             $hostCabPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.cab"
             if ($cabEnabled -and $isWsusVm -and $isTopOfHier -and (Test-Path $hostCabPath)) {
                 try {
+                    # Staleness warning: cab >540 days old (based on host
+                    # LastWriteTime -- when it was placed in this checkout).
+                    # Replaces the old per-DSC-run sidecar-based age check.
+                    try {
+                        $cabAgeDays = [int](((Get-Date) - (Get-Item $hostCabPath).LastWriteTime).TotalDays)
+                        if ($cabAgeDays -gt 540) {
+                            Write-Log "[Phase $Phase]: WSUS baseline cab is $cabAgeDays days old (>540). Consider regenerating via baseimagestaging\New-WsusCategoriesBaseline.ps1." -Warning
+                        }
+                    } catch {}
                     $hostCabHash = (Get-FileHash -Path $hostCabPath -Algorithm MD5 -ErrorAction Stop).Hash
                     $guestProbe = Invoke-VmCommand -VmName $currentItem.vmName -VmDomainName $domainName -ScriptBlock {
                         New-Item -Path 'C:\staging\wsus' -ItemType Directory -Force | Out-Null
@@ -2621,12 +2630,6 @@ $global:VM_Config = {
                         $cabCopyOk = Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $hostCabPath -Destination 'C:\staging\wsus' -Force
                         if ($cabCopyOk -eq $false) {
                             Write-Log "[Phase $Phase]: $($currentItem.vmName): WSUS baseline cab copy failed; WSUSSync will fall back to Microsoft Update sync." -Warning
-                        }
-                        else {
-                            $hostMetaPath = Join-Path $Common.AzureFilesPath "tools\wsus\WsusCategoriesBaseline.meta.json"
-                            if (Test-Path $hostMetaPath) {
-                                Copy-ItemSafe -VmName $currentItem.vmName -VMDomainName $domainName -Path $hostMetaPath -Destination 'C:\staging\wsus' -Force | Out-Null
-                            }
                         }
                     }
                 }
