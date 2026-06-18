@@ -916,6 +916,66 @@ CurrentBranch=1
             Write-DscStatus "SQL pre-flight: WARNING — auth_scheme still $authScheme after $kerbMaxAttempts attempts. setup.exe may fail with error 18452 during cluster settling. Check SPNs and msDS-SupportedEncryptionTypes on the SQL service account."
         }
 
+        # Step 3.5: Verify this site server's COMPUTER ACCOUNT has admin /
+        # remote-WMI rights on every SQL host that backs the site DB. The
+        # SQL probes above only validate the SQL login path (Integrated
+        # Auth via Kerberos), but ConfigMgr Setup ALSO walks the SQL
+        # host(s) via remote WMI (root\cimv2) during its prereq pass to
+        # read SQL config/services. That call uses our computer account's
+        # OS-level credentials, not the SQL login, and surfaces as the
+        # cryptic prereq:
+        #   "The site server computer's machine account does not have
+        #    Administrator's privileges on the SQL Server selected for
+        #    site database installation."
+        # The host-side Phase 8 preflight (Common.Phases.ps1) already
+        # tries to add $env:COMPUTERNAME$ to BUILTIN\Administrators on
+        # every SQL node before this DSC script runs, but membership can
+        # still be missing on this exact box at this exact moment due to
+        # AD replication lag, GPO churn, a stale Kerberos ticket caching
+        # the old token, or a manually-edited SQL host. Probe it here so
+        # we fail in seconds with a precise pointer instead of waiting
+        # for setup.exe's prereq pass to surface it minutes later. The
+        # Phase 8 per-VM job's outer timeout would otherwise let the
+        # whole deploy hang while dependent nodes wait.
+        $wmiTargets = New-Object System.Collections.Generic.List[string]
+        if ($sqlServerName -and $sqlServerName -ne $env:COMPUTERNAME) { $wmiTargets.Add($sqlServerName) | Out-Null }
+        if ($installToAO) {
+            if ($sqlNode1 -and $sqlNode1 -ne $env:COMPUTERNAME -and -not $wmiTargets.Contains($sqlNode1)) { $wmiTargets.Add($sqlNode1) | Out-Null }
+            if ($sqlNode2 -and $sqlNode2 -ne $env:COMPUTERNAME -and -not $wmiTargets.Contains($sqlNode2)) { $wmiTargets.Add($sqlNode2) | Out-Null }
+        }
+        if ($wmiTargets.Count -gt 0) {
+            $wmiFailures = New-Object System.Collections.Generic.List[string]
+            foreach ($wmiHost in $wmiTargets) {
+                $wmiOk = $false
+                $wmiErr = $null
+                # 6 attempts x 10s = 60s. Anything genuinely broken
+                # (account not a member) reports ACCESS_DENIED on the
+                # FIRST attempt; the retry budget is for transient
+                # RPC/DCOM warmup right after VMs cold-boot.
+                for ($wmiTry = 1; $wmiTry -le 6; $wmiTry++) {
+                    try {
+                        $null = Get-CimInstance -ComputerName $wmiHost -Namespace 'root\cimv2' -ClassName Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop
+                        $note = if ($wmiTry -gt 1) { " (attempt $wmiTry)" } else { '' }
+                        Write-DscStatus "SQL pre-flight WMI: $env:COMPUTERNAME`$ has admin/WMI access to [$wmiHost]$note"
+                        $wmiOk = $true
+                        break
+                    }
+                    catch {
+                        $wmiErr = $_.Exception.Message
+                        Write-DscStatus "SQL pre-flight WMI: attempt $wmiTry/6 to [$wmiHost] failed: $wmiErr"
+                    }
+                    if ($wmiTry -lt 6) { Start-Sleep -Seconds 10 }
+                }
+                if (-not $wmiOk) {
+                    $wmiFailures.Add("[$wmiHost] $wmiErr") | Out-Null
+                }
+            }
+            if ($wmiFailures.Count -gt 0) {
+                Write-DscStatus "SQL pre-flight WMI: $env:COMPUTERNAME`$ cannot WMI to: $($wmiFailures -join ' | '). CM Setup would fail its prereq pass with 'Computer account doesn't have admininstrative rights to the SQL Server'. Add $env:COMPUTERNAME`$ to BUILTIN\Administrators on each listed SQL host (e.g. 'net localgroup Administrators $env:USERDOMAIN\$env:COMPUTERNAME`$ /add' from the SQL host) and re-run -StartPhase 8. Refusing to launch setup.exe blind -- a failed prereq pass would otherwise hang for many minutes per VM and stall every dependent node." -Failure
+                return
+            }
+        }
+
         # Step 4: AG synchronization stability gate (SQLAO only).
         # ConfigMgr Setup's Init_Database does an unconditional failover to
         # the secondary (to set db_owner / clr / trustworthy on the AG db)
