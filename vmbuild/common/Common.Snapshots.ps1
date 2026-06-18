@@ -184,6 +184,20 @@ function Invoke-SnapshotDomain {
                 $vm = Get-VM -Name $vmName -ErrorAction Stop
                 $notesFile = Join-Path $vm.Path ($snapshotName + ".json")
                 $vm.notes | Out-File $notesFile
+                # Force CheckpointType=Production before capture. Standard
+                # (memory-including) checkpoints of AD-joined VMs are an
+                # anti-pattern: restore wakes the VM in Saved state with
+                # the original runtime tickets/secure-channel context, which
+                # frequently desyncs from AD after the snapshot ages out and
+                # produces phantom auth failures (broken secure channel,
+                # WMI ACCESS_DENIED) that look exactly like real ACL gaps.
+                # Production checkpoints use VSS for an app-consistent disk-
+                # only capture; restore leaves the VM Off so the next start
+                # is a clean cold boot. Idempotent: no-op on already-Production.
+                if ($vm.CheckpointType -ne 'Production') {
+                    $messages.Add("$vmName`: forcing CheckpointType Production (was $($vm.CheckpointType))")
+                    Set-VM -VM $vm -CheckpointType Production -ErrorAction SilentlyContinue
+                }
                 Checkpoint-VM -VM $vm -SnapshotName $snapshotName -ErrorAction Stop
                 $ok = $true
             }
@@ -233,6 +247,14 @@ function Invoke-SnapshotDomain {
                         Show-StatusEraseLine "Checkpointing $($vm.VmName) to [$($snapshot)]" -indent
                     }
 
+                    # Force CheckpointType=Production -- see ThreadJob branch
+                    # above for rationale (Standard checkpoints of AD-joined
+                    # VMs cause stale Kerberos/secure-channel state on restore).
+                    $hvm = Get-VM -Name $vm.VmName -ErrorAction SilentlyContinue
+                    if ($hvm -and $hvm.CheckpointType -ne 'Production') {
+                        Write-Log "$($vm.VmName): forcing CheckpointType Production (was $($hvm.CheckpointType))" -LogOnly
+                        Set-VM -VM $hvm -CheckpointType Production -ErrorAction SilentlyContinue
+                    }
                     Checkpoint-VM2 -Name $vm.VmName -SnapshotName $snapshot -ErrorAction Stop
                     $complete = $true
                     if (-not $quiet) {
@@ -475,7 +497,27 @@ function select-RestoreSnapshotDomain {
 
                 if ($checkPoint) {
                     Show-StatusEraseLine "Restoring $($vm.VmName)" -indent
+                    # Hard-off the VM before reverting. Restore-VMCheckpoint will
+                    # also stop a Running VM automatically, but doing it explicitly
+                    # invalidates our PSDirect session cache (Stop-VM2 clears it),
+                    # avoids the auto-stop racing with in-flight VSS writers, and
+                    # gives a deterministic pre-revert state for every checkpoint
+                    # type. No-op when the VM is already Off.
+                    try { Stop-VM2 -Name $vm.VmName -TurnOff -ErrorAction SilentlyContinue | Out-Null } catch {}
                     $checkPoint | Restore-VMCheckpoint -Confirm:$false
+                    # Defense in depth: a Standard (memory-including) checkpoint
+                    # restore leaves the VM in Saved state -- starting from Saved
+                    # resumes with the snapshot-time runtime context (stale
+                    # Kerberos tickets, broken secure channel, dead WMI/DCOM
+                    # connections), which is exactly the failure mode the
+                    # 'live snapshot of an AD member' anti-pattern produces.
+                    # Force any Saved/Running post-restore state to Off so the
+                    # downstream Select-StartDomain always does a clean cold boot.
+                    $postState = (Get-VM -Name $vm.VmName -ErrorAction SilentlyContinue).State
+                    if ($postState -and $postState -ne 'Off') {
+                        Write-Log "$($vm.VmName): post-restore state was $postState; forcing Off for clean cold boot" -LogOnly
+                        try { Stop-VM2 -Name $vm.VmName -TurnOff -ErrorAction SilentlyContinue | Out-Null } catch {}
+                    }
                     if ($response -eq "MemLabs Snapshot") {
                         $notesFile = Join-Path (Get-VM2 -Name $($vm.VmName)).Path 'MemLabs.Notes.json'
                     }
