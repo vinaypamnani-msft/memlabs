@@ -1004,6 +1004,25 @@ function Invoke-SmartStartVMsBackground {
             if (-not $critOnly) { $buckets += 'NONCRIT' }
             $startedNames = @()  # Track VMs where Start-VM succeeded
 
+            # Live-refresh the banner's progress counter from the ACTUAL running
+            # state of every target VM. Called repeatedly while VMs are still
+            # being issued Start-VM so the count climbs as each VM powers on,
+            # instead of staying pinned at 0/N until the whole start loop (which
+            # includes ~60s of inter-bucket sleeps and can take minutes to issue
+            # Start-VM for every VM on a loaded host) finishes.
+            $updateActive = {
+                $runningNow = 0
+                foreach ($n in $op.VMNames) {
+                    $v = Get-VM -Name $n -ErrorAction SilentlyContinue
+                    if ($v -and $v.State -eq "Running") { $runningNow++ }
+                }
+                $newActive = $op.VMCount - $runningNow
+                if ($newActive -ne $op.StillActive) {
+                    $op.StillActive = $newActive
+                    $op.StateChanged = $true
+                }
+            }
+
             foreach ($bucket in $buckets) {
                 $vms = @($crit.$bucket | Where-Object { $_ })
                 if ($vms.Count -eq 0) { continue }
@@ -1029,10 +1048,17 @@ function Invoke-SmartStartVMsBackground {
                     else {
                         $failures++  # VM doesn't exist
                     }
+                    # Reflect the new running count in the banner as we go.
+                    & $updateActive
                 }
 
                 if ($startedAny -and $waitSecs -gt 0) {
-                    Start-Sleep -Seconds $waitSecs
+                    # Refresh the counter across the inter-bucket wait so VMs
+                    # that finish powering on during the sleep show up promptly.
+                    for ($w = 0; $w -lt $waitSecs; $w++) {
+                        Start-Sleep -Seconds 1
+                        & $updateActive
+                    }
                 }
             }
 
