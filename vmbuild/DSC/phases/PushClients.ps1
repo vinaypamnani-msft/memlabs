@@ -268,6 +268,83 @@ $AnyClientFound = $false
 $CollectionName = "All Systems"
 $pushMaxAttempts = 2
 
+# Redeploy-aware staleness test. When a same-named VM is removed from the domain
+# and rebuilt, CM keeps the OLD device record (IsClient=1) while the freshly
+# built machine has no agent. The IsClient pre-check below would then wrongly
+# trim the VM and never push. Compare the AD machine account's join/rotation
+# time (pwdLastSet, fallback whenCreated) against CM's last-active time: if the
+# machine (re)joined the domain AFTER CM last heard from the client, the CM
+# record belongs to the previous incarnation and must be cleared so ccmsetup
+# re-runs on the new machine. RSAT-free (ADSISearcher) so it works on any site
+# server. PS5.1-safe.
+function Test-CMClientRecordStale {
+    param([string]$ShortName, [string]$SiteCode)
+
+    $result = New-Object psobject -Property @{ Stale = $false; Reason = '' }
+
+    # --- AD machine epoch ---
+    $adEpoch = $null
+    try {
+        $searcher = [ADSISearcher]"(&(objectClass=computer)(cn=$ShortName))"
+        $null = $searcher.PropertiesToLoad.AddRange(@('pwdlastset', 'whencreated'))
+        $adRes = $searcher.FindOne()
+        if ($adRes) {
+            $pwd = $adRes.Properties['pwdlastset']
+            if ($pwd -and $pwd.Count -gt 0 -and [int64]$pwd[0] -gt 0) {
+                $adEpoch = [datetime]::FromFileTimeUtc([int64]$pwd[0])
+            }
+            if (-not $adEpoch) {
+                $wc = $adRes.Properties['whencreated']
+                if ($wc -and $wc.Count -gt 0) { $adEpoch = ([datetime]$wc[0]).ToUniversalTime() }
+            }
+        }
+    }
+    catch {
+        # Can't read AD -> don't second-guess CM; treat as not-stale.
+        $result.Reason = "AD lookup failed: $($_.Exception.Message)"
+        return $result
+    }
+    if (-not $adEpoch) {
+        $result.Reason = "no AD machine account found for $ShortName"
+        return $result
+    }
+
+    # --- CM last-active epoch (SMS_CombinedDeviceResources backs the Devices node) ---
+    $cmLastActive = $null
+    $clientActiveStatus = $null
+    try {
+        $combined = Get-WmiObject -Namespace "root\sms\site_$SiteCode" -Class SMS_CombinedDeviceResources -Filter "Name='$ShortName'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($combined) {
+            $clientActiveStatus = $combined.ClientActiveStatus
+            if ($combined.LastActiveTime) {
+                $cmLastActive = ([Management.ManagementDateTimeConverter]::ToDateTime($combined.LastActiveTime)).ToUniversalTime()
+            }
+        }
+    }
+    catch {}
+
+    # 60-min margin absorbs DateTimeKind/timezone skew; a real redeploy gap is
+    # days-to-months so the margin never masks one, while a healthy client
+    # (LastActiveTime updates on every ~60-min policy cycle) is never flagged
+    # even right after a 30-day machine-password rotation.
+    if ($cmLastActive) {
+        if ($adEpoch -gt $cmLastActive.AddMinutes(60)) {
+            $result.Stale = $true
+            $result.Reason = "AD machine epoch $($adEpoch.ToString('u')) is newer than CM LastActiveTime $($cmLastActive.ToString('u')) (ClientActiveStatus=$clientActiveStatus)"
+        }
+    }
+    else {
+        # CM marks it a client but has never recorded activity, and the machine
+        # account (re)joined within the last day -> almost certainly a redeploy
+        # whose old record predates activity tracking.
+        if ($adEpoch -gt (Get-Date).ToUniversalTime().AddDays(-1)) {
+            $result.Stale = $true
+            $result.Reason = "CM has no LastActiveTime and AD machine epoch $($adEpoch.ToString('u')) is within 24h (ClientActiveStatus=$clientActiveStatus)"
+        }
+    }
+    return $result
+}
+
 for ($pushAttempt = 1; $pushAttempt -le $pushMaxAttempts; $pushAttempt++) {
 
 Write-DscStatus "[ClientPush] Pre-check: querying '$CollectionName' for existing clients... (attempt $pushAttempt/$pushMaxAttempts)"
@@ -280,12 +357,36 @@ try {
 }
 
 foreach ($clientName in $ClientNameList) {
-    $isClient = ($allDevices | Where-Object { ($_.Name -eq $clientName -or $_.Name -like "$($clientName).*") -and $_.IsClient }).Count -gt 0
-    if ($isClient) {
-        Write-DscStatus "[ClientPush] Pre-check: $clientName already has CM client installed"
-        $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
-        $AnyClientFound = $true
+    $cmIsClient = ($allDevices | Where-Object { ($_.Name -eq $clientName -or $_.Name -like "$($clientName).*") -and $_.IsClient }).Count -gt 0
+    if (-not $cmIsClient) { continue }
+
+    # CM reports this name as an installed client. Verify the record actually
+    # belongs to the CURRENT machine before trusting it -- on a redeploy the
+    # record is stale (old incarnation) and the new machine truly has no agent.
+    $shortName = ($clientName -split '\.')[0]
+    $staleInfo = Test-CMClientRecordStale -ShortName $shortName -SiteCode $SiteCode
+
+    if ($staleInfo.Stale) {
+        Write-DscStatus "[ClientPush] Pre-check: $clientName CM record looks stale (redeploy) -- $($staleInfo.Reason). Removing stale CM record and re-pushing."
+        try {
+            $staleDevs = @(Get-CMDevice -Name $shortName -ErrorAction SilentlyContinue | Where-Object { $_.IsClient })
+            foreach ($sd in $staleDevs) {
+                Remove-CMDevice -InputObject $sd -Force -ErrorAction Stop
+                Write-DscStatus "[ClientPush] Removed stale CM device record for $shortName (ResourceID $($sd.ResourceID))."
+            }
+        }
+        catch {
+            Write-DscStatus "[ClientPush] WARNING: failed to remove stale CM record for $shortName ($($_.Exception.Message)). Will still attempt push."
+        }
+        # Leave $clientName in the push list so the loop below re-discovers and
+        # re-pushes it (the IsClient re-guards downstream now see no record).
+        continue
     }
+
+    # Genuinely an active client -> trim from the push list.
+    Write-DscStatus "[ClientPush] Pre-check: $clientName already has CM client installed (active)"
+    $ClientNameList = $ClientNameList | Where-Object { $_ -ne $clientName }
+    $AnyClientFound = $true
 }
 
 # If all clients already have the agent installed, skip the rest
