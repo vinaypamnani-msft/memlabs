@@ -5237,6 +5237,7 @@ function Test-DomainMemberFunctionality {
             if ($l -match '0x87d0029e') { return "failed to download client content from a DP (content not available / BITS or transport error)." }
             if ($l -match '0x87d00269') { return "no Management Point could be located (boundary / boundary-group or MP availability problem)." }
             if ($l -match '0x80092004') { return "PKI cert chain/issuer problem (object or property not found while building the cert chain)." }
+            if ($l -match '0x800704dd') { return "BITS could not download the client payload: ERROR_NOT_LOGGED_ON -- BITS requires an interactive logon session to run the transfer and none was present (common on a freshly-booted lab client with no console user). ccmsetup runs as SYSTEM and registers its own 'Configuration Manager Client Retry Task' (re-attempts every ~10 min), so the client typically self-heals on a later cycle or once a user logs on -- no manual ccmsetup relaunch needed." }
             return $null
         }
         $grabCcmDiag = {
@@ -5433,9 +5434,29 @@ function Test-DomainMemberFunctionality {
                 $results.Details.Add("INFO: ccmsetup already running (PID $(($running.Id) -join ',')); waiting for it to finish instead of relaunching")
             }
             else {
-                try { Start-Process -FilePath $ccmsetupExe -ErrorAction Stop } catch {
-                    $results.Details.Add("INFO: Failed to launch ccmsetup: $($_.Exception.Message)")
-                    return $false
+                # ccmsetup runs as SYSTEM and, when an install attempt fails, registers
+                # its OWN 'Configuration Manager Client Retry Task' (re-attempts every
+                # ~10 min in the correct service context). Re-launching ccmsetup
+                # ourselves is redundant with that task -- and from the Phase 11 PSDirect
+                # context it runs with no logon session, so a BITS payload download hits
+                # the very same ERROR_NOT_LOGGED_ON (0x800704dd) and fails again. So
+                # prefer triggering the client's own retry task; only spawn ccmsetup
+                # directly when no such task exists.
+                $retryTask = Get-ScheduledTask -TaskName 'Configuration Manager Client Retry Task' -ErrorAction SilentlyContinue
+                if ($retryTask) {
+                    try {
+                        $retryTask | Start-ScheduledTask -ErrorAction Stop
+                        $results.Details.Add("INFO: Triggered ccmsetup's own 'Configuration Manager Client Retry Task' (SYSTEM) instead of launching a competing ccmsetup")
+                    }
+                    catch {
+                        $results.Details.Add("INFO: Could not start ccmsetup retry task ($($_.Exception.Message)); ccmsetup will still retry on its own ~10 min schedule")
+                    }
+                }
+                else {
+                    try { Start-Process -FilePath $ccmsetupExe -ErrorAction Stop } catch {
+                        $results.Details.Add("INFO: Failed to launch ccmsetup: $($_.Exception.Message)")
+                        return $false
+                    }
                 }
                 Start-Sleep -Seconds 10
             }
