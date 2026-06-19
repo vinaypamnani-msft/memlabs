@@ -223,6 +223,16 @@ if ($SUPNames) {
     Write-DscStatus "SUP role to be installed on '$($SUPNames -join ',')'"
 }
 
+# Kick off the WSUS categories cab import in the background NOW. Done BEFORE
+# the $allSUPsInstalled / $SUPs.Count early-returns so a -ResetOnly wipe of
+# SUSDB followed by a vmbuild re-run actually exercises the cab path: in that
+# scenario CM still has the SUP definition (Get-CMSoftwareUpdatePoint returns
+# truthy), $allSUPsInstalled=$true, and the early-return below would skip the
+# import. The function is idempotent: 'already-imported' (TaxonomyCats >= 100)
+# / 'no-cab' / 'no-wsusutil' all short-circuit cleanly, so it's safe to fire
+# on every InstallRoles run regardless of SUP state.
+Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
+
 # Quick check: if all SUPs are already installed, skip the entire install+sync
 $allSUPsInstalled = $true
 foreach ($SUP in $SUPs) {
@@ -235,6 +245,10 @@ foreach ($SUP in $SUPs) {
 }
 if ($allSUPsInstalled -and $SUPs.Count -gt 0) {
     Write-DscStatus "All SUP roles already installed. Skipping SUP install and configuration."
+    # Wait for any in-flight cab import we just kicked off above before
+    # returning, so the caller's Phase 11 taxonomy assertion sees a populated
+    # SUSDB. No-op when the import short-circuited (no state file).
+    try { Wait-WsusBaselineImport -Tag "[InstallRoles]" } catch { Write-DscStatus "WARNING: Wait-WsusBaselineImport (allSUPsInstalled path) threw: $($_.Exception.Message)" }
     if (-not $rpFailed) {
         $Configuration.InstallSUP.Status = 'Completed'
         $Configuration.InstallSUP.EndTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
@@ -262,15 +276,6 @@ $existingSUPs = Get-CMSoftwareUpdatePoint -SiteCode $SiteCode
 if ($thisSiteIsTopSite -and -not $existingSUPs -and $SUPs.Count -gt 0) {
     $configureSUP = $true
 }
-
-# Kick off the WSUS categories cab import in the background NOW (before the
-# Install-SUP loop and WCM configuration). Owns launch + verify in a single
-# script context -- replaces the old Phase 7 WSUSSync background launch
-# which could be killed mid-import by a post-phase reboot, leaving SUSDB
-# with a partial taxonomy that the next CM sync would trip over.
-# No-op when the cab isn't on disk (cab disabled or copy failed) -- in that
-# case Phase 7's MU fire-and-forget sync is populating the taxonomy.
-Start-WsusBaselineImportBackground -Tag "[InstallRoles]" | Out-Null
 
 # Install SUP
 foreach ($SUP in $SUPs) {
