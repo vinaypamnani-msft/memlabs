@@ -501,6 +501,14 @@ Write-DscStatus "$Tag Starting perfloading"
 
     } # end Primary-only apps/packages block
 
+    ## Hierarchy auto-approval (TwoKeyApproval) + CM-script library import.
+    ## Both are Primary-tier in MEMLABS: New-CMScript on a CAS in a hierarchy
+    ## is a no-op (CM Scripts are authored on the Primary; the CAS has no
+    ## script library role), so the import block silently fails on every
+    ## name and bloats the log. The TwoKeyApproval setting pairs with the
+    ## script library and only matters where scripts actually live.
+    if ($CurrentRole -ne "CAS") {
+
     ## Changing the auto-approval setting on Hierarchy settings
 
     $namespace = "ROOT\SMS\site_$SiteCode"
@@ -586,6 +594,8 @@ Write-DscStatus "$Tag Starting perfloading"
             Write-DscStatus "$Tag Failed to import: $ScriptName. Error: $_"
         }
     }
+
+    } # end Primary-only TwoKeyApproval + CM-script library block
 
 
     ## Task sequences — Primary only (boot images, OSD content, local shares)
@@ -2227,26 +2237,57 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
             WaitMonth                     = 3
             EnableThirdPartyUpdates       = $true
             EnableManualCertManagement    = $false
-            AddProduct                    = $products
         }
 
+        # Apply base config first (no products yet) so any error in the
+        # base parameters is isolated from the per-product additions
+        # below. Set-CMSoftwareUpdatePointComponent leaves existing
+        # subscribed products untouched when -AddProduct is omitted.
         Set-CMSoftwareUpdatePointComponent @parameters
 
         #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
         Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
 
-        # Verify the AddProduct call actually accepted the names we asked for.
-        # Set-CMSoftwareUpdatePointComponent silently drops any -AddProduct name
-        # that doesn't exist in SMS_UpdateCategoryInstance (CM's mirror of WSUS
-        # dbo.UpdateCategories). When the WSUS catalog is empty -- typically
-        # because Sync 1 never landed (cab not imported AND MU sync stalled or
-        # was canceled) -- every name gets dropped and we end up with 0 of N
-        # products subscribed and no error from the cmdlet. Re-read the
-        # subscribed list now and surface this state explicitly so it doesn't
-        # masquerade as success and waste 10 minutes in the WCM wait below.
-        $postAddProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
-        $accepted = @($products | Where-Object { $_ -in $postAddProducts })
-        $rejected = @($products | Where-Object { $_ -notin $postAddProducts })
+        # Add products one at a time so a single malformed / catalog-missing
+        # name surfaces on its own log line instead of disappearing into a
+        # bulk silent-drop. Set-CMSoftwareUpdatePointComponent silently
+        # drops any -AddProduct name that doesn't exist in
+        # SMS_UpdateCategoryInstance (CM's mirror of WSUS dbo.UpdateCategories)
+        # — no error, no warning, just nothing happens. Per-product gives
+        # us "Added '<name>'" / "WARNING: '<name>' rejected (not in catalog)"
+        # so a typo or canonical-case mismatch (e.g. '24H2' vs the actual
+        # 'Microsoft Server Operating System – 24H2') is named explicitly.
+        $accepted = @()
+        $rejected = @()
+        foreach ($product in $products) {
+            $beforeSubscribed = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+                Where-Object { $_.IsSubscribed } |
+                Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+            try {
+                Set-CMSoftwareUpdatePointComponent -InputObject $supComp -AddProduct $product -ErrorAction Stop | Out-Null
+            }
+            catch {
+                $rejected += $product
+                Write-DscStatus "$Tag WARNING: Add product '$product' threw: $($_.Exception.Message)"
+                continue
+            }
+            $afterSubscribed = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" |
+                Where-Object { $_.IsSubscribed } |
+                Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+            if ($product -in $afterSubscribed) {
+                $accepted += $product
+                if ($product -in $beforeSubscribed) {
+                    Write-DscStatus "$Tag Product '$product' already subscribed (no-op)"
+                }
+                else {
+                    Write-DscStatus "$Tag Added product '$product'"
+                }
+            }
+            else {
+                $rejected += $product
+                Write-DscStatus "$Tag WARNING: Product '$product' was silently rejected by SUP component (not in WSUS catalog — check exact name match against dbo.UpdateCategories)"
+            }
+        }
         if ($accepted.Count -eq 0) {
             Write-DscStatus "$Tag WARNING: 0 of $($products.Count) requested products were accepted by Set-CMSoftwareUpdatePointComponent -- the WSUS catalog has none of these names. This means Sync 1 didn't actually populate the catalog (cab import failed/skipped AND the MU categories sync didn't complete). Skipping WCM wait -- there is nothing to push. SUP will be subscribed to the 3 default classifications only ($($parameters.AddUpdateClassification -join ', ')); Phase 11 will WARN on subscription parity until the catalog is repaired. Rejected: $($rejected -join ', ')"
             return
