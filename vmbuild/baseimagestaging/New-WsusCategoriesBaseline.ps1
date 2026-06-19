@@ -226,12 +226,58 @@ END
             } else {
                 $piArgs = @('postinstall', "SQL_INSTANCE_NAME=$sqlServerName", "CONTENT_DIR=$contentDir")
             }
-            $postinstallLog = Join-Path $env:TEMP 'WsusBaselineReset_postinstall.log'
-            $proc = Start-Process -FilePath $wsusUtil -ArgumentList $piArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $postinstallLog -ErrorAction Stop
-            if ($proc.ExitCode -ne 0) {
+
+            # Run wsusutil postinstall as NT AUTHORITY\SYSTEM via a one-shot
+            # scheduled task. The final postinstall step calls into the WSUS
+            # Admin API (CreateDefaultSubscription -> UpdateServer SOAP) which
+            # enforces a PrincipalPermission demand for the local 'WSUS
+            # Administrators' group. DSC's LCM is SYSTEM and SYSTEM is always
+            # trusted by that demand; PSDirect's local admin (vmbuildadmin)
+            # is only trusted on hosts where it happens to also be in WSUS
+            # Administrators. Running postinstall as SYSTEM matches the DSC
+            # path and works regardless of group membership and regardless
+            # of whether SUSDB lives on WID, local SQL, or remote SQL.
+            $postinstallStdout = Join-Path $env:TEMP 'WsusBaselineReset_postinstall.stdout.log'
+            $taskName = "MemlabsWsusBaselineReset_$([guid]::NewGuid().ToString('N').Substring(0,8))"
+            $taskCmd = ('"{0}" {1} > "{2}" 2>&1' -f $wsusUtil, ($piArgs -join ' '), $postinstallStdout)
+            $taskAction = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c ' + $taskCmd)
+            $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(20))
+            Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+            try {
+                Start-ScheduledTask -TaskName $taskName
+                # Poll. wsusutil postinstall is normally 1-3 min; cap at 20 to
+                # match the task's ExecutionTimeLimit.
+                $taskDeadline = (Get-Date).AddMinutes(20)
+                do {
+                    Start-Sleep -Seconds 5
+                    $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
+                    $taskState = (Get-ScheduledTask -TaskName $taskName).State
+                } while ($taskState -eq 'Running' -and (Get-Date) -lt $taskDeadline)
+                if ($taskState -eq 'Running') {
+                    throw "wsusutil postinstall scheduled task still Running after 20 min; aborting."
+                }
+                $exitCode = $taskInfo.LastTaskResult
+            }
+            finally {
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            if ($exitCode -ne 0) {
+                # Real diagnostic content is in WSUS's own log
+                # (%TEMP%\WSUS_PostInstall_*.log on whichever account ran
+                # postinstall, in our case SYSTEM = C:\Windows\Temp). Find the
+                # newest one and tail it; fall back to our stdout capture.
                 $tail = ''
-                if (Test-Path $postinstallLog) { $tail = (Get-Content $postinstallLog -Tail 10 -ErrorAction SilentlyContinue) -join "`n" }
-                throw "wsusutil postinstall exit=$($proc.ExitCode). Args: $($piArgs -join ' '). Tail: $tail"
+                $wsusLog = Get-ChildItem -Path 'C:\Windows\Temp' -Filter 'WSUS_PostInstall_*.log' -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+                if ($wsusLog) {
+                    $tail = (Get-Content $wsusLog.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n"
+                }
+                if (-not $tail -and (Test-Path $postinstallStdout)) {
+                    $tail = (Get-Content $postinstallStdout -Tail 40 -ErrorAction SilentlyContinue) -join "`n"
+                }
+                throw "wsusutil postinstall (as SYSTEM via scheduled task) exit=$exitCode. Args: $($piArgs -join ' '). Log tail: $tail"
             }
 
             Start-Service WsusService -ErrorAction SilentlyContinue
