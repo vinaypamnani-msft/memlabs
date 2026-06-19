@@ -683,7 +683,8 @@ function Start-PhaseJobs {
 
                     $reachable = $false
                     for ($p = 1; $p -le 2 -and -not $reachable; $p++) {
-                        Write-Log "[Phase 8] $sqlHost`: probing PowerShell Direct reachability (attempt $p/2) before admin-add for site server $($ss.vmName)." -Activity
+                        Write-Progress2 "Preparing Phase $Phase" -Status "$sqlHost`: probing PowerShell Direct (attempt $p/2)" -PercentComplete $global:preparePhasePercent
+                        Write-Log "[Phase 8] $sqlHost`: probing PowerShell Direct reachability (attempt $p/2) before admin-add for site server $($ss.vmName)." -LogOnly
                         $reachable = & $probe $sqlHost $domain "PSDirect liveness probe"
                         if (-not $reachable -and $p -lt 2) { Start-Sleep -Seconds 10 }
                     }
@@ -696,12 +697,14 @@ function Start-PhaseJobs {
                         try { Start-VM2 -Name $sqlHost -ErrorAction Stop } catch {
                             Write-Log "[Phase 8] $sqlHost`: Start-VM2 threw: $($_.Exception.Message)" -Warning
                         }
-                        # Bounded, logged wait for the guest to answer after the
-                        # restart. Up to 8 probes (~60s each worst case) + 20s
-                        # gaps = ~10 min ceiling, with a log line per attempt so
-                        # the operator sees progress instead of a silent freeze.
+                        # Bounded wait for the guest to answer after the restart.
+                        # Up to 8 probes (~60s each worst case) + 20s gaps = ~10
+                        # min ceiling. Heartbeat goes to the in-place "Preparing
+                        # Phase" progress bar (not a per-attempt banner) so the
+                        # screen stays clean while still showing it's not frozen.
                         for ($p = 1; $p -le 8 -and -not $reachable; $p++) {
-                            Write-Log "[Phase 8] $sqlHost`: waiting for PowerShell Direct after restart (attempt $p/8)." -Activity
+                            Write-Progress2 "Preparing Phase $Phase" -Status "$sqlHost`: waiting for PowerShell Direct after restart (attempt $p/8)" -PercentComplete $global:preparePhasePercent
+                            Write-Log "[Phase 8] $sqlHost`: waiting for PowerShell Direct after restart (attempt $p/8)." -LogOnly
                             $reachable = & $probe $sqlHost $domain "PSDirect liveness probe (post-restart)"
                             if (-not $reachable -and $p -lt 8) { Start-Sleep -Seconds 20 }
                         }
@@ -713,7 +716,7 @@ function Start-PhaseJobs {
                             $preflightFailures.Add($msg) | Out-Null
                             continue
                         }
-                        Write-Log "[Phase 8] $sqlHost`: PowerShell Direct recovered after restart." -Activity
+                        Write-Log "[Phase 8] $sqlHost`: PowerShell Direct recovered after restart."
                     }
                 }
 
