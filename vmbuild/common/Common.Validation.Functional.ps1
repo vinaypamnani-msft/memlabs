@@ -5357,11 +5357,23 @@ function Test-DomainMemberFunctionality {
                 return $false
             }
             $results.Details.Add("INFO: Attempting ccmsetup retry...")
-            try { Start-Process -FilePath $ccmsetupExe -ErrorAction Stop } catch {
-                $results.Details.Add("INFO: Failed to launch ccmsetup: $($_.Exception.Message)")
-                return $false
+            # Never launch a competing ccmsetup if one is already running. An
+            # in-flight install (or ccmsetup's own internal GetDPLocations retry
+            # cycle) must be allowed to finish -- ccmsetup is single-instance
+            # (global mutex), so a second launch would no-op anyway and only
+            # muddy our wait/verdict. If one is running, wait for it instead of
+            # relaunching.
+            $running = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
+            if ($running) {
+                $results.Details.Add("INFO: ccmsetup already running (PID $(($running.Id) -join ',')); waiting for it to finish instead of relaunching")
             }
-            Start-Sleep -Seconds 10
+            else {
+                try { Start-Process -FilePath $ccmsetupExe -ErrorAction Stop } catch {
+                    $results.Details.Add("INFO: Failed to launch ccmsetup: $($_.Exception.Message)")
+                    return $false
+                }
+                Start-Sleep -Seconds 10
+            }
             # Wait up to 5 minutes for ccmsetup to finish
             for ($w = 0; $w -lt 30; $w++) {
                 Write-Progress -Activity $progressActivity -Status "ccmsetup retry: waiting for ccmsetup to finish ($($w * 10)s)"
@@ -5486,7 +5498,15 @@ function Test-DomainMemberFunctionality {
                 }
                 # Fall through to log check below
             }
-            if (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
+            # If ccmsetup is STILL running at this point (a slow install -- content
+            # download or its own GetDPLocations retry cycle -- that outlasted our
+            # 5-min wait), do NOT read a stale exit line and declare failure, and do
+            # NOT relaunch a competing instance: let the in-flight install finish.
+            $stillRunning = Get-Process -Name 'ccmsetup' -ErrorAction SilentlyContinue
+            if ($stillRunning) {
+                $results.Details.Add("WARN: ccmsetup is still running (install in progress); not interrupting -- re-run Phase 11 to re-check once it finishes")
+            }
+            elseif (Test-Path 'C:\Windows\ccmsetup\Logs\ccmsetup.log') {
                 $logTail = Get-Content 'C:\Windows\ccmsetup\Logs\ccmsetup.log' -Tail 50 -ErrorAction SilentlyContinue
                 # Check the LAST exit line -- the log may contain both failures (from
                 # an earlier auto-push race) and a later success. Only the final exit matters.
