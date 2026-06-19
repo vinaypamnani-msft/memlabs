@@ -237,10 +237,13 @@ END
             # Administrators. Running postinstall as SYSTEM matches the DSC
             # path and works regardless of group membership and regardless
             # of whether SUSDB lives on WID, local SQL, or remote SQL.
-            $postinstallStdout = Join-Path $env:TEMP 'WsusBaselineReset_postinstall.stdout.log'
+            # Invoke wsusutil.exe directly (no cmd.exe shim): Task Scheduler's
+            # -Execute / -Argument parameters handle the space in "Program
+            # Files" natively. The cmd.exe /c shim strips outer quotes and
+            # was bisecting the path at the first space, producing an instant
+            # exit=1 with no WSUS log written.
             $taskName = "MemlabsWsusBaselineReset_$([guid]::NewGuid().ToString('N').Substring(0,8))"
-            $taskCmd = ('"{0}" {1} > "{2}" 2>&1' -f $wsusUtil, ($piArgs -join ' '), $postinstallStdout)
-            $taskAction = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ('/c ' + $taskCmd)
+            $taskAction = New-ScheduledTaskAction -Execute $wsusUtil -Argument ($piArgs -join ' ')
             $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
             $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromMinutes(20))
             Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
@@ -263,21 +266,19 @@ END
                 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             }
             if ($exitCode -ne 0) {
-                # Real diagnostic content is in WSUS's own log
-                # (%TEMP%\WSUS_PostInstall_*.log on whichever account ran
-                # postinstall, in our case SYSTEM = C:\Windows\Temp). Find the
-                # newest one and tail it; fall back to our stdout capture.
+                # Diagnostic content is in WSUS's own log
+                # (C:\Windows\Temp\WSUS_PostInstall_*.log when SYSTEM runs it).
                 $tail = ''
                 $wsusLog = Get-ChildItem -Path 'C:\Windows\Temp' -Filter 'WSUS_PostInstall_*.log' -ErrorAction SilentlyContinue |
                     Sort-Object LastWriteTime -Descending |
                     Select-Object -First 1
                 if ($wsusLog) {
-                    $tail = (Get-Content $wsusLog.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n"
+                    $tail = "($($wsusLog.FullName) last-modified $($wsusLog.LastWriteTime)):`n" +
+                        ((Get-Content $wsusLog.FullName -Tail 40 -ErrorAction SilentlyContinue) -join "`n")
+                } else {
+                    $tail = '(no WSUS_PostInstall_*.log found in C:\Windows\Temp -- wsusutil may have failed to launch)'
                 }
-                if (-not $tail -and (Test-Path $postinstallStdout)) {
-                    $tail = (Get-Content $postinstallStdout -Tail 40 -ErrorAction SilentlyContinue) -join "`n"
-                }
-                throw "wsusutil postinstall (as SYSTEM via scheduled task) exit=$exitCode. Args: $($piArgs -join ' '). Log tail: $tail"
+                throw "wsusutil postinstall (as SYSTEM via scheduled task) exit=$exitCode. Exe: $wsusUtil. Args: $($piArgs -join ' '). Log: $tail"
             }
 
             Start-Service WsusService -ErrorAction SilentlyContinue
