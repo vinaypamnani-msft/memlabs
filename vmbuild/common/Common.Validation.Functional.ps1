@@ -5109,6 +5109,82 @@ function Test-PassiveSiteFunctionality {
     return (Format-TestResult -VMName $VMName -RoleLabel 'PassiveSite-Parent' -Result $parentResult)
 }
 
+function Save-CcmSetupLog {
+    <#
+    .SYNOPSIS
+        Pull the guest's ccmsetup / client.msi logs to the host log directory
+        when a ConfigMgr client install failed, for offline troubleshooting.
+    .DESCRIPTION
+        Mirrors the Phase 8 CM-setup log-capture pattern (Get-Content in-guest,
+        Set-Content on host) instead of Copy-Item -FromSession, so it works
+        through the existing PSDirect plumbing and bounds size by tailing each
+        log. Files land as:
+            <VmName>-Phase11-<timestamp>-ccmsetup.log
+            <VmName>-Phase11-<timestamp>-client.msi.log   (+ rolled variants)
+        Best-effort and non-fatal: any failure just logs a warning.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$DomainName
+    )
+
+    $Phase = 11
+    $logDir = $null
+    if ($Common -and $Common.LogPath) { $logDir = Split-Path $Common.LogPath -Parent }
+    if (-not $logDir -or -not (Test-Path $logDir)) {
+        Write-Log "[Phase $Phase] $VMName [DomainMember]: ccmsetup log capture: host log dir not resolvable ($logDir)" -Warning -LogOnly
+        return
+    }
+
+    $pullBlock = {
+        $logRoot = 'C:\Windows\ccmsetup\Logs'
+        $out = @{}
+        if (-not (Test-Path $logRoot)) { return $out }
+        # ccmsetup.log + rolled ccmsetup-*.log + client.msi*.log. Most-recent
+        # first, tail each to bound the payload pulled back over PSDirect.
+        $files = Get-ChildItem -Path $logRoot -Filter '*.log' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'ccmsetup*.log' -or $_.Name -like 'client.msi*.log' } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 6
+        foreach ($f in $files) {
+            try {
+                $content = Get-Content -LiteralPath $f.FullName -Tail 4000 -ErrorAction SilentlyContinue
+                if ($content) { $out[$f.Name] = ($content -join "`r`n") }
+            }
+            catch { }
+        }
+        return $out
+    }
+
+    try {
+        $res = Invoke-VmCommand -VmName $VMName -VmDomainName $DomainName -ScriptBlock $pullBlock `
+            -SuppressLog -AsJob -TimeoutSeconds 120 -DisplayName "Pull ccmsetup logs"
+    }
+    catch {
+        Write-Log "[Phase $Phase] $VMName [DomainMember]: ccmsetup log capture: PSDirect call threw: $($_.Exception.Message)" -Warning -LogOnly
+        return
+    }
+    if (-not $res -or $res.ScriptBlockFailed -or -not ($res.ScriptBlockOutput -is [hashtable]) -or $res.ScriptBlockOutput.Count -eq 0) {
+        Write-Log "[Phase $Phase] $VMName [DomainMember]: ccmsetup log capture: no logs returned from VM" -Warning -LogOnly
+        return
+    }
+
+    $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    foreach ($name in $res.ScriptBlockOutput.Keys) {
+        $content = $res.ScriptBlockOutput[$name]
+        if (-not $content) { continue }
+        $dest = Join-Path $logDir "$VMName-Phase$Phase-$stamp-$name"
+        try {
+            Set-Content -LiteralPath $dest -Value $content -Encoding UTF8 -ErrorAction Stop
+            $kb = [math]::Round(([System.Text.Encoding]::UTF8.GetByteCount($content)) / 1KB, 1)
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: Pulled $name (${kb}KB tail) -> $dest" -OutputStream
+        }
+        catch {
+            Write-Log "[Phase $Phase] $VMName [DomainMember]: ccmsetup log capture: failed to write ${name}: $_" -Warning -LogOnly
+        }
+    }
+}
+
 function Test-DomainMemberFunctionality {
     <#
     .SYNOPSIS
@@ -5145,6 +5221,36 @@ function Test-DomainMemberFunctionality {
         # always advances (the host resets the timer on count growth).
         $progressActivity = "$env:COMPUTERNAME [DomainMember]"
         Write-Progress -Activity $progressActivity -Status "Checking domain membership"
+
+        # ccmsetup failure diagnostics. ccmsetup exits with an opaque hex code;
+        # decode the common ones and pull the relevant LocationServices / cert
+        # lines from ccmsetup.log so a WARN names the actual broken subsystem
+        # instead of just the code. PS5.1-safe (runs on down-level client OSes).
+        $decodeCcmError = {
+            param($line)
+            if (-not $line) { return $null }
+            $l = "$line".ToLower()
+            if ($l -match '0x87d00454') {
+                return "GetDPLocations failed (the MP replied HTTP 200 but returned no content location) -- either the ConfigMgr Client Package isn't distributed to a DP in this VM's boundary group yet, or under PKI/HTTPS the client cert issuer isn't in the MP's trusted-issuer list. Typically a transient content-distribution race during auto-push that clears on the next client-location cycle / Phase 11 re-run."
+            }
+            if ($l -match '0x87d00227') { return "client.msi installation failed (see C:\Windows\ccmsetup\Logs\client.msi.log)." }
+            if ($l -match '0x87d0029e') { return "failed to download client content from a DP (content not available / BITS or transport error)." }
+            if ($l -match '0x87d00269') { return "no Management Point could be located (boundary / boundary-group or MP availability problem)." }
+            if ($l -match '0x80092004') { return "PKI cert chain/issuer problem (object or property not found while building the cert chain)." }
+            return $null
+        }
+        $grabCcmDiag = {
+            param($logFile)
+            $diag = New-Object System.Collections.Generic.List[string]
+            if (Test-Path $logFile) {
+                $tail = Get-Content $logFile -Tail 150 -ErrorAction SilentlyContinue
+                $hits = $tail | Where-Object {
+                    $_ -match 'GetDPLocations|Failed to find DP locations|Unable to find any Certificate|no (client )?certificate|Sending location (services )?request|status code|MP_LocationManager|boundary'
+                } | Select-Object -Last 5
+                foreach ($h in $hits) { if ($h) { $diag.Add(("$h").Trim()) } }
+            }
+            return $diag
+        }
 
         # Domain membership
         $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction SilentlyContinue
@@ -5333,7 +5439,14 @@ function Test-DomainMemberFunctionality {
                         }
                     }
                     if ($failDetail) {
-                        $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail")
+                        $meaning = & $decodeCcmError $failDetail
+                        if ($meaning) {
+                            $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail -- $meaning")
+                        }
+                        else {
+                            $results.Details.Add("WARN: CcmExec is $($ccm.Status); ccmsetup failed: $failDetail")
+                        }
+                        foreach ($d in (& $grabCcmDiag $logPath)) { $results.Details.Add("  ccmsetup.log: $d") }
                     }
                     else {
                         $results.Details.Add("WARN: CcmExec is $($ccm.Status) (ccmsetup finished but service won't start)")
@@ -5398,7 +5511,14 @@ function Test-DomainMemberFunctionality {
                     }
                 }
                 elseif ($exitLine) {
-                    $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim())")
+                    $meaning = & $decodeCcmError $exitLine
+                    if ($meaning) {
+                        $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim()) -- $meaning")
+                    }
+                    else {
+                        $results.Details.Add("WARN: CcmExec not installed; ccmsetup failed: $($exitLine.Trim())")
+                    }
+                    foreach ($d in (& $grabCcmDiag 'C:\Windows\ccmsetup\Logs\ccmsetup.log')) { $results.Details.Add("  ccmsetup.log: $d") }
                 }
                 else {
                     $results.Details.Add("WARN: CcmExec not installed; ccmsetup.log exists but no success/failure line found")
@@ -5431,6 +5551,16 @@ function Test-DomainMemberFunctionality {
         }
         else {
             $result.ScriptBlockOutput.Details[-1] = "OK: CcmExec not installed (pushClient=false in config)"
+        }
+    }
+
+    # On a ccmsetup install failure, pull the guest's ccmsetup / client.msi
+    # logs to the host log directory so the operator can troubleshoot offline
+    # (these live only on the guest and are otherwise lost on VHD compaction).
+    if ($result.ScriptBlockOutput -is [hashtable] -and $result.ScriptBlockOutput.Details) {
+        $ccmFailed = $result.ScriptBlockOutput.Details | Where-Object { $_ -match 'ccmsetup failed' }
+        if ($ccmFailed) {
+            Save-CcmSetupLog -VMName $VMName -DomainName $domain
         }
     }
 
