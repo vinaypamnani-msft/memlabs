@@ -432,6 +432,45 @@
             DependsOn     = $nextDepend
         }
 
+        # WSUS categories baseline cab import for this Secondary's SUP.
+        # By the time WaitPrimary returns the Primary's InstallRoles has
+        # added the SUP role to this Secondary, which installs WSUS +
+        # runs wsusutil postinstall via CM's site component manager. The
+        # cab was already staged to C:\staging\wsus\ during Phase <=7
+        # by the host orchestrator. Fire the import locally now -- CM's
+        # ScriptWorkflow on the Primary never runs on a Secondary, so
+        # this is the only point where the import can be triggered with
+        # WSUS guaranteed-installed and the cab guaranteed-present.
+        # Start-WsusBaselineImportBackground + Wait-WsusBaselineImport
+        # are defined in C:\staging\DSC\phases\ScriptFunctions.ps1 and
+        # are idempotent (short-circuit with 'no-cab' / 'already-imported'
+        # / 'no-wsusutil' as appropriate), so this is safe on re-runs and
+        # on Secondaries that for any reason don't have a SUP role.
+        Script ImportWsusBaseline {
+            GetScript  = { @{ Result = '' } }
+            TestScript = {
+                if (-not (Test-Path 'C:\staging\wsus\WsusCategoriesBaseline.cab')) { return $true }
+                try {
+                    [void][System.Reflection.Assembly]::LoadWithPartialName('Microsoft.UpdateServices.Administration')
+                    $srv = [Microsoft.UpdateServices.Administration.AdminProxy]::GetUpdateServer()
+                    return ($srv.GetUpdateCategories().Count -ge 100)
+                }
+                catch { return $false }
+            }
+            SetScript  = {
+                try {
+                    . C:\staging\DSC\phases\ScriptFunctions.ps1
+                    Start-WsusBaselineImportBackground -Tag '[Phase8-Secondary]' | Out-Null
+                    Wait-WsusBaselineImport -Tag '[Phase8-Secondary]'
+                }
+                catch {
+                    # Non-fatal: downstream sync from upstream SUP will eventually populate
+                    # the taxonomy, just slower. Don't break the Secondary's DSC over this.
+                }
+            }
+            DependsOn  = "[WaitForEvent]WaitPrimary"
+        }
+
         WriteEvent WriteConfigFinished {
             LogPath   = $LogPath
             WriteNode = "ConfigurationFinished"
