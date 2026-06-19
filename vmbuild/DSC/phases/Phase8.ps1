@@ -625,16 +625,11 @@
                 FileServer = $ThisVM.PatchMyPCFileServer
             }
             $nextDepend = '[InstallPMPC]InstallPMPC'
-            WriteStatus RebootNow {
-                Status    = "Rebooting to get Finalize PMPC"
-                DependsOn = $nextDepend
-            }
-
-            RebootNow RebootNow {
-                FileName  = 'C:\Temp\PMPCReboot.txt'
-                DependsOn = $nextDepend
-            }
-            $nextDepend = "[RebootNow]RebootNow"
+            # No RebootNow here: pmpc.msi was installed with /norestart and the
+            # forced reboot would kill the in-flight WSUS sync that perfloading
+            # kicked off after AddProduct (sync runs async on WsusService.exe
+            # and is not waited on by ScriptWorkflow). Any reboot PMPC actually
+            # needs is picked up at the next natural restart.
         }
 
         WriteStatus Complete {
