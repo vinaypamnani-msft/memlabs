@@ -5323,12 +5323,54 @@ function Test-DomainMemberFunctionality {
 
         # PKI client authentication certificate (when UsePKI + pushClient)
         if ($checkPki) {
-            $clientCert = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2' -and   # Client Authentication
-                    $_.Issuer -notmatch 'O=Microsoft' -and
-                    $_.Subject -ne $_.Issuer                                               # Not self-signed
-                } | Select-Object -First 1
+            # Find the auto-enrolled client-auth cert (non-Microsoft, not self-signed).
+            $findClientCert = {
+                Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.2' -and   # Client Authentication
+                        $_.Issuer -notmatch 'O=Microsoft' -and
+                        $_.Subject -ne $_.Issuer                                               # Not self-signed
+                    } | Select-Object -First 1
+            }
+            # Build the cert chain to a trusted root; returns @{ Ok; Status }.
+            # Under a 2-tier PKI (offline root + enterprise sub-CA), ccmsetup must be
+            # able to build leaf -> sub-CA -> offline-root locally. The leaf
+            # auto-enrolls fine, but the offline root + sub-CA certs only land in the
+            # local Trusted Root / Intermediate stores on the autoenrollment / GP
+            # cycle. If ccmsetup runs first, chain-building fails (CRYPT_E_NOT_FOUND
+            # 0x80092004) -> 'Unable to find any Certificate based on Certificate
+            # Issuers' -> GetDPLocations 0x87d00454. Revocation is ignored: the
+            # offline root has no reachable CRL in the lab.
+            $testChain = {
+                param($cert)
+                if (-not $cert) { return @{ Ok = $false; Status = 'no-cert' } }
+                try {
+                    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+                    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                    $built = $chain.Build($cert)
+                    $flags = (@($chain.ChainStatus) | ForEach-Object { $_.Status }) -join ','
+                    if (-not $flags) { $flags = 'OK' }
+                    return @{ Ok = [bool]$built; Status = $flags }
+                }
+                catch { return @{ Ok = $false; Status = "chain-build-threw: $($_.Exception.Message)" } }
+            }
+            # Pull the AD-published Root/Sub CA certs into the local stores.
+            # certutil -pulse triggers autoenrollment (downloads the AD-published
+            # Trusted Root + Intermediate CAs); gpupdate forces the computer GP
+            # root-cert distribution. Both idempotent and quick.
+            $pullChainCAs = {
+                try { & certutil.exe -pulse 2>&1 | Out-Null } catch {}
+                try { & gpupdate.exe /target:computer /force 2>&1 | Out-Null } catch {}
+            }
+
+            $clientCert = & $findClientCert
+            if (-not $clientCert) {
+                $results.Details.Add("REMEDIATE: No PKI client auth cert yet; running certutil -pulse + gpupdate to trigger auto-enrollment...")
+                & $pullChainCAs
+                Start-Sleep -Seconds 15
+                $clientCert = & $findClientCert
+            }
+
             if ($clientCert) {
                 $results.Details.Add("OK: PKI client auth certificate found (Subject='$($clientCert.Subject)', Issuer='$($clientCert.Issuer)', Expires=$($clientCert.NotAfter.ToString('yyyy-MM-dd')))")
                 if ($clientCert.NotAfter -lt (Get-Date)) {
@@ -5339,10 +5381,33 @@ function Test-DomainMemberFunctionality {
                     $results.Passed = $false
                     $results.Details.Add("FAIL: PKI client auth certificate has no private key")
                 }
+                # Validate the trust chain (the offline-root anchor must be present locally).
+                $chainResult = & $testChain $clientCert
+                if ($chainResult.Ok) {
+                    $results.Details.Add("OK: Client cert chains to a trusted root (chain status: $($chainResult.Status))")
+                }
+                else {
+                    $results.Details.Add("REMEDIATE: Client cert chain incomplete ($($chainResult.Status)); pulling AD-published root/sub-CA certs (certutil -pulse + gpupdate)...")
+                    & $pullChainCAs
+                    Start-Sleep -Seconds 15
+                    $clientCert = & $findClientCert
+                    $chainResult = & $testChain $clientCert
+                    if ($chainResult.Ok) {
+                        $results.Details.Add("RECOVERED: Client cert chain healthy after pulling CA certs (chain status: $($chainResult.Status))")
+                    }
+                    else {
+                        $rootCount = 0
+                        try { $rootCount = @(Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $_.Issuer }).Count } catch {}
+                        # WARN (not FAIL): the chain can still converge on the next GP
+                        # cycle and ccmsetup itself retries. Surface the missing-anchor
+                        # cause so the operator knows it's PKI propagation, not the leaf.
+                        $results.Details.Add("WARN: Client cert still doesn't chain to a trusted root ($($chainResult.Status)) after remediation. The offline root / sub-CA cert hasn't propagated to LocalMachine\Root + \CA yet (roots-in-store=$rootCount). ccmsetup will fail PKI auth (0x80092004 -> GetDPLocations 0x87d00454) until it does; re-run Phase 11 after the next GP cycle.")
+                    }
+                }
             }
             else {
                 $results.Passed = $false
-                $results.Details.Add("FAIL: No PKI client authentication certificate in LocalMachine\My. ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT. Check auto-enrollment and the ConfigMgrClientCertificate template.")
+                $results.Details.Add("FAIL: No PKI client authentication certificate in LocalMachine\My (even after auto-enrollment remediation). ccmsetup will fail with CCM_E_NO_CLIENT_PKI_CERT. Check auto-enrollment and the ConfigMgrClientCertificate template.")
             }
         }
 
