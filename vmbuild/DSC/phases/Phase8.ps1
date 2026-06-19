@@ -476,11 +476,11 @@
             WriteNode = "ConfigurationFinished"
             Status    = "Passed"
             Ensure    = "Present"
-            DependsOn = "[WaitForEvent]WaitPrimary"
+            DependsOn = "[Script]ImportWsusBaseline"
         }
 
         WriteStatus Complete {
-            DependsOn = "[InstallODBCDriver]ODBCDriverInstall"
+            DependsOn = "[Script]ImportWsusBaseline"
             Status    = "Complete!"
         }
     }
