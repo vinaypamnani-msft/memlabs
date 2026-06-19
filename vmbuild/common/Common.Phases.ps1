@@ -659,31 +659,61 @@ function Start-PhaseJobs {
                     # The VM reports 'Running', but that only means the Hyper-V
                     # worker process is up -- the guest OS / PSDirect VMBus can
                     # still be unreachable (mid-boot, hung integration services,
-                    # or a passive SQLAO node that came up slowly). The old code
-                    # skipped straight to the Step 2 ADSI add against an
-                    # unreachable guest, where each Invoke-VmCommand burned ~5 min
-                    # in Get-VmSession credential/retry timeouts and returned
-                    # nothing usable ("Invoke-VmCommand returned no result"), then
-                    # repeated that 3x before failing preflight ~15 min later.
-                    # Probe PSDirect liveness here (this also gives the guest a
-                    # settle window); if it's still dead, restart it ONCE and wait.
-                    $reachable = Wait-ForVm -VmName $sqlHost -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 3 -SkipDiskTest -Quiet
+                    # or a passive SQLAO node that came up slowly). Probe PSDirect
+                    # liveness with a BOUNDED, LOGGED check before the Step 2
+                    # admin-add so an unreachable guest doesn't silently burn
+                    # ~5 min/attempt in Get-VmSession credential-retry timeouts.
+                    #
+                    # Do NOT use Wait-ForVm here: its TimeoutMinutes is only
+                    # re-checked between iterations, and a single in-flight
+                    # Get-VmSession call burns ~5-6 min (4 creds x 30s x 3
+                    # retries) with -Quiet producing zero feedback -- so a
+                    # "3 minute" wait actually runs ~6 min silently (the
+                    # regression that made this look hung). Probe via
+                    # Invoke-VmCommand with -SkipDomainFallback (LocalOnly: only
+                    # the primary domain cred + the VMNAME\local fallback, no
+                    # domain-lookup/Administrator creds) + -SessionMaxRetries 1
+                    # + -AsJob, so each probe is bounded to ~60s worst case and
+                    # emits its own log line. A reachable guest answers in <5s.
+                    $probe = {
+                        param($vm, $dom, $label)
+                        $r = Invoke-VmCommand -VmName $vm -VmDomainName $dom -DisplayName $label -SuppressLog -SkipDomainFallback -SessionMaxRetries 1 -AsJob -TimeoutSeconds 30 -ScriptBlock { $env:COMPUTERNAME }
+                        return [bool]($r -and -not $r.ScriptBlockFailed -and "$($r.ScriptBlockOutput)".Trim())
+                    }
+
+                    $reachable = $false
+                    for ($p = 1; $p -le 2 -and -not $reachable; $p++) {
+                        Write-Log "[Phase 8] $sqlHost`: probing PowerShell Direct reachability (attempt $p/2) before admin-add for site server $($ss.vmName)." -Activity
+                        $reachable = & $probe $sqlHost $domain "PSDirect liveness probe"
+                        if (-not $reachable -and $p -lt 2) { Start-Sleep -Seconds 10 }
+                    }
+
                     if (-not $reachable) {
-                        Write-Log "[Phase 8] $sqlHost is Running but not reachable via PowerShell Direct after 3 min; restarting it once for site-server $($ss.vmName) preflight." -Warning
+                        Write-Log "[Phase 8] $sqlHost is Running but did not answer PowerShell Direct within ~2 min; restarting it once for site-server $($ss.vmName) preflight." -Warning
                         try { Stop-VM2 -Name $sqlHost -TurnOff } catch {
                             Write-Log "[Phase 8] $sqlHost`: Stop-VM2 threw: $($_.Exception.Message)" -Warning
                         }
                         try { Start-VM2 -Name $sqlHost -ErrorAction Stop } catch {
                             Write-Log "[Phase 8] $sqlHost`: Start-VM2 threw: $($_.Exception.Message)" -Warning
                         }
-                        $reachable = Wait-ForVm -VmName $sqlHost -PathToVerify 'C:\Users' -VmDomainName $domain -TimeoutMinutes 5 -SkipDiskTest -Quiet
+                        # Bounded, logged wait for the guest to answer after the
+                        # restart. Up to 8 probes (~60s each worst case) + 20s
+                        # gaps = ~10 min ceiling, with a log line per attempt so
+                        # the operator sees progress instead of a silent freeze.
+                        for ($p = 1; $p -le 8 -and -not $reachable; $p++) {
+                            Write-Log "[Phase 8] $sqlHost`: waiting for PowerShell Direct after restart (attempt $p/8)." -Activity
+                            $reachable = & $probe $sqlHost $domain "PSDirect liveness probe (post-restart)"
+                            if (-not $reachable -and $p -lt 8) { Start-Sleep -Seconds 20 }
+                        }
+
                         if (-not $reachable) {
                             $postState = (Get-VM2 -Name $sqlHost -ErrorAction SilentlyContinue).State
-                            $msg = "[$($ss.vmName) -> $sqlHost] SQL host is Running but never became reachable via PowerShell Direct, even after a restart (state=$postState). The in-guest self-heal scriptblock cannot be delivered."
+                            $msg = "[$($ss.vmName) -> $sqlHost] SQL host is Running but never answered PowerShell Direct, even after a restart (state=$postState). The in-guest self-heal scriptblock cannot be delivered."
                             Write-Log "[Phase 8] $msg" -Failure
                             $preflightFailures.Add($msg) | Out-Null
                             continue
                         }
+                        Write-Log "[Phase 8] $sqlHost`: PowerShell Direct recovered after restart." -Activity
                     }
                 }
 
