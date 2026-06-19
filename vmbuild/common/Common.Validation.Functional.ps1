@@ -265,6 +265,16 @@ function Test-VmFunctionality {
         $testsPassed = Test-MaintenanceTasks -VMName $VMName -Domain $domain
     }
 
+    # Verify the DSC LCM is idle. By Phase 11 every phase MOF has been applied,
+    # so the LCM should be Idle; a Busy/Pending state means DSC is still running
+    # after the build, wasting host CPU/disk. Informational WARN only (it never
+    # fails the VM, so it is intentionally not assigned to $testsPassed). Skip
+    # powered-off / non-PSDirect roles and Linux VMs (no DSC).
+    if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA')) {
+        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Verifying DSC LCM is idle"
+        $null = Test-DscIdle -VMName $VMName -Domain $domain
+    }
+
     # Pre-create the domain admin user profile so first RDCMan/RDP login is fast.
     # Applies to all domain-joined Windows VMs that will stay running. Skip:
     #   - OSDClient/AADClient: not reachable via PSDirect / not domain-joined
@@ -4882,6 +4892,91 @@ function Test-MaintenanceTasks {
         -AsJob -TimeoutSeconds 300
 
     return (Format-TestResult -VMName $VMName -RoleLabel 'Maintenance' -Result $result)
+}
+
+function Test-DscIdle {
+    <#
+    .SYNOPSIS
+        Warns (non-fatal) when the DSC LCM is still busy/pending after the build.
+    .DESCRIPTION
+        By Phase 11 every phase MOF has already been applied, so the LCM should
+        be Idle. A non-Idle LCMState means DSC is still doing work after the
+        deployment finished:
+          - Busy  = a configuration is actively applying right now.
+          - Pending* = a configuration and/or reboot is queued and the
+            consistency engine will pick it up.
+        DSC continuing to run after the build just burns host CPU/disk, so this
+        emits a WARN with the LCM state and the most recent DSC operational-log
+        activity (which resource/config is still executing). It is informational
+        only and never fails the VM.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VMName,
+        [Parameter(Mandatory)][string]$Domain
+    )
+
+    $Phase = 11
+    Write-Log "[Phase $Phase] $VMName [DSC]: Checking DSC LCM is idle" -LogOnly
+
+    $scriptBlock = {
+        # Informational check: Passed stays $true unconditionally so a still-
+        # running DSC never fails the VM's functional validation.
+        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
+
+        $results.Details.Add("CMD: (Get-DscLocalConfigurationManager).LCMState")
+        $lcmState = 'Unknown'
+        try {
+            $lcmState = (Get-DscLocalConfigurationManager -ErrorAction Stop).LCMState
+        }
+        catch {
+            # LCM unreadable (no config ever pushed / provider host down) means
+            # there is no apply running. Nothing is wasting resources.
+            $results.Details.Add("OK: DSC LCM not queryable ($($_.Exception.Message)); treating as no running configuration")
+            return $results
+        }
+
+        # Idle = nothing applying and nothing queued -- the desired post-build state.
+        if ($lcmState -eq 'Idle') {
+            $results.Details.Add("OK: DSC LCM is Idle")
+            return $results
+        }
+
+        # Any other state means DSC is still running after the build finished.
+        $results.Details.Add("WARN: DSC LCM is '$lcmState' (expected 'Idle' after the build) - DSC is still running after deployment and wasting resources")
+
+        # Surface the most recent DSC operational-log activity so the operator
+        # can see which configuration/resource is still executing.
+        try {
+            $events = Get-WinEvent -LogName 'Microsoft-Windows-DSC/Operational' -MaxEvents 12 -ErrorAction Stop |
+                Sort-Object TimeCreated
+            if ($events) {
+                $results.Details.Add("WARN: Most recent DSC operational-log activity (oldest -> newest):")
+                foreach ($e in $events) {
+                    $msg = ($e.Message -replace '\s+', ' ').Trim()
+                    if ($msg.Length -gt 220) { $msg = $msg.Substring(0, 220) + '...' }
+                    $results.Details.Add("WARN:   [$($e.TimeCreated.ToString('HH:mm:ss'))] $msg")
+                }
+            }
+            else {
+                $results.Details.Add("WARN: No DSC operational-log events found to identify the running configuration")
+            }
+        }
+        catch {
+            $results.Details.Add("WARN: Could not read DSC operational log to identify the running configuration ($($_.Exception.Message))")
+        }
+
+        return $results
+    }
+
+    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
+        -ScriptBlock $scriptBlock -DisplayName "Phase11-DSC-Idle-Test" -SuppressLog `
+        -AsJob -TimeoutSeconds 180
+
+    # Format-TestResult returns the script's Passed verdict, which is always
+    # $true here; the WARN: detail lines still reach the console/log via the
+    # Phase 11 output buffer.
+    return (Format-TestResult -VMName $VMName -RoleLabel 'DSC' -Result $result)
 }
 
 function Test-UserProfilePreCreation {
