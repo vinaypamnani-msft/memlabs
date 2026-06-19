@@ -1618,6 +1618,12 @@ function Get-ConfigurationData {
                 # the install already succeeded and a new rollback point is
                 # unnecessary. If there's no CAS/Primary in the Phase 8 set at
                 # all, no CM site install is happening -- also skip.
+                # lastPhaseComplete is now monotonic (see Set-VMNote in Common.ps1),
+                # so '< 8' reliably means "this CAS/Primary has never finished
+                # Phase 8" -- the only state where a pre-install rollback point
+                # is useful. This correctly covers both the happy first-deploy
+                # path AND a resume after an earlier phase (e.g. Phase 4) failed,
+                # while skipping no-op re-runs on a lab that already reached 8+.
                 $phase8SiteServers = $cd.AllNodes | Where-Object {
                     $_.NodeName -ne "*" -and ($_.Role -eq 'CAS' -or $_.Role -eq 'Primary')
                 }
@@ -1639,9 +1645,6 @@ function Get-ConfigurationData {
                     else {
                         Write-Log "[Phase 8] Skipping auto-snapshot: CAS/Primary already completed Phase 8 (re-run)" -LogOnly
                     }
-                }
-                elseif (-not $global:Phase1DeployedNewVMs) {
-                    Write-Log "[Phase 8] Skipping auto-snapshot: re-deploy (Phase 1 did not deploy new VMs)" -LogOnly
                 }
                 elseif (-not $snapshot) {
                     $response = Read-YesOrNoWithTimeout -timeout 30 -prompt "Automatically take snapshot of domain? (Y/n)" -HideHelp -Default "y"

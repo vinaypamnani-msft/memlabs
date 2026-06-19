@@ -2956,16 +2956,18 @@ function New-VmNote {
             memLabsDeployVersion = $Common.MemLabsVersion
         }
 
-        # Track the last phase that completed successfully on this VM
+        # Track the highest phase that has ever completed successfully on this VM.
+        # Monotonic: a -StartPhase N re-run must not drop the value from (say) 11
+        # down to N, because the Phase 8 auto-snapshot guard reads this as
+        # "has this CAS/Primary ever finished Phase 8?" (lastPhaseComplete >= 8).
+        $existingNote = Get-VMNote -VMName $VmName
+        $existingMax = if ($existingNote -and $existingNote.lastPhaseComplete) { [int]$existingNote.lastPhaseComplete } else { 0 }
         if ($Successful -and $Phase -gt 0) {
-            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $Phase -Force
+            $newMax = [Math]::Max($existingMax, [int]$Phase)
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $newMax -Force
         }
-        else {
-            # Preserve existing lastPhaseComplete from previous successful phase
-            $existingNote = Get-VMNote -VMName $VmName
-            if ($existingNote -and $existingNote.lastPhaseComplete) {
-                $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingNote.lastPhaseComplete -Force
-            }
+        elseif ($existingMax -gt 0) {
+            $vmNote | Add-Member -MemberType NoteProperty -Name "lastPhaseComplete" -Value $existingMax -Force
         }
 
         if ($UpdateVersion.IsPresent) {
@@ -5265,24 +5267,8 @@ function Invoke-VmCommand {
                                 # PSRemotingJob exposes per-session streams on its child job.
                                 $progressSource = if ($job.ChildJobs -and $job.ChildJobs.Count -gt 0) { $job.ChildJobs[0] } else { $job }
                                 if ($progressSource -and $progressSource.Progress -and $progressSource.Progress.Count -gt 0) {
-                                    # Scan backward for the latest *real* progress record. PowerShell
-                                    # auto-emits a "Preparing modules for first use." (and Compress-Archive)
-                                    # pseudo-record whose StatusDescription is whitespace-only; forwarding
-                                    # it to Write-Progress2 trips the -Status ValidateNotNullOrEmpty guard
-                                    # and logs a benign-but-noisy exception. Skip those, mirroring the
-                                    # filtering Write-JobProgress already does in Common.Phases.ps1.
-                                    $lastRec = $null
-                                    for ($ri = $progressSource.Progress.Count - 1; $ri -ge 0; $ri--) {
-                                        $cand = $progressSource.Progress[$ri]
-                                        if ($cand -and $cand.Activity -and
-                                            $cand.Activity -ne "Preparing modules for first use." -and
-                                            $cand.Activity -ne "Compress-Archive" -and
-                                            $cand.StatusDescription -and $cand.StatusDescription.Trim().Length -gt 0) {
-                                            $lastRec = $cand
-                                            break
-                                        }
-                                    }
-                                    if ($lastRec) {
+                                    $lastRec = $progressSource.Progress[$progressSource.Progress.Count - 1]
+                                    if ($lastRec -and $lastRec.Activity -and $lastRec.StatusDescription) {
                                         $line = "$($lastRec.Activity)|$($lastRec.StatusDescription)"
                                         if ($line -ne $lastForwarded) {
                                             $lastForwarded = $line
@@ -8027,8 +8013,8 @@ if (-not $Common.Initialized) {
         }
 
         $global:Common = [PSCustomObject]@{
-            MemLabsVersion              = "260619.0"
-            LatestHotfixVersion         = "260619.0"
+            MemLabsVersion              = "260616.0"
+            LatestHotfixVersion         = "260616.0"
             PS7                         = $PS7
             Initialized                 = $true
             InJob                       = $InJob
