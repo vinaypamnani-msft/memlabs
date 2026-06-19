@@ -275,17 +275,6 @@ function Test-VmFunctionality {
         $null = Test-DscIdle -VMName $VMName -Domain $domain
     }
 
-    # Pre-create the domain admin user profile so first RDCMan/RDP login is fast.
-    # Applies to all domain-joined Windows VMs that will stay running. Skip:
-    #   - OSDClient/AADClient: not reachable via PSDirect / not domain-joined
-    #   - Linux VMs (Proxy, LinuxServer, LinuxClient): no Windows profiles
-    #   - StandaloneRootCA: offline (powered off) after setup, stays off long-term
-    #   - WorkgroupMember/InternetClient: not domain-joined with the admin account
-    if ($testsPassed -and -not $vmIsLinux -and $role -notin @('OSDClient', 'AADClient', 'StandaloneRootCA', 'WorkgroupMember', 'InternetClient')) {
-        Write-Progress2 -PercentComplete 0 -Activity $validationActivity -Status "Pre-creating domain admin profile"
-        $testsPassed = Test-UserProfilePreCreation -VMName $VMName -Domain $domain -DeployConfig $DeployConfig
-    }
-
     # ---- Linux health check ----
     # For all Linux VMs: ping + SSH + SMB health cascade from the host.
     # Ping fail → restart. SSH down + SMB down → restart (both services dead).
@@ -4977,115 +4966,6 @@ function Test-DscIdle {
     # $true here; the WARN: detail lines still reach the console/log via the
     # Phase 11 output buffer.
     return (Format-TestResult -VMName $VMName -RoleLabel 'DSC' -Result $result)
-}
-
-function Test-UserProfilePreCreation {
-    <#
-    .SYNOPSIS
-        Pre-creates the domain admin user profile on the VM.
-    .DESCRIPTION
-        Runs a scheduled task as the domain admin account inside the guest VM,
-        which forces Windows to create the full user profile (NTUSER.DAT, shell
-        folders, etc.). This eliminates the long "Preparing your desktop" delay
-        when first connecting via RDCMan or RDP.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$VMName,
-        [Parameter(Mandatory)][string]$Domain,
-        [Parameter(Mandatory)][object]$DeployConfig
-    )
-
-    $Phase = 11
-    $adminName = $DeployConfig.vmOptions.adminName
-    if (-not $adminName) { $adminName = 'admin' }
-
-    # Prefer the VM's own assigned domain user (domainUser) over the domain admin,
-    # so the profile that actually gets used on first RDP login is the one we
-    # pre-create. domainUser is stored prefixed (e.g. "ADA-user1") and shares the
-    # same lab password as the admin account (both set to $DomainCreds in Phase2DC),
-    # so the existing admin password works to register the task as that user.
-    $thisVM = $DeployConfig.virtualMachines | Where-Object { $_.vmName -eq $VMName } | Select-Object -First 1
-    $profileUser = if ($thisVM -and $thisVM.domainUser) { $thisVM.domainUser } else { $adminName }
-
-    Write-Log "[Phase $Phase] $VMName [ProfilePreCreate]: Pre-creating profile for $Domain\$profileUser" -LogOnly
-
-    $scriptBlock = {
-        param($domainName, $userName, [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
-              $adminPass)
-        $results = @{ Passed = $true; Details = [System.Collections.Generic.List[string]]::new() }
-
-        $fullUser = "$domainName\$userName"
-
-        # Check if profile already exists
-        $existingProfile = Get-CimInstance -Class Win32_UserProfile -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalPath -like "*\$userName" -and -not $_.Special }
-        if ($existingProfile) {
-            $results.Details.Add("OK: Profile already exists at $($existingProfile.LocalPath)")
-            return $results
-        }
-
-        # Create a scheduled task that runs as the domain admin to trigger profile creation.
-        # The task runs a trivial command; Windows creates the profile on first logon.
-        $taskName = 'MemLabs-ProfilePreCreate'
-        $results.Details.Add("CMD: Creating scheduled task '$taskName' as $fullUser")
-
-        try {
-            # Clean up any leftover from a previous attempt
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-
-            $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c echo profile-created'
-            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
-            Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings `
-                -User $fullUser -Password $adminPass -RunLevel Highest -ErrorAction Stop | Out-Null
-
-            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-
-            # Wait for the task to complete (up to 60 seconds)
-            $maxWait = 60
-            $elapsed = 0
-            do {
-                Start-Sleep -Seconds 2
-                $elapsed += 2
-                $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-            } while ($elapsed -lt $maxWait -and $null -ne $taskInfo -and $taskInfo.LastTaskResult -eq 267009) # 267009 = task is running
-
-            # Clean up
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        }
-        catch {
-            $results.Details.Add("WARN: Scheduled task approach failed: $($_.Exception.Message)")
-            # Not fatal - try to continue and check if profile was created anyway
-        }
-
-        # Verify the profile was created
-        Start-Sleep -Seconds 2
-        $userProfile = Get-CimInstance -Class Win32_UserProfile -ErrorAction SilentlyContinue |
-            Where-Object { $_.LocalPath -like "*\$userName" -and -not $_.Special }
-        if ($userProfile) {
-            $results.Details.Add("OK: Profile pre-created at $($userProfile.LocalPath)")
-        }
-        else {
-            # Non-fatal: a missing pre-created profile only means the first interactive
-            # RDP/RDCMan logon will incur the one-time "Preparing your desktop" delay.
-            # It does not indicate a broken VM, so this is a WARN, not a FAIL.
-            $results.Details.Add("WARN: Profile for $fullUser was not pre-created (first RDP login may be slow)")
-        }
-
-        return $results
-    }
-
-    # Pass the admin password so the scheduled task can run as the chosen domain user
-    # (admin and per-VM domainUser share the same lab password).
-    $adminPassword = $Common.LocalAdmin.GetNetworkCredential().Password
-
-    $result = Invoke-VmCommand -VmName $VMName -VmDomainName $Domain `
-        -ScriptBlock $scriptBlock `
-        -ArgumentList @($Domain, $profileUser, $adminPassword) `
-        -DisplayName "Phase11-ProfilePreCreate" -SuppressLog `
-        -AsJob -TimeoutSeconds 300
-
-    return (Format-TestResult -VMName $VMName -RoleLabel 'ProfilePreCreate' -Result $result)
 }
 
 function Test-PassiveSiteFunctionality {
