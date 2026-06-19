@@ -1319,13 +1319,19 @@ function New-LinuxVirtualMachine {
                         }
                         else {
                             Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)"
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName (Linux)" -LogContext $VmName
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                     }
                 }
                 catch {
-                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
+                    # Add-DHCPReservationIsolated already logs each attempt and rethrows
+                    # with the full exception chain on final failure; surface a concise
+                    # WARN here plus the script stack for diagnostic completeness.
+                    $exType = $_.Exception.GetType().FullName
+                    $exMsg  = $_.Exception.Message
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP) [$exType]: $exMsg" -Warning
+                    if ($_.ScriptStackTrace) { Write-Log "$VmName`: DHCP reservation failure stack: $($_.ScriptStackTrace)" -LogOnly }
                 }
             }
         }

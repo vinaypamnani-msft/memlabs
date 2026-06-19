@@ -1046,16 +1046,6 @@ function Test-DhcpReservations {
         if ($vm.role -eq 'OSDClient') { continue }
         # A VM with no pre-assigned IP had no reservation created for it.
         if (-not $vm.AssignedIP) { continue }
-        # Linux Proxy uses cloud-init/netplan for its static .2 IP; Phase 1's
-        # Add-DhcpServerv4Reservation call against that IP fails (the DHCP
-        # server rejects it for that address specifically -- see Phase 1 log:
-        # "Failed to reserve IP address <network>.2"). DHCP can't lease .2
-        # to anyone else either (cloud-init owns it on the guest), so there's
-        # nothing to protect against. Skip the audit for this case.
-        if ($vm.role -eq 'Proxy' -and $vm.operatingSystem -and
-            ($vm.operatingSystem -like 'Ubuntu*' -or $vm.operatingSystem -like 'Debian*' -or $vm.operatingSystem -like 'Linux*')) {
-            continue
-        }
 
         $checked++
         $expectedIp = ($vm.AssignedIP -replace '/.+$', '')

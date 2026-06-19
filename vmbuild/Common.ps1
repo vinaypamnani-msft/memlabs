@@ -3418,19 +3418,138 @@ function Get-AllDHCPReservationsIsolated {
     }
 }
 
+# Host-wide named mutex serializing every DHCP server write/read-for-write op.
+# The DhcpServer CDXML cmdlets call into the DHCP RPC interface and parallel
+# Phase 1 VM-create jobs hitting Add-DhcpServerv4Reservation /
+# Get-DhcpServerv4FreeIPAddress + Add-DhcpServerv4ExclusionRange against the
+# same scope produced intermittent "Failed to reserve IP address ... in scope
+# ... on DHCP server ..." errors that swallowed all root-cause detail. The
+# Global\ prefix makes the mutex visible across PowerShell processes / jobs
+# on the host (matches the pattern used by Global\MemlabsImapi2fsLock in
+# Common.Linux.ps1). Failures to acquire fall through after the timeout so a
+# single stuck holder can't deadlock a whole deploy -- the operation runs
+# anyway and any race-induced error gets caught/retried by the caller.
+function Invoke-WithDhcpMutex {
+    param(
+        [Parameter(Mandatory = $true)] [scriptblock] $ScriptBlock,
+        [int] $TimeoutSeconds = 120
+    )
+    $mtx = $null
+    $acquired = $false
+    try {
+        try {
+            $mtx = [System.Threading.Mutex]::new($false, 'Global\MemLabs_DHCP')
+            $acquired = $mtx.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # Prior holder died without releasing; ownership is now ours.
+            $acquired = $true
+        }
+        catch {
+            # Mutex creation itself failed (rare: ACL / WaitHandleCannotBeOpenedException
+            # under unusual session conditions). Run unguarded rather than fail the deploy.
+            Write-Log "Invoke-WithDhcpMutex: mutex unavailable, running unguarded ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -LogOnly
+        }
+        if (-not $acquired -and $mtx) {
+            Write-Log "Invoke-WithDhcpMutex: timed out after $TimeoutSeconds s; proceeding without serialization" -LogOnly
+        }
+        & $ScriptBlock
+    }
+    finally {
+        if ($mtx) {
+            if ($acquired) { try { $mtx.ReleaseMutex() } catch {} }
+            try { $mtx.Dispose() } catch {}
+        }
+    }
+}
+
 # Create a DHCP reservation, running the DhcpServer CIM cmdlet in an isolated
-# runspace. Throws on failure (matches the prior -ErrorAction Stop behavior).
+# runspace. Serialized across the host via Global\MemLabs_DHCP and retried on
+# failure with exponential backoff so transient RPC contention from parallel
+# Phase 1 VM-create jobs doesn't surface as a permanent reservation failure.
+# Pre-cleans an orphaned reservation on the same IP under a different MAC --
+# left over from a partial prior deploy this is the most common cause of the
+# bare cmdlet failing. Throws with full exception chain detail (type, message,
+# every InnerException) on final failure so the caller's log line carries the
+# actual root cause instead of a stringified ErrorRecord.
 function Add-DHCPReservationIsolated {
     param(
         [Parameter(Mandatory = $true)][string] $ScopeId,
         [Parameter(Mandatory = $true)][string] $IPAddress,
         [Parameter(Mandatory = $true)][string] $Mac,
-        [string] $Description
+        [string] $Description,
+        [int] $MaxAttempts = 4,
+        [string] $LogContext
     )
-    Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
-        param($scopeId, $ip, $mac, $desc)
-        Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
-    } | Out-Null
+
+    $tag = if ($LogContext) { "$LogContext`: " } else { '' }
+    $attempt = 0
+    $lastError = $null
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+        try {
+            Invoke-WithDhcpMutex -ScriptBlock {
+                Invoke-IsolatedCim -ArgumentList $ScopeId, $IPAddress, $Mac, $Description -ScriptBlock {
+                    param($scopeId, $ip, $mac, $desc)
+
+                    # Pre-clean: orphaned reservation on this IP under a different
+                    # MAC (e.g. a previous deploy that wasn't fully torn down) is
+                    # the most common cause of Add-DhcpServerv4Reservation throwing
+                    # "Failed to reserve IP address ... in scope ...". If the
+                    # existing reservation is already ours, the Add below will
+                    # report duplicate -- caller treats that as success via retry.
+                    try {
+                        $existing = Get-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue
+                        if ($existing) {
+                            $existingMac = ($existing.ClientId -replace '-', '')
+                            if ($existingMac -ne $mac) {
+                                Remove-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ErrorAction SilentlyContinue | Out-Null
+                            }
+                            else {
+                                # Reservation already exists with our MAC -- idempotent success.
+                                return
+                            }
+                        }
+                    }
+                    catch { }
+
+                    Add-DhcpServerv4Reservation -ScopeId $scopeId -IPAddress $ip -ClientId $mac -Description $desc -ErrorAction Stop | Out-Null
+                } | Out-Null
+            }
+            if ($attempt -gt 1) {
+                Write-Log "${tag}Add-DHCPReservationIsolated: succeeded for $IPAddress on attempt $attempt/$MaxAttempts (Scope=$ScopeId, MAC=$Mac)" -LogOnly
+            }
+            return
+        }
+        catch {
+            $lastError = $_
+            $exType = $_.Exception.GetType().FullName
+            $exMsg = $_.Exception.Message
+            $inner = $_.Exception.InnerException
+            $innerStr = ''
+            while ($inner) {
+                $innerStr += " >> [$($inner.GetType().FullName)] $($inner.Message)"
+                $inner = $inner.InnerException
+            }
+            Write-Log "${tag}Add-DHCPReservationIsolated: attempt $attempt/$MaxAttempts failed for $IPAddress (Scope=$ScopeId, MAC=$Mac): [$exType] $exMsg$innerStr" -LogOnly
+            if ($attempt -lt $MaxAttempts) {
+                # 500ms, 1s, 2s
+                Start-Sleep -Milliseconds ([int](500 * [math]::Pow(2, $attempt - 1)))
+            }
+        }
+    }
+
+    # All attempts failed -- rethrow with full diagnostic context so the
+    # caller's catch logs the real root cause instead of a stringified $_.
+    $exType = $lastError.Exception.GetType().FullName
+    $exMsg = $lastError.Exception.Message
+    $inner = $lastError.Exception.InnerException
+    $innerStr = ''
+    while ($inner) {
+        $innerStr += " >> [$($inner.GetType().FullName)] $($inner.Message)"
+        $inner = $inner.InnerException
+    }
+    throw "Add-DHCPReservationIsolated: all $MaxAttempts attempts failed for $IPAddress (Scope=$ScopeId, MAC=$Mac). Final error: [$exType] $exMsg$innerStr"
 }
 
 function Remove-DHCPReservation {
@@ -3446,43 +3565,48 @@ function Remove-DHCPReservation {
     # lookup/removal in an isolated in-process runspace so the poison lands on
     # the throwaway runspace instead. Removal is synchronous here (the prior
     # -AsJob was itself a progress-isolation workaround that's now unnecessary).
-    $logLines = Invoke-IsolatedCim -ArgumentList $ip, $mac, $vmName -ScriptBlock {
-        param($ip, $mac, $vmName)
-        $out = @()
-        $scopes = (Get-DhcpServerv4Scope).ScopeID
+    # Wrapped in Invoke-WithDhcpMutex so parallel Phase 1 jobs don't fight the
+    # add path -- a remove on scope X racing an add on scope X has produced
+    # spurious "Failed to reserve" errors in the past.
+    $logLines = Invoke-WithDhcpMutex -ScriptBlock {
+        Invoke-IsolatedCim -ArgumentList $ip, $mac, $vmName -ScriptBlock {
+            param($ip, $mac, $vmName)
+            $out = @()
+            $scopes = (Get-DhcpServerv4Scope).ScopeID
 
-        if ($ip) {
-            $out += "$vmName Checking for Reservation for $ip"
-            if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
-                $out += "$vmName Removing Reservation for $ip"
-                Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue
-            }
-        }
-
-        if ($mac) {
-            $out += "$vmName Checking for Reservation for $mac"
-            foreach ($scope in $scopes) {
-                $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
-                if ($reservation) {
-                    $out += "$vmName Removing Reservation for $mac"
-                    Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
-                    break
+            if ($ip) {
+                $out += "$vmName Checking for Reservation for $ip"
+                if (Get-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue) {
+                    $out += "$vmName Removing Reservation for $ip"
+                    Remove-DhcpServerv4Reservation -IPAddress $ip -ErrorAction SilentlyContinue
                 }
             }
-        }
 
-        if (-not $ip -and -not $mac) {
-            $out += "$vmName Checking for Reservation for $vmName"
-            foreach ($scope in $scopes) {
-                $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
-                if ($reservation) {
-                    $out += "$vmName Removing Reservation for $vmName"
-                    Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
-                    break
+            if ($mac) {
+                $out += "$vmName Checking for Reservation for $mac"
+                foreach ($scope in $scopes) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                    if ($reservation) {
+                        $out += "$vmName Removing Reservation for $mac"
+                        Remove-DhcpServerv4Reservation -ScopeId $scope -ClientId $mac -ErrorAction SilentlyContinue
+                        break
+                    }
                 }
             }
+
+            if (-not $ip -and -not $mac) {
+                $out += "$vmName Checking for Reservation for $vmName"
+                foreach ($scope in $scopes) {
+                    $reservation = Get-DhcpServerv4Reservation -ScopeId $scope -ErrorAction SilentlyContinue | Where-Object { $_.Name -like $vmName + ".*" }
+                    if ($reservation) {
+                        $out += "$vmName Removing Reservation for $vmName"
+                        Remove-DhcpServerv4Reservation -ScopeId $scope -IPAddress $reservation.IPAddress -ErrorAction SilentlyContinue
+                        break
+                    }
+                }
+            }
+            return $out
         }
-        return $out
     }
 
     foreach ($line in $logLines) {
@@ -3914,13 +4038,23 @@ function Set-DeployConfigIPAddresses {
         # Dynamic allocation from the DHCP pool
         if (-not $ip) {
             try {
-                $freeIP = Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop
-                if ($freeIP) {
-                    $ip = $freeIP.ToString()
+                # Get-DhcpServerv4FreeIPAddress + Add-DhcpServerv4ExclusionRange
+                # is a read-then-write race when multiple Phase 1 jobs allocate
+                # against the same scope. Serialize host-wide via the DHCP mutex
+                # so two parallel allocations can't both pick the same address
+                # before either one excludes it.
+                $allocResult = Invoke-WithDhcpMutex -ScriptBlock {
+                    $freeIP = Get-DhcpServerv4FreeIPAddress -ScopeId $scopeId -ErrorAction Stop
+                    if ($freeIP) {
+                        # Exclude it immediately so the next call can't return the same address
+                        Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $freeIP -EndRange $freeIP -ErrorAction SilentlyContinue | Out-Null
+                    }
+                    $freeIP
+                }
+                if ($allocResult) {
+                    $ip = $allocResult.ToString()
                     $ipSource = 'dhcp-pool'
                     $dynamicCount++
-                    # Exclude it immediately so the next call can't return the same address
-                    Add-DhcpServerv4ExclusionRange -ScopeId $scopeId -StartRange $freeIP -EndRange $freeIP -ErrorAction SilentlyContinue | Out-Null
                 }
                 else {
                     Write-Log "$($vm.vmName): DHCP scope $scopeId returned no free IPs (scope may be exhausted)" -Warning
@@ -4331,14 +4465,20 @@ function New-VirtualMachine {
                         }
                         else {
                             Remove-DHCPReservation -mac $vmMac2 -vmName $VmName
-                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName"
+                            Add-DHCPReservationIsolated -ScopeId $scopeId2 -IPAddress $thisVmConfig2.AssignedIP -Mac $vmMac2 -Description "Reservation for $VmName" -LogContext $VmName
                             Write-Log "$VmName`: DHCP reservation created post-start: $($thisVmConfig2.AssignedIP) (MAC=$vmMac2, Scope=$scopeId2)" -LogOnly
                         }
                         $thisVmConfig2 | Add-Member -MemberType NoteProperty -Name 'ReservationCreated' -Value $true -Force
                     }
                 }
                 catch {
-                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP). $_" -Warning
+                    # Add-DHCPReservationIsolated already logs each attempt and rethrows
+                    # with the full exception chain on final failure; surface a concise
+                    # WARN here plus the script stack for diagnostic completeness.
+                    $exType = $_.Exception.GetType().FullName
+                    $exMsg  = $_.Exception.Message
+                    Write-Log "$VmName`: Could not create DHCP reservation post-start for $($thisVmConfig2.AssignedIP) [$exType]: $exMsg" -Warning
+                    if ($_.ScriptStackTrace) { Write-Log "$VmName`: DHCP reservation failure stack: $($_.ScriptStackTrace)" -LogOnly }
                 }
             }
         }
