@@ -768,6 +768,56 @@ if ($CurrentRole -ne "CAS" -and $CurrentRole -in @("Primary", "Secondary")) {
     }
 }
 
+# Force a FULL collection re-evaluation on every MEMLABS-* device collection
+# (plus All Unknown Computers) now that PushClients + auto-push + first-contact
+# Heartbeat Discovery have had time to register the agent and flip
+# SMS_R_System.Client to 1 for every freshly-pushed VM. Without this,
+# SMS_FullCollectionMembership.IsClient is the value colleval snapshotted
+# when the resource was FIRST added to the collection -- typically before
+# its DDR was processed -- and the stale IsClient=False cache causes CM to
+# skip projecting per-resource application deployment policy
+# (CCM_ApplicationCIAssignment) to those members. Observed symptom:
+# Phase 11 DomainMember check WARNs "Office deployment policy not visible
+# after 3 min of polling" on a client that IS in MEMLABS-Office Install
+# Targets and IS a healthy registered CM client, purely because the
+# membership snapshot was stale. A single RequestRefresh($false) rewrites
+# every IsClient cell on the next colleval pass.
+if ($CurrentRole -in @("Primary", "Secondary")) {
+    $refSiteCode = $ThisVM.siteCode
+    if ($refSiteCode) {
+        try {
+            $ns = "root\sms\site_$refSiteCode"
+            # CollectionType=2 is Device. Filter to MEMLABS-* + All Unknown
+            # Computers in PowerShell (WQL -Filter doesn't reliably accept
+            # SQL LIKE with %). Built-in collections (All Systems, All
+            # Users, etc.) are excluded -- CM evals those on its own
+            # schedule and we don't deploy MEMLABS apps to them directly.
+            $allCols = @(Get-WmiObject -Namespace $ns -Class SMS_Collection -Filter "CollectionType=2" -ErrorAction Stop)
+            $targetCols = @($allCols | Where-Object { $_.Name -like 'MEMLABS-*' -or $_.Name -eq 'All Unknown Computers' })
+            if ($targetCols.Count -gt 0) {
+                Write-DscStatus "Refreshing $($targetCols.Count) collection(s) to update IsClient snapshots after PushClients"
+                $refOk = 0
+                foreach ($c in $targetCols) {
+                    try {
+                        [void]([wmi]$c.__PATH).RequestRefresh($false)
+                        $refOk++
+                    }
+                    catch {
+                        Write-DscStatus "  WARN: RequestRefresh on '$($c.Name)' ($($c.CollectionID)) failed: $($_.Exception.Message)"
+                    }
+                }
+                Write-DscStatus "  Requested re-eval on $refOk of $($targetCols.Count) collection(s); colleval will process them in the background"
+            }
+            else {
+                Write-DscStatus "No MEMLABS-* device collections found to refresh (perfloading may not have run)"
+            }
+        }
+        catch {
+            Write-DscStatus "WARNING: Failed to enumerate collections for refresh sweep: $($_.Exception.Message)"
+        }
+    }
+}
+
 # Non-CAS: mark completion now that PushClients, EnableBLM, component
 # resets, and component stabilization are done.
 if ($CurrentRole -ne "CAS") {
