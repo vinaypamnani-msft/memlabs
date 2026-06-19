@@ -187,6 +187,38 @@ $ssSB = {
             }
         }
     } catch { Add("SCI error: $($_.Exception.Message)") }
+
+    Add("`n***** Enhanced HTTP / token state (the CCMTOKENAUTH path) *****")
+    # Site-wide eHTTP + client-cert communication settings live in SMS_SCI_SCProperty
+    # under the SMS_HIERARCHY_MANAGER / SMS_POLICY_PROVIDER components. Dump anything
+    # token / eHTTP / cert / CRL / communication related so we can diff working vs broken.
+    try {
+        $props = Get-CimInstance -Namespace $ns -ClassName SMS_SCI_SCProperty -ErrorAction Stop |
+            Where-Object { $_.PropertyName -match 'Token|eHTTP|EnhancedHTTP|HTTPSOnly|ClientCert|UsePKI|CRL|CommunicationMode|Enable' }
+        if ($props) {
+            foreach ($p in $props) { Add(("   [{0}] {1} = Value:{2} Value1:{3}" -f $p.ItemName, $p.PropertyName, $p.Value, $p.Value1)) }
+        } else { Add("   (no token/eHTTP SCProperty matched)") }
+    } catch { Add("SCProperty error: $($_.Exception.Message)") }
+    # Site definition flags
+    try {
+        $sd = Get-CimInstance -Namespace $ns -ClassName SMS_SCI_SiteDefinition -ErrorAction SilentlyContinue
+        foreach ($d in $sd) {
+            foreach ($pl in $d.Props) {
+                if ($pl.PropertyName -match 'Token|eHTTP|HTTPS|ClientCert|PKI|CRL|Communication') {
+                    Add(("   SiteDef {0} = Value:{1} Value1:{2}" -f $pl.PropertyName, $pl.Value, $pl.Value1))
+                }
+            }
+        }
+    } catch {}
+    # mpcontrol / token-signing cert health
+    Add("`n----- MP token / SMS Issuing cert in LocalMachine (SMS Token / Issuing) -----")
+    try {
+        Get-ChildItem Cert:\LocalMachine\SMS -ErrorAction SilentlyContinue | ForEach-Object {
+            Add(("   SMS store: Thumb={0} Subject={1} NotAfter={2}" -f $_.Thumbprint, $_.Subject, $_.NotAfter))
+        }
+    } catch {}
+    Add("`n----- Site server local time (clock skew check) -----")
+    Add("   LocalTime(UTC) = $((Get-Date).ToUniversalTime().ToString('o'))")
     $sb.ToString()
 }
 
@@ -197,14 +229,55 @@ $clSB = {
     $sb = New-Object System.Text.StringBuilder
     function Add([string]$t) { [void]$sb.AppendLine($t) }
     Add("==================== CLIENT: $env:COMPUTERNAME ====================")
+
+    Add("`n----- Clock / time skew (tokens + Kerberos are time-sensitive) -----")
+    Add("   LocalTime(UTC) = $((Get-Date).ToUniversalTime().ToString('o'))")
+    try { Add((& w32tm /query /status 2>&1 | Out-String)) } catch {}
+
+    Add("`n----- Client PKI cert(s) in LocalMachine\My (issuer must be MP-trusted) -----")
+    try {
+        Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue | ForEach-Object {
+            $eku = ($_.EnhancedKeyUsageList | ForEach-Object { $_.FriendlyName }) -join ','
+            Add(("   Thumb={0} Subj={1} Issuer={2} EKU=[{3}] NotAfter={4}" -f $_.Thumbprint, $_.Subject, $_.Issuer, $eku, $_.NotAfter))
+        }
+    } catch {}
+
+    $pattern = 'BITS|0x800704dd|800704dd|InternetMode|GetDPLocations|Authorization|Negotiate|client cert|CCMTOKENAUTH|SMS_DP_SMSPKG|token|Successfully downloaded|return code|sslFlags|BG_AUTH'
+
+    # Live ccmsetup.log
     $log = 'C:\Windows\ccmsetup\Logs\ccmsetup.log'
     if (Test-Path $log) {
-        Add("`n----- ccmsetup.log: download / auth / BITS lines -----")
-        $hits = Select-String -Path $log -Pattern 'BITS|0x800704dd|InternetMode|GetDPLocations|Authorization|Negotiate|client cert|Successfully downloaded|return code|sslFlags' -ErrorAction SilentlyContinue
-        if ($hits) { Add(($hits | Select-Object -Last 60 | ForEach-Object { $_.Line }) -join "`n") }
-        Add("`n----- ccmsetup.log tail (30) -----")
+        Add("`n----- ccmsetup.log (live): download / auth / token / BITS lines -----")
+        $hits = Select-String -Path $log -Pattern $pattern -ErrorAction SilentlyContinue
+        if ($hits) { Add(($hits | Select-Object -Last 80 | ForEach-Object { $_.Line }) -join "`n") }
+        Add("`n----- ccmsetup.log (live) tail (30) -----")
         Add((Get-Content $log -Tail 30 | Out-String))
-    } else { Add("(no ccmsetup.log)") }
+    } else { Add("(no live ccmsetup.log)") }
+
+    # Rolled ccmsetup-*.log files (where the ORIGINAL 0x800704dd most likely lives)
+    Add("`n----- ROLLED ccmsetup-*.log: lines around 0x800704dd / token / auth -----")
+    try {
+        $rolled = Get-ChildItem 'C:\Windows\ccmsetup\Logs\ccmsetup-*.log' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime
+        if ($rolled) {
+            foreach ($rf in $rolled) {
+                $rh = Select-String -Path $rf.FullName -Pattern $pattern -ErrorAction SilentlyContinue
+                if ($rh) {
+                    Add(">> $($rf.Name)")
+                    Add(($rh | Select-Object -Last 50 | ForEach-Object { $_.Line }) -join "`n")
+                }
+            }
+        } else { Add("(no rolled ccmsetup-*.log)") }
+    } catch { Add("rolled-log error: $($_.Exception.Message)") }
+
+    # ClientLocation / token acquisition (only present once client is partly up)
+    foreach ($cl in @('LocationServices.log','ClientIDManagerStartup.log','CcmMessaging.log')) {
+        $p = "C:\Windows\CCM\Logs\$cl"
+        if (Test-Path $p) {
+            Add("`n----- $cl : token / auth / DP / cert lines -----")
+            $h = Select-String -Path $p -Pattern 'token|CCMTOKENAUTH|SMS_DP_SMSPKG|client cert|Authorization|Negotiate|MP_|GetToken|registration' -ErrorAction SilentlyContinue
+            if ($h) { Add(($h | Select-Object -Last 40 | ForEach-Object { $_.Line }) -join "`n") }
+        }
+    }
     $sb.ToString()
 }
 
