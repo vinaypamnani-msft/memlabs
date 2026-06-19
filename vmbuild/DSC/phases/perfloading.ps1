@@ -1405,12 +1405,48 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         #   desyncStreak   : WSUS idle + last sync Failed/Canceled while CM=running
         $poolDownStreak = 0
         $desyncStreak = 0
+        # Track 6702-with-Canceled-LastResult streaks separately: CM transitions to
+        # 6702 ("Completed") even when the underlying WSUS sync ended Canceled or
+        # Failed (CM treats "stopped" as "done"). A single 6702-Canceled poll could
+        # be a stale LastResult from a *previous* sync that hasn't been overwritten
+        # yet, so confirm over multiple polls before declaring this 6702 a false
+        # positive. Once confirmed, retry / repair like a real failure.
+        $falsePositive6702Streak = 0
         for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
             Start-Sleep -Seconds 30
             $status = Get-CMSoftwareUpdateSyncStatus | Where-Object { $_.SiteCode -eq $SiteCode } | Select-Object -First 1
 
             if ($status.LastSyncState -eq 6702) {
-                Write-DscStatus "$Tag $Label completed (attempt $attempt)"
+                # Cross-check the WSUS-side LastResult before accepting CM's 6702.
+                # Canceled/Failed here means CM transitioned to 6702 but the WSUS
+                # catalog wasn't actually populated -- accepting this would cause
+                # Set-CMSoftwareUpdatePointComponent -AddProduct to silently no-op
+                # against an empty catalog later (every -AddProduct name is dropped
+                # unless it exists in SMS_UpdateCategoryInstance, which mirrors WSUS).
+                $live = Get-WsusSyncLiveness
+                if ($live.LastResult -in @('Canceled', 'Failed')) {
+                    $falsePositive6702Streak++
+                    if ($falsePositive6702Streak -ge 2) {
+                        if ($attempt % 3 -eq 0) {
+                            Write-DscStatus "$Tag $($Label): CM state 6702 but WSUS LastResult=$($live.LastResult) ($falsePositive6702Streak polls) -- false-positive completion. Repairing WSUS... (attempt $attempt of $MaxAttempts)"
+                            Write-WsusDiagnostics -Reason "$Label false-positive 6702 ($($live.LastResult)) at attempt $attempt"
+                            Repair-WsusSync
+                        }
+                        else {
+                            Write-DscStatus "$Tag $($Label): CM state 6702 but WSUS LastResult=$($live.LastResult) -- treating as failed, retrying (attempt $attempt of $MaxAttempts)"
+                            Invoke-FullSync
+                        }
+                        $falsePositive6702Streak = 0
+                        $poolDownStreak = 0
+                        $desyncStreak = 0
+                        continue
+                    }
+                    else {
+                        Write-DscStatus "$Tag $($Label): CM state 6702 with WSUS LastResult=$($live.LastResult) (poll $falsePositive6702Streak) -- confirming before retry (attempt $attempt of $MaxAttempts)"
+                        continue
+                    }
+                }
+                Write-DscStatus "$Tag $Label completed (attempt $attempt, WSUS LastResult=$($live.LastResult))"
                 return $true
             }
             elseif ($status.LastSyncState -eq 6703) {
@@ -1538,16 +1574,26 @@ if ($ctr -and $ctr.VersionToReport) { Write-Host $ctr.VersionToReport }
         # OS names may have date/variant suffixes (e.g. "Server 2019 March 2021")
         # so anchors use .* instead of $ to match variants.
         $products = $products -replace "^Server 2016\b.*$", "Windows Server 2016"
+        # Product names below match WSUS canonical titles exactly (the strings
+        # found in upd:Title on entries with CategoryType="Product" inside the
+        # cab's metadata.txt and in $wsus.GetUpdateCategories()). Microsoft is
+        # inconsistent across releases: Server 2022 ("21H2") ships as lowercase
+        # "operating system" while Server 2025 ("24H2") ships as Capital O+S
+        # "Operating System". SQL is uniformly capital "Server". CM's category
+        # lookup is case-insensitive (default SQL collation), so the AddProduct
+        # bind worked either way; matching canonical here keeps the perfloading
+        # log lines (and the 'Enabling missing products' warning) byte-identical
+        # to what shows up in WSUS / the cab.
         $products = $products -replace "^Server 2019\b.*$", "Windows Server 2019"
         $products = $products -replace "^Server 2022\b.*$", "Microsoft Server operating system-21H2"
-        $products = $products -replace "^Server 2025\b.*$", "Microsoft Server operating system-24H2"
+        $products = $products -replace "^Server 2025\b.*$", "Microsoft Server Operating System-24H2"
         $products = $products -replace "^Windows 10\b.*$", "Windows 10, version 1903 and later"
         $products = $products -replace "^Windows 11\b.*$", "Windows 11"
-        $products = $products -replace "^Sql Server 2016\b.*$", "Microsoft SQL server 2016"
-        $products = $products -replace "^Sql Server 2017\b.*$", "Microsoft SQL server 2017"
-        $products = $products -replace "^Sql Server 2019\b.*$", "Microsoft SQL server 2019"
-        $products = $products -replace "^Sql Server 2022\b.*$", "Microsoft SQL server 2022"
-        $products = $products -replace "^Sql Server 2025\b.*$", "Microsoft SQL server 2025"
+        $products = $products -replace "^Sql Server 2016\b.*$", "Microsoft SQL Server 2016"
+        $products = $products -replace "^Sql Server 2017\b.*$", "Microsoft SQL Server 2017"
+        $products = $products -replace "^Sql Server 2019\b.*$", "Microsoft SQL Server 2019"
+        $products = $products -replace "^Sql Server 2022\b.*$", "Microsoft SQL Server 2022"
+        $products = $products -replace "^Sql Server 2025\b.*$", "Microsoft SQL Server 2025"
 
         # Only subscribe to Office updates when a pushable client actually installs Office.
         if (@($clientVMs | Where-Object { $_.installOffice -and $_.installOffice -ne $false }).Count -gt 0) {
@@ -2181,6 +2227,29 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
 
         #there is an additional windows 10 component under Developer tools which gets enabled by above method, so we are removing the product family to avoid it explicitly
         Set-CMSoftwareUpdatePointComponent -RemoveProductFamily "Developer Tools, Runtimes, and Redistributables"
+
+        # Verify the AddProduct call actually accepted the names we asked for.
+        # Set-CMSoftwareUpdatePointComponent silently drops any -AddProduct name
+        # that doesn't exist in SMS_UpdateCategoryInstance (CM's mirror of WSUS
+        # dbo.UpdateCategories). When the WSUS catalog is empty -- typically
+        # because Sync 1 never landed (cab not imported AND MU sync stalled or
+        # was canceled) -- every name gets dropped and we end up with 0 of N
+        # products subscribed and no error from the cmdlet. Re-read the
+        # subscribed list now and surface this state explicitly so it doesn't
+        # masquerade as success and waste 10 minutes in the WCM wait below.
+        $postAddProducts = @(Get-CMSoftwareUpdateCategory -Fast -TypeName "product" | Where-Object { $_.IsSubscribed } | Select-Object -ExpandProperty LocalizedCategoryInstanceName)
+        $accepted = @($products | Where-Object { $_ -in $postAddProducts })
+        $rejected = @($products | Where-Object { $_ -notin $postAddProducts })
+        if ($accepted.Count -eq 0) {
+            Write-DscStatus "$Tag WARNING: 0 of $($products.Count) requested products were accepted by Set-CMSoftwareUpdatePointComponent -- the WSUS catalog has none of these names. This means Sync 1 didn't actually populate the catalog (cab import failed/skipped AND the MU categories sync didn't complete). Skipping WCM wait -- there is nothing to push. SUP will be subscribed to the 3 default classifications only ($($parameters.AddUpdateClassification -join ', ')); Phase 11 will WARN on subscription parity until the catalog is repaired. Rejected: $($rejected -join ', ')"
+            return
+        }
+        if ($rejected.Count -gt 0) {
+            Write-DscStatus "$Tag WARNING: $($accepted.Count) of $($products.Count) requested products accepted; $($rejected.Count) rejected (not in WSUS catalog): $($rejected -join ', '). Continuing with the $($accepted.Count) that did bind."
+        }
+        else {
+            Write-DscStatus "$Tag All $($accepted.Count) requested products accepted by SUP component"
+        }
         Write-DscStatus "$Tag Products enabled. Waiting for WCM to reconfigure WSUS with new products..."
 
         # Adding products triggers WCM reconfiguration (SUBSCRIPTION_PENDING).
@@ -2387,7 +2456,7 @@ where SMS_R_System.OperatingSystemNameandVersion like "%Workstation%" order by S
         
             try {
                 New-CMSoftwareUpdateAutoDeploymentRule -CollectionId SMSDM003 -Name $ADRNames.Server `
-                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server operating system-24H2" -Architecture X64 `
+                    -DateReleasedOrRevised Last7Days -Title "cumulative", "security", "malicious" -Superseded $false -Product "Windows Server 2016", "Windows Server 2019", "Microsoft Server operating system-21H2", "Microsoft Server Operating System-24H2" -Architecture X64 `
                     -Schedule $patchTueSchedule -RunType RunTheRuleOnSchedule `
                     -DeploymentPackageName $Packages[1].Name -Description "MEMLABS autocreated ADR for win server patching" -AddToExistingSoftwareUpdateGroup $true -UserNotification DisplayAll
     
