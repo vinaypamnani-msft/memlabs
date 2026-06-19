@@ -659,11 +659,52 @@ if ($ThisVM.role -ne "CAS") {
     # sentinel status the host watches for, then pause ~60s so the host can
     # pulse + verify the offline-root/sub-CA chain into every push client's
     # LocalMachine cert stores BEFORE auto-push runs ccmsetup. Without the full
-    # chain the client fails GetDPLocations (0x87d00454) over HTTPS. Non-PKI
-    # deploys skip this so they are not delayed.
+    # chain the client fails GetDPLocations (0x87d00454) over HTTPS.
+    #
+    # Only emit the sentinel (and pay the 60s pause + trigger the host pulse)
+    # when there is actually a push target that is NOT yet a registered client.
+    # The Primary IS the site server, so we query our own SMS provider: if every
+    # push target already shows SMS_R_System.Client = 1 the agent is already
+    # installed -- which over HTTPS means ccmsetup already built the chain
+    # successfully -- so pulsing would be wasted work (and a wasted 60s) on every
+    # redeploy. A target with no row or Client != 1 still needs ccmsetup to run,
+    # so we want the host to pre-stage its certs first. Non-PKI deploys, and any
+    # query failure, skip/fall-through safely. 
     if ($cmo.UsePKI) {
-        Write-DscStatus "MEMLABS-PULSE-CERTS: Waiting for host to refresh certificates on clients"
-        Start-Sleep -Seconds 60
+        $needCertPulse = $true
+        try {
+            $pushTargets = @()
+            if ($ThisVM.thisParams -and $ThisVM.thisParams.ClientPush) {
+                $pushTargets = @($ThisVM.thisParams.ClientPush | Where-Object { $_ -and $_ -ne $ThisVM.vmName })
+            }
+            if ($pushTargets.Count -gt 0 -and $ThisVM.siteCode) {
+                $cpNs = "root\sms\site_$($ThisVM.siteCode)"
+                $notYetClient = @()
+                foreach ($t in $pushTargets) {
+                    $isClient = $false
+                    $rows = @(Get-WmiObject -Namespace $cpNs -Class SMS_R_System -Filter "Name='$t'" -ErrorAction SilentlyContinue)
+                    foreach ($row in $rows) {
+                        if ($row -and ([int]$row.Client -eq 1)) { $isClient = $true; break }
+                    }
+                    if (-not $isClient) { $notYetClient += $t }
+                }
+                if ($notYetClient.Count -eq 0) {
+                    $needCertPulse = $false
+                    Write-DscStatus "All $($pushTargets.Count) push target(s) already report Client=1; skipping host cert pre-stage."
+                }
+                else {
+                    Write-DscStatus "$($notYetClient.Count) of $($pushTargets.Count) push target(s) not yet client ($($notYetClient -join ', ')); requesting host cert pre-stage."
+                }
+            }
+        }
+        catch {
+            $needCertPulse = $true
+            Write-DscStatus "Client-state check failed ($($_.Exception.Message)); requesting host cert pre-stage to be safe." -Warning
+        }
+        if ($needCertPulse) {
+            Write-DscStatus "MEMLABS-PULSE-CERTS: Waiting for host to refresh certificates on clients"
+            Start-Sleep -Seconds 60
+        }
     }
     Write-DscStatus "Always Running PushClients.ps1"
     $ScriptFile = Join-Path -Path $PSScriptRoot -ChildPath "PushClients.ps1"
