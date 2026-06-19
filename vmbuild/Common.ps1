@@ -5867,13 +5867,29 @@ function Get-VmSession {
             # "socket target process has ended" / "background process reported
             # an error" mean the guest-side PSDirect host crashed.
             # Auth errors (access denied, logon failure) are NOT channel-broken.
+            $channelBroken = $false
             if ($connectResult.TimedOut) {
                 $sawChannelBroken = $true
+                $channelBroken = $true
             }
             elseif ($connectResult.ErrorMessage -match 'socket target process has ended|background process reported an error') {
                 $sawChannelBroken = $true
+                $channelBroken = $true
             }
             Remove-VmSession $ps
+
+            # When the transport itself is dead -- the connect timed out (guest
+            # never answered the hvsocket) or the guest-side PSDirect host
+            # crashed -- cycling through the remaining credentials is pointless:
+            # they all ride the SAME broken channel and would each burn the full
+            # connect timeout for nothing. Credential cycling only helps for AUTH
+            # failures (access denied / logon failure), which return fast and are
+            # NOT channel-broken. Stop this pass immediately and let the outer
+            # retry loop (with backoff) decide whether to try again.
+            if ($channelBroken) {
+                Write-Log "$VmName`: connect did not respond on '$($entry.Username)' (channel broken, not an auth error); skipping remaining credentials this pass." -Verbose
+                break
+            }
         }
 
         $triedList = $triedNames -join ', '
