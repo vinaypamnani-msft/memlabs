@@ -44,6 +44,16 @@
 #   the delta. Use this to validate a freshly-generated cab against a
 #   clean WSUS VM before uploading it to Azure Files. Combine with -Reset
 #   to wipe + retest on the same VM.
+#
+# -ResetOnly:
+#   Wipe SUSDB + WsusContent + re-run `wsusutil postinstall` on the guest
+#   and exit. Skips generation, sync, export, and upload. Use when you
+#   want to put one or more SUP/WSUS VMs back to a clean postinstall
+#   state so a `-StartPhase 6` or `-StartPhase 7` re-run exercises the
+#   real cab-import path end-to-end (including InstallRoles' Phase 8
+#   Start-WsusBaselineImportBackground / Wait-WsusBaselineImport) without
+#   rebuilding the entire lab from scratch. Mutually exclusive with
+#   -Resume and -Upload (-Reset is implied).
 
 [CmdletBinding()]
 param (
@@ -64,6 +74,14 @@ param (
     # WSUS has already been synced (categories>0 or updates>0).
     [Parameter(Mandatory = $false)]
     [switch]$Reset,
+
+    # Wipe SUSDB + WsusContent + re-run wsusutil postinstall on the guest
+    # and exit (no export, no upload, no sync). Use to put a SUP/WSUS VM
+    # back to a clean postinstall state so a -StartPhase 6/7 re-run
+    # exercises the real Phase 7+8 cab-import path. -Reset is implied;
+    # mutually exclusive with -Resume and -Upload.
+    [Parameter(Mandatory = $false)]
+    [switch]$ResetOnly,
 
     # Skip pre-flight gate and the StartSynchronization kick: attach to an
     # already-running categories sync on the guest and poll it to completion,
@@ -91,6 +109,13 @@ if ($Reset.IsPresent -and $Resume.IsPresent) {
 if ($Upload.IsPresent -and $Resume.IsPresent) {
     throw "[Baseline] -Upload and -Resume are mutually exclusive."
 }
+if ($ResetOnly.IsPresent -and ($Resume.IsPresent -or $Upload.IsPresent)) {
+    throw "[Baseline] -ResetOnly cannot be combined with -Resume or -Upload."
+}
+if ($ResetOnly.IsPresent) {
+    # -ResetOnly implies -Reset (the wipe block below is gated on $Reset).
+    $Reset = [switch]$true
+}
 
 $ErrorActionPreference = 'Stop'
 $enableVerbose = $PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent
@@ -116,6 +141,7 @@ Write-Log "[Baseline] Domain:       $DomainName"
 Write-Log "[Baseline] Output dir:   $OutputDir"
 Write-Log "[Baseline] Timeout:      $SyncTimeoutMinutes min"
 Write-Log "[Baseline] Reset:        $($Reset.IsPresent)"
+Write-Log "[Baseline] ResetOnly:    $($ResetOnly.IsPresent)"
 Write-Log "[Baseline] Resume:       $($Resume.IsPresent)"
 Write-Log "[Baseline] Upload:       $($Upload.IsPresent)"
 
@@ -221,6 +247,16 @@ END
         throw "[Baseline] -Reset failed: $errMsg"
     }
     Write-Log "[Baseline] Reset complete (backend=$($resetResult.ScriptBlockOutput.SqlBackend), ContentDir=$($resetResult.ScriptBlockOutput.ContentDir)). Re-running pre-flight..." -Success
+}
+
+# -ResetOnly: wipe was the only goal. Skip generation, sync, export, and
+# upload. The operator can now re-run vmbuild with `-StartPhase 6` (or 7)
+# and exercise the real cab-import path (Common.ScriptBlocks.ps1 pre-DSC
+# copy -> Phase 7 WSUSSync skip -> Phase 8 InstallRoles
+# Start-WsusBaselineImportBackground / Wait-WsusBaselineImport).
+if ($ResetOnly.IsPresent) {
+    Write-Log "[Baseline] -ResetOnly complete on $VmName. WSUS is back to a clean postinstall state. Re-run vmbuild with -StartPhase 6 (or 7) to test the cab-import path." -Success
+    return
 }
 
 # -Upload: short-circuit. Skip generation; push an existing host cab to the
