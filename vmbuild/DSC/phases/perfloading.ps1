@@ -965,8 +965,18 @@ Write-DscStatus "$Tag Starting perfloading"
 
         $baselinename = [System.IO.Path]::GetFileNameWithoutExtension($ConfigName.Name)
 
-        if (!(Get-CMBaseline -Fast -Name $baselinename)) {
-            try {
+        # Whole-iteration try/catch: the Get-CMBaseline guard below issues a WMI
+        # ExecQuery against the SMS provider, which can throw a transient
+        # ManagementException (e.g. WBEM_E_NOT_FOUND / 0x80041002 when the
+        # provider is momentarily busy right after site setup). That call used to
+        # sit OUTSIDE the try, so a single hiccup terminated the dot-sourced
+        # Perfloading.ps1 mid-run -- skipping everything after it, including the
+        # Office app/deployment creation and the end-of-run recovery sweep, which
+        # left the Office Install Targets collection with no deployment. Catch it
+        # per-baseline and continue so one flaky baseline can't sink the rest of
+        # perfloading.
+        try {
+            if (!(Get-CMBaseline -Fast -Name $baselinename)) {
                 # Create a configuration item (we are importing the cab files directly here)
                 $filename = $baselineFolder + "\" + $ConfigName.Name
                 Write-DscStatus "$Tag Importing cab from $filename location"
@@ -987,13 +997,12 @@ Write-DscStatus "$Tag Starting perfloading"
                 New-CMBaselineDeployment -Name $baselinename -CollectionName "All Systems" -EnableEnforcement $true
                 Write-DscStatus "$Tag Successfully deployed the baseline $baselinename to All systems"
             }
-            catch {
-                Write-DscStatus "$Tag WARNING: Failed to import/deploy baseline '$baselinename': $($_.Exception.Message)"
+            else {
+                Write-DscStatus "Baseline $baselinename are already in place"
             }
         }
-        else {
-            Write-DscStatus "Baseline $baselinename are already in place"
-
+        catch {
+            Write-DscStatus "$Tag WARNING: Failed to import/deploy baseline '$baselinename': $($_.Exception.Message)"
         }
     }
     } # end if baselineFolder exists
